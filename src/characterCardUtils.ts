@@ -4,6 +4,14 @@ import {
   type WorldBookEntry,
 } from "./worldbookUtils";
 import { normalizeRegexScript, type RegexScript } from "./regexUtils";
+import {
+  extractCharacterTavernScripts,
+  extractCharacterTavernVariables,
+  normalizeTavernScript,
+  normalizeTavernVariables,
+  serializeTavernScript,
+  type TavernScript,
+} from "./tavernScriptUtils";
 
 export type CharacterCardSourceFormat =
   | "renge"
@@ -34,6 +42,8 @@ export type CharacterCard = {
   sourceFormat: CharacterCardSourceFormat;
   characterBook: WorldBook | null;
   regexScripts: RegexScript[];
+  tavernScripts: TavernScript[];
+  tavernVariables: Record<string, unknown>;
   extensions: Record<string, unknown>;
   extraData: Record<string, unknown>;
   createdAt: string;
@@ -208,6 +218,8 @@ export function createCharacterCard(name = "新角色") : CharacterCard {
     sourceFormat: "renge",
     characterBook: null,
     regexScripts: [],
+    tavernScripts: [],
+    tavernVariables: {},
     extensions: {},
     extraData: {},
     createdAt: timestamp,
@@ -249,6 +261,20 @@ export function normalizeCharacterCard(
       )
     : null;
   const embeddedRegexScripts = extractCharacterRegexScripts(root, data, sourceFileName);
+  const storedTavernScripts = Array.isArray(data.tavernScripts)
+    ? data.tavernScripts.map((script, scriptIndex) =>
+        normalizeTavernScript(script, scriptIndex, sourceFileName),
+      )
+    : null;
+  const embeddedTavernScripts = extractCharacterTavernScripts(
+    root,
+    data,
+    sourceFileName,
+  );
+  const storedTavernVariables = isRecord(data.tavernVariables)
+    ? normalizeTavernVariables(data.tavernVariables)
+    : null;
+  const embeddedTavernVariables = extractCharacterTavernVariables(root, data);
   const timestamp = new Date().toISOString();
   const importedAvatar =
     options.avatarDataUrl ?? stringValue(data.avatarDataUrl ?? data.avatar);
@@ -261,7 +287,8 @@ export function normalizeCharacterCard(
     "alternateGreetings", "group_only_greetings", "groupOnlyGreetings", "tags", "creator",
     "character_version", "characterVersion", "avatar", "avatarDataUrl", "sourceFileName",
     "sourceFormat", "character_book", "characterBook", "regex_scripts", "regexScripts",
-    "extensions", "extraData", "createdAt", "updatedAt",
+    "extensions", "extraData", "createdAt", "updatedAt", "tavernScripts",
+    "tavernVariables",
   ]);
   const importedExtraData = cloneRecord(data.extraData);
   Object.entries(data).forEach(([key, value]) => {
@@ -304,6 +331,8 @@ export function normalizeCharacterCard(
         : "renge"),
     characterBook: normalizedBook,
     regexScripts: storedRegexScripts ?? embeddedRegexScripts,
+    tavernScripts: storedTavernScripts ?? embeddedTavernScripts,
+    tavernVariables: storedTavernVariables ?? embeddedTavernVariables,
     extensions: cloneRecord(data.extensions),
     extraData: importedExtraData,
     createdAt: stringValue(data.createdAt, timestamp),
@@ -568,6 +597,24 @@ export function serializeCharacterCard(card: CharacterCard) {
   const regexScripts = card.regexScripts.map(exportRegexScript);
   const extensions = cloneRecord(card.extensions);
   if (regexScripts.length > 0) extensions.regex_scripts = regexScripts;
+  const existingTavernHelper = isRecord(extensions.tavern_helper)
+    ? cloneRecord(extensions.tavern_helper)
+    : {};
+  if (card.tavernScripts.length > 0) {
+    existingTavernHelper.scripts = card.tavernScripts.map(serializeTavernScript);
+  } else {
+    delete existingTavernHelper.scripts;
+  }
+  if (Object.keys(card.tavernVariables).length > 0) {
+    existingTavernHelper.variables = cloneRecord(card.tavernVariables);
+  } else {
+    delete existingTavernHelper.variables;
+  }
+  if (Object.keys(existingTavernHelper).length > 0) {
+    extensions.tavern_helper = existingTavernHelper;
+  } else {
+    delete extensions.tavern_helper;
+  }
   return {
     spec: card.spec,
     spec_version: card.specVersion || (card.spec === "chara_card_v3" ? "3.0" : "2.0"),
