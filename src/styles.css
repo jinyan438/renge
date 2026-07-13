@@ -730,6 +730,88 @@ summary:focus-visible {
   color: #334155;
 }
 
+.personalization-settings {
+  max-width: 900px;
+  padding: 16px;
+}
+
+.personalization-style-list {
+  display: grid;
+  gap: 14px;
+}
+
+.personalization-style-card {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #dfe4ec;
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.personalization-style-card > p {
+  margin: 0;
+  color: #667085;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.personalization-style-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.personalization-toggle {
+  color: #172033;
+  font-weight: 800;
+}
+
+.personalization-toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: #07C160;
+}
+
+.personalization-color-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.personalization-color-field input[type="color"] {
+  width: 42px;
+  height: 32px;
+  padding: 2px;
+  border: 1px solid #cfd6e2;
+  border-radius: 8px;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.personalization-color-field code {
+  min-width: 76px;
+  color: #334155;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+.personalization-preview {
+  min-height: 48px;
+  padding: 12px 14px;
+  border: 1px dashed #cfd6e2;
+  border-radius: 8px;
+  color: #172033;
+  background: #f8fafc;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
 .root-access-details {
   grid-column: 1 / -1;
   max-width: 100%;
@@ -1749,6 +1831,19 @@ summary:focus-visible {
   color: inherit;
   font-size: 14px;
   line-height: 1.65;
+}
+
+.chat-personalized-quote,
+.chat-personalized-italic {
+  color: inherit;
+}
+
+.quote-style-enabled .chat-personalized-quote {
+  color: var(--chat-quote-color, #E18A24);
+}
+
+.italic-style-enabled .chat-personalized-italic {
+  color: var(--chat-italic-color, #808080);
 }
 
 .chat-markdown {

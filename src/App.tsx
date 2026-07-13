@@ -19,6 +19,7 @@ import {
   ListPlus,
   MessageSquare,
   Menu,
+  Palette,
   Pencil,
   Play,
   Plus,
@@ -38,6 +39,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  type CSSProperties,
   type Dispatch,
   type DragEvent,
   type MouseEvent,
@@ -92,7 +94,7 @@ type TypeDragTarget = {
 };
 
 type AppView = "home" | "studio" | "settings" | "chat";
-type SettingsTab = "providers" | "prompts" | "user" | "mcp" | "skills" | "device";
+type SettingsTab = "providers" | "prompts" | "user" | "personalization" | "mcp" | "skills" | "device";
 type ProviderPullState = "idle" | "loading" | "success" | "error";
 type ChatGenerationState = "idle" | "running" | "stopping";
 type ChatMode = "ai" | "persona" | "multi";
@@ -194,6 +196,13 @@ type UserProfile = {
   updatedAt: string;
 };
 
+type ChatPersonalizationSettings = {
+  quoteStyleEnabled: boolean;
+  quoteStyleColor: string;
+  italicStyleEnabled: boolean;
+  italicStyleColor: string;
+};
+
 type PcConnectionData = {
   baseUrl?: string;
   workspacePath?: string;
@@ -265,6 +274,7 @@ type RengeAppData = {
   chatHtmlRenderEnabled?: boolean;
   chatReasoningVisible?: boolean;
   chatHeartbeatReminderVisible?: boolean;
+  chatPersonalization?: ChatPersonalizationSettings;
   mcpServers?: McpServerConfig[];
   skills?: SkillProfile[];
   pcConnection?: PcConnectionData;
@@ -456,6 +466,7 @@ const CHAT_MULTI_BUBBLE_STORAGE_KEY = "renge_chat_multi_bubble_enabled";
 const CHAT_HTML_RENDER_STORAGE_KEY = "renge_chat_html_render_enabled";
 const CHAT_REASONING_VISIBLE_STORAGE_KEY = "renge_chat_reasoning_visible";
 const CHAT_HEARTBEAT_REMINDER_VISIBLE_STORAGE_KEY = "renge_chat_heartbeat_reminder_visible";
+const CHAT_PERSONALIZATION_STORAGE_KEY = "renge_chat_personalization";
 const MCP_SERVERS_STORAGE_KEY = "renge_mcp_servers";
 const SKILLS_STORAGE_KEY = "renge_skills";
 const PC_SERVER_URL_STORAGE_KEY = "renge_pc_server_url";
@@ -468,6 +479,12 @@ const DEFAULT_HEARTBEAT_INTERVAL_MINUTES = 5;
 const MIN_HEARTBEAT_INTERVAL_MINUTES = 1;
 const MAX_HEARTBEAT_INTERVAL_MINUTES = 24 * 60;
 const MAX_MULTI_AGENT_ROUNDS = 20;
+const DEFAULT_CHAT_PERSONALIZATION: ChatPersonalizationSettings = {
+  quoteStyleEnabled: false,
+  quoteStyleColor: "#E18A24",
+  italicStyleEnabled: false,
+  italicStyleColor: "#808080",
+};
 const VOLCENGINE_CODING_PLAN_NAME = "火山方舟 Coding Plan";
 const VOLCENGINE_CODING_PLAN_API_BASE_URL = "https://ark.cn-beijing.volces.com/api/coding/v3";
 const VOLCENGINE_CODING_PLAN_MODEL_ID = "ark-code-latest";
@@ -1076,6 +1093,47 @@ function loadUserProfile() {
     return normalizeUserProfile(JSON.parse(rawValue) as Partial<UserProfile>);
   } catch {
     return createUserProfile();
+  }
+}
+
+function normalizePersonalizationColor(value: unknown, fallback: string) {
+  return typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value)
+    ? value.toUpperCase()
+    : fallback;
+}
+
+function normalizeChatPersonalization(
+  rawSettings?: Partial<ChatPersonalizationSettings> | null,
+): ChatPersonalizationSettings {
+  return {
+    quoteStyleEnabled:
+      typeof rawSettings?.quoteStyleEnabled === "boolean"
+        ? rawSettings.quoteStyleEnabled
+        : DEFAULT_CHAT_PERSONALIZATION.quoteStyleEnabled,
+    quoteStyleColor: normalizePersonalizationColor(
+      rawSettings?.quoteStyleColor,
+      DEFAULT_CHAT_PERSONALIZATION.quoteStyleColor,
+    ),
+    italicStyleEnabled:
+      typeof rawSettings?.italicStyleEnabled === "boolean"
+        ? rawSettings.italicStyleEnabled
+        : DEFAULT_CHAT_PERSONALIZATION.italicStyleEnabled,
+    italicStyleColor: normalizePersonalizationColor(
+      rawSettings?.italicStyleColor,
+      DEFAULT_CHAT_PERSONALIZATION.italicStyleColor,
+    ),
+  };
+}
+
+function loadChatPersonalization() {
+  try {
+    const rawValue = localStorage.getItem(CHAT_PERSONALIZATION_STORAGE_KEY);
+    if (!rawValue) return { ...DEFAULT_CHAT_PERSONALIZATION };
+    return normalizeChatPersonalization(
+      JSON.parse(rawValue) as Partial<ChatPersonalizationSettings>,
+    );
+  } catch {
+    return { ...DEFAULT_CHAT_PERSONALIZATION };
   }
 }
 
@@ -2566,57 +2624,83 @@ function resizeHtmlPreviewFrame(event: SyntheticEvent<HTMLIFrameElement>) {
 function renderInlineText(content: string): ReactNode[] {
   const nodes: ReactNode[] = [];
   const normalizedContent = stripHiddenImageAnnotations(content);
-  // 捕获组：1=code, 2=image alt, 3=image url, 4=link text, 5=link url, 6/7=strong, 8=del, 9/10=em
+  // 个性化引用覆盖半角/全角双引号、中文弯引号、书名式引号和半角角括号。
   const inlinePattern =
-    /`([^`]+)`|(https?:\/\/\S+?\.(?:png|jpe?g|webp|gif)(?:\?\S*)?|data:image\/[a-zA-Z+.-]+;base64,[A-Za-z0-9+/=]+)|!\[([^\]]*)\]\s*\(\s*([^)\s]+)\s*\)|\[([^\]]+)\]\s*\(\s*([^)\s]+)\s*\)|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|\*([^*\n]+)\*|_([^_\n]+)_/g;
+    /`(?<code>[^`]+)`|(?<bareImage>https?:\/\/\S+?\.(?:png|jpe?g|webp|gif)(?:\?\S*)?|data:image\/[a-zA-Z+.-]+;base64,[A-Za-z0-9+/=]+)|!\[(?<imageAlt>[^\]]*)\]\s*\(\s*(?<imageUrl>[^)\s]+)\s*\)|\[(?<linkText>[^\]]+)\]\s*\(\s*(?<linkUrl>[^)\s]+)\s*\)|(?<personalizedQuote>"[^"\n]+"|＂[^＂\n]+＂|“[^”\n]+”|〝[^〞\n]+〞|「[^」\n]+」|｢[^｣\n]+｣|『[^』\n]+』)|\*\*(?<doubleAsterisk>[^*]+)\*\*|__(?<doubleUnderscore>[^_]+)__|~~(?<deleted>[^~]+)~~|\*(?<asteriskEm>[^*\n]+)\*|_(?<underscoreEm>[^_\n]+)_/g;
   let cursor = 0;
   let match: RegExpExecArray | null;
 
   while ((match = inlinePattern.exec(normalizedContent))) {
     if (match.index > cursor) nodes.push(normalizedContent.slice(cursor, match.index));
+    const groups = match.groups ?? {};
 
-    if (match[1] !== undefined) {
-      nodes.push(<code key={`code-${match.index}`}>{match[1]}</code>);
-    } else if (match[2] !== undefined) {
+    if (groups.code !== undefined) {
+      nodes.push(<code key={`code-${match.index}`}>{groups.code}</code>);
+    } else if (groups.bareImage !== undefined) {
       // 裸图片 URL（http(s) 直链或 data:image/...）
       nodes.push(
         <img
           key={`bare-img-${match.index}`}
-          src={match[2]}
+          src={groups.bareImage}
           alt="生成的图片"
           className="chat-inline-image"
           loading="lazy"
         />,
       );
-    } else if (match[3] !== undefined && match[4] !== undefined) {
+    } else if (groups.imageAlt !== undefined && groups.imageUrl !== undefined) {
       nodes.push(
         <img
           key={`img-${match.index}`}
-          src={match[4]}
-          alt={match[3] || "生成的图片"}
+          src={groups.imageUrl}
+          alt={groups.imageAlt || "生成的图片"}
           className="chat-inline-image"
           loading="lazy"
         />,
       );
-    } else if (match[5] !== undefined && match[6] !== undefined) {
+    } else if (groups.linkText !== undefined && groups.linkUrl !== undefined) {
       nodes.push(
         <a
           className="chat-inline-link"
-          href={match[6]}
+          href={groups.linkUrl}
           key={`link-${match.index}`}
           rel="noreferrer"
           target="_blank"
-          title={match[6]}
+          title={groups.linkUrl}
         >
-          {match[5]}
+          {groups.linkText}
         </a>,
       );
-    } else if (match[7] !== undefined || match[8] !== undefined) {
-      nodes.push(<strong key={`strong-${match.index}`}>{match[7] ?? match[8]}</strong>);
-    } else if (match[9] !== undefined) {
-      nodes.push(<del key={`del-${match.index}`}>{match[9]}</del>);
-    } else if (match[10] !== undefined || match[11] !== undefined) {
-      nodes.push(<em key={`em-${match.index}`}>{match[10] ?? match[11]}</em>);
+    } else if (groups.personalizedQuote !== undefined) {
+      const quote = groups.personalizedQuote;
+      nodes.push(
+        <span className="chat-personalized-quote" key={`quote-${match.index}`}>
+          {quote.slice(0, 1)}
+          {renderInlineText(quote.slice(1, -1))}
+          {quote.slice(-1)}
+        </span>,
+      );
+    } else if (groups.doubleAsterisk !== undefined) {
+      nodes.push(
+        <strong key={`strong-${match.index}`}>
+          {renderInlineText(groups.doubleAsterisk)}
+        </strong>,
+      );
+    } else if (groups.doubleUnderscore !== undefined) {
+      nodes.push(
+        <strong key={`strong-${match.index}`}>
+          {renderInlineText(groups.doubleUnderscore)}
+        </strong>,
+      );
+    } else if (groups.deleted !== undefined) {
+      nodes.push(<del key={`del-${match.index}`}>{groups.deleted}</del>);
+    } else if (groups.asteriskEm !== undefined) {
+      nodes.push(
+        <em className="chat-personalized-italic" key={`em-${match.index}`}>
+          {renderInlineText(groups.asteriskEm)}
+        </em>,
+      );
+    } else if (groups.underscoreEm !== undefined) {
+      nodes.push(<em key={`em-${match.index}`}>{groups.underscoreEm}</em>);
     }
     cursor = match.index + match[0].length;
   }
@@ -5381,6 +5465,8 @@ export function App() {
   const [chatHeartbeatReminderVisible, setChatHeartbeatReminderVisible] = useState(
     () => localStorage.getItem(CHAT_HEARTBEAT_REMINDER_VISIBLE_STORAGE_KEY) !== "false",
   );
+  const [chatPersonalization, setChatPersonalization] =
+    useState<ChatPersonalizationSettings>(loadChatPersonalization);
   const [chatSender, setChatSender] = useState<ChatSenderIdentity>(loadChatSender);
   const [mcpServers, setMcpServers] = useState<McpServerConfig[]>(loadMcpServers);
   const [mcpTools, setMcpTools] = useState<McpToolDefinition[]>([]);
@@ -5652,6 +5738,9 @@ export function App() {
         typeof persistentData?.chatHeartbeatReminderVisible === "boolean"
           ? persistentData.chatHeartbeatReminderVisible
           : localStorage.getItem(CHAT_HEARTBEAT_REMINDER_VISIBLE_STORAGE_KEY) !== "false";
+      const nextChatPersonalization = persistentData?.chatPersonalization
+        ? normalizeChatPersonalization(persistentData.chatPersonalization)
+        : loadChatPersonalization();
       const nextMcpServers = Array.isArray(persistentData?.mcpServers)
         ? persistentData.mcpServers.map((server, index) =>
             normalizeMcpServerConfig(server as Partial<McpServerConfig> & Record<string, unknown>, `MCP Server ${index + 1}`),
@@ -5740,6 +5829,7 @@ export function App() {
       setChatHtmlRenderEnabled(nextChatHtmlRenderEnabled);
       setChatReasoningVisible(nextChatReasoningVisible);
       setChatHeartbeatReminderVisible(nextChatHeartbeatReminderVisible);
+      setChatPersonalization(nextChatPersonalization);
       setMcpServers(nextMcpServers);
       setActiveMcpServerId(nextMcpServers[0]?.id ?? "");
       setSkills(nextSkills);
@@ -5802,6 +5892,10 @@ export function App() {
       CHAT_HEARTBEAT_REMINDER_VISIBLE_STORAGE_KEY,
       String(chatHeartbeatReminderVisible),
     );
+    localStorage.setItem(
+      CHAT_PERSONALIZATION_STORAGE_KEY,
+      JSON.stringify(chatPersonalization),
+    );
     localStorage.setItem(MCP_SERVERS_STORAGE_KEY, JSON.stringify(mcpServers));
     localStorage.setItem(SKILLS_STORAGE_KEY, JSON.stringify(skills));
     const pcConnection: PcConnectionData = {
@@ -5835,12 +5929,13 @@ export function App() {
       chatHtmlRenderEnabled,
       chatReasoningVisible,
       chatHeartbeatReminderVisible,
+      chatPersonalization,
       mcpServers,
       skills,
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     });
-  }, [activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, appDataLoaded, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatReasoningVisible, chatSender, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, skills, systemPrompts, userProfile]);
+  }, [activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, appDataLoaded, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatReasoningVisible, chatSender, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, skills, systemPrompts, userProfile]);
 
   useEffect(() => {
     if (!appDataLoaded) return;
@@ -10946,6 +11041,17 @@ export function App() {
           </button>
           <button
             type="button"
+            className={`settings-tab ${settingsTab === "personalization" ? "active" : ""}`}
+            onClick={() => {
+              setSettingsTab("personalization");
+              closeMobileSidebar();
+            }}
+          >
+            <Palette size={16} />
+            个性化
+          </button>
+          <button
+            type="button"
             className={`settings-tab ${settingsTab === "mcp" ? "active" : ""}`}
             onClick={() => {
               setSettingsTab("mcp");
@@ -10997,11 +11103,13 @@ export function App() {
                     ? "提示词"
                     : settingsTab === "user"
                       ? "用户资料"
-                      : settingsTab === "mcp"
-                        ? "MCP 服务器"
-                        : settingsTab === "skills"
-                          ? "Skills"
-                          : "手机端"}
+                      : settingsTab === "personalization"
+                        ? "个性化"
+                        : settingsTab === "mcp"
+                          ? "MCP 服务器"
+                          : settingsTab === "skills"
+                            ? "Skills"
+                            : "手机端"}
               </h1>
             </div>
             {settingsTab === "providers" && (
@@ -11439,6 +11547,106 @@ export function App() {
                   />
                   <span>发送用户昵称和简介给 AI</span>
                 </label>
+              </div>
+            </section>
+          )}
+
+          {settingsTab === "personalization" && (
+            <section
+              className={`section-block personalization-settings ${
+                chatPersonalization.quoteStyleEnabled ? "quote-style-enabled" : ""
+              } ${chatPersonalization.italicStyleEnabled ? "italic-style-enabled" : ""}`}
+              style={
+                {
+                  "--chat-quote-color": chatPersonalization.quoteStyleColor,
+                  "--chat-italic-color": chatPersonalization.italicStyleColor,
+                } as CSSProperties
+              }
+            >
+              <div className="section-heading compact">
+                <div>
+                  <h2>聊天文字样式</h2>
+                  <p>为对话中的引用内容和斜体内容设置独立颜色。</p>
+                </div>
+              </div>
+
+              <div className="personalization-style-list">
+                <article className="personalization-style-card">
+                  <div className="personalization-style-heading">
+                    <label className="tool-toggle personalization-toggle">
+                      <input
+                        type="checkbox"
+                        checked={chatPersonalization.quoteStyleEnabled}
+                        onChange={(event) =>
+                          setChatPersonalization((current) => ({
+                            ...current,
+                            quoteStyleEnabled: event.target.checked,
+                          }))
+                        }
+                      />
+                      <span>引用文样式</span>
+                    </label>
+                    <label className="personalization-color-field">
+                      <span>颜色</span>
+                      <input
+                        type="color"
+                        aria-label="引用文样式颜色"
+                        value={chatPersonalization.quoteStyleColor}
+                        onChange={(event) =>
+                          setChatPersonalization((current) => ({
+                            ...current,
+                            quoteStyleColor: event.target.value.toUpperCase(),
+                          }))
+                        }
+                      />
+                      <code>{chatPersonalization.quoteStyleColor}</code>
+                    </label>
+                  </div>
+                  <p>
+                    适用于半角/全角双引号、中文弯引号、`「」`、`『』` 和半角 `｢｣`
+                    包裹的内容。
+                  </p>
+                  <div className="personalization-preview" aria-label="引用文样式预览">
+                    {renderInlineText('“这是引用文样式预览”')}
+                  </div>
+                </article>
+
+                <article className="personalization-style-card">
+                  <div className="personalization-style-heading">
+                    <label className="tool-toggle personalization-toggle">
+                      <input
+                        type="checkbox"
+                        checked={chatPersonalization.italicStyleEnabled}
+                        onChange={(event) =>
+                          setChatPersonalization((current) => ({
+                            ...current,
+                            italicStyleEnabled: event.target.checked,
+                          }))
+                        }
+                      />
+                      <span>斜体文样式</span>
+                    </label>
+                    <label className="personalization-color-field">
+                      <span>颜色</span>
+                      <input
+                        type="color"
+                        aria-label="斜体文样式颜色"
+                        value={chatPersonalization.italicStyleColor}
+                        onChange={(event) =>
+                          setChatPersonalization((current) => ({
+                            ...current,
+                            italicStyleColor: event.target.value.toUpperCase(),
+                          }))
+                        }
+                      />
+                      <code>{chatPersonalization.italicStyleColor}</code>
+                    </label>
+                  </div>
+                  <p>适用于单星号 `*文本*` 包裹的 Markdown 斜体内容。</p>
+                  <div className="personalization-preview" aria-label="斜体文样式预览">
+                    {renderInlineText("*这是斜体文样式预览*")}
+                  </div>
+                </article>
               </div>
             </section>
           )}
@@ -11915,7 +12123,17 @@ export function App() {
 
   if (view === "chat") {
     return (
-      <main className={`chat-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""}`}>
+      <main
+        className={`chat-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""} ${
+          chatPersonalization.quoteStyleEnabled ? "quote-style-enabled" : ""
+        } ${chatPersonalization.italicStyleEnabled ? "italic-style-enabled" : ""}`}
+        style={
+          {
+            "--chat-quote-color": chatPersonalization.quoteStyleColor,
+            "--chat-italic-color": chatPersonalization.italicStyleColor,
+          } as CSSProperties
+        }
+      >
         <button
           type="button"
           className="mobile-sidebar-toggle"
