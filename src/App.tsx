@@ -50,6 +50,7 @@ import {
   type ReactNode,
   type SetStateAction,
   type SyntheticEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -1792,6 +1793,7 @@ const shellLanguages = new Set(["sh", "shell", "bash", "zsh", "cmd", "bat", "pow
 const htmlLanguages = new Set(["html", "htm", "xhtml"]);
 const HTML_PREVIEW_RESIZE_MESSAGE = "renge-html-preview-resize";
 const HTML_PREVIEW_VARIABLES_UPDATE_MESSAGE = "renge-html-preview-variables-update";
+const HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE = "renge-html-preview-context-update";
 const HYPNOOS_APPEND_OPERATION_MESSAGE = "HYPNOOS_APPEND_OPERATION";
 const HTML_PREVIEW_MAX_HEIGHT = 12000;
 const htmlPreviewStyle = [
@@ -1941,6 +1943,9 @@ function serializeHtmlPreviewValue(value: unknown) {
 function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreviewContext) {
   const previewIdLiteral = serializeHtmlPreviewValue(previewId);
   const messageTypeLiteral = serializeHtmlPreviewValue(HTML_PREVIEW_VARIABLES_UPDATE_MESSAGE);
+  const contextMessageTypeLiteral = serializeHtmlPreviewValue(
+    HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
+  );
   const contextLiteral = serializeHtmlPreviewValue(context);
 
   return [
@@ -1948,6 +1953,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "(() => {",
     `const previewId = ${previewIdLiteral};`,
     `const updateMessageType = ${messageTypeLiteral};`,
+    `const contextUpdateMessageType = ${contextMessageTypeLiteral};`,
     `const snapshot = ${contextLiteral};`,
     "const clone = (value) => {",
     "  if (value == null) return value;",
@@ -1955,6 +1961,42 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  try { return JSON.parse(JSON.stringify(value)); } catch { return value; }",
     "};",
     "const isRecord = (value) => Boolean(value) && typeof value === \"object\" && !Array.isArray(value);",
+    "const bridgeEventHandlers = new Map();",
+    "const eventOn = (eventName, callback) => {",
+    "  if (typeof callback !== \"function\") return callback;",
+    "  const key = String(eventName);",
+    "  const callbacks = bridgeEventHandlers.get(key) || new Set();",
+    "  callbacks.add(callback);",
+    "  bridgeEventHandlers.set(key, callbacks);",
+    "  return callback;",
+    "};",
+    "const eventRemoveListener = (eventName, callback) => {",
+    "  const callbacks = bridgeEventHandlers.get(String(eventName));",
+    "  if (!callbacks) return false;",
+    "  callbacks.delete(callback);",
+    "  if (callbacks.size === 0) bridgeEventHandlers.delete(String(eventName));",
+    "  return true;",
+    "};",
+    "const eventOnce = (eventName, callback) => {",
+    "  if (typeof callback !== \"function\") return callback;",
+    "  const once = (...args) => { eventRemoveListener(eventName, once); return callback(...args); };",
+    "  eventOn(eventName, once);",
+    "  return once;",
+    "};",
+    "const eventEmit = async (eventName, ...args) => {",
+    "  const callbacks = Array.from(bridgeEventHandlers.get(String(eventName)) || []);",
+    "  for (const callback of callbacks) await callback(...args);",
+    "  return callbacks.length > 0;",
+    "};",
+    "const emitVariableUpdate = () => void eventEmit(String(window.Mvu?.events?.VARIABLE_UPDATE_ENDED || \"mag_variable_update_ended\"), clone(snapshot));",
+    "window.addEventListener(\"message\", (event) => {",
+    "  if (event.source !== parent || !isRecord(event.data)) return;",
+    "  if (event.data.type !== contextUpdateMessageType || event.data.id !== previewId) return;",
+    "  if (!isRecord(event.data.context)) return;",
+    "  Object.assign(snapshot, clone(event.data.context));",
+    "  emitVariableUpdate();",
+    "  try { window.dispatchEvent(new CustomEvent(\"renge-html-preview-context-updated\", { detail: clone(snapshot) })); } catch {}",
+    "});",
     "const normalizeMessageId = (value, defaultToCurrent = true) => {",
     "  if (value == null || value === \"current\") return defaultToCurrent ? snapshot.currentMessageIndex : snapshot.messages.length - 1;",
     "  if (value === \"latest\") return snapshot.messages.length - 1;",
@@ -1987,6 +2029,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "    const index = normalizeMessageId(normalized.message_id, true);",
     "    if (snapshot.messages[index]) snapshot.messages[index].variables = next;",
     "  }",
+    "  emitVariableUpdate();",
     "  try {",
     "    parent.postMessage({",
     "      type: updateMessageType,",
@@ -2076,7 +2119,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  getVariables, setVariables: replaceVariables, replaceVariables, updateVariablesWith, insertOrAssignVariables,",
     "  getCurrentMessageId: () => snapshot.currentMessageIndex,",
     "  getLastMessageId: () => snapshot.messages.length - 1,",
-    "  getChatMessages, setChatMessages, getContext,",
+    "  getChatMessages, setChatMessages, getContext, eventOn, eventOnce, eventEmit, eventRemoveListener,",
     "};",
     "Object.assign(window, api);",
     "window.getCurrentMessage = () => getChatMessages(snapshot.currentMessageIndex)[0] || null;",
@@ -2092,6 +2135,9 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "});",
     "window.SillyTavern = sillyTavern;",
     "const mvu = isRecord(window.Mvu) ? window.Mvu : {};",
+    "mvu.events = isRecord(mvu.events) ? mvu.events : {};",
+    "mvu.events.VARIABLE_INITIALIZED ||= \"mag_variable_initialized\";",
+    "mvu.events.VARIABLE_UPDATE_ENDED ||= \"mag_variable_update_ended\";",
     "mvu.getMvuData = (option) => getVariables(option);",
     "mvu.setMvuData = (variables, option) => replaceVariables(variables, option);",
     "window.Mvu = mvu;",
@@ -3035,6 +3081,93 @@ function buildHtmlPreviewDocument(
     "</html>",
     ].join(""),
     previewId,
+  );
+}
+
+type ChatHtmlPreviewProps = {
+  content: string;
+  context: HtmlPreviewContext;
+  messageId: string;
+  previewId: string;
+  frameRegistry: { current: Map<string, HTMLIFrameElement> };
+};
+
+function ChatHtmlPreview({
+  content,
+  context,
+  messageId,
+  previewId,
+  frameRegistry,
+}: ChatHtmlPreviewProps) {
+  const frameRef = useRef<HTMLIFrameElement | null>(null);
+  const sourceDocumentRef = useRef<{
+    content: string;
+    previewId: string;
+    value: string;
+  } | null>(null);
+
+  if (
+    !sourceDocumentRef.current ||
+    sourceDocumentRef.current.content !== content ||
+    sourceDocumentRef.current.previewId !== previewId
+  ) {
+    sourceDocumentRef.current = {
+      content,
+      previewId,
+      value: buildHtmlPreviewDocument(content, previewId, context),
+    };
+  }
+
+  const sendContextUpdate = useCallback(() => {
+    const frameWindow = frameRef.current?.contentWindow;
+    if (!frameWindow) return;
+    frameWindow.postMessage(
+      {
+        type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
+        id: previewId,
+        context,
+      },
+      "*",
+    );
+  }, [context, previewId]);
+
+  useEffect(() => {
+    sendContextUpdate();
+  }, [sendContextUpdate]);
+
+  const registerFrame = useCallback(
+    (frame: HTMLIFrameElement | null) => {
+      frameRef.current = frame;
+      if (frame) frameRegistry.current.set(previewId, frame);
+      else frameRegistry.current.delete(previewId);
+    },
+    [frameRegistry, previewId],
+  );
+
+  const handleLoad = useCallback(
+    (event: SyntheticEvent<HTMLIFrameElement>) => {
+      resizeHtmlPreviewFrame(event);
+      window.requestAnimationFrame(sendContextUpdate);
+    },
+    [sendContextUpdate],
+  );
+
+  return (
+    <div className="chat-html-preview">
+      <iframe
+        className="chat-html-frame"
+        allow="autoplay; fullscreen; gamepad"
+        allowFullScreen
+        data-message-id={messageId}
+        loading="eager"
+        onLoad={handleLoad}
+        ref={registerFrame}
+        referrerPolicy="no-referrer"
+        srcDoc={sourceDocumentRef.current.value}
+        tabIndex={0}
+        title="HTML 预览"
+      />
+    </div>
   );
 }
 
@@ -10967,7 +11100,11 @@ export function App() {
     );
   };
 
-  const renderChatContent = (content: string, messageId: string) => {
+  const renderChatContent = (
+    content: string,
+    messageId: string,
+    sourceMessageId = messageId,
+  ) => {
     const toolProgressBlock = parseToolProgressContent(content);
     if (toolProgressBlock) {
       return (
@@ -10982,7 +11119,7 @@ export function App() {
     const getHtmlPreviewContext = () => {
       if (htmlPreviewContext) return htmlPreviewContext;
       const currentMessageIndex = chatMessages.findIndex(
-        (message) => message.id === messageId,
+        (message) => message.id === sourceMessageId,
       );
       htmlPreviewContext = {
         currentMessageIndex:
@@ -11010,31 +11147,14 @@ export function App() {
             if (chatHtmlRenderEnabled && looksLikeStandaloneRenderableHtml(part.content)) {
               const previewId = `${messageId}-html-text-${partIndex}`;
               return (
-                <div className="chat-html-preview" key={previewId}>
-                  <iframe
-                    className="chat-html-frame"
-                    allow="autoplay; fullscreen; gamepad"
-                    allowFullScreen
-                    data-message-id={messageId}
-                    loading="eager"
-                    onLoad={resizeHtmlPreviewFrame}
-                    ref={(frame) => {
-                      if (frame) {
-                        htmlPreviewFrameRefs.current.set(previewId, frame);
-                      } else {
-                        htmlPreviewFrameRefs.current.delete(previewId);
-                      }
-                    }}
-                    referrerPolicy="no-referrer"
-                    srcDoc={buildHtmlPreviewDocument(
-                      part.content,
-                      previewId,
-                      getHtmlPreviewContext(),
-                    )}
-                    tabIndex={0}
-                    title="HTML 预览"
-                  />
-                </div>
+                <ChatHtmlPreview
+                  content={part.content}
+                  context={getHtmlPreviewContext()}
+                  frameRegistry={htmlPreviewFrameRefs}
+                  key={previewId}
+                  messageId={sourceMessageId}
+                  previewId={previewId}
+                />
               );
             }
 
@@ -11048,31 +11168,14 @@ export function App() {
           if (chatHtmlRenderEnabled && shouldRenderHtmlCodePart(part)) {
             const previewId = `${messageId}-html-${partIndex}`;
             return (
-              <div className="chat-html-preview" key={previewId}>
-                <iframe
-                  className="chat-html-frame"
-                  allow="autoplay; fullscreen; gamepad"
-                  allowFullScreen
-                  data-message-id={messageId}
-                  loading="eager"
-                  onLoad={resizeHtmlPreviewFrame}
-                  ref={(frame) => {
-                    if (frame) {
-                      htmlPreviewFrameRefs.current.set(previewId, frame);
-                    } else {
-                      htmlPreviewFrameRefs.current.delete(previewId);
-                    }
-                  }}
-                  referrerPolicy="no-referrer"
-                  srcDoc={buildHtmlPreviewDocument(
-                    part.content,
-                    previewId,
-                    getHtmlPreviewContext(),
-                  )}
-                  tabIndex={0}
-                  title="HTML 预览"
-                />
-              </div>
+              <ChatHtmlPreview
+                content={part.content}
+                context={getHtmlPreviewContext()}
+                frameRegistry={htmlPreviewFrameRefs}
+                key={previewId}
+                messageId={sourceMessageId}
+                previewId={previewId}
+              />
             );
           }
 
@@ -17767,7 +17870,7 @@ export function App() {
                             {segmentIndex === 0 &&
                               message.role === "assistant" &&
                               renderChatReasoning(message.reasoning, id)}
-                            {renderChatContent(segment, id)}
+                            {renderChatContent(segment, id, message.id)}
                             {segmentIndex === 0 &&
                               renderChatAttachments(message.attachments ?? [])}
                           </>
