@@ -60,6 +60,8 @@ export type TavernScriptRuntimeAdapter = {
   setMessages(messages: TavernRuntimeMessage[]): void;
   getChatVariables(): Record<string, unknown>;
   setChatVariables(variables: Record<string, unknown>): void;
+  getCharacterVariables(): Record<string, unknown>;
+  setCharacterVariables(variables: Record<string, unknown>): void;
   getGlobalVariables(): Record<string, unknown>;
   setGlobalVariables(variables: Record<string, unknown>): void;
   getScriptData(scriptId: string): Record<string, unknown>;
@@ -236,7 +238,8 @@ function normalizeMessageId(value: unknown, messages: TavernRuntimeMessage[]) {
     return messages.length - 1;
   }
   const parsed = Number(value);
-  return Number.isInteger(parsed) ? parsed : messages.length - 1;
+  if (!Number.isInteger(parsed)) return messages.length - 1;
+  return parsed < 0 ? messages.length + parsed : parsed;
 }
 
 function isFrameworkScript(script: TavernScript) {
@@ -658,9 +661,31 @@ export class TavernScriptRuntime {
         if (!message) return;
         if (typeof update.message === "string") message.content = update.message;
         else if (typeof update.content === "string") message.content = update.content;
+        const swipeIndex = Number.isInteger(Number(update.swipe_id))
+          ? Math.max(0, Number(update.swipe_id))
+          : 0;
+        if (Array.isArray(update.swipes) && typeof update.swipes[swipeIndex] === "string") {
+          message.content = update.swipes[swipeIndex];
+        }
         if (update.role === "user" || update.role === "assistant") message.role = update.role;
         if (isRecord(update.data)) message.variables = cloneValue(update.data);
+        else if (
+          Array.isArray(update.swipes_data) &&
+          isRecord(update.swipes_data[swipeIndex])
+        ) {
+          message.variables = cloneValue(update.swipes_data[swipeIndex]);
+        } else if (Array.isArray(update.variables) && isRecord(update.variables[swipeIndex])) {
+          message.variables = cloneValue(update.variables[swipeIndex]);
+        } else if (isRecord(update.variables)) {
+          message.variables = cloneValue(update.variables);
+        }
         if (isRecord(update.extra)) message.extra = cloneValue(update.extra);
+        else if (
+          Array.isArray(update.swipes_info) &&
+          isRecord(update.swipes_info[swipeIndex])
+        ) {
+          message.extra = cloneValue(update.swipes_info[swipeIndex]);
+        }
       });
       this.adapter.setMessages(messages);
       return true;
@@ -738,10 +763,11 @@ export class TavernScriptRuntime {
       cloneValue(
         getWorldBooks().find((book) => book.name === String(name))?.entries ?? [],
       );
-    const getCharLorebooks = async () => ({
+    const getCharWorldbookNames = () => ({
       primary: getCharacter()?.worldBook?.name ?? null,
       additional: [] as string[],
     });
+    const getCharLorebooks = async () => getCharWorldbookNames();
     const getLorebookSettings = async () => ({
       selected_global_lorebooks: this.adapter.getWorldBooks().map((book) => book.name),
       selected_world_info: this.adapter.getWorldBooks().map((book) => book.name),
@@ -874,6 +900,7 @@ export class TavernScriptRuntime {
       eventRemoveListener,
       getCharData: () => this.getSillyTavernCharacters()[0]?.data ?? null,
       getCharLorebooks,
+      getCharWorldbookNames,
       getCurrentCharPrimaryLorebook: () => getCharacter()?.worldBook?.name ?? null,
       getLorebookEntries,
       getLorebookSettings,
@@ -938,6 +965,9 @@ export class TavernScriptRuntime {
     const type = String(normalized.type ?? "message").toLowerCase();
     if (type === "global") return this.adapter.getGlobalVariables();
     if (type === "chat") return this.adapter.getChatVariables();
+    if (type === "character" || type === "char") {
+      return this.adapter.getCharacterVariables();
+    }
     if (type === "script" || type === "local") return this.adapter.getScriptData(scriptId);
     const index = normalizeMessageId(normalized.message_id, messages);
     return messages[index]?.variables ?? {};
@@ -962,6 +992,10 @@ export class TavernScriptRuntime {
     }
     if (type === "chat") {
       this.adapter.setChatVariables(next);
+      return;
+    }
+    if (type === "character" || type === "char") {
+      this.adapter.setCharacterVariables(next);
       return;
     }
     if (type === "script" || type === "local") {
