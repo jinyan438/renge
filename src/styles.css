@@ -1223,12 +1223,13 @@ summary:focus-visible {
   font-size: 12px;
 }
 
-.worldbook-content-field textarea {
-  min-height: 300px;
+.field.worldbook-content-field textarea {
+  height: clamp(420px, 48dvh, 760px);
+  min-height: 420px;
   resize: vertical;
   font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .worldbook-toggle-grid {
@@ -4846,8 +4847,9 @@ input[type="range"] {
     min-height: auto;
   }
 
-  .worldbook-content-field textarea {
-    min-height: 45dvh;
+  .field.worldbook-content-field textarea {
+    height: auto;
+    min-height: 50dvh;
   }
 
   .prompt-editor {
