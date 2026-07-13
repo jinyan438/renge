@@ -1,0 +1,33 @@
+node_modules/
+dist/
+
+# Runtime logs and temporary files
+*.log
+*.err.log
+*.out.log
+tmp/
+temp/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Build caches and generated artifacts
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+*.apk
+*.aab
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

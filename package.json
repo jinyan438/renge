@@ -1,0 +1,33 @@
+{
+  "name": "renge-agent-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "serve": "node server.mjs",
+    "start": "node server.mjs",
+    "android:apk": "build_android_apk.bat --no-pause",
+    "electron:install-local": "node scripts/install-electron-local.mjs",
+    "electron": "npm run build && electron electron/main.mjs",
+    "desktop": "npm run electron"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.0.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.0"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "electron": "^42.4.1"
+  }
+}
