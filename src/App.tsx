@@ -4251,6 +4251,22 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
+function resolveCharacterWorldBook(
+  card: CharacterCard,
+  availableWorldBooks: WorldBook[],
+) {
+  if (card.characterBook?.entries.length) return card.characterBook;
+  const linkedName =
+    (typeof card.extensions.world === "string" ? card.extensions.world.trim() : "") ||
+    card.characterBook?.name.trim() ||
+    "";
+  if (!linkedName) return card.characterBook;
+  return (
+    availableWorldBooks.find((book) => book.name.trim() === linkedName) ??
+    card.characterBook
+  );
+}
+
 function stringArg(args: Record<string, unknown>, key: string, fallback = "") {
   const value = args[key];
   return value === undefined || value === null ? fallback : String(value);
@@ -7821,6 +7837,33 @@ export function App() {
           ),
         );
       },
+      getCharacterVariables: () => {
+        const session = chatSessionsRef.current.find(
+          (candidate) => candidate.id === activeChatSessionIdRef.current,
+        );
+        const card = characterCardsRef.current.find(
+          (candidate) => candidate.id === session?.roleplayCharacterCardId,
+        );
+        return normalizeTavernVariables(card?.tavernVariables);
+      },
+      setCharacterVariables: (variables) => {
+        const session = chatSessionsRef.current.find(
+          (candidate) => candidate.id === activeChatSessionIdRef.current,
+        );
+        if (!session?.roleplayCharacterCardId) return;
+        const updatedAt = new Date().toISOString();
+        updateCards((cards) =>
+          cards.map((card) =>
+            card.id === session.roleplayCharacterCardId
+              ? {
+                  ...card,
+                  tavernVariables: normalizeTavernVariables(variables),
+                  updatedAt,
+                }
+              : card,
+          ),
+        );
+      },
       getGlobalVariables: () => normalizeTavernVariables(tavernGlobalVariablesRef.current),
       setGlobalVariables: (variables) => {
         const next = normalizeTavernVariables(variables);
@@ -7872,6 +7915,10 @@ export function App() {
           (candidate) => candidate.id === session?.roleplayCharacterCardId,
         );
         if (!card) return null;
+        const characterWorldBook = resolveCharacterWorldBook(
+          card,
+          worldBooksRef.current,
+        );
         return {
           id: card.id,
           name: card.name,
@@ -7882,11 +7929,11 @@ export function App() {
           messageExample: card.messageExample,
           avatarDataUrl: card.avatarDataUrl,
           extensions: card.extensions,
-          worldBook: card.characterBook
+          worldBook: characterWorldBook
             ? {
-                id: card.characterBook.id,
-                name: card.characterBook.name,
-                entries: card.characterBook.entries.map((entry) => ({
+                id: characterWorldBook.id,
+                name: characterWorldBook.name,
+                entries: characterWorldBook.entries.map((entry) => ({
                   id: entry.id,
                   comment: entry.comment,
                   content: entry.content,
@@ -10903,11 +10950,16 @@ export function App() {
           characterName: responderName,
         },
       );
+      const responderCharacterWorldBook = responderCharacterCard
+        ? resolveCharacterWorldBook(responderCharacterCard, worldBooks)
+        : null;
       const characterWorldBookSystemPrompt =
-        responderCharacterCard?.characterBook
+        responderCharacterCard &&
+        responderCharacterWorldBook &&
+        !activeWorldBookIds.includes(responderCharacterWorldBook.id)
           ? buildWorldBookPrompt(
-              [responderCharacterCard.characterBook],
-              [responderCharacterCard.characterBook.id],
+              [responderCharacterWorldBook],
+              [responderCharacterWorldBook.id],
               messagesForApi.map((message) => ({
                 role: message.role,
                 content: message.content,
@@ -11668,11 +11720,17 @@ export function App() {
               : chatPersona.name,
         },
       );
+      const activeCharacterWorldBook = activeSessionRoleplayCard
+        ? resolveCharacterWorldBook(activeSessionRoleplayCard, worldBooks)
+        : null;
       const characterWorldBookSystemPrompt =
-        chatMode === "roleplay" && activeSessionRoleplayCard?.characterBook
+        chatMode === "roleplay" &&
+        activeSessionRoleplayCard &&
+        activeCharacterWorldBook &&
+        !activeWorldBookIds.includes(activeCharacterWorldBook.id)
           ? buildWorldBookPrompt(
-              [activeSessionRoleplayCard.characterBook],
-              [activeSessionRoleplayCard.characterBook.id],
+              [activeCharacterWorldBook],
+              [activeCharacterWorldBook.id],
               messagesForApi.map((message) => ({
                 role: message.role,
                 content: message.content,
