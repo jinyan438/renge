@@ -2,6 +2,7 @@ import {
   ArrowLeft,
   Bot,
   Bookmark,
+  BookOpen,
   Boxes,
   Braces,
   ChevronDown,
@@ -18,6 +19,7 @@ import {
   Home,
   KeyRound,
   ListPlus,
+  Languages,
   MessageSquare,
   Menu,
   Palette,
@@ -26,6 +28,7 @@ import {
   Plus,
   RefreshCw,
   Save,
+  Search,
   Server,
   Settings2,
   SlidersHorizontal,
@@ -96,6 +99,21 @@ import {
   normalizeRegexScript,
   type RegexScript,
 } from "./regexUtils";
+import {
+  applyCharacterTranslations,
+  buildCharacterCardPrompt,
+  collectCharacterTranslationFields,
+  createCharacterCard,
+  exportCharacterCardJson,
+  exportCharacterCardPng,
+  getCharacterCardGreetings,
+  importCharacterCardFile,
+  loadCharacterCardsFromDatabase,
+  loadCharacterCardsFromStorage,
+  normalizeCharacterCard,
+  saveCharacterCardsToDatabase,
+  type CharacterCard,
+} from "./characterCardUtils";
 import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryType } from "./types";
 
 const AVATAR_OUTPUT_SIZE = 512;
@@ -124,11 +142,11 @@ type TypeDragTarget = {
   placement: DragPlacement;
 };
 
-type AppView = "home" | "studio" | "settings" | "chat";
+type AppView = "home" | "studio" | "characters" | "settings" | "chat";
 type SettingsTab = "providers" | "prompts" | "presets" | "worldbooks" | "regexes" | "user" | "personalization" | "mcp" | "skills" | "device";
 type ProviderPullState = "idle" | "loading" | "success" | "error";
 type ChatGenerationState = "idle" | "running" | "stopping";
-type ChatMode = "ai" | "persona" | "multi";
+type ChatMode = "ai" | "persona" | "multi" | "roleplay";
 type ChatRole = "user" | "assistant";
 type ChatApiRole = "system" | "user" | "assistant" | "tool";
 type ChatSenderKind = "user" | "persona" | "system";
@@ -188,7 +206,7 @@ type ChatMessage = {
   createdAt: string;
   sender?: ChatSenderIdentity;
   attachments?: ChatAttachment[];
-  source?: "heartbeat";
+  source?: "heartbeat" | "roleplay-greeting";
 };
 
 type ChatHeartbeatConfig = {
@@ -219,6 +237,8 @@ type ChatSession = {
   messages: ChatMessage[];
   heartbeat: ChatHeartbeatConfig;
   memoryPersonaIds: string[];
+  roleplayCharacterCardId?: string;
+  roleplayGreetingIndex?: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -316,6 +336,8 @@ type RengeAppData = {
   worldBooks?: WorldBook[];
   activeWorldBookIds?: string[];
   regexScripts?: RegexScript[];
+  characterCards?: CharacterCard[];
+  activeCharacterCardId?: string;
   userProfile?: UserProfile;
   chatSender?: ChatSenderIdentity;
   chatMultiBubbleEnabled?: boolean;
@@ -514,6 +536,8 @@ const CHAT_PRESET_ENABLED_STORAGE_KEY = "renge_chat_preset_enabled";
 const WORLD_BOOKS_STORAGE_KEY = "renge_world_books";
 const ACTIVE_WORLD_BOOKS_STORAGE_KEY = "renge_active_world_books";
 const REGEX_SCRIPTS_STORAGE_KEY = "renge_regex_scripts";
+const CHARACTER_CARDS_STORAGE_KEY = "renge_character_cards";
+const ACTIVE_CHARACTER_CARD_STORAGE_KEY = "renge_active_character_card";
 const USER_PROFILE_STORAGE_KEY = "renge_user_profile";
 const CHAT_SENDER_STORAGE_KEY = "renge_chat_sender";
 const CHAT_MULTI_BUBBLE_STORAGE_KEY = "renge_chat_multi_bubble_enabled";
@@ -968,7 +992,7 @@ function loadSystemPrompts() {
 }
 
 function normalizeChatMode(value: unknown): ChatMode {
-  if (value === "ai" || value === "multi") return value;
+  if (value === "ai" || value === "multi" || value === "roleplay") return value;
   return "persona";
 }
 
@@ -1335,6 +1359,7 @@ function createChatSession(
   workspacePath = workspaceKey !== DEFAULT_WORKSPACE_KEY && !workspaceKey.startsWith("browser:")
     ? workspaceKey
     : undefined,
+  roleplay?: { characterCardId: string; greetingIndex?: number },
 ): ChatSession {
   const timestamp = new Date().toISOString();
 
@@ -1347,6 +1372,12 @@ function createChatSession(
     messages: [],
     heartbeat: createDefaultHeartbeatConfig(),
     memoryPersonaIds: [],
+    ...(roleplay
+      ? {
+          roleplayCharacterCardId: roleplay.characterCardId,
+          roleplayGreetingIndex: roleplay.greetingIndex ?? 0,
+        }
+      : {}),
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -1379,8 +1410,35 @@ function normalizeChatSession(rawSession: Partial<ChatSession>): ChatSession {
             typeof personaId === "string" && personaIds.indexOf(personaId) === index,
         )
       : [],
+    ...(typeof rawSession.roleplayCharacterCardId === "string" &&
+    rawSession.roleplayCharacterCardId.trim()
+      ? {
+          roleplayCharacterCardId: rawSession.roleplayCharacterCardId,
+          roleplayGreetingIndex: Math.max(
+            0,
+            Math.floor(Number(rawSession.roleplayGreetingIndex) || 0),
+          ),
+        }
+      : {}),
     createdAt: rawSession.createdAt ?? new Date().toISOString(),
     updatedAt: rawSession.updatedAt ?? new Date().toISOString(),
+  };
+}
+
+function createRoleplayGreetingMessage(
+  card: CharacterCard,
+  userName: string,
+  greetingIndex = 0,
+): ChatMessage | null {
+  const greetings = getCharacterCardGreetings(card, userName);
+  if (greetings.length === 0) return null;
+  const safeIndex = Math.max(0, Math.min(greetingIndex, greetings.length - 1));
+  return {
+    id: crypto.randomUUID(),
+    role: "assistant",
+    content: greetings[safeIndex],
+    source: "roleplay-greeting",
+    createdAt: new Date().toISOString(),
   };
 }
 
@@ -5558,6 +5616,35 @@ export function App() {
     status: ProviderPullState;
     message: string;
   }>({ status: "idle", message: "" });
+  const [characterCards, setCharacterCards] = useState<CharacterCard[]>(() =>
+    loadCharacterCardsFromStorage(CHARACTER_CARDS_STORAGE_KEY),
+  );
+  const [activeCharacterCardId, setActiveCharacterCardId] = useState(
+    () => localStorage.getItem(ACTIVE_CHARACTER_CARD_STORAGE_KEY) ?? "",
+  );
+  const [editingCharacterCardId, setEditingCharacterCardId] = useState("");
+  const [characterEditorTab, setCharacterEditorTab] = useState<
+    "basic" | "advanced" | "greetings" | "worldbook" | "regex"
+  >("basic");
+  const [characterSearch, setCharacterSearch] = useState("");
+  const [characterImportState, setCharacterImportState] = useState<{
+    status: ProviderPullState;
+    message: string;
+  }>({ status: "idle", message: "" });
+  const [characterTranslationState, setCharacterTranslationState] = useState<{
+    status: ProviderPullState;
+    message: string;
+  }>({ status: "idle", message: "" });
+  const [characterTranslationPreview, setCharacterTranslationPreview] = useState<{
+    cardId: string;
+    items: Array<{
+      key: string;
+      label: string;
+      source: string;
+      translated: string;
+      selected: boolean;
+    }>;
+  } | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile>(loadUserProfile);
   const [providerPullState, setProviderPullState] = useState<{
     status: ProviderPullState;
@@ -5674,6 +5761,8 @@ export function App() {
   const presetImportInputRef = useRef<HTMLInputElement>(null);
   const worldBookImportInputRef = useRef<HTMLInputElement>(null);
   const regexImportInputRef = useRef<HTMLInputElement>(null);
+  const characterImportInputRef = useRef<HTMLInputElement>(null);
+  const characterAvatarInputRef = useRef<HTMLInputElement>(null);
   const mcpImportInputRef = useRef<HTMLInputElement>(null);
   const skillZipInputRef = useRef<HTMLInputElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
@@ -5801,9 +5890,10 @@ export function App() {
     let cancelled = false;
 
     async function loadInitialAppData() {
-      const [persistentData, localPersonas] = await Promise.all([
+      const [persistentData, localPersonas, databaseCharacterCards] = await Promise.all([
         loadPersistentAppData(),
         personaStore.list(),
+        loadCharacterCardsFromDatabase(),
       ]);
       if (cancelled) return;
 
@@ -5836,6 +5926,14 @@ export function App() {
             normalizeRegexScript(script, index),
           )
         : loadRegexScriptsFromStorage(REGEX_SCRIPTS_STORAGE_KEY);
+      const normalizedCharacterCards =
+        Array.isArray(persistentData?.characterCards) && persistentData.characterCards.length > 0
+        ? persistentData.characterCards.map((card, index) =>
+            normalizeCharacterCard(card, index),
+          )
+        : databaseCharacterCards.length > 0
+          ? databaseCharacterCards
+          : loadCharacterCardsFromStorage(CHARACTER_CARDS_STORAGE_KEY);
       const normalizedUserProfile = persistentData?.userProfile
         ? normalizeUserProfile(persistentData.userProfile)
         : loadUserProfile();
@@ -5844,6 +5942,15 @@ export function App() {
         normalizedPersonas,
       );
       const nextChatMode = normalizeChatMode(persistentData?.chatMode ?? loadChatMode());
+      const storedActiveCharacterCardId =
+        persistentData?.activeCharacterCardId ??
+        localStorage.getItem(ACTIVE_CHARACTER_CARD_STORAGE_KEY) ??
+        "";
+      const nextActiveCharacterCardId = normalizedCharacterCards.some(
+        (card) => card.id === storedActiveCharacterCardId,
+      )
+        ? storedActiveCharacterCardId
+        : normalizedCharacterCards[0]?.id ?? "";
       const storedMultiAgentPersonaIds = normalizeMultiAgentPersonaIds(
         persistentData?.multiAgentPersonaIds ?? loadMultiAgentPersonaIds(),
         normalizedPersonas,
@@ -5995,6 +6102,8 @@ export function App() {
       setSelectedRegexTargetKey(
         normalizedRegexScripts[0] ? `global:${normalizedRegexScripts[0].id}` : "",
       );
+      setCharacterCards(normalizedCharacterCards);
+      setActiveCharacterCardId(nextActiveCharacterCardId);
       setUserProfile(normalizedUserProfile);
       setChatSender(nextChatSender);
       setChatMode(nextChatMode);
@@ -6067,6 +6176,16 @@ export function App() {
     localStorage.setItem(WORLD_BOOKS_STORAGE_KEY, JSON.stringify(worldBooks));
     localStorage.setItem(ACTIVE_WORLD_BOOKS_STORAGE_KEY, JSON.stringify(activeWorldBookIds));
     localStorage.setItem(REGEX_SCRIPTS_STORAGE_KEY, JSON.stringify(regexScripts));
+    void saveCharacterCardsToDatabase(characterCards);
+    try {
+      localStorage.setItem(
+        CHARACTER_CARDS_STORAGE_KEY,
+        JSON.stringify(characterCards.map((card) => ({ ...card, avatarDataUrl: "" }))),
+      );
+    } catch {
+      localStorage.removeItem(CHARACTER_CARDS_STORAGE_KEY);
+    }
+    localStorage.setItem(ACTIVE_CHARACTER_CARD_STORAGE_KEY, activeCharacterCardId);
     localStorage.setItem(USER_PROFILE_STORAGE_KEY, JSON.stringify(userProfile));
     localStorage.setItem(CHAT_SENDER_STORAGE_KEY, JSON.stringify(chatSender));
     localStorage.setItem(CHAT_MULTI_BUBBLE_STORAGE_KEY, String(chatMultiBubbleEnabled));
@@ -6113,6 +6232,8 @@ export function App() {
       worldBooks,
       activeWorldBookIds,
       regexScripts,
+      characterCards,
+      activeCharacterCardId,
       userProfile,
       chatSender,
       chatMultiBubbleEnabled,
@@ -6125,7 +6246,7 @@ export function App() {
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     });
-  }, [activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataLoaded, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataLoaded, characterCards, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, userProfile, worldBooks]);
 
   useEffect(() => {
     if (!appDataLoaded) return;
@@ -6203,6 +6324,11 @@ export function App() {
   }, [personas]);
 
   useEffect(() => {
+    if (characterCards.some((card) => card.id === activeCharacterCardId)) return;
+    setActiveCharacterCardId(characterCards[0]?.id ?? "");
+  }, [activeCharacterCardId, characterCards]);
+
+  useEffect(() => {
     setMultiAgentModelConfigs((current) =>
       normalizeMultiAgentModelConfigs(
         current,
@@ -6249,7 +6375,9 @@ export function App() {
         session.id === activeChatSessionId
           ? {
               ...session,
-              title: inferChatSessionTitle(chatMessages),
+              title: session.roleplayCharacterCardId
+                ? session.title
+                : inferChatSessionTitle(chatMessages),
               messages: chatMessages,
               updatedAt: new Date().toISOString(),
             }
@@ -6262,6 +6390,33 @@ export function App() {
     () => personas.find((persona) => persona.id === activePersonaId) ?? personas[0],
     [personas, activePersonaId],
   );
+  const activeRoleplayCard = useMemo(
+    () =>
+      characterCards.find((card) => card.id === activeCharacterCardId) ??
+      characterCards[0],
+    [activeCharacterCardId, characterCards],
+  );
+  const scopedRoleplayCard = useMemo(() => {
+    if (chatMode !== "roleplay") return undefined;
+    const session =
+      chatSessions.find((item) => item.id === activeChatSessionId) ?? chatSessions[0];
+    if (!session?.roleplayCharacterCardId) return undefined;
+    return characterCards.find((card) => card.id === session.roleplayCharacterCardId);
+  }, [activeChatSessionId, characterCards, chatMode, chatSessions]);
+  const editingCharacterCard = useMemo(
+    () => characterCards.find((card) => card.id === editingCharacterCardId),
+    [characterCards, editingCharacterCardId],
+  );
+  const filteredCharacterCards = useMemo(() => {
+    const query = characterSearch.trim().toLocaleLowerCase();
+    if (!query) return characterCards;
+    return characterCards.filter((card) =>
+      [card.name, card.description, card.creator, ...card.tags]
+        .join("\n")
+        .toLocaleLowerCase()
+        .includes(query),
+    );
+  }, [characterCards, characterSearch]);
   const multiAgentPersonas = useMemo(
     () =>
       multiAgentPersonaIds
@@ -6549,8 +6704,11 @@ export function App() {
     () => [
       ...regexScripts,
       ...(chatPresetEnabled && activeChatPreset ? activeChatPreset.regexScripts : []),
+      ...(scopedRoleplayCard
+        ? scopedRoleplayCard.regexScripts
+        : []),
     ],
-    [activeChatPreset, chatPresetEnabled, regexScripts],
+    [activeChatPreset, chatPresetEnabled, regexScripts, scopedRoleplayCard],
   );
   const selectedRegexError = selectedRegexTarget
     ? getRegexScriptError(selectedRegexTarget.script)
@@ -6837,10 +6995,206 @@ export function App() {
   );
   const chatPersona = activePersona;
   const chatProvider = activeProvider;
+  const updateCharacterCard = (cardId: string, patch: Partial<CharacterCard>) => {
+    setCharacterCards((current) =>
+      current.map((card) =>
+        card.id === cardId
+          ? { ...card, ...patch, id: card.id, updatedAt: new Date().toISOString() }
+          : card,
+      ),
+    );
+  };
+  const addCharacterCard = () => {
+    const card = createCharacterCard(`新角色 ${characterCards.length + 1}`);
+    setCharacterCards((current) => [...current, card]);
+    setActiveCharacterCardId(card.id);
+    setEditingCharacterCardId(card.id);
+    setCharacterEditorTab("basic");
+    setCharacterImportState({ status: "idle", message: "" });
+  };
+  const importCharacterCardFiles = async (files: FileList | File[]) => {
+    const fileList = Array.from(files);
+    if (fileList.length === 0) return;
+    setCharacterImportState({
+      status: "loading",
+      message: `正在解析 ${fileList.length} 张角色卡...`,
+    });
+    const imported: CharacterCard[] = [];
+    const errors: string[] = [];
+    for (const file of fileList) {
+      try {
+        imported.push(await importCharacterCardFile(file));
+      } catch (error) {
+        errors.push(`${file.name}：${error instanceof Error ? error.message : "格式无效"}`);
+      }
+    }
+    if (imported.length > 0) {
+      setCharacterCards((current) => [...current, ...imported]);
+      setActiveCharacterCardId(imported[0].id);
+    }
+    setCharacterImportState(
+      errors.length > 0
+        ? { status: "error", message: `部分文件导入失败：${errors.join("；")}` }
+        : { status: "idle", message: "" },
+    );
+    if (characterImportInputRef.current) characterImportInputRef.current.value = "";
+  };
+  const downloadCharacterFile = (data: BlobPart, fileName: string, type: string) => {
+    const url = URL.createObjectURL(new Blob([data], { type }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  const safeCharacterFileName = (card: CharacterCard) =>
+    (card.name.trim() || "character").replace(/[\\/:*?"<>|]/g, "_");
+  const exportCharacterJson = (card: CharacterCard) => {
+    downloadCharacterFile(
+      exportCharacterCardJson(card),
+      `${safeCharacterFileName(card)}.json`,
+      "application/json;charset=utf-8",
+    );
+  };
+  const exportCharacterPng = async (card: CharacterCard) => {
+    try {
+      const bytes = await exportCharacterCardPng(card);
+      downloadCharacterFile(bytes, `${safeCharacterFileName(card)}.png`, "image/png");
+      setCharacterImportState({ status: "idle", message: "" });
+    } catch (error) {
+      setCharacterImportState({
+        status: "error",
+        message: error instanceof Error ? `PNG 导出失败：${error.message}` : "PNG 导出失败。",
+      });
+    }
+  };
+  const deleteCharacterCard = (card: CharacterCard) => {
+    if (!window.confirm(`删除角色卡「${card.name}」？已产生的会话消息会保留。`)) return;
+    const remaining = characterCards.filter((item) => item.id !== card.id);
+    setCharacterCards(remaining);
+    if (activeCharacterCardId === card.id) setActiveCharacterCardId(remaining[0]?.id ?? "");
+    if (editingCharacterCardId === card.id) setEditingCharacterCardId("");
+  };
+  const replaceCharacterAvatar = async (file?: File) => {
+    if (!file || !editingCharacterCard) return;
+    try {
+      updateCharacterCard(editingCharacterCard.id, {
+        avatarDataUrl: await readFileAsDataUrl(file),
+      });
+    } finally {
+      if (characterAvatarInputRef.current) characterAvatarInputRef.current.value = "";
+    }
+  };
+  const translateCharacterCard = async (card: CharacterCard) => {
+    const modelId = getEffectiveProviderModelId(chatProvider);
+    if (!chatProvider?.apiBaseUrl || !modelId) {
+      setCharacterTranslationState({
+        status: "error",
+        message: "翻译前请先在设置中配置可用的供应商和模型。",
+      });
+      return;
+    }
+    const fields = collectCharacterTranslationFields(card);
+    if (fields.length === 0) {
+      setCharacterTranslationState({ status: "error", message: "角色卡没有可翻译的文本。" });
+      return;
+    }
+    setCharacterTranslationState({ status: "loading", message: "正在翻译角色卡..." });
+    try {
+      const groups: typeof fields[] = [];
+      fields.forEach((field) => {
+        const current = groups[groups.length - 1];
+        const currentLength = current?.reduce((total, item) => total + item.value.length, 0) ?? 0;
+        if (!current || currentLength + field.value.length > 7000) groups.push([field]);
+        else current.push(field);
+      });
+      const translations: Record<string, string> = {};
+      for (const group of groups) {
+        const source = Object.fromEntries(group.map((field) => [field.key, field.value]));
+        const response = await fetch("/api/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            apiBaseUrl: trimTrailingSlash(chatProvider.apiBaseUrl),
+            apiKey: chatProvider.apiKey,
+            request: {
+              model: modelId,
+              messages: [
+                {
+                  role: "system",
+                  content:
+                    "你是专业的创作内容翻译。把输入 JSON 对象的每个字符串值翻译成自然、准确、符合角色语气的简体中文；保留键名、Markdown、HTML、变量、{{user}}、{{char}} 和专有格式。只输出一个合法 JSON 对象，不要解释。",
+                },
+                { role: "user", content: JSON.stringify(source) },
+              ],
+              temperature: 0.2,
+              stream: false,
+            },
+          }),
+        });
+        const payload = (await response.json()) as {
+          error?: string | { message?: string };
+          choices?: Array<{ message?: ChatApiMessage }>;
+          output_text?: string;
+        };
+        if (!response.ok) {
+          const errorMessage =
+            typeof payload.error === "string" ? payload.error : payload.error?.message;
+          throw new Error(errorMessage || `翻译请求失败：${response.status}`);
+        }
+        const rawContent =
+          getChatApiMessageText(payload.choices?.[0]?.message).trim() ||
+          payload.output_text?.trim() ||
+          "";
+        const jsonText = rawContent.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+        const translatedGroup = JSON.parse(jsonText) as Record<string, unknown>;
+        group.forEach((field) => {
+          if (typeof translatedGroup[field.key] === "string") {
+            translations[field.key] = translatedGroup[field.key] as string;
+          }
+        });
+      }
+      setCharacterTranslationPreview({
+        cardId: card.id,
+        items: fields.map((field) => ({
+          key: field.key,
+          label: field.label,
+          source: field.value,
+          translated: translations[field.key] ?? field.value,
+          selected: true,
+        })),
+      });
+      setCharacterTranslationState({ status: "idle", message: "" });
+    } catch (error) {
+      setCharacterTranslationState({
+        status: "error",
+        message: error instanceof Error ? `翻译失败：${error.message}` : "翻译失败。",
+      });
+    }
+  };
+  const applySelectedCharacterTranslations = () => {
+    if (!characterTranslationPreview) return;
+    const card = characterCards.find((item) => item.id === characterTranslationPreview.cardId);
+    if (!card) return;
+    const selectedTranslations = Object.fromEntries(
+      characterTranslationPreview.items
+        .filter((item) => item.selected)
+        .map((item) => [item.key, item.translated]),
+    );
+    setCharacterCards((current) =>
+      current.map((item) =>
+        item.id === card.id ? applyCharacterTranslations(item, selectedTranslations) : item,
+      ),
+    );
+    setCharacterTranslationPreview(null);
+  };
   const composeChatApiMessages = (
     systemPrompt: string,
     history: ChatApiMessage[],
     responderPersona?: AgentPersona,
+    responderContext?: { name: string; description: string },
   ): ChatApiMessage[] => {
     if (!chatPresetEnabled || !activeChatPreset) {
       return [
@@ -6854,12 +7208,44 @@ export function App() {
       .find((message) => message.role === "user");
     return applyChatPresetToMessages(activeChatPreset, systemPrompt, history, {
       user: userProfile.nickname.trim() || "User",
-      char: responderPersona?.name ?? "AI",
-      description: responderPersona ? buildPersonaPrompt(responderPersona) : "",
+      char: responderContext?.name ?? responderPersona?.name ?? "AI",
+      description:
+        responderContext?.description ??
+        (responderPersona ? buildPersonaPrompt(responderPersona) : ""),
       persona: userProfile.bio.trim(),
       lastUserMessage: getChatApiMessageText(lastUserMessage),
     }) as ChatApiMessage[];
   };
+  const applyPromptRegexToApiMessages = (
+    messages: ChatApiMessage[],
+    characterName: string,
+  ) =>
+    messages.map((message, index) => {
+      if (message.role !== "user" && message.role !== "assistant") return message;
+      const applyContent = (content: string) =>
+        applyRegexScripts(content, effectiveRegexScripts, {
+          placement: message.role === "user" ? 1 : 2,
+          destination: "prompt",
+          depth: messages.length - index - 1,
+          userName: userProfile.nickname,
+          characterName,
+        });
+      if (typeof message.content === "string") {
+        const content = applyContent(message.content);
+        return content === message.content ? message : { ...message, content };
+      }
+      if (Array.isArray(message.content)) {
+        return {
+          ...message,
+          content: message.content.map((part) =>
+            part.type === "text" && typeof part.text === "string"
+              ? { ...part, text: applyContent(part.text) }
+              : part,
+          ),
+        };
+      }
+      return message;
+    });
   const activeChatPresetRequestParameters =
     chatPresetEnabled && activeChatPreset
       ? buildChatPresetRequestParameters(activeChatPreset)
@@ -6872,24 +7258,93 @@ export function App() {
       return Boolean(provider?.apiBaseUrl && modelId);
     });
   const chatModelReady =
-    chatMode === "multi" ? multiAgentModelsReady : Boolean(effectiveChatModelId);
+    chatMode === "multi"
+      ? multiAgentModelsReady
+      : chatMode === "roleplay"
+        ? Boolean(effectiveChatModelId && scopedRoleplayCard)
+        : Boolean(effectiveChatModelId);
   const chatModelLabel =
     chatMode === "multi"
       ? multiAgentModelsReady
         ? `${multiAgentPersonas.length} 个 Agent 独立模型`
         : "Agent 模型待配置"
+      : chatMode === "roleplay"
+        ? scopedRoleplayCard
+          ? `${scopedRoleplayCard.name} · ${effectiveChatModelId || "模型待配置"}`
+          : "角色卡待选择"
       : effectiveChatModelId || "模型待配置";
   const chatStarterPrompts =
     chatMode === "persona"
       ? ["介绍一下你自己", "从你的长期目标开始聊", "用你的表达习惯回应我"]
       : chatMode === "multi"
         ? ["请依次给出你们各自的观点", "从不同角度分析这个问题", "先讨论，再各自给出下一步建议"]
+        : chatMode === "roleplay"
+          ? ["继续当前场景", "说说你现在的想法", "推进接下来的剧情"]
         : ["梳理当前任务并给出下一步", "检查工作区中的潜在问题", "总结当前目标和待办事项"];
   const workspaceInfo = getWorkspaceInfo(localWorkspaceHandle);
   const activeChatSession = useMemo(
     () => chatSessions.find((session) => session.id === activeChatSessionId) ?? chatSessions[0],
     [activeChatSessionId, chatSessions],
   );
+  const activeSessionRoleplayCard = useMemo(
+    () => scopedRoleplayCard,
+    [scopedRoleplayCard],
+  );
+  const startRoleplayWithCharacter = (card: CharacterCard, greetingIndex = 0) => {
+    const greeting = createRoleplayGreetingMessage(
+      card,
+      userProfile.nickname.trim() || "用户",
+      greetingIndex,
+    );
+    const session = createChatSession(
+      workspaceInfo.key,
+      workspaceInfo.name,
+      workspaceInfo.path,
+      { characterCardId: card.id, greetingIndex },
+    );
+    session.title = `角色：${card.name}`;
+    session.messages = greeting ? [greeting] : [];
+    setCharacterCards((current) =>
+      current.map((item) =>
+        item.id === card.id ? { ...item, updatedAt: new Date().toISOString() } : item,
+      ),
+    );
+    setActiveCharacterCardId(card.id);
+    setChatMode("roleplay");
+    setChatSessions((current) => [...current, session]);
+    setActiveChatSessionId(session.id);
+    setChatMessages(session.messages);
+    setChatStatus({ status: "idle", message: "" });
+    setView("chat");
+  };
+  const cycleRoleplayGreeting = () => {
+    if (!activeChatSession || !activeSessionRoleplayCard) return;
+    const greetings = getCharacterCardGreetings(
+      activeSessionRoleplayCard,
+      userProfile.nickname.trim() || "用户",
+    );
+    if (greetings.length < 2) return;
+    const nextIndex = ((activeChatSession.roleplayGreetingIndex ?? 0) + 1) % greetings.length;
+    const greeting = createRoleplayGreetingMessage(
+      activeSessionRoleplayCard,
+      userProfile.nickname.trim() || "用户",
+      nextIndex,
+    );
+    if (!greeting) return;
+    const nextMessages = chatMessages.some((message) => message.source === "roleplay-greeting")
+      ? chatMessages.map((message) =>
+          message.source === "roleplay-greeting" ? { ...greeting, id: message.id } : message,
+        )
+      : [greeting, ...chatMessages];
+    setChatMessages(nextMessages);
+    setChatSessions((current) =>
+      current.map((session) =>
+        session.id === activeChatSession.id
+          ? { ...session, roleplayGreetingIndex: nextIndex, messages: nextMessages }
+          : session,
+      ),
+    );
+  };
   const recentChatSessions = useMemo(
     () =>
       [...chatSessions]
@@ -6919,11 +7374,14 @@ export function App() {
           destination: "display",
           depth: visibleChatMessages.length - index - 1,
           userName: userProfile.nickname,
-          characterName: assistantPersona?.name ?? activePersona?.name ?? "AI",
+          characterName:
+            chatMode === "roleplay" && activeSessionRoleplayCard
+              ? activeSessionRoleplayCard.name
+              : assistantPersona?.name ?? activePersona?.name ?? "AI",
         });
         return content === message.content ? message : { ...message, content };
       }),
-    [activePersona, chatMode, effectiveRegexScripts, personas, userProfile.nickname, visibleChatMessages],
+    [activePersona, activeSessionRoleplayCard, chatMode, effectiveRegexScripts, personas, userProfile.nickname, visibleChatMessages],
   );
   const chatMessageMenuMessage = useMemo(
     () => chatMessages.find((message) => message.id === chatMessageMenu?.messageId),
@@ -7516,6 +7974,10 @@ export function App() {
     setChatMessages(session.messages);
     setEditingChatMessage(null);
     setChatMessageMenu(null);
+    if (session.roleplayCharacterCardId) {
+      setChatMode("roleplay");
+      setActiveCharacterCardId(session.roleplayCharacterCardId);
+    }
 
     if (session.workspacePath && window.rengeDesktop?.isElectron) {
       setChatStatus({ status: "loading", message: `正在恢复工作区：${session.workspaceName}` });
@@ -9474,7 +9936,7 @@ export function App() {
       streamingStatusMessage?: string;
       successMessage?: string;
       exposeHeartbeatTools?: boolean;
-      responseMode?: "ai" | "persona";
+      responseMode?: "ai" | "persona" | "roleplay";
       responderPersona?: AgentPersona;
       requestProvider?: ModelProviderChannel;
       requestModelId?: string;
@@ -9486,8 +9948,13 @@ export function App() {
       multiAgentStopCondition?: string;
     } = {},
   ) => {
-    const responseMode = options.responseMode ?? (chatMode === "ai" ? "ai" : "persona");
+    const responseMode =
+      options.responseMode ??
+      (chatMode === "ai" ? "ai" : chatMode === "roleplay" ? "roleplay" : "persona");
     const responderPersona = options.responderPersona ?? chatPersona;
+    const responderCharacterCard =
+      responseMode === "roleplay" ? activeSessionRoleplayCard : undefined;
+    const responderName = responderCharacterCard?.name ?? responderPersona?.name ?? "AI";
     const assistantSender: ChatSenderIdentity | undefined =
       responseMode === "persona" && responderPersona
         ? { kind: "persona", personaId: responderPersona.id }
@@ -9582,6 +10049,13 @@ export function App() {
         responseMode === "persona" && responderPersona
           ? buildPersonaPrompt(responderPersona)
           : "";
+      const roleplaySystemPrompt =
+        responderCharacterCard
+          ? buildCharacterCardPrompt(
+              responderCharacterCard,
+              userProfile.nickname.trim() || "用户",
+            )
+          : "";
       const personaMemoryPrompt =
         responseMode === "persona"
           ? buildPersonaMemoryPrompt(
@@ -9639,34 +10113,63 @@ export function App() {
         messagesForApi.map((message) => ({ role: message.role, content: message.content })),
         {
           userName: userProfile.nickname,
-          characterName: responderPersona.name,
+          characterName: responderName,
         },
       );
+      const characterWorldBookSystemPrompt =
+        responderCharacterCard?.characterBook
+          ? buildWorldBookPrompt(
+              [responderCharacterCard.characterBook],
+              [responderCharacterCard.characterBook.id],
+              messagesForApi.map((message) => ({
+                role: message.role,
+                content: message.content,
+              })),
+              {
+                userName: userProfile.nickname,
+                characterName: responderCharacterCard.name,
+              },
+            )
+          : "";
       const systemPrompt = [
         selectedSystemPrompt,
         skillSystemPrompt,
         userProfileSystemPrompt,
         personaSystemPrompt,
+        roleplaySystemPrompt,
         personaMemoryPrompt,
         chatSenderContextPrompt,
         multiAgentSystemPrompt,
         worldBookSystemPrompt,
+        characterWorldBookSystemPrompt,
         toolSystemPrompt,
         mcpToolsSystemPrompt,
         heartbeatSystemPrompt,
       ]
         .filter(Boolean)
         .join("\n\n");
-      const apiMessages = composeChatApiMessages(
+      const apiMessages = applyPromptRegexToApiMessages(composeChatApiMessages(
         systemPrompt,
         messagesForApi.map((message) =>
-          buildChatMessageForApi(message, personas, userProfile, responderPersona, {
+          buildChatMessageForApi(
+            message,
+            personas,
+            userProfile,
+            responseMode === "persona" ? responderPersona : undefined,
+            {
             sendImageAttachmentsToProvider,
             hasImageRecognitionMcp,
-          }),
+            },
+          ),
         ),
-        responderPersona,
-      );
+        responseMode === "persona" ? responderPersona : undefined,
+        responderCharacterCard
+          ? {
+              name: responderCharacterCard.name,
+              description: roleplaySystemPrompt,
+            }
+          : undefined,
+      ), responderName);
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);
@@ -10233,6 +10736,13 @@ export function App() {
       await sendMultiAgentMessage(content, attachmentsToSend);
       return;
     }
+    if (chatMode === "roleplay" && !activeSessionRoleplayCard) {
+      setChatStatus({
+        status: "error",
+        message: "请先选择角色卡，再开始角色扮演会话。",
+      });
+      return;
+    }
     activeUserRequestTextRef.current = content;
 
     const requestModelId = getEffectiveProviderModelId(chatProvider);
@@ -10325,6 +10835,13 @@ export function App() {
           : "";
       const personaSystemPrompt =
         chatMode === "persona" && chatPersona ? buildPersonaPrompt(chatPersona) : "";
+      const roleplaySystemPrompt =
+        chatMode === "roleplay" && activeSessionRoleplayCard
+          ? buildCharacterCardPrompt(
+              activeSessionRoleplayCard,
+              userProfile.nickname.trim() || "用户",
+            )
+          : "";
       const personaMemoryPrompt =
         chatMode === "persona"
           ? buildPersonaMemoryPrompt(
@@ -10353,33 +10870,67 @@ export function App() {
         messagesForApi.map((message) => ({ role: message.role, content: message.content })),
         {
           userName: userProfile.nickname,
-          characterName: chatPersona.name,
+          characterName:
+            chatMode === "roleplay" && activeSessionRoleplayCard
+              ? activeSessionRoleplayCard.name
+              : chatPersona.name,
         },
       );
+      const characterWorldBookSystemPrompt =
+        chatMode === "roleplay" && activeSessionRoleplayCard?.characterBook
+          ? buildWorldBookPrompt(
+              [activeSessionRoleplayCard.characterBook],
+              [activeSessionRoleplayCard.characterBook.id],
+              messagesForApi.map((message) => ({
+                role: message.role,
+                content: message.content,
+              })),
+              {
+                userName: userProfile.nickname,
+                characterName: activeSessionRoleplayCard.name,
+              },
+            )
+          : "";
       const systemPrompt = [
         selectedSystemPrompt,
         skillSystemPrompt,
         userProfileSystemPrompt,
         personaSystemPrompt,
+        roleplaySystemPrompt,
         personaMemoryPrompt,
         chatSenderContextPrompt,
         worldBookSystemPrompt,
+        characterWorldBookSystemPrompt,
         toolSystemPrompt,
         mcpToolsSystemPrompt,
         heartbeatSystemPrompt,
       ]
         .filter(Boolean)
         .join("\n\n");
-      const apiMessages = composeChatApiMessages(
+      const apiMessages = applyPromptRegexToApiMessages(composeChatApiMessages(
         systemPrompt,
         messagesForApi.map((message) =>
-          buildChatMessageForApi(message, personas, userProfile, chatPersona, {
-            sendImageAttachmentsToProvider,
-            hasImageRecognitionMcp,
-          }),
+          buildChatMessageForApi(
+            message,
+            personas,
+            userProfile,
+            chatMode === "persona" ? chatPersona : undefined,
+            {
+              sendImageAttachmentsToProvider,
+              hasImageRecognitionMcp,
+            },
+          ),
         ),
         chatMode === "persona" ? chatPersona : undefined,
-      );
+        chatMode === "roleplay" && activeSessionRoleplayCard
+          ? {
+              name: activeSessionRoleplayCard.name,
+              description: roleplaySystemPrompt,
+            }
+          : undefined,
+      ), chatMode === "roleplay" && activeSessionRoleplayCard
+        ? activeSessionRoleplayCard.name
+        : chatPersona.name);
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);
@@ -11577,6 +12128,10 @@ export function App() {
               <Bot size={16} />
               人格工作室
             </button>
+            <button type="button" title="角色卡管理器" onClick={() => setView("characters")}>
+              <BookOpen size={16} />
+              角色卡
+            </button>
             <button type="button" title="对话" onClick={() => setView("chat")}>
               <MessageSquare size={16} />
               对话
@@ -11636,6 +12191,30 @@ export function App() {
               </button>
             </article>
 
+            <article className="module-card character-module-card">
+              <div className="module-icon">
+                <BookOpen size={24} />
+              </div>
+              <div className="module-card-copy">
+                <h2>角色卡管理器</h2>
+                <p>导入、编辑、翻译和导出酒馆 PNG / JSON 角色卡。</p>
+              </div>
+              <div className="module-meta">
+                <span>{characterCards.length} 张角色卡</span>
+                <span>
+                  {characterCards.filter((card) => card.characterBook).length} 本内置世界书 · {characterCards.reduce((total, card) => total + card.regexScripts.length, 0)} 条私有正则
+                </span>
+              </div>
+              <button
+                type="button"
+                className="home-primary-action"
+                onClick={() => setView("characters")}
+              >
+                <BookOpen size={16} />
+                打开管理器
+              </button>
+            </article>
+
             <article className="module-card">
               <div className="module-icon">
                 <MessageSquare size={24} />
@@ -11650,6 +12229,10 @@ export function App() {
                     ? "人格 Agent"
                     : chatMode === "multi"
                       ? `${multiAgentPersonas.length} Agent 轮流`
+                      : chatMode === "roleplay"
+                        ? activeRoleplayCard
+                          ? `角色扮演 · ${activeRoleplayCard.name}`
+                          : "角色扮演"
                       : "AI 直连"}
                 </span>
                 <span>{chatModelLabel}</span>
@@ -11706,6 +12289,556 @@ export function App() {
           </section>
         </section>
         {pcBrowserModal}
+      </main>
+    );
+  }
+
+  if (view === "characters") {
+    return (
+      <main className="character-manager-shell">
+        <header className="character-manager-header">
+          <div>
+            <button type="button" className="ghost-action" onClick={() => setView("home")}>
+              <ArrowLeft size={16} />
+              主页
+            </button>
+            <div>
+              <div className="eyebrow">SillyTavern Character Cards</div>
+              <h1>角色卡管理器</h1>
+              <p>角色卡内置世界书与正则独立保存，只在绑定该角色的会话中生效。</p>
+            </div>
+          </div>
+          <div className="character-manager-actions">
+            <label className="character-search">
+              <Search size={16} />
+              <input
+                value={characterSearch}
+                placeholder="搜索名称、作者或标签"
+                onChange={(event) => setCharacterSearch(event.target.value)}
+              />
+            </label>
+            <input
+              ref={characterImportInputRef}
+              type="file"
+              accept=".png,.json,image/png,application/json"
+              multiple
+              hidden
+              onChange={(event) => void importCharacterCardFiles(event.target.files ?? [])}
+            />
+            <button
+              type="button"
+              className="ghost-action"
+              onClick={() => characterImportInputRef.current?.click()}
+            >
+              <Upload size={16} />
+              导入 PNG / JSON
+            </button>
+            <button type="button" className="small-action" onClick={addCharacterCard}>
+              <Plus size={16} />
+              新建角色卡
+            </button>
+          </div>
+        </header>
+
+        {characterImportState.status !== "idle" && (
+          <div className={`provider-status character-manager-status ${characterImportState.status}`}>
+            {characterImportState.message}
+          </div>
+        )}
+
+        <section className="character-gallery" aria-label="角色卡列表">
+          {filteredCharacterCards.length === 0 ? (
+            <div className="character-gallery-empty">
+              <BookOpen size={34} />
+              <h2>{characterCards.length === 0 ? "还没有角色卡" : "没有匹配的角色卡"}</h2>
+              <p>
+                {characterCards.length === 0
+                  ? "可以批量导入酒馆原生 PNG / JSON 角色卡，也可以从空白卡开始编辑。"
+                  : "换一个名称、作者或标签关键词试试。"}
+              </p>
+              {characterCards.length === 0 && (
+                <button
+                  type="button"
+                  className="small-action"
+                  onClick={() => characterImportInputRef.current?.click()}
+                >
+                  <Upload size={16} />
+                  导入角色卡
+                </button>
+              )}
+            </div>
+          ) : (
+            filteredCharacterCards.map((card) => (
+              <article className="character-cover-card" key={card.id}>
+                <button
+                  type="button"
+                  className="character-cover-button"
+                  title={`以 ${card.name} 开始角色扮演`}
+                  onClick={() => startRoleplayWithCharacter(card)}
+                >
+                  {card.avatarDataUrl ? (
+                    <img src={card.avatarDataUrl} alt={`${card.name} 封面`} />
+                  ) : (
+                    <span className="character-cover-placeholder">
+                      <UserRound size={52} />
+                    </span>
+                  )}
+                  <span className="character-cover-gradient" />
+                  <span className="character-cover-copy">
+                    <strong>{card.name || "未命名角色"}</strong>
+                    <small>{card.creator || card.sourceFileName || "本地角色卡"}</small>
+                  </span>
+                </button>
+                <div className="character-card-badges">
+                  {card.characterBook && <span>内置世界书 {card.characterBook.entries.length}</span>}
+                  {card.regexScripts.length > 0 && <span>私有正则 {card.regexScripts.length}</span>}
+                </div>
+                <div className="character-card-tags">
+                  {card.tags.slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}
+                </div>
+                <div className="character-card-actions">
+                  <button
+                    type="button"
+                    title="开始角色扮演"
+                    onClick={() => startRoleplayWithCharacter(card)}
+                  >
+                    <Play size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    title="编辑角色卡"
+                    onClick={() => {
+                      setEditingCharacterCardId(card.id);
+                      setCharacterEditorTab("basic");
+                    }}
+                  >
+                    <Pencil size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    title="翻译角色卡"
+                    disabled={characterTranslationState.status === "loading"}
+                    onClick={() => void translateCharacterCard(card)}
+                  >
+                    <Languages size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    title="查看原始封面"
+                    disabled={!card.avatarDataUrl}
+                    onClick={() => window.open(card.avatarDataUrl, "_blank", "noopener,noreferrer")}
+                  >
+                    <Eye size={15} />
+                  </button>
+                  <button type="button" title="导出 PNG" onClick={() => void exportCharacterPng(card)}>
+                    <Download size={15} />
+                  </button>
+                  <button type="button" title="导出 JSON" onClick={() => exportCharacterJson(card)}>
+                    <FileJson size={15} />
+                  </button>
+                  <button type="button" title="删除角色卡" onClick={() => deleteCharacterCard(card)}>
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              </article>
+            ))
+          )}
+        </section>
+
+        {characterTranslationState.status !== "idle" && (
+          <div className={`provider-status character-manager-status ${characterTranslationState.status}`}>
+            {characterTranslationState.message}
+          </div>
+        )}
+
+        {editingCharacterCard && (
+          <div className="modal-backdrop character-editor-backdrop" role="dialog" aria-modal="true">
+            <section className="character-editor-modal">
+              <header className="character-editor-header">
+                <div>
+                  <h2>编辑 {editingCharacterCard.name || "角色卡"}</h2>
+                  <span>
+                    {editingCharacterCard.sourceFormat === "sillytavern-png"
+                      ? "PNG 角色卡"
+                      : editingCharacterCard.sourceFormat === "sillytavern-json"
+                        ? "JSON 角色卡"
+                        : "本地角色卡"}
+                  </span>
+                </div>
+                <div>
+                  <button
+                    type="button"
+                    className="ghost-action"
+                    onClick={() => void translateCharacterCard(editingCharacterCard)}
+                  >
+                    <Languages size={15} />
+                    翻译
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-button flat"
+                    title="关闭"
+                    onClick={() => setEditingCharacterCardId("")}
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
+              </header>
+              <nav className="character-editor-tabs">
+                {([
+                  ["basic", "基本信息"],
+                  ["advanced", "高级设定"],
+                  ["greetings", `问候语 ${1 + editingCharacterCard.alternateGreetings.length}`],
+                  ["worldbook", `内置世界书 ${editingCharacterCard.characterBook?.entries.length ?? 0}`],
+                  ["regex", `角色正则 ${editingCharacterCard.regexScripts.length}`],
+                ] as const).map(([tab, label]) => (
+                  <button
+                    type="button"
+                    className={characterEditorTab === tab ? "active" : ""}
+                    key={tab}
+                    onClick={() => setCharacterEditorTab(tab)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </nav>
+
+              <div className="character-editor-content">
+                {characterEditorTab === "basic" && (
+                  <div className="character-basic-layout">
+                    <div className="character-avatar-editor">
+                      {editingCharacterCard.avatarDataUrl ? (
+                        <img src={editingCharacterCard.avatarDataUrl} alt="角色封面" />
+                      ) : (
+                        <span><UserRound size={58} /></span>
+                      )}
+                      <input
+                        ref={characterAvatarInputRef}
+                        type="file"
+                        accept="image/*"
+                        hidden
+                        onChange={(event) => void replaceCharacterAvatar(event.target.files?.[0])}
+                      />
+                      <button
+                        type="button"
+                        className="ghost-action"
+                        onClick={() => characterAvatarInputRef.current?.click()}
+                      >
+                        <Upload size={15} />
+                        更换封面
+                      </button>
+                    </div>
+                    <div className="character-form-grid">
+                      <label className="field">
+                        <span>角色名称</span>
+                        <input
+                          value={editingCharacterCard.name}
+                          onChange={(event) => updateCharacterCard(editingCharacterCard.id, { name: event.target.value })}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>昵称</span>
+                        <input
+                          value={editingCharacterCard.nickname}
+                          onChange={(event) => updateCharacterCard(editingCharacterCard.id, { nickname: event.target.value })}
+                        />
+                      </label>
+                      <label className="field character-field-wide">
+                        <span>标签（逗号或换行分隔）</span>
+                        <input
+                          value={editingCharacterCard.tags.join(", ")}
+                          onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                            tags: event.target.value.split(/[,，\n]/).map((tag) => tag.trim()).filter(Boolean),
+                          })}
+                        />
+                      </label>
+                      {([
+                        ["description", "角色描述"],
+                        ["personality", "性格"],
+                        ["scenario", "场景设定"],
+                        ["messageExample", "示例对话"],
+                      ] as const).map(([key, label]) => (
+                        <label className="field character-field-wide" key={key}>
+                          <span>{label}</span>
+                          <textarea
+                            rows={key === "messageExample" ? 12 : 8}
+                            value={editingCharacterCard[key]}
+                            onChange={(event) => updateCharacterCard(editingCharacterCard.id, { [key]: event.target.value })}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {characterEditorTab === "advanced" && (
+                  <div className="character-form-grid single-column">
+                    <div className="character-inline-grid">
+                      <label className="field">
+                        <span>作者</span>
+                        <input value={editingCharacterCard.creator} onChange={(event) => updateCharacterCard(editingCharacterCard.id, { creator: event.target.value })} />
+                      </label>
+                      <label className="field">
+                        <span>角色版本</span>
+                        <input value={editingCharacterCard.characterVersion} onChange={(event) => updateCharacterCard(editingCharacterCard.id, { characterVersion: event.target.value })} />
+                      </label>
+                    </div>
+                    {([
+                      ["systemPrompt", "角色系统指令"],
+                      ["postHistoryInstructions", "历史后指令"],
+                      ["creatorNotes", "创作者备注"],
+                    ] as const).map(([key, label]) => (
+                      <label className="field" key={key}>
+                        <span>{label}</span>
+                        <textarea rows={10} value={editingCharacterCard[key]} onChange={(event) => updateCharacterCard(editingCharacterCard.id, { [key]: event.target.value })} />
+                      </label>
+                    ))}
+                  </div>
+                )}
+
+                {characterEditorTab === "greetings" && (
+                  <div className="character-greetings-editor">
+                    <label className="field">
+                      <span>开场白</span>
+                      <textarea rows={12} value={editingCharacterCard.firstMessage} onChange={(event) => updateCharacterCard(editingCharacterCard.id, { firstMessage: event.target.value })} />
+                    </label>
+                    {editingCharacterCard.alternateGreetings.map((greeting, index) => (
+                      <div className="character-array-item" key={index}>
+                        <label className="field">
+                          <span>备选问候 {index + 1}</span>
+                          <textarea
+                            rows={10}
+                            value={greeting}
+                            onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                              alternateGreetings: editingCharacterCard.alternateGreetings.map((item, itemIndex) => itemIndex === index ? event.target.value : item),
+                            })}
+                          />
+                        </label>
+                        <button type="button" className="icon-button flat" title="删除备选问候" onClick={() => updateCharacterCard(editingCharacterCard.id, {
+                          alternateGreetings: editingCharacterCard.alternateGreetings.filter((_, itemIndex) => itemIndex !== index),
+                        })}><Trash2 size={15} /></button>
+                      </div>
+                    ))}
+                    <button type="button" className="ghost-action" onClick={() => updateCharacterCard(editingCharacterCard.id, {
+                      alternateGreetings: [...editingCharacterCard.alternateGreetings, ""],
+                    })}><Plus size={15} />增加备选问候</button>
+                  </div>
+                )}
+
+                {characterEditorTab === "worldbook" && (
+                  <div className="character-private-editor">
+                    <div className="character-private-notice">
+                      <Bookmark size={17} />
+                      <span>这里的世界书只绑定当前角色卡，不会进入设置中的全局世界书列表。</span>
+                    </div>
+                    {!editingCharacterCard.characterBook ? (
+                      <button type="button" className="small-action" onClick={() => updateCharacterCard(editingCharacterCard.id, {
+                        characterBook: createWorldBook(`${editingCharacterCard.name || "角色"}的内置世界书`),
+                      })}><Plus size={15} />创建内置世界书</button>
+                    ) : (
+                      <>
+                        <div className="character-inline-grid">
+                          <label className="field">
+                            <span>世界书名称</span>
+                            <input value={editingCharacterCard.characterBook.name} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                              characterBook: { ...editingCharacterCard.characterBook!, name: event.target.value },
+                            })} />
+                          </label>
+                          <button type="button" className="ghost-action danger" onClick={() => updateCharacterCard(editingCharacterCard.id, { characterBook: null })}><Trash2 size={15} />移除内置世界书</button>
+                        </div>
+                        <label className="field">
+                          <span>世界书描述</span>
+                          <textarea rows={5} value={editingCharacterCard.characterBook.description} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                            characterBook: { ...editingCharacterCard.characterBook!, description: event.target.value },
+                          })} />
+                        </label>
+                        <div className="character-private-list">
+                          {editingCharacterCard.characterBook.entries.map((entry, index) => (
+                            <details className="character-private-entry" key={entry.id} open={index === 0}>
+                              <summary>
+                                <span>{entry.comment || `条目 ${index + 1}`}</span>
+                                <small>{entry.enabled ? "启用" : "停用"}</small>
+                              </summary>
+                              <div>
+                                <div className="character-inline-grid">
+                                  <label className="field">
+                                    <span>条目名称</span>
+                                    <input value={entry.comment} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                                      characterBook: { ...editingCharacterCard.characterBook!, entries: editingCharacterCard.characterBook!.entries.map((item) => item.id === entry.id ? { ...item, comment: event.target.value } : item) },
+                                    })} />
+                                  </label>
+                                  <label className="toggle-field compact-toggle">
+                                    <input type="checkbox" checked={entry.enabled} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                                      characterBook: { ...editingCharacterCard.characterBook!, entries: editingCharacterCard.characterBook!.entries.map((item) => item.id === entry.id ? { ...item, enabled: event.target.checked } : item) },
+                                    })} />
+                                    <span>启用</span>
+                                  </label>
+                                </div>
+                                <label className="field">
+                                  <span>主关键词（逗号或换行）</span>
+                                  <input value={entry.keys.join(", ")} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                                    characterBook: { ...editingCharacterCard.characterBook!, entries: editingCharacterCard.characterBook!.entries.map((item) => item.id === entry.id ? { ...item, keys: event.target.value.split(/[,，\n]/).map((key) => key.trim()).filter(Boolean) } : item) },
+                                  })} />
+                                </label>
+                                <label className="field">
+                                  <span>条目内容</span>
+                                  <textarea rows={16} value={entry.content} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                                    characterBook: { ...editingCharacterCard.characterBook!, entries: editingCharacterCard.characterBook!.entries.map((item) => item.id === entry.id ? { ...item, content: event.target.value } : item) },
+                                  })} />
+                                </label>
+                                <button type="button" className="ghost-action danger" onClick={() => updateCharacterCard(editingCharacterCard.id, {
+                                  characterBook: { ...editingCharacterCard.characterBook!, entries: editingCharacterCard.characterBook!.entries.filter((item) => item.id !== entry.id) },
+                                })}><Trash2 size={14} />删除条目</button>
+                              </div>
+                            </details>
+                          ))}
+                        </div>
+                        <button type="button" className="ghost-action" onClick={() => updateCharacterCard(editingCharacterCard.id, {
+                          characterBook: { ...editingCharacterCard.characterBook!, entries: [...editingCharacterCard.characterBook!.entries, createWorldBookEntry(editingCharacterCard.characterBook!.entries.length)] },
+                        })}><Plus size={15} />增加世界书条目</button>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {characterEditorTab === "regex" && (
+                  <div className="character-private-editor">
+                    <div className="character-private-notice">
+                      <Braces size={17} />
+                      <span>这里的正则只绑定当前角色卡，不会进入设置中的全局正则列表。</span>
+                    </div>
+                    <div className="character-private-list">
+                      {editingCharacterCard.regexScripts.map((script, index) => (
+                        <details className="character-private-entry" key={script.id} open={index === 0}>
+                          <summary>
+                            <span>{script.scriptName || `正则 ${index + 1}`}</span>
+                            <small>{script.disabled ? "停用" : "启用"}</small>
+                          </summary>
+                          <div>
+                            <div className="character-inline-grid">
+                              <label className="field">
+                                <span>脚本名称</span>
+                                <input value={script.scriptName} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                                  regexScripts: editingCharacterCard.regexScripts.map((item) => item.id === script.id ? { ...item, scriptName: event.target.value } : item),
+                                })} />
+                              </label>
+                              <label className="toggle-field compact-toggle">
+                                <input type="checkbox" checked={!script.disabled} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                                  regexScripts: editingCharacterCard.regexScripts.map((item) => item.id === script.id ? { ...item, disabled: !event.target.checked } : item),
+                                })} />
+                                <span>启用</span>
+                              </label>
+                            </div>
+                            <label className="field">
+                              <span>查找正则</span>
+                              <textarea rows={7} className="code-textarea" value={script.findRegex} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                                regexScripts: editingCharacterCard.regexScripts.map((item) => item.id === script.id ? { ...item, findRegex: event.target.value } : item),
+                              })} />
+                            </label>
+                            <label className="field">
+                              <span>替换内容</span>
+                              <textarea rows={14} className="code-textarea" value={script.replaceString} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                                regexScripts: editingCharacterCard.regexScripts.map((item) => item.id === script.id ? { ...item, replaceString: event.target.value } : item),
+                              })} />
+                            </label>
+                            <div className="character-regex-options">
+                              {[1, 2].map((placement) => (
+                                <label className="toggle-field compact-toggle" key={placement}>
+                                  <input type="checkbox" checked={script.placement.includes(placement)} onChange={() => updateCharacterCard(editingCharacterCard.id, {
+                                    regexScripts: editingCharacterCard.regexScripts.map((item) => item.id === script.id ? { ...item, placement: item.placement.includes(placement) ? item.placement.filter((value) => value !== placement) : [...item.placement, placement] } : item),
+                                  })} />
+                                  <span>{placement === 1 ? "用户输入" : "AI 输出"}</span>
+                                </label>
+                              ))}
+                              <label className="toggle-field compact-toggle">
+                                <input type="checkbox" checked={script.promptOnly} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                                  regexScripts: editingCharacterCard.regexScripts.map((item) => item.id === script.id ? { ...item, promptOnly: event.target.checked } : item),
+                                })} />
+                                <span>仅提示词</span>
+                              </label>
+                              <label className="toggle-field compact-toggle">
+                                <input type="checkbox" checked={script.markdownOnly} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                                  regexScripts: editingCharacterCard.regexScripts.map((item) => item.id === script.id ? { ...item, markdownOnly: event.target.checked } : item),
+                                })} />
+                                <span>仅显示</span>
+                              </label>
+                            </div>
+                            {getRegexScriptError(script) && <small className="field-error">{getRegexScriptError(script)}</small>}
+                            <button type="button" className="ghost-action danger" onClick={() => updateCharacterCard(editingCharacterCard.id, {
+                              regexScripts: editingCharacterCard.regexScripts.filter((item) => item.id !== script.id),
+                            })}><Trash2 size={14} />删除正则</button>
+                          </div>
+                        </details>
+                      ))}
+                    </div>
+                    <button type="button" className="ghost-action" onClick={() => updateCharacterCard(editingCharacterCard.id, {
+                      regexScripts: [...editingCharacterCard.regexScripts, createRegexScript(`角色正则 ${editingCharacterCard.regexScripts.length + 1}`)],
+                    })}><Plus size={15} />增加角色正则</button>
+                  </div>
+                )}
+              </div>
+
+              <footer className="character-editor-footer">
+                <span>修改会自动保存到本地和应用数据。</span>
+                <div>
+                  <button type="button" className="ghost-action" onClick={() => exportCharacterJson(editingCharacterCard)}><FileJson size={15} />导出 JSON</button>
+                  <button type="button" className="ghost-action" onClick={() => void exportCharacterPng(editingCharacterCard)}><Download size={15} />导出 PNG</button>
+                  <button type="button" className="small-action" onClick={() => setEditingCharacterCardId("")}><Check size={15} />完成</button>
+                </div>
+              </footer>
+            </section>
+          </div>
+        )}
+
+        {characterTranslationPreview && (
+          <div className="modal-backdrop character-translation-backdrop" role="dialog" aria-modal="true">
+            <section className="character-translation-modal">
+              <header className="character-editor-header">
+                <div>
+                  <h2>翻译预览</h2>
+                  <span>勾选要覆盖到角色卡的字段；正则脚本不会翻译。</span>
+                </div>
+                <button type="button" className="icon-button flat" title="关闭" onClick={() => setCharacterTranslationPreview(null)}><X size={18} /></button>
+              </header>
+              <div className="character-translation-list">
+                {characterTranslationPreview.items.map((item) => (
+                  <article key={item.key}>
+                    <label className="toggle-field compact-toggle">
+                      <input type="checkbox" checked={item.selected} onChange={(event) => setCharacterTranslationPreview((current) => current ? {
+                        ...current,
+                        items: current.items.map((candidate) => candidate.key === item.key ? { ...candidate, selected: event.target.checked } : candidate),
+                      } : current)} />
+                      <strong>{item.label}</strong>
+                    </label>
+                    <div>
+                      <label className="field">
+                        <span>原文</span>
+                        <textarea rows={6} value={item.source} readOnly />
+                      </label>
+                      <label className="field">
+                        <span>译文</span>
+                        <textarea rows={6} value={item.translated} onChange={(event) => setCharacterTranslationPreview((current) => current ? {
+                          ...current,
+                          items: current.items.map((candidate) => candidate.key === item.key ? { ...candidate, translated: event.target.value } : candidate),
+                        } : current)} />
+                      </label>
+                    </div>
+                  </article>
+                ))}
+              </div>
+              <footer className="character-editor-footer">
+                <button type="button" className="ghost-action" onClick={() => setCharacterTranslationPreview((current) => current ? {
+                  ...current,
+                  items: current.items.map((item) => ({ ...item, selected: true })),
+                } : current)}>全选</button>
+                <div>
+                  <button type="button" className="ghost-action" onClick={() => setCharacterTranslationPreview(null)}>取消</button>
+                  <button type="button" className="small-action" onClick={applySelectedCharacterTranslations}><Check size={15} />应用所选翻译</button>
+                </div>
+              </footer>
+            </section>
+          </div>
+        )}
       </main>
     );
   }
@@ -12706,7 +13839,7 @@ export function App() {
                 <div className="section-heading compact">
                   <div>
                     <h2>全局世界书</h2>
-                    <p>勾选的世界书会共同作用于普通、人格和多 Agent 会话。</p>
+                    <p>勾选的世界书会共同作用于普通、人格、多 Agent 和角色扮演会话；角色卡内置世界书仍保持私有。</p>
                   </div>
                 </div>
                 <div className="worldbook-active-summary">
@@ -13139,7 +14272,7 @@ export function App() {
                     ).length}
                   </strong>
                   <span>
-                    个当前生效 · 全局 {regexScripts.length} · 预设 {chatPresets.reduce((total, preset) => total + preset.regexScripts.length, 0)}
+                    个当前生效 · 全局 {regexScripts.length} · 预设 {chatPresets.reduce((total, preset) => total + preset.regexScripts.length, 0)} · 当前角色私有 {scopedRoleplayCard?.regexScripts.length ?? 0}（不进入全局列表）
                   </span>
                 </div>
                 {regexImportState.status === "error" && (
@@ -14161,6 +15294,14 @@ export function App() {
                 <Boxes size={15} />
                 多 Agent
               </button>
+              <button
+                type="button"
+                className={chatMode === "roleplay" ? "active" : ""}
+                onClick={() => setChatMode("roleplay")}
+              >
+                <BookOpen size={15} />
+                角色扮演
+              </button>
             </div>
             <label className="chat-field">
               <span>会话预设</span>
@@ -14205,6 +15346,17 @@ export function App() {
                 )}
               </div>
             </details>
+            {chatMode === "roleplay" && activeSessionRoleplayCard && (
+              <div className="chat-roleplay-scope">
+                <BookOpen size={15} />
+                <div>
+                  <strong>{activeSessionRoleplayCard.name}</strong>
+                  <span>
+                    私有世界书 {activeSessionRoleplayCard.characterBook?.entries.length ?? 0} 条 · 私有正则 {activeSessionRoleplayCard.regexScripts.length} 条
+                  </span>
+                </div>
+              </div>
+            )}
             <div className="chat-output-options">
               <label className="tool-toggle">
                 <input
@@ -14352,6 +15504,10 @@ export function App() {
                     ? `${activePersona.name} / Agent`
                     : chatMode === "multi"
                       ? "多 Agent 对话"
+                      : chatMode === "roleplay"
+                        ? activeSessionRoleplayCard
+                          ? `角色：${activeSessionRoleplayCard.name}`
+                          : "选择角色卡开始角色扮演"
                       : "AI Direct")}
               </h1>
             </div>
@@ -14461,7 +15617,7 @@ export function App() {
               <button
                 type="button"
                 className={`ghost-action ${activeSessionMemoryEnabled ? "active-memory" : ""}`}
-                disabled={!activePersona || !activeChatSession}
+                disabled={chatMode !== "persona" || !activePersona || !activeChatSession}
                 title={
                   activePersona
                     ? `${activeSessionMemoryEnabled ? "取消" : "设为"} ${activePersona.name} 的记忆`
@@ -14472,6 +15628,22 @@ export function App() {
                 <Bookmark size={16} />
                 {activeSessionMemoryEnabled ? "取消记忆" : "设为记忆"}
               </button>
+              {chatMode === "roleplay" &&
+                activeSessionRoleplayCard &&
+                getCharacterCardGreetings(
+                  activeSessionRoleplayCard,
+                  userProfile.nickname.trim() || "用户",
+                ).length > 1 && (
+                  <button
+                    type="button"
+                    className="ghost-action"
+                    title="切换开场白"
+                    onClick={cycleRoleplayGreeting}
+                  >
+                    <RefreshCw size={16} />
+                    切换问候
+                  </button>
+                )}
               <button
                 type="button"
                 className="ghost-action"
@@ -14479,7 +15651,15 @@ export function App() {
                 title="清空当前会话"
                 aria-label="清空当前会话"
                 onClick={() => {
-                  setChatMessages([]);
+                  const greeting =
+                    chatMode === "roleplay" && activeSessionRoleplayCard
+                      ? createRoleplayGreetingMessage(
+                          activeSessionRoleplayCard,
+                          userProfile.nickname.trim() || "用户",
+                          activeChatSession?.roleplayGreetingIndex ?? 0,
+                        )
+                      : null;
+                  setChatMessages(greeting ? [greeting] : []);
                   setChatStatus({ status: "idle", message: "" });
                 }}
               >
@@ -14493,20 +15673,32 @@ export function App() {
             {visibleChatMessages.length === 0 ? (
               <div className="chat-empty">
                 <div className="chat-empty-icon">
-                  {chatMode === "ai" ? <Sparkles size={24} /> : <Bot size={24} />}
+                  {chatMode === "ai" ? <Sparkles size={24} /> : chatMode === "roleplay" ? <BookOpen size={24} /> : <Bot size={24} />}
                 </div>
                 <h2>
                   {chatMode === "persona"
                     ? activePersona.name
                     : chatMode === "multi"
                       ? `多 Agent · 已选 ${multiAgentPersonas.length} 个`
+                      : chatMode === "roleplay"
+                        ? activeSessionRoleplayCard?.name ?? "选择一张角色卡"
                       : "AI 直连"}
                 </h2>
                 <div className={`chat-empty-model ${chatModelReady ? "ready" : "attention"}`}>
                   <Server size={14} />
                   {chatModelReady ? chatModelLabel : "尚未配置模型"}
                 </div>
-                {!chatModelReady && (
+                {!chatModelReady && chatMode === "roleplay" && !activeSessionRoleplayCard && (
+                  <button
+                    type="button"
+                    className="chat-empty-action"
+                    onClick={() => setView("characters")}
+                  >
+                    <BookOpen size={16} />
+                    打开角色卡管理器
+                  </button>
+                )}
+                {!chatModelReady && !(chatMode === "roleplay" && !activeSessionRoleplayCard) && (
                   <button
                     type="button"
                     className="chat-empty-action"
@@ -14550,8 +15742,14 @@ export function App() {
                       personas,
                       chatMode === "persona" ? activePersona : undefined,
                     );
-                    const messageName = assistantPersona?.name ?? "AI";
-                    const messageAvatarImage = assistantPersona?.avatarImage ?? "";
+                    const messageName =
+                      chatMode === "roleplay" && activeSessionRoleplayCard
+                        ? activeSessionRoleplayCard.name
+                        : assistantPersona?.name ?? "AI";
+                    const messageAvatarImage =
+                      chatMode === "roleplay" && activeSessionRoleplayCard
+                        ? activeSessionRoleplayCard.avatarDataUrl
+                        : assistantPersona?.avatarImage ?? "";
 
                     return (
                       <article className="chat-message assistant" key={item.id}>
@@ -14603,11 +15801,15 @@ export function App() {
                 const messageName =
                   message.role === "user"
                     ? getChatSenderName(messageSender, personas, userProfile)
-                    : assistantPersona?.name ?? "AI";
+                    : chatMode === "roleplay" && activeSessionRoleplayCard
+                      ? activeSessionRoleplayCard.name
+                      : assistantPersona?.name ?? "AI";
                 const messageAvatarImage =
                   message.role === "user"
                     ? getChatSenderAvatarImage(messageSender, personas, userProfile)
-                    : assistantPersona?.avatarImage ?? "";
+                    : chatMode === "roleplay" && activeSessionRoleplayCard
+                      ? activeSessionRoleplayCard.avatarDataUrl
+                      : assistantPersona?.avatarImage ?? "";
 
                 return (
                   <article className={`chat-message ${message.role}`} key={id}>
@@ -14835,6 +16037,8 @@ export function App() {
                           ? "AI 直连模式不使用人格"
                           : chatMode === "multi"
                             ? "按点击顺序选择至少 2 个 Agent"
+                            : chatMode === "roleplay"
+                              ? "选择角色卡并创建绑定会话"
                             : "选择人格"
                       }
                     >
@@ -14843,6 +16047,8 @@ export function App() {
                           ? "AI直连"
                           : chatMode === "multi"
                             ? `多Agent · ${multiAgentPersonas.length}`
+                            : chatMode === "roleplay"
+                              ? activeSessionRoleplayCard?.name ?? "选择角色卡"
                             : activePersona.name}
                       </span>
                     </summary>
@@ -14991,6 +16197,33 @@ export function App() {
                             );
                           })}
                         </>
+                      ) : chatMode === "roleplay" ? (
+                        characterCards.length > 0 ? (
+                          characterCards.map((card) => (
+                            <button
+                              type="button"
+                              className={card.id === activeSessionRoleplayCard?.id ? "active character-option" : "character-option"}
+                              key={card.id}
+                              onClick={(event) => {
+                                startRoleplayWithCharacter(card);
+                                event.currentTarget.closest("details")?.removeAttribute("open");
+                              }}
+                            >
+                              <span className="composer-character-avatar">
+                                {card.avatarDataUrl ? <img src={card.avatarDataUrl} alt="" /> : <UserRound size={15} />}
+                              </span>
+                              <span>{card.name}</span>
+                              <small>
+                                世界书 {card.characterBook?.entries.length ?? 0} · 正则 {card.regexScripts.length}
+                              </small>
+                            </button>
+                          ))
+                        ) : (
+                          <button type="button" onClick={() => setView("characters")}>
+                            <BookOpen size={15} />
+                            <span>导入角色卡</span>
+                          </button>
+                        )
                       ) : (
                         personas.map((persona) => (
                           <button
@@ -15120,7 +16353,8 @@ export function App() {
                   disabled={
                     chatGenerationState === "idle" &&
                     ((!chatInput.trim() && chatAttachments.length === 0) ||
-                      chatStatus.status === "loading")
+                      chatStatus.status === "loading" ||
+                      (chatMode === "roleplay" && !activeSessionRoleplayCard))
                   }
                   onClick={() =>
                     chatGenerationState === "idle"
