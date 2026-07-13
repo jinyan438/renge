@@ -1,3 +1,9 @@
+import {
+  extractSillyTavernPresetRegexScripts,
+  normalizeRegexScript,
+  type RegexScript,
+} from "./regexUtils";
+
 export type ChatPresetPromptRole = "system" | "user" | "assistant";
 
 export type ChatPresetPrompt = {
@@ -31,6 +37,7 @@ export type ChatPreset = {
   squashSystemMessages: boolean;
   prompts: ChatPresetPrompt[];
   backupPrompts: ChatPresetPrompt[];
+  regexScripts: RegexScript[];
   createdAt: string;
   updatedAt: string;
 };
@@ -114,6 +121,7 @@ export function createDefaultChatPreset(name = "默认预设"): ChatPreset {
     squashSystemMessages: false,
     prompts: [],
     backupPrompts: [],
+    regexScripts: [],
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -160,6 +168,10 @@ export function normalizeChatPreset(rawPreset: unknown, index = 0): ChatPreset {
         normalizeChatPresetPrompt(prompt, promptIndex),
       )
     : [];
+  const rawRegexScripts = raw.regexScripts ?? raw.regexes ?? raw.regex_scripts;
+  const regexScripts = Array.isArray(rawRegexScripts)
+    ? rawRegexScripts.map((script, scriptIndex) => normalizeRegexScript(script, scriptIndex))
+    : [];
 
   return {
     id: typeof raw.id === "string" && raw.id ? raw.id : fallback.id,
@@ -191,6 +203,7 @@ export function normalizeChatPreset(rawPreset: unknown, index = 0): ChatPreset {
     ),
     prompts,
     backupPrompts,
+    regexScripts,
     createdAt:
       typeof raw.createdAt === "string" ? raw.createdAt : fallback.createdAt,
     updatedAt:
@@ -282,6 +295,7 @@ export function importSillyTavernPreset(rawPreset: unknown, fileName: string): C
     .map((prompt, index) => normalizeChatPresetPrompt(prompt, index));
   const fallback = createDefaultChatPreset(fileNameWithoutExtension(fileName));
   const timestamp = new Date().toISOString();
+  const regexScripts = extractSillyTavernPresetRegexScripts(rawPreset, fileName);
 
   return {
     ...fallback,
@@ -304,6 +318,7 @@ export function importSillyTavernPreset(rawPreset: unknown, fileName: string): C
     squashSystemMessages: booleanValue(rawPreset.squash_system_messages, false),
     prompts: orderedPrompts,
     backupPrompts,
+    regexScripts,
     createdAt: timestamp,
     updatedAt: timestamp,
   };

@@ -3,6 +3,7 @@ import {
   Bot,
   Bookmark,
   Boxes,
+  Braces,
   ChevronDown,
   Check,
   Copy,
@@ -86,6 +87,15 @@ import {
   type WorldBook,
   type WorldBookEntry,
 } from "./worldbookUtils";
+import {
+  applyRegexScripts,
+  createRegexScript,
+  getRegexScriptError,
+  importSillyTavernRegexFile,
+  loadRegexScriptsFromStorage,
+  normalizeRegexScript,
+  type RegexScript,
+} from "./regexUtils";
 import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryType } from "./types";
 
 const AVATAR_OUTPUT_SIZE = 512;
@@ -115,7 +125,7 @@ type TypeDragTarget = {
 };
 
 type AppView = "home" | "studio" | "settings" | "chat";
-type SettingsTab = "providers" | "prompts" | "presets" | "worldbooks" | "user" | "personalization" | "mcp" | "skills" | "device";
+type SettingsTab = "providers" | "prompts" | "presets" | "worldbooks" | "regexes" | "user" | "personalization" | "mcp" | "skills" | "device";
 type ProviderPullState = "idle" | "loading" | "success" | "error";
 type ChatGenerationState = "idle" | "running" | "stopping";
 type ChatMode = "ai" | "persona" | "multi";
@@ -123,6 +133,17 @@ type ChatRole = "user" | "assistant";
 type ChatApiRole = "system" | "user" | "assistant" | "tool";
 type ChatSenderKind = "user" | "persona" | "system";
 type ProviderReasoningEffort = "low" | "medium" | "high" | "xhigh";
+type RegexScriptScope = "global" | "preset";
+
+type RegexScriptTarget = {
+  key: string;
+  scope: RegexScriptScope;
+  script: RegexScript;
+  index: number;
+  total: number;
+  presetId?: string;
+  presetName?: string;
+};
 
 type ChatSenderIdentity = {
   kind: ChatSenderKind;
@@ -294,6 +315,7 @@ type RengeAppData = {
   chatPresetEnabled?: boolean;
   worldBooks?: WorldBook[];
   activeWorldBookIds?: string[];
+  regexScripts?: RegexScript[];
   userProfile?: UserProfile;
   chatSender?: ChatSenderIdentity;
   chatMultiBubbleEnabled?: boolean;
@@ -491,6 +513,7 @@ const ACTIVE_CHAT_PRESET_STORAGE_KEY = "renge_active_chat_preset";
 const CHAT_PRESET_ENABLED_STORAGE_KEY = "renge_chat_preset_enabled";
 const WORLD_BOOKS_STORAGE_KEY = "renge_world_books";
 const ACTIVE_WORLD_BOOKS_STORAGE_KEY = "renge_active_world_books";
+const REGEX_SCRIPTS_STORAGE_KEY = "renge_regex_scripts";
 const USER_PROFILE_STORAGE_KEY = "renge_user_profile";
 const CHAT_SENDER_STORAGE_KEY = "renge_chat_sender";
 const CHAT_MULTI_BUBBLE_STORAGE_KEY = "renge_chat_multi_bubble_enabled";
@@ -2024,6 +2047,9 @@ const htmlBlockRootTags = new Set([
   "blockquote",
   "form",
   "figure",
+  "details",
+  "summary",
+  "dialog",
   "svg",
   "canvas",
 ]);
@@ -2211,6 +2237,28 @@ function splitEmbeddedHtmlBlocks(content: string): PlainChatHtmlSegment[] {
     if (blockEnd <= blockStart) {
       searchCursor = blockStart + 1;
       continue;
+    }
+
+    let trailingCursor = blockEnd;
+    while (trailingCursor < content.length) {
+      const whitespace = /^\s*/.exec(content.slice(trailingCursor))?.[0] ?? "";
+      const trailingTagStart = trailingCursor + whitespace.length;
+      const trailingToken = readHtmlTagToken(content, trailingTagStart);
+      if (
+        !trailingToken?.tagName ||
+        trailingToken.closing ||
+        !htmlRawTextTags.has(trailingToken.tagName)
+      ) {
+        break;
+      }
+      const trailingBlockEnd = findMatchingHtmlBlockEnd(
+        content,
+        trailingTagStart,
+        trailingToken.tagName,
+      );
+      if (trailingBlockEnd <= trailingTagStart) break;
+      blockEnd = trailingBlockEnd;
+      trailingCursor = trailingBlockEnd;
     }
 
     const htmlBlock = content.slice(blockStart, blockEnd);
@@ -5502,6 +5550,14 @@ export function App() {
     status: ProviderPullState;
     message: string;
   }>({ status: "idle", message: "" });
+  const [regexScripts, setRegexScripts] = useState<RegexScript[]>(() =>
+    loadRegexScriptsFromStorage(REGEX_SCRIPTS_STORAGE_KEY),
+  );
+  const [selectedRegexTargetKey, setSelectedRegexTargetKey] = useState("");
+  const [regexImportState, setRegexImportState] = useState<{
+    status: ProviderPullState;
+    message: string;
+  }>({ status: "idle", message: "" });
   const [userProfile, setUserProfile] = useState<UserProfile>(loadUserProfile);
   const [providerPullState, setProviderPullState] = useState<{
     status: ProviderPullState;
@@ -5617,6 +5673,7 @@ export function App() {
   const userAvatarInputRef = useRef<HTMLInputElement>(null);
   const presetImportInputRef = useRef<HTMLInputElement>(null);
   const worldBookImportInputRef = useRef<HTMLInputElement>(null);
+  const regexImportInputRef = useRef<HTMLInputElement>(null);
   const mcpImportInputRef = useRef<HTMLInputElement>(null);
   const skillZipInputRef = useRef<HTMLInputElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
@@ -5774,6 +5831,11 @@ export function App() {
       const normalizedWorldBooks = Array.isArray(persistentData?.worldBooks)
         ? persistentData.worldBooks.map(normalizeWorldBook)
         : loadWorldBooksFromStorage(WORLD_BOOKS_STORAGE_KEY);
+      const normalizedRegexScripts = Array.isArray(persistentData?.regexScripts)
+        ? persistentData.regexScripts.map((script, index) =>
+            normalizeRegexScript(script, index),
+          )
+        : loadRegexScriptsFromStorage(REGEX_SCRIPTS_STORAGE_KEY);
       const normalizedUserProfile = persistentData?.userProfile
         ? normalizeUserProfile(persistentData.userProfile)
         : loadUserProfile();
@@ -5929,6 +5991,10 @@ export function App() {
       setActiveWorldBookIds(nextActiveWorldBookIds);
       setSelectedWorldBookId(normalizedWorldBooks[0]?.id ?? "");
       setSelectedWorldBookEntryId(normalizedWorldBooks[0]?.entries[0]?.id ?? "");
+      setRegexScripts(normalizedRegexScripts);
+      setSelectedRegexTargetKey(
+        normalizedRegexScripts[0] ? `global:${normalizedRegexScripts[0].id}` : "",
+      );
       setUserProfile(normalizedUserProfile);
       setChatSender(nextChatSender);
       setChatMode(nextChatMode);
@@ -6000,6 +6066,7 @@ export function App() {
     localStorage.setItem(CHAT_PRESET_ENABLED_STORAGE_KEY, String(chatPresetEnabled));
     localStorage.setItem(WORLD_BOOKS_STORAGE_KEY, JSON.stringify(worldBooks));
     localStorage.setItem(ACTIVE_WORLD_BOOKS_STORAGE_KEY, JSON.stringify(activeWorldBookIds));
+    localStorage.setItem(REGEX_SCRIPTS_STORAGE_KEY, JSON.stringify(regexScripts));
     localStorage.setItem(USER_PROFILE_STORAGE_KEY, JSON.stringify(userProfile));
     localStorage.setItem(CHAT_SENDER_STORAGE_KEY, JSON.stringify(chatSender));
     localStorage.setItem(CHAT_MULTI_BUBBLE_STORAGE_KEY, String(chatMultiBubbleEnabled));
@@ -6045,6 +6112,7 @@ export function App() {
       chatPresetEnabled,
       worldBooks,
       activeWorldBookIds,
+      regexScripts,
       userProfile,
       chatSender,
       chatMultiBubbleEnabled,
@@ -6057,7 +6125,7 @@ export function App() {
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     });
-  }, [activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataLoaded, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, skills, systemPrompts, userProfile, worldBooks]);
+  }, [activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataLoaded, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, userProfile, worldBooks]);
 
   useEffect(() => {
     if (!appDataLoaded) return;
@@ -6448,6 +6516,172 @@ export function App() {
     updateSelectedWorldBook({ entries });
   };
 
+  const regexScriptTargets = useMemo<RegexScriptTarget[]>(
+    () => [
+      ...regexScripts.map((script, index) => ({
+        key: `global:${script.id}`,
+        scope: "global" as const,
+        script,
+        index,
+        total: regexScripts.length,
+      })),
+      ...chatPresets.flatMap((preset) =>
+        preset.regexScripts.map((script, index) => ({
+          key: `preset:${preset.id}:${script.id}`,
+          scope: "preset" as const,
+          script,
+          index,
+          total: preset.regexScripts.length,
+          presetId: preset.id,
+          presetName: preset.name,
+        })),
+      ),
+    ],
+    [chatPresets, regexScripts],
+  );
+  const selectedRegexTarget = useMemo(
+    () =>
+      regexScriptTargets.find((target) => target.key === selectedRegexTargetKey) ??
+      regexScriptTargets[0],
+    [regexScriptTargets, selectedRegexTargetKey],
+  );
+  const effectiveRegexScripts = useMemo(
+    () => [
+      ...regexScripts,
+      ...(chatPresetEnabled && activeChatPreset ? activeChatPreset.regexScripts : []),
+    ],
+    [activeChatPreset, chatPresetEnabled, regexScripts],
+  );
+  const selectedRegexError = selectedRegexTarget
+    ? getRegexScriptError(selectedRegexTarget.script)
+    : "";
+
+  useEffect(() => {
+    if (!selectedRegexTarget) {
+      setSelectedRegexTargetKey("");
+      return;
+    }
+    if (selectedRegexTarget.key !== selectedRegexTargetKey) {
+      setSelectedRegexTargetKey(selectedRegexTarget.key);
+    }
+  }, [selectedRegexTarget, selectedRegexTargetKey]);
+
+  const updateRegexScriptTarget = (
+    target: RegexScriptTarget,
+    patch: Partial<RegexScript>,
+  ) => {
+    const updatedAt = new Date().toISOString();
+    if (target.scope === "global") {
+      setRegexScripts((current) =>
+        current.map((script) =>
+          script.id === target.script.id ? { ...script, ...patch, updatedAt } : script,
+        ),
+      );
+      return;
+    }
+    setChatPresets((current) =>
+      current.map((preset) =>
+        preset.id === target.presetId
+          ? {
+              ...preset,
+              regexScripts: preset.regexScripts.map((script) =>
+                script.id === target.script.id
+                  ? { ...script, ...patch, updatedAt }
+                  : script,
+              ),
+              updatedAt,
+            }
+          : preset,
+      ),
+    );
+  };
+
+  const addRegexScript = () => {
+    const script = createRegexScript(`新正则规则 ${regexScripts.length + 1}`);
+    setRegexScripts((current) => [...current, script]);
+    setSelectedRegexTargetKey(`global:${script.id}`);
+    setRegexImportState({ status: "idle", message: "" });
+  };
+
+  const importRegexScriptFile = async (file?: File) => {
+    if (!file) return;
+    setRegexImportState({ status: "loading", message: "正在解析酒馆原生正则..." });
+    try {
+      const scripts = importSillyTavernRegexFile(
+        JSON.parse(await file.text()) as unknown,
+        file.name,
+      );
+      setRegexScripts((current) => [...current, ...scripts]);
+      setSelectedRegexTargetKey(`global:${scripts[0].id}`);
+      setRegexImportState({ status: "idle", message: "" });
+    } catch (error) {
+      setRegexImportState({
+        status: "error",
+        message:
+          error instanceof Error
+            ? `导入失败：${error.message}`
+            : "导入失败：正则格式无效。",
+      });
+    } finally {
+      if (regexImportInputRef.current) regexImportInputRef.current.value = "";
+    }
+  };
+
+  const deleteRegexScriptTarget = (target: RegexScriptTarget) => {
+    if (target.scope === "global") {
+      setRegexScripts((current) =>
+        current.filter((script) => script.id !== target.script.id),
+      );
+    } else {
+      setChatPresets((current) =>
+        current.map((preset) =>
+          preset.id === target.presetId
+            ? {
+                ...preset,
+                regexScripts: preset.regexScripts.filter(
+                  (script) => script.id !== target.script.id,
+                ),
+                updatedAt: new Date().toISOString(),
+              }
+            : preset,
+        ),
+      );
+    }
+    setSelectedRegexTargetKey(
+      regexScriptTargets.find((candidate) => candidate.key !== target.key)?.key ?? "",
+    );
+  };
+
+  const moveRegexScriptTarget = (target: RegexScriptTarget, direction: -1 | 1) => {
+    const targetIndex = target.index + direction;
+    if (targetIndex < 0 || targetIndex >= target.total) return;
+    const move = (scripts: RegexScript[]) => {
+      const next = [...scripts];
+      [next[target.index], next[targetIndex]] = [next[targetIndex], next[target.index]];
+      return next;
+    };
+    if (target.scope === "global") {
+      setRegexScripts(move);
+      return;
+    }
+    setChatPresets((current) =>
+      current.map((preset) =>
+        preset.id === target.presetId
+          ? { ...preset, regexScripts: move(preset.regexScripts), updatedAt: new Date().toISOString() }
+          : preset,
+      ),
+    );
+  };
+
+  const toggleRegexPlacement = (target: RegexScriptTarget, placement: number) => {
+    const current = target.script.placement;
+    updateRegexScriptTarget(target, {
+      placement: current.includes(placement)
+        ? current.filter((value) => value !== placement)
+        : [...current, placement].sort((left, right) => left - right),
+    });
+  };
+
   const updateActiveChatPreset = (patch: Partial<ChatPreset>) => {
     if (!activeChatPreset) return;
     setChatPresets((current) =>
@@ -6476,6 +6710,12 @@ export function App() {
       name: `${activeChatPreset.name} 副本`,
       prompts: activeChatPreset.prompts.map((prompt) => ({ ...prompt })),
       backupPrompts: activeChatPreset.backupPrompts.map((prompt) => ({ ...prompt })),
+      regexScripts: activeChatPreset.regexScripts.map((script) => ({
+        ...script,
+        id: crypto.randomUUID(),
+        trimStrings: [...script.trimStrings],
+        placement: [...script.placement],
+      })),
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -6664,6 +6904,26 @@ export function App() {
         ? chatMessages
         : chatMessages.filter((message) => !isHeartbeatUiReminderMessage(message)),
     [chatHeartbeatReminderVisible, chatMessages],
+  );
+  const regexProcessedChatMessages = useMemo(
+    () =>
+      visibleChatMessages.map((message, index) => {
+        if (message.role !== "assistant" || !message.content) return message;
+        const assistantPersona = getAssistantMessagePersona(
+          message,
+          personas,
+          chatMode === "persona" ? activePersona : undefined,
+        );
+        const content = applyRegexScripts(message.content, effectiveRegexScripts, {
+          placement: 2,
+          destination: "display",
+          depth: visibleChatMessages.length - index - 1,
+          userName: userProfile.nickname,
+          characterName: assistantPersona?.name ?? activePersona?.name ?? "AI",
+        });
+        return content === message.content ? message : { ...message, content };
+      }),
+    [activePersona, chatMode, effectiveRegexScripts, personas, userProfile.nickname, visibleChatMessages],
   );
   const chatMessageMenuMessage = useMemo(
     () => chatMessages.find((message) => message.id === chatMessageMenu?.messageId),
@@ -11524,6 +11784,17 @@ export function App() {
           </button>
           <button
             type="button"
+            className={`settings-tab ${settingsTab === "regexes" ? "active" : ""}`}
+            onClick={() => {
+              setSettingsTab("regexes");
+              closeMobileSidebar();
+            }}
+          >
+            <Braces size={16} />
+            正则
+          </button>
+          <button
+            type="button"
             className={`settings-tab ${settingsTab === "user" ? "active" : ""}`}
             onClick={() => {
               setSettingsTab("user");
@@ -11599,15 +11870,17 @@ export function App() {
                       ? "预设"
                       : settingsTab === "worldbooks"
                         ? "世界书"
-                        : settingsTab === "user"
-                          ? "用户资料"
-                          : settingsTab === "personalization"
-                            ? "个性化"
-                            : settingsTab === "mcp"
-                              ? "MCP 服务器"
-                              : settingsTab === "skills"
-                                ? "Skills"
-                                : "手机端"}
+                        : settingsTab === "regexes"
+                          ? "正则后处理"
+                          : settingsTab === "user"
+                            ? "用户资料"
+                            : settingsTab === "personalization"
+                              ? "个性化"
+                              : settingsTab === "mcp"
+                                ? "MCP 服务器"
+                                : settingsTab === "skills"
+                                  ? "Skills"
+                                  : "手机端"}
               </h1>
             </div>
             {settingsTab === "providers" && (
@@ -11675,6 +11948,29 @@ export function App() {
                 <button type="button" className="small-action" onClick={addWorldBook}>
                   <Plus size={16} />
                   新建世界书
+                </button>
+              </div>
+            )}
+            {settingsTab === "regexes" && (
+              <div className="topbar-actions">
+                <button
+                  type="button"
+                  className="ghost-action"
+                  onClick={() => regexImportInputRef.current?.click()}
+                >
+                  <Upload size={16} />
+                  导入酒馆正则
+                </button>
+                <input
+                  ref={regexImportInputRef}
+                  className="hidden-input"
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={(event) => void importRegexScriptFile(event.target.files?.[0])}
+                />
+                <button type="button" className="small-action" onClick={addRegexScript}>
+                  <Plus size={16} />
+                  新建正则
                 </button>
               </div>
             )}
@@ -12092,7 +12388,7 @@ export function App() {
                     <div className="preset-source-card">
                       <span>提示词模块</span>
                       <strong>
-                        启用 {activeChatPreset.prompts.filter((prompt) => prompt.enabled).length} / {activeChatPreset.prompts.length}
+                        启用 {activeChatPreset.prompts.filter((prompt) => prompt.enabled).length} / {activeChatPreset.prompts.length} · 正则 {activeChatPreset.regexScripts.length}
                       </strong>
                     </div>
                   </div>
@@ -12819,6 +13115,324 @@ export function App() {
               ) : (
                 <section className="section-block preset-empty-state">
                   没有可编辑的世界书，请新建或导入酒馆 JSON 世界书。
+                </section>
+              )}
+            </div>
+          )}
+
+          {settingsTab === "regexes" && (
+            <div className="settings-grid regex-settings-grid">
+              <aside className="regex-list-panel section-block">
+                <div className="section-heading compact">
+                  <div>
+                    <h2>正则后处理</h2>
+                    <p>按列表顺序处理 AI 的显示文本，原始会话内容保持不变。</p>
+                  </div>
+                </div>
+                <div className="regex-active-summary">
+                  <strong>
+                    {effectiveRegexScripts.filter(
+                      (script) =>
+                        !script.disabled &&
+                        script.placement.includes(2) &&
+                        !script.promptOnly,
+                    ).length}
+                  </strong>
+                  <span>
+                    个当前生效 · 全局 {regexScripts.length} · 预设 {chatPresets.reduce((total, preset) => total + preset.regexScripts.length, 0)}
+                  </span>
+                </div>
+                {regexImportState.status === "error" && (
+                  <div className="provider-status error">{regexImportState.message}</div>
+                )}
+                <div className="regex-script-list">
+                  {regexScriptTargets.length === 0 ? (
+                    <div className="preset-empty-state">
+                      尚未添加正则。可导入酒馆原生 JSON，或新建一条规则。
+                    </div>
+                  ) : (
+                    regexScriptTargets.map((target) => {
+                      const presetIsActive =
+                        target.scope === "preset" &&
+                        chatPresetEnabled &&
+                        target.presetId === activeChatPreset?.id;
+                      return (
+                        <div
+                          className={`regex-script-item ${
+                            target.key === selectedRegexTarget?.key ? "selected" : ""
+                          } ${target.script.disabled ? "disabled" : ""}`}
+                          key={target.key}
+                        >
+                          <input
+                            type="checkbox"
+                            aria-label={`启用正则 ${target.script.scriptName}`}
+                            checked={!target.script.disabled}
+                            onChange={(event) =>
+                              updateRegexScriptTarget(target, {
+                                disabled: !event.target.checked,
+                              })
+                            }
+                          />
+                          <button
+                            type="button"
+                            className="regex-script-select"
+                            onClick={() => setSelectedRegexTargetKey(target.key)}
+                          >
+                            <strong>{target.script.scriptName}</strong>
+                            <span>
+                              {target.scope === "global"
+                                ? "全局"
+                                : `预设 · ${target.presetName}${presetIsActive ? " · 当前生效" : ""}`}
+                            </span>
+                          </button>
+                          <div className="regex-script-order-actions">
+                            <button
+                              type="button"
+                              title="上移"
+                              disabled={target.index === 0}
+                              onClick={() => moveRegexScriptTarget(target, -1)}
+                            >
+                              ↑
+                            </button>
+                            <button
+                              type="button"
+                              title="下移"
+                              disabled={target.index === target.total - 1}
+                              onClick={() => moveRegexScriptTarget(target, 1)}
+                            >
+                              ↓
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </aside>
+
+              {selectedRegexTarget ? (
+                <section className="regex-editor section-block">
+                  <div className="regex-editor-heading">
+                    <div>
+                      <h2>正则脚本编辑器</h2>
+                      <p>
+                        {selectedRegexTarget.scope === "global"
+                          ? `全局规则${selectedRegexTarget.script.sourceFileName ? ` · ${selectedRegexTarget.script.sourceFileName}` : ""}`
+                          : `预设规则 · ${selectedRegexTarget.presetName}`}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="danger-action"
+                      onClick={() => deleteRegexScriptTarget(selectedRegexTarget)}
+                    >
+                      <Trash2 size={15} />
+                      删除正则
+                    </button>
+                  </div>
+
+                  <label className="field">
+                    <span>规则名称</span>
+                    <input
+                      value={selectedRegexTarget.script.scriptName}
+                      onChange={(event) =>
+                        updateRegexScriptTarget(selectedRegexTarget, {
+                          scriptName: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+
+                  <label className="field regex-find-field">
+                    <span>查找正则</span>
+                    <textarea
+                      value={selectedRegexTarget.script.findRegex}
+                      placeholder="支持原始表达式，或 /pattern/gim 格式"
+                      spellCheck={false}
+                      onChange={(event) =>
+                        updateRegexScriptTarget(selectedRegexTarget, {
+                          findRegex: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                  {selectedRegexError && (
+                    <div className="regex-validation-error">
+                      <strong>正则不可执行</strong>
+                      <span>{selectedRegexError}</span>
+                    </div>
+                  )}
+
+                  <label className="field regex-replace-field">
+                    <span>替换内容</span>
+                    <textarea
+                      value={selectedRegexTarget.script.replaceString}
+                      placeholder="支持 $1、$2 等捕获组；可以包含 Markdown 或 HTML/CSS"
+                      spellCheck={false}
+                      onChange={(event) =>
+                        updateRegexScriptTarget(selectedRegexTarget, {
+                          replaceString: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+
+                  <div className="regex-toggle-grid">
+                    <label className={`provider-thinking-toggle ${!selectedRegexTarget.script.disabled ? "active" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={!selectedRegexTarget.script.disabled}
+                        onChange={(event) =>
+                          updateRegexScriptTarget(selectedRegexTarget, {
+                            disabled: !event.target.checked,
+                          })
+                        }
+                      />
+                      启用规则
+                    </label>
+                    <label className={`provider-thinking-toggle ${selectedRegexTarget.script.markdownOnly ? "active" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={selectedRegexTarget.script.markdownOnly}
+                        onChange={(event) =>
+                          updateRegexScriptTarget(selectedRegexTarget, {
+                            markdownOnly: event.target.checked,
+                          })
+                        }
+                      />
+                      仅显示文本
+                    </label>
+                    <label className={`provider-thinking-toggle ${selectedRegexTarget.script.promptOnly ? "active" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={selectedRegexTarget.script.promptOnly}
+                        onChange={(event) =>
+                          updateRegexScriptTarget(selectedRegexTarget, {
+                            promptOnly: event.target.checked,
+                          })
+                        }
+                      />
+                      仅提示词
+                    </label>
+                    <label className={`provider-thinking-toggle ${selectedRegexTarget.script.runOnEdit ? "active" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={selectedRegexTarget.script.runOnEdit}
+                        onChange={(event) =>
+                          updateRegexScriptTarget(selectedRegexTarget, {
+                            runOnEdit: event.target.checked,
+                          })
+                        }
+                      />
+                      编辑后重跑
+                    </label>
+                    <label className={`provider-thinking-toggle ${selectedRegexTarget.script.substituteRegex > 0 ? "active" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={selectedRegexTarget.script.substituteRegex > 0}
+                        onChange={(event) =>
+                          updateRegexScriptTarget(selectedRegexTarget, {
+                            substituteRegex: event.target.checked ? 1 : 0,
+                          })
+                        }
+                      />
+                      替换正则宏
+                    </label>
+                  </div>
+
+                  <div className="regex-editor-section">
+                    <div>
+                      <h3>执行位置</h3>
+                      <p>Renge 当前只对 AI 输出的显示文本执行；其他位置会原样保留以兼容酒馆格式。</p>
+                    </div>
+                    <div className="regex-placement-grid">
+                      {[
+                        { value: 1, label: "用户输入" },
+                        { value: 2, label: "AI 输出" },
+                        { value: 3, label: "快捷命令" },
+                        { value: 5, label: "世界书" },
+                      ].map((placement) => (
+                        <label
+                          className={`provider-thinking-toggle ${
+                            selectedRegexTarget.script.placement.includes(placement.value)
+                              ? "active"
+                              : ""
+                          }`}
+                          key={placement.value}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectedRegexTarget.script.placement.includes(placement.value)}
+                            onChange={() =>
+                              toggleRegexPlacement(selectedRegexTarget, placement.value)
+                            }
+                          />
+                          {placement.label}（{placement.value}）
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="regex-advanced-fields">
+                    <label className="field">
+                      <span>最小深度</span>
+                      <input
+                        type="number"
+                        min="0"
+                        value={selectedRegexTarget.script.minDepth ?? ""}
+                        placeholder="不限制"
+                        onChange={(event) =>
+                          updateRegexScriptTarget(selectedRegexTarget, {
+                            minDepth: event.target.value
+                              ? Math.max(0, Number(event.target.value))
+                              : null,
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="field">
+                      <span>最大深度</span>
+                      <input
+                        type="number"
+                        min="0"
+                        value={selectedRegexTarget.script.maxDepth ?? ""}
+                        placeholder="不限制"
+                        onChange={(event) =>
+                          updateRegexScriptTarget(selectedRegexTarget, {
+                            maxDepth: event.target.value
+                              ? Math.max(0, Number(event.target.value))
+                              : null,
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="field regex-trim-field">
+                      <span>替换后移除字符串</span>
+                      <textarea
+                        value={selectedRegexTarget.script.trimStrings.join("\n")}
+                        placeholder="每行一个；通常保持为空"
+                        onChange={(event) =>
+                          updateRegexScriptTarget(selectedRegexTarget, {
+                            trimStrings: event.target.value
+                              .split("\n")
+                              .map((value) => value.trim())
+                              .filter(Boolean),
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+
+                  <div className="regex-editor-note">
+                    <Braces size={16} />
+                    <span>
+                      替换内容中的 HTML/CSS 需要在会话侧栏开启“渲染 HTML”。正则只改变显示结果，不会修改存档原文，也不会发送给 AI。
+                    </span>
+                  </div>
+                </section>
+              ) : (
+                <section className="section-block preset-empty-state">
+                  没有可编辑的正则，请新建或导入酒馆 JSON 正则。
                 </section>
               )}
             </div>
@@ -13924,7 +14538,7 @@ export function App() {
                 )}
               </div>
             ) : (
-              getRenderedChatItems(visibleChatMessages, chatMultiBubbleEnabled).map((item) => {
+              getRenderedChatItems(regexProcessedChatMessages, chatMultiBubbleEnabled).map((item) => {
                 if (item.kind === "toolGroup") {
                   const hasEditingMessage = item.segments.some(
                     (segment) => editingChatMessage?.messageId === segment.message.id,
