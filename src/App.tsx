@@ -65,6 +65,16 @@ import {
   normalizePersona,
 } from "./personaData";
 import { personaStore } from "./personaStore";
+import {
+  applyChatPresetToMessages,
+  buildChatPresetRequestParameters,
+  createDefaultChatPreset,
+  importSillyTavernPreset,
+  loadChatPresetsFromStorage,
+  normalizeChatPreset,
+  type ChatPreset,
+  type ChatPresetPrompt,
+} from "./presetUtils";
 import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryType } from "./types";
 
 const AVATAR_OUTPUT_SIZE = 512;
@@ -94,7 +104,7 @@ type TypeDragTarget = {
 };
 
 type AppView = "home" | "studio" | "settings" | "chat";
-type SettingsTab = "providers" | "prompts" | "user" | "personalization" | "mcp" | "skills" | "device";
+type SettingsTab = "providers" | "prompts" | "presets" | "user" | "personalization" | "mcp" | "skills" | "device";
 type ProviderPullState = "idle" | "loading" | "success" | "error";
 type ChatGenerationState = "idle" | "running" | "stopping";
 type ChatMode = "ai" | "persona" | "multi";
@@ -268,6 +278,9 @@ type RengeAppData = {
   systemPrompts?: SystemPromptProfile[];
   activeSystemPromptId?: string;
   activeSystemPromptIds?: string[];
+  chatPresets?: ChatPreset[];
+  activeChatPresetId?: string;
+  chatPresetEnabled?: boolean;
   userProfile?: UserProfile;
   chatSender?: ChatSenderIdentity;
   chatMultiBubbleEnabled?: boolean;
@@ -460,6 +473,9 @@ const ACTIVE_PERSONA_STORAGE_KEY = "renge_active_persona";
 const SYSTEM_PROMPTS_STORAGE_KEY = "renge_system_prompts";
 const ACTIVE_SYSTEM_PROMPT_STORAGE_KEY = "renge_active_system_prompt";
 const ACTIVE_SYSTEM_PROMPTS_STORAGE_KEY = "renge_active_system_prompts";
+const CHAT_PRESETS_STORAGE_KEY = "renge_chat_presets";
+const ACTIVE_CHAT_PRESET_STORAGE_KEY = "renge_active_chat_preset";
+const CHAT_PRESET_ENABLED_STORAGE_KEY = "renge_chat_preset_enabled";
 const USER_PROFILE_STORAGE_KEY = "renge_user_profile";
 const CHAT_SENDER_STORAGE_KEY = "renge_chat_sender";
 const CHAT_MULTI_BUBBLE_STORAGE_KEY = "renge_chat_multi_bubble_enabled";
@@ -5433,6 +5449,23 @@ export function App() {
   const [activeSystemPromptIds, setActiveSystemPromptIds] = useState(() =>
     normalizeActiveSystemPromptIds(getStoredActiveSystemPromptIds() ?? [], systemPrompts),
   );
+  const [chatPresets, setChatPresets] = useState<ChatPreset[]>(() =>
+    loadChatPresetsFromStorage(CHAT_PRESETS_STORAGE_KEY),
+  );
+  const [activeChatPresetId, setActiveChatPresetId] = useState(() => {
+    const storedPresetId = localStorage.getItem(ACTIVE_CHAT_PRESET_STORAGE_KEY);
+    return chatPresets.some((preset) => preset.id === storedPresetId)
+      ? storedPresetId ?? ""
+      : chatPresets[0]?.id ?? "";
+  });
+  const [chatPresetEnabled, setChatPresetEnabled] = useState(
+    () => localStorage.getItem(CHAT_PRESET_ENABLED_STORAGE_KEY) === "true",
+  );
+  const [selectedChatPresetPromptId, setSelectedChatPresetPromptId] = useState("");
+  const [presetImportState, setPresetImportState] = useState<{
+    status: ProviderPullState;
+    message: string;
+  }>({ status: "idle", message: "" });
   const [userProfile, setUserProfile] = useState<UserProfile>(loadUserProfile);
   const [providerPullState, setProviderPullState] = useState<{
     status: ProviderPullState;
@@ -5546,6 +5579,7 @@ export function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const userAvatarInputRef = useRef<HTMLInputElement>(null);
+  const presetImportInputRef = useRef<HTMLInputElement>(null);
   const mcpImportInputRef = useRef<HTMLInputElement>(null);
   const skillZipInputRef = useRef<HTMLInputElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
@@ -5696,6 +5730,10 @@ export function App() {
         persistentData?.systemPrompts && persistentData.systemPrompts.length > 0
           ? persistentData.systemPrompts.map(normalizeSystemPromptProfile)
           : loadSystemPrompts();
+      const normalizedChatPresets =
+        persistentData?.chatPresets && persistentData.chatPresets.length > 0
+          ? persistentData.chatPresets.map((preset, index) => normalizeChatPreset(preset, index))
+          : loadChatPresetsFromStorage(CHAT_PRESETS_STORAGE_KEY);
       const normalizedUserProfile = persistentData?.userProfile
         ? normalizeUserProfile(persistentData.userProfile)
         : loadUserProfile();
@@ -5809,6 +5847,19 @@ export function App() {
             : nextActiveSystemPromptId
               ? [nextActiveSystemPromptId]
               : [];
+      const localActiveChatPresetId = localStorage.getItem(ACTIVE_CHAT_PRESET_STORAGE_KEY);
+      const nextActiveChatPresetId =
+        persistentData?.activeChatPresetId &&
+        normalizedChatPresets.some((preset) => preset.id === persistentData.activeChatPresetId)
+          ? persistentData.activeChatPresetId
+          : localActiveChatPresetId &&
+              normalizedChatPresets.some((preset) => preset.id === localActiveChatPresetId)
+            ? localActiveChatPresetId
+            : normalizedChatPresets[0]?.id ?? "";
+      const nextChatPresetEnabled =
+        typeof persistentData?.chatPresetEnabled === "boolean"
+          ? persistentData.chatPresetEnabled
+          : localStorage.getItem(CHAT_PRESET_ENABLED_STORAGE_KEY) === "true";
 
       setPersonas(normalizedPersonas);
       setActivePersonaId(nextActivePersonaId);
@@ -5817,6 +5868,9 @@ export function App() {
       setSystemPrompts(normalizedSystemPrompts);
       setActiveSystemPromptId(nextActiveSystemPromptId);
       setActiveSystemPromptIds(nextActiveSystemPromptIds);
+      setChatPresets(normalizedChatPresets);
+      setActiveChatPresetId(nextActiveChatPresetId);
+      setChatPresetEnabled(nextChatPresetEnabled);
       setUserProfile(normalizedUserProfile);
       setChatSender(nextChatSender);
       setChatMode(nextChatMode);
@@ -5883,6 +5937,9 @@ export function App() {
     localStorage.setItem(SYSTEM_PROMPTS_STORAGE_KEY, JSON.stringify(systemPrompts));
     localStorage.setItem(ACTIVE_SYSTEM_PROMPT_STORAGE_KEY, activeSystemPromptId);
     localStorage.setItem(ACTIVE_SYSTEM_PROMPTS_STORAGE_KEY, JSON.stringify(activeSystemPromptIds));
+    localStorage.setItem(CHAT_PRESETS_STORAGE_KEY, JSON.stringify(chatPresets));
+    localStorage.setItem(ACTIVE_CHAT_PRESET_STORAGE_KEY, activeChatPresetId);
+    localStorage.setItem(CHAT_PRESET_ENABLED_STORAGE_KEY, String(chatPresetEnabled));
     localStorage.setItem(USER_PROFILE_STORAGE_KEY, JSON.stringify(userProfile));
     localStorage.setItem(CHAT_SENDER_STORAGE_KEY, JSON.stringify(chatSender));
     localStorage.setItem(CHAT_MULTI_BUBBLE_STORAGE_KEY, String(chatMultiBubbleEnabled));
@@ -5923,6 +5980,9 @@ export function App() {
       systemPrompts,
       activeSystemPromptId,
       activeSystemPromptIds,
+      chatPresets,
+      activeChatPresetId,
+      chatPresetEnabled,
       userProfile,
       chatSender,
       chatMultiBubbleEnabled,
@@ -5935,7 +5995,7 @@ export function App() {
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     });
-  }, [activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, appDataLoaded, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatReasoningVisible, chatSender, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, skills, systemPrompts, userProfile]);
+  }, [activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, appDataLoaded, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, skills, systemPrompts, userProfile]);
 
   useEffect(() => {
     if (!appDataLoaded) return;
@@ -6164,6 +6224,172 @@ export function App() {
         .filter((promptProfile): promptProfile is SystemPromptProfile => Boolean(promptProfile)),
     [activeSystemPromptIds, systemPrompts],
   );
+  const activeChatPreset = useMemo(
+    () =>
+      chatPresets.find((preset) => preset.id === activeChatPresetId) ?? chatPresets[0],
+    [activeChatPresetId, chatPresets],
+  );
+  const selectedChatPresetPrompt = useMemo(
+    () =>
+      activeChatPreset?.prompts.find(
+        (prompt) => prompt.identifier === selectedChatPresetPromptId,
+      ) ?? activeChatPreset?.prompts[0],
+    [activeChatPreset, selectedChatPresetPromptId],
+  );
+
+  useEffect(() => {
+    if (!activeChatPreset) {
+      setSelectedChatPresetPromptId("");
+      return;
+    }
+    if (
+      !activeChatPreset.prompts.some(
+        (prompt) => prompt.identifier === selectedChatPresetPromptId,
+      )
+    ) {
+      setSelectedChatPresetPromptId(activeChatPreset.prompts[0]?.identifier ?? "");
+    }
+  }, [activeChatPreset, selectedChatPresetPromptId]);
+
+  const updateActiveChatPreset = (patch: Partial<ChatPreset>) => {
+    if (!activeChatPreset) return;
+    setChatPresets((current) =>
+      current.map((preset) =>
+        preset.id === activeChatPreset.id
+          ? { ...preset, ...patch, updatedAt: new Date().toISOString() }
+          : preset,
+      ),
+    );
+  };
+
+  const addChatPreset = () => {
+    const preset = createDefaultChatPreset(`新预设 ${chatPresets.length + 1}`);
+    setChatPresets((current) => [...current, preset]);
+    setActiveChatPresetId(preset.id);
+    setSelectedChatPresetPromptId("");
+    setPresetImportState({ status: "success", message: "已创建新的空白预设。" });
+  };
+
+  const duplicateChatPreset = () => {
+    if (!activeChatPreset) return;
+    const timestamp = new Date().toISOString();
+    const duplicate: ChatPreset = {
+      ...activeChatPreset,
+      id: crypto.randomUUID(),
+      name: `${activeChatPreset.name} 副本`,
+      prompts: activeChatPreset.prompts.map((prompt) => ({ ...prompt })),
+      backupPrompts: activeChatPreset.backupPrompts.map((prompt) => ({ ...prompt })),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    setChatPresets((current) => [...current, duplicate]);
+    setActiveChatPresetId(duplicate.id);
+    setSelectedChatPresetPromptId(duplicate.prompts[0]?.identifier ?? "");
+    setPresetImportState({ status: "success", message: "已另存为新的预设副本。" });
+  };
+
+  const deleteChatPreset = () => {
+    if (!activeChatPreset) return;
+    const remaining = chatPresets.filter((preset) => preset.id !== activeChatPreset.id);
+    if (remaining.length === 0) remaining.push(createDefaultChatPreset());
+    setChatPresets(remaining);
+    setActiveChatPresetId(remaining[0].id);
+    setSelectedChatPresetPromptId(remaining[0].prompts[0]?.identifier ?? "");
+    setPresetImportState({ status: "success", message: `已删除预设「${activeChatPreset.name}」。` });
+  };
+
+  const importChatPresetFile = async (file?: File) => {
+    if (!file) return;
+    setPresetImportState({ status: "loading", message: "正在解析酒馆原生预设..." });
+    try {
+      const rawPreset = JSON.parse(await file.text()) as unknown;
+      const importedPreset = importSillyTavernPreset(rawPreset, file.name);
+      setChatPresets((current) => [...current, importedPreset]);
+      setActiveChatPresetId(importedPreset.id);
+      setSelectedChatPresetPromptId(importedPreset.prompts[0]?.identifier ?? "");
+      setChatPresetEnabled(true);
+      const enabledCount = importedPreset.prompts.filter((prompt) => prompt.enabled).length;
+      setPresetImportState({
+        status: "success",
+        message: `已导入「${importedPreset.name}」：${importedPreset.prompts.length} 个顺序模块（启用 ${enabledCount} 个），${importedPreset.backupPrompts.length} 个备用模块；已设为当前会话预设。`,
+      });
+    } catch (error) {
+      setPresetImportState({
+        status: "error",
+        message: error instanceof Error ? `导入失败：${error.message}` : "导入失败：预设格式无效。",
+      });
+    } finally {
+      if (presetImportInputRef.current) presetImportInputRef.current.value = "";
+    }
+  };
+
+  const updateChatPresetPrompt = (
+    identifier: string,
+    patch: Partial<ChatPresetPrompt>,
+  ) => {
+    if (!activeChatPreset) return;
+    updateActiveChatPreset({
+      prompts: activeChatPreset.prompts.map((prompt) =>
+        prompt.identifier === identifier ? { ...prompt, ...patch } : prompt,
+      ),
+    });
+  };
+
+  const addChatPresetPrompt = () => {
+    if (!activeChatPreset) return;
+    const identifier = crypto.randomUUID();
+    const prompt: ChatPresetPrompt = {
+      identifier,
+      name: `提示词模块 ${activeChatPreset.prompts.length + 1}`,
+      role: "system",
+      content: "",
+      enabled: true,
+      marker: false,
+      systemPrompt: false,
+      injectionPosition: 0,
+      injectionDepth: 0,
+      injectionOrder: activeChatPreset.prompts.length,
+    };
+    updateActiveChatPreset({ prompts: [...activeChatPreset.prompts, prompt] });
+    setSelectedChatPresetPromptId(identifier);
+  };
+
+  const moveChatPresetPrompt = (identifier: string, direction: -1 | 1) => {
+    if (!activeChatPreset) return;
+    const currentIndex = activeChatPreset.prompts.findIndex(
+      (prompt) => prompt.identifier === identifier,
+    );
+    const targetIndex = currentIndex + direction;
+    if (currentIndex < 0 || targetIndex < 0 || targetIndex >= activeChatPreset.prompts.length) return;
+    const prompts = [...activeChatPreset.prompts];
+    [prompts[currentIndex], prompts[targetIndex]] = [prompts[targetIndex], prompts[currentIndex]];
+    updateActiveChatPreset({ prompts });
+  };
+
+  const deleteChatPresetPrompt = (identifier: string) => {
+    if (!activeChatPreset) return;
+    const prompts = activeChatPreset.prompts.filter(
+      (prompt) => prompt.identifier !== identifier,
+    );
+    updateActiveChatPreset({ prompts });
+    setSelectedChatPresetPromptId(prompts[0]?.identifier ?? "");
+  };
+
+  const activateBackupPresetPrompt = (identifier: string) => {
+    if (!activeChatPreset) return;
+    const backupPrompt = activeChatPreset.backupPrompts.find(
+      (prompt) => prompt.identifier === identifier,
+    );
+    if (!backupPrompt) return;
+    const prompt = { ...backupPrompt, enabled: true };
+    updateActiveChatPreset({
+      prompts: [...activeChatPreset.prompts, prompt],
+      backupPrompts: activeChatPreset.backupPrompts.filter(
+        (candidate) => candidate.identifier !== identifier,
+      ),
+    });
+    setSelectedChatPresetPromptId(prompt.identifier);
+  };
   const currentChatSender = useMemo(
     () => normalizeChatSenderIdentity(chatSender, personas),
     [chatSender, personas],
@@ -6178,6 +6404,37 @@ export function App() {
   );
   const chatPersona = activePersona;
   const chatProvider = activeProvider;
+  const composeChatApiMessages = (
+    systemPrompt: string,
+    history: ChatApiMessage[],
+    responderPersona?: AgentPersona,
+  ): ChatApiMessage[] => {
+    if (!chatPresetEnabled || !activeChatPreset) {
+      return [
+        ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
+        ...history,
+      ];
+    }
+
+    const lastUserMessage = [...history]
+      .reverse()
+      .find((message) => message.role === "user");
+    return applyChatPresetToMessages(activeChatPreset, systemPrompt, history, {
+      user: userProfile.nickname.trim() || "User",
+      char: responderPersona?.name ?? "AI",
+      description: responderPersona ? buildPersonaPrompt(responderPersona) : "",
+      persona: userProfile.bio.trim(),
+      lastUserMessage: getChatApiMessageText(lastUserMessage),
+    }) as ChatApiMessage[];
+  };
+  const activeChatPresetRequestParameters =
+    chatPresetEnabled && activeChatPreset
+      ? buildChatPresetRequestParameters(activeChatPreset)
+      : null;
+  const effectiveChatStreamEnabled =
+    chatPresetEnabled && activeChatPreset
+      ? activeChatPreset.streamOpenAi
+      : chatStreamEnabled;
   const effectiveChatModelId = getEffectiveProviderModelId(chatProvider);
   const multiAgentModelsReady =
     multiAgentPersonas.length >= 2 &&
@@ -8941,15 +9198,16 @@ export function App() {
       ]
         .filter(Boolean)
         .join("\n\n");
-      const apiMessages: ChatApiMessage[] = [
-        ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
-        ...messagesForApi.map((message) =>
+      const apiMessages = composeChatApiMessages(
+        systemPrompt,
+        messagesForApi.map((message) =>
           buildChatMessageForApi(message, personas, userProfile, responderPersona, {
             sendImageAttachmentsToProvider,
             hasImageRecognitionMcp,
           }),
         ),
-      ];
+        responderPersona,
+      );
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);
@@ -8992,7 +9250,9 @@ export function App() {
                     tool_choice: options.toolChoice ?? "auto",
                   }
                 : {}),
-              temperature: responseMode === "persona" ? 0.72 : 0.6,
+              ...(activeChatPresetRequestParameters ?? {
+                temperature: responseMode === "persona" ? 0.72 : 0.6,
+              }),
               ...buildProviderReasoningRequest(requestProvider),
               stream: options.stream,
             },
@@ -9066,7 +9326,7 @@ export function App() {
           getChatApiMessageReasoning(assistantMessage) || reasoning || assistantReasoning;
         assistantContent =
           getChatApiMessageText(assistantMessage).trim() || payload?.output_text?.trim() || "";
-      } else if (chatStreamEnabled && availableChatTools.length === 0) {
+      } else if (effectiveChatStreamEnabled && availableChatTools.length === 0) {
         setChatMessages((current) => [
           ...current,
           {
@@ -9641,15 +9901,16 @@ export function App() {
       ]
         .filter(Boolean)
         .join("\n\n");
-      const apiMessages: ChatApiMessage[] = [
-        ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
-        ...messagesForApi.map((message) =>
+      const apiMessages = composeChatApiMessages(
+        systemPrompt,
+        messagesForApi.map((message) =>
           buildChatMessageForApi(message, personas, userProfile, chatPersona, {
             sendImageAttachmentsToProvider,
             hasImageRecognitionMcp,
           }),
         ),
-      ];
+        chatMode === "persona" ? chatPersona : undefined,
+      );
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);
@@ -9692,7 +9953,9 @@ export function App() {
                     tool_choice: options.toolChoice ?? "auto",
                   }
                 : {}),
-              temperature: chatMode === "persona" ? 0.72 : 0.6,
+              ...(activeChatPresetRequestParameters ?? {
+                temperature: chatMode === "persona" ? 0.72 : 0.6,
+              }),
               ...buildProviderReasoningRequest(chatProvider),
               stream: options.stream,
             },
@@ -9763,7 +10026,7 @@ export function App() {
           getChatApiMessageReasoning(assistantMessage) || reasoning || assistantReasoning;
         assistantContent =
           getChatApiMessageText(assistantMessage).trim() || payload?.output_text?.trim() || "";
-      } else if (chatStreamEnabled && availableChatTools.length === 0) {
+      } else if (effectiveChatStreamEnabled && availableChatTools.length === 0) {
         setChatMessages((current) => [
           ...current,
           {
@@ -11030,6 +11293,17 @@ export function App() {
           </button>
           <button
             type="button"
+            className={`settings-tab ${settingsTab === "presets" ? "active" : ""}`}
+            onClick={() => {
+              setSettingsTab("presets");
+              closeMobileSidebar();
+            }}
+          >
+            <SlidersHorizontal size={16} />
+            预设
+          </button>
+          <button
+            type="button"
             className={`settings-tab ${settingsTab === "user" ? "active" : ""}`}
             onClick={() => {
               setSettingsTab("user");
@@ -11101,15 +11375,17 @@ export function App() {
                   ? "供应商渠道"
                   : settingsTab === "prompts"
                     ? "提示词"
-                    : settingsTab === "user"
-                      ? "用户资料"
-                      : settingsTab === "personalization"
-                        ? "个性化"
-                        : settingsTab === "mcp"
-                          ? "MCP 服务器"
-                          : settingsTab === "skills"
-                            ? "Skills"
-                            : "手机端"}
+                    : settingsTab === "presets"
+                      ? "预设"
+                      : settingsTab === "user"
+                        ? "用户资料"
+                        : settingsTab === "personalization"
+                          ? "个性化"
+                          : settingsTab === "mcp"
+                            ? "MCP 服务器"
+                            : settingsTab === "skills"
+                              ? "Skills"
+                              : "手机端"}
               </h1>
             </div>
             {settingsTab === "providers" && (
@@ -11133,6 +11409,29 @@ export function App() {
                 <Plus size={16} />
                 添加提示词
               </button>
+            )}
+            {settingsTab === "presets" && (
+              <div className="topbar-actions">
+                <button
+                  type="button"
+                  className="ghost-action"
+                  onClick={() => presetImportInputRef.current?.click()}
+                >
+                  <Upload size={16} />
+                  导入酒馆预设
+                </button>
+                <input
+                  ref={presetImportInputRef}
+                  className="hidden-input"
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={(event) => void importChatPresetFile(event.target.files?.[0])}
+                />
+                <button type="button" className="small-action" onClick={addChatPreset}>
+                  <Plus size={16} />
+                  新建预设
+                </button>
+              </div>
             )}
             {settingsTab === "mcp" && (
               <div className="topbar-actions">
@@ -11468,6 +11767,407 @@ export function App() {
                   </label>
                 </div>
               </section>
+            </div>
+          )}
+
+          {settingsTab === "presets" && (
+            <div className="settings-grid preset-settings-grid">
+              <aside className="provider-list preset-list-panel">
+                <label className={`provider-thinking-toggle ${chatPresetEnabled ? "active" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={chatPresetEnabled}
+                    onChange={(event) => setChatPresetEnabled(event.target.checked)}
+                  />
+                  应用当前预设到会话
+                </label>
+
+                {chatPresets.map((preset) => (
+                  <button
+                    type="button"
+                    className={`provider-item ${preset.id === activeChatPreset?.id ? "active" : ""}`}
+                    key={preset.id}
+                    onClick={() => {
+                      setActiveChatPresetId(preset.id);
+                      setSelectedChatPresetPromptId(preset.prompts[0]?.identifier ?? "");
+                    }}
+                  >
+                    <strong>{preset.name}</strong>
+                    <span>
+                      {preset.sourceFormat === "sillytavern" ? "酒馆原生" : "Renge"} · {preset.prompts.length} 个模块
+                    </span>
+                  </button>
+                ))}
+
+                {presetImportState.message && (
+                  <p className={`provider-status ${presetImportState.status}`}>
+                    {presetImportState.message}
+                  </p>
+                )}
+              </aside>
+
+              {activeChatPreset ? (
+                <section className="section-block preset-editor">
+                  <div className="section-heading compact preset-editor-heading">
+                    <div>
+                      <h2>全局预设编辑器</h2>
+                      <p>
+                        当前会话使用「{activeChatPreset.name}」；酒馆预设按 prompt_order
+                        的顺序和启用状态导入。
+                      </p>
+                    </div>
+                    <div className="topbar-actions">
+                      <button type="button" className="ghost-action" onClick={duplicateChatPreset}>
+                        <Copy size={15} />
+                        另存副本
+                      </button>
+                      <button type="button" className="danger-action" onClick={deleteChatPreset}>
+                        <Trash2 size={15} />
+                        删除
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="preset-meta-grid">
+                    <label className="field">
+                      <span>预设名称</span>
+                      <input
+                        value={activeChatPreset.name}
+                        onChange={(event) => updateActiveChatPreset({ name: event.target.value })}
+                      />
+                    </label>
+                    <div className="preset-source-card">
+                      <span>来源</span>
+                      <strong>
+                        {activeChatPreset.sourceFormat === "sillytavern"
+                          ? `SillyTavern · ${activeChatPreset.sourceFileName || "JSON"}`
+                          : "Renge 内建预设"}
+                      </strong>
+                    </div>
+                    <div className="preset-source-card">
+                      <span>提示词模块</span>
+                      <strong>
+                        启用 {activeChatPreset.prompts.filter((prompt) => prompt.enabled).length} / {activeChatPreset.prompts.length}
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div className="preset-editor-section">
+                    <div className="section-heading compact">
+                      <div>
+                        <h3>主要参数</h3>
+                        <p>应用预设时覆盖会话请求的采样和 Token 参数。</p>
+                      </div>
+                    </div>
+                    <div className="preset-parameter-grid">
+                      <label className="field">
+                        <span>Temperature</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="2"
+                          step="0.01"
+                          value={activeChatPreset.temperature}
+                          onChange={(event) => updateActiveChatPreset({ temperature: Number(event.target.value) })}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Top P</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                          value={activeChatPreset.topP}
+                          onChange={(event) => updateActiveChatPreset({ topP: Number(event.target.value) })}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Top K</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={activeChatPreset.topK}
+                          onChange={(event) => updateActiveChatPreset({ topK: Number(event.target.value) })}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Top A</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                          value={activeChatPreset.topA}
+                          onChange={(event) => updateActiveChatPreset({ topA: Number(event.target.value) })}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Min P</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                          value={activeChatPreset.minP}
+                          onChange={(event) => updateActiveChatPreset({ minP: Number(event.target.value) })}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Repetition Penalty</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={activeChatPreset.repetitionPenalty}
+                          onChange={(event) => updateActiveChatPreset({ repetitionPenalty: Number(event.target.value) })}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Frequency Penalty</span>
+                        <input
+                          type="number"
+                          min="-2"
+                          max="2"
+                          step="0.01"
+                          value={activeChatPreset.frequencyPenalty}
+                          onChange={(event) => updateActiveChatPreset({ frequencyPenalty: Number(event.target.value) })}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Presence Penalty</span>
+                        <input
+                          type="number"
+                          min="-2"
+                          max="2"
+                          step="0.01"
+                          value={activeChatPreset.presencePenalty}
+                          onChange={(event) => updateActiveChatPreset({ presencePenalty: Number(event.target.value) })}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>最大生成 Tokens</span>
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={activeChatPreset.maxTokens}
+                          onChange={(event) => updateActiveChatPreset({ maxTokens: Number(event.target.value) })}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>最大上下文长度</span>
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={activeChatPreset.maxContext}
+                          onChange={(event) => updateActiveChatPreset({ maxContext: Number(event.target.value) })}
+                        />
+                      </label>
+                      <label className={`provider-thinking-toggle ${activeChatPreset.squashSystemMessages ? "active" : ""}`}>
+                        <input
+                          type="checkbox"
+                          checked={activeChatPreset.squashSystemMessages}
+                          onChange={(event) => updateActiveChatPreset({ squashSystemMessages: event.target.checked })}
+                        />
+                        合并连续 System 消息
+                      </label>
+                      <label className={`provider-thinking-toggle ${activeChatPreset.streamOpenAi ? "active" : ""}`}>
+                        <input
+                          type="checkbox"
+                          checked={activeChatPreset.streamOpenAi}
+                          onChange={(event) => updateActiveChatPreset({ streamOpenAi: event.target.checked })}
+                        />
+                        使用流式输出
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="preset-editor-section">
+                    <div className="section-heading compact">
+                      <div>
+                        <h3>提示词注入</h3>
+                        <p>
+                          模块顺序会直接影响注入顺序；main 放置现有系统提示，chatHistory
+                          放置当前会话历史。
+                        </p>
+                      </div>
+                      <button type="button" className="small-action" onClick={addChatPresetPrompt}>
+                        <Plus size={15} />
+                        添加模块
+                      </button>
+                    </div>
+
+                    <div className="preset-prompt-workspace">
+                      <div className="preset-prompt-list">
+                        {activeChatPreset.prompts.length === 0 ? (
+                          <div className="preset-empty-state">当前预设没有提示词模块。</div>
+                        ) : (
+                          activeChatPreset.prompts.map((prompt, index) => (
+                            <div
+                              className={`preset-prompt-item ${
+                                prompt.identifier === selectedChatPresetPrompt?.identifier ? "active" : ""
+                              } ${prompt.enabled ? "" : "disabled"}`}
+                              key={prompt.identifier}
+                            >
+                              <input
+                                type="checkbox"
+                                aria-label={`启用 ${prompt.name}`}
+                                checked={prompt.enabled}
+                                onChange={(event) =>
+                                  updateChatPresetPrompt(prompt.identifier, { enabled: event.target.checked })
+                                }
+                              />
+                              <button
+                                type="button"
+                                className="preset-prompt-select"
+                                onClick={() => setSelectedChatPresetPromptId(prompt.identifier)}
+                              >
+                                <strong>{prompt.name}</strong>
+                                <span>
+                                  {prompt.role} · {prompt.marker ? "占位符" : prompt.injectionPosition === 2 ? `聊天深度 ${prompt.injectionDepth}` : "相对注入"}
+                                </span>
+                              </button>
+                              <div className="preset-prompt-order-actions">
+                                <button
+                                  type="button"
+                                  title="上移"
+                                  disabled={index === 0}
+                                  onClick={() => moveChatPresetPrompt(prompt.identifier, -1)}
+                                >
+                                  ↑
+                                </button>
+                                <button
+                                  type="button"
+                                  title="下移"
+                                  disabled={index === activeChatPreset.prompts.length - 1}
+                                  onClick={() => moveChatPresetPrompt(prompt.identifier, 1)}
+                                >
+                                  ↓
+                                </button>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+
+                      {selectedChatPresetPrompt ? (
+                        <div className="preset-prompt-editor">
+                          <div className="preset-prompt-editor-title">
+                            <strong>编辑模块</strong>
+                            <button
+                              type="button"
+                              className="danger-action"
+                              onClick={() => deleteChatPresetPrompt(selectedChatPresetPrompt.identifier)}
+                            >
+                              <Trash2 size={14} />
+                              删除模块
+                            </button>
+                          </div>
+                          <label className="field">
+                            <span>模块名称</span>
+                            <input
+                              value={selectedChatPresetPrompt.name}
+                              onChange={(event) =>
+                                updateChatPresetPrompt(selectedChatPresetPrompt.identifier, { name: event.target.value })
+                              }
+                            />
+                          </label>
+                          <label className="field">
+                            <span>Identifier</span>
+                            <input value={selectedChatPresetPrompt.identifier} readOnly />
+                          </label>
+                          <div className="preset-prompt-fields-row">
+                            <label className="field">
+                              <span>角色</span>
+                              <select
+                                value={selectedChatPresetPrompt.role}
+                                onChange={(event) =>
+                                  updateChatPresetPrompt(selectedChatPresetPrompt.identifier, {
+                                    role: event.target.value as ChatPresetPrompt["role"],
+                                  })
+                                }
+                              >
+                                <option value="system">System</option>
+                                <option value="user">User</option>
+                                <option value="assistant">Assistant</option>
+                              </select>
+                            </label>
+                            <label className="field">
+                              <span>位置</span>
+                              <select
+                                value={selectedChatPresetPrompt.injectionPosition}
+                                onChange={(event) =>
+                                  updateChatPresetPrompt(selectedChatPresetPrompt.identifier, {
+                                    injectionPosition: Number(event.target.value) as 0 | 1 | 2,
+                                  })
+                                }
+                              >
+                                <option value={0}>相对注入</option>
+                                <option value={1}>相对注入（兼容）</option>
+                                <option value={2}>聊天中注入</option>
+                              </select>
+                            </label>
+                            <label className="field">
+                              <span>深度</span>
+                              <input
+                                type="number"
+                                min="0"
+                                value={selectedChatPresetPrompt.injectionDepth}
+                                disabled={selectedChatPresetPrompt.injectionPosition !== 2}
+                                onChange={(event) =>
+                                  updateChatPresetPrompt(selectedChatPresetPrompt.identifier, {
+                                    injectionDepth: Math.max(0, Number(event.target.value)),
+                                  })
+                                }
+                              />
+                            </label>
+                          </div>
+                          <label className="field">
+                            <span>提示词内容</span>
+                            <textarea
+                              className="preset-prompt-content"
+                              value={selectedChatPresetPrompt.content}
+                              placeholder={selectedChatPresetPrompt.marker ? "这是酒馆占位模块，通常不需要内容。" : "输入要注入会话的提示词"}
+                              onChange={(event) =>
+                                updateChatPresetPrompt(selectedChatPresetPrompt.identifier, { content: event.target.value })
+                              }
+                            />
+                          </label>
+                        </div>
+                      ) : (
+                        <div className="preset-empty-state">选择一个模块后可编辑内容与注入位置。</div>
+                      )}
+                    </div>
+
+                    {activeChatPreset.backupPrompts.length > 0 && (
+                      <div className="preset-backup-prompts">
+                        <strong>备用模块（未进入 prompt_order）</strong>
+                        <p>这些模块来自导入文件，但不在酒馆当前顺序表中；点击即可加入当前预设。</p>
+                        <div>
+                          {activeChatPreset.backupPrompts.map((prompt) => (
+                            <button
+                              type="button"
+                              className="ghost-action"
+                              key={prompt.identifier}
+                              onClick={() => activateBackupPresetPrompt(prompt.identifier)}
+                            >
+                              <Plus size={13} />
+                              {prompt.name}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </section>
+              ) : (
+                <section className="section-block preset-empty-state">
+                  没有可编辑的预设，请新建或导入酒馆 JSON 预设。
+                </section>
+              )}
             </div>
           )}
 
@@ -12195,14 +12895,41 @@ export function App() {
                 多 Agent
               </button>
             </div>
+            <label className="chat-field">
+              <span>会话预设</span>
+              <select
+                value={chatPresetEnabled ? activeChatPreset?.id ?? "" : ""}
+                onChange={(event) => {
+                  if (!event.target.value) {
+                    setChatPresetEnabled(false);
+                    return;
+                  }
+                  setActiveChatPresetId(event.target.value);
+                  setChatPresetEnabled(true);
+                }}
+              >
+                <option value="">不应用预设</option>
+                {chatPresets.map((preset) => (
+                  <option value={preset.id} key={preset.id}>
+                    {preset.name}
+                  </option>
+                ))}
+              </select>
+            </label>
             <div className="chat-output-options">
               <label className="tool-toggle">
                 <input
                   type="checkbox"
-                  checked={chatStreamEnabled}
-                  onChange={(event) => setChatStreamEnabled(event.target.checked)}
+                  checked={effectiveChatStreamEnabled}
+                  onChange={(event) => {
+                    if (chatPresetEnabled && activeChatPreset) {
+                      updateActiveChatPreset({ streamOpenAi: event.target.checked });
+                    } else {
+                      setChatStreamEnabled(event.target.checked);
+                    }
+                  }}
                 />
-                <span>流式输出</span>
+                <span>流式输出{chatPresetEnabled && activeChatPreset ? "（预设）" : ""}</span>
               </label>
               <label className="tool-toggle">
                 <input
