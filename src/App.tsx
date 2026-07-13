@@ -114,6 +114,24 @@ import {
   saveCharacterCardsToDatabase,
   type CharacterCard,
 } from "./characterCardUtils";
+import {
+  createTavernScript,
+  exportTavernScriptCollectionJson,
+  exportTavernScriptJson,
+  importSillyTavernScriptFile,
+  loadTavernScriptsFromStorage,
+  normalizeTavernScript,
+  normalizeTavernVariables,
+  type TavernScript,
+} from "./tavernScriptUtils";
+import {
+  TAVERN_EVENTS,
+  TavernScriptRuntime,
+  type TavernRuntimeButton,
+  type TavernRuntimeLog,
+  type TavernRuntimeMessage,
+  type TavernRuntimeStatus,
+} from "./tavernScriptRuntime";
 import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryType } from "./types";
 
 const AVATAR_OUTPUT_SIZE = 512;
@@ -143,7 +161,7 @@ type TypeDragTarget = {
 };
 
 type AppView = "home" | "studio" | "characters" | "settings" | "chat";
-type SettingsTab = "providers" | "prompts" | "presets" | "worldbooks" | "regexes" | "user" | "personalization" | "mcp" | "skills" | "device";
+type SettingsTab = "providers" | "prompts" | "presets" | "worldbooks" | "regexes" | "scripts" | "user" | "personalization" | "mcp" | "skills" | "device";
 type ProviderPullState = "idle" | "loading" | "success" | "error";
 type ChatGenerationState = "idle" | "running" | "stopping";
 type ChatMode = "ai" | "persona" | "multi" | "roleplay";
@@ -152,6 +170,7 @@ type ChatApiRole = "system" | "user" | "assistant" | "tool";
 type ChatSenderKind = "user" | "persona" | "system";
 type ProviderReasoningEffort = "low" | "medium" | "high" | "xhigh";
 type RegexScriptScope = "global" | "preset";
+type TavernScriptScope = "global" | "character";
 
 type RegexScriptTarget = {
   key: string;
@@ -161,6 +180,16 @@ type RegexScriptTarget = {
   total: number;
   presetId?: string;
   presetName?: string;
+};
+
+type TavernScriptTarget = {
+  key: string;
+  scope: TavernScriptScope;
+  script: TavernScript;
+  index: number;
+  total: number;
+  characterId?: string;
+  characterName?: string;
 };
 
 type ChatSenderIdentity = {
@@ -207,6 +236,8 @@ type ChatMessage = {
   sender?: ChatSenderIdentity;
   attachments?: ChatAttachment[];
   source?: "heartbeat" | "roleplay-greeting";
+  variables?: Record<string, unknown>;
+  extra?: Record<string, unknown>;
 };
 
 type ChatHeartbeatConfig = {
@@ -239,6 +270,7 @@ type ChatSession = {
   memoryPersonaIds: string[];
   roleplayCharacterCardId?: string;
   roleplayGreetingIndex?: number;
+  scriptVariables: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
 };
@@ -336,6 +368,8 @@ type RengeAppData = {
   worldBooks?: WorldBook[];
   activeWorldBookIds?: string[];
   regexScripts?: RegexScript[];
+  tavernScripts?: TavernScript[];
+  tavernGlobalVariables?: Record<string, unknown>;
   characterCards?: CharacterCard[];
   activeCharacterCardId?: string;
   userProfile?: UserProfile;
@@ -536,6 +570,8 @@ const CHAT_PRESET_ENABLED_STORAGE_KEY = "renge_chat_preset_enabled";
 const WORLD_BOOKS_STORAGE_KEY = "renge_world_books";
 const ACTIVE_WORLD_BOOKS_STORAGE_KEY = "renge_active_world_books";
 const REGEX_SCRIPTS_STORAGE_KEY = "renge_regex_scripts";
+const TAVERN_SCRIPTS_STORAGE_KEY = "renge_tavern_scripts";
+const TAVERN_GLOBAL_VARIABLES_STORAGE_KEY = "renge_tavern_global_variables";
 const CHARACTER_CARDS_STORAGE_KEY = "renge_character_cards";
 const ACTIVE_CHARACTER_CARD_STORAGE_KEY = "renge_active_character_card";
 const USER_PROFILE_STORAGE_KEY = "renge_user_profile";
@@ -1258,7 +1294,15 @@ function normalizeChatMessage(rawMessage: Partial<ChatMessage>): ChatMessage {
         ? { sender: normalizedSender }
         : {}),
     ...(attachments.length > 0 ? { attachments } : {}),
-    ...(rawMessage.source === "heartbeat" ? { source: "heartbeat" as const } : {}),
+    ...(rawMessage.source === "heartbeat" || rawMessage.source === "roleplay-greeting"
+      ? { source: rawMessage.source }
+      : {}),
+    ...(isObjectRecord(rawMessage.variables)
+      ? { variables: normalizeTavernVariables(rawMessage.variables) }
+      : {}),
+    ...(isObjectRecord(rawMessage.extra)
+      ? { extra: normalizeTavernVariables(rawMessage.extra) }
+      : {}),
   };
 }
 
@@ -1372,6 +1416,7 @@ function createChatSession(
     messages: [],
     heartbeat: createDefaultHeartbeatConfig(),
     memoryPersonaIds: [],
+    scriptVariables: {},
     ...(roleplay
       ? {
           roleplayCharacterCardId: roleplay.characterCardId,
@@ -1410,6 +1455,7 @@ function normalizeChatSession(rawSession: Partial<ChatSession>): ChatSession {
             typeof personaId === "string" && personaIds.indexOf(personaId) === index,
         )
       : [],
+    scriptVariables: normalizeTavernVariables(rawSession.scriptVariables),
     ...(typeof rawSession.roleplayCharacterCardId === "string" &&
     rawSession.roleplayCharacterCardId.trim()
       ? {
@@ -5710,6 +5756,32 @@ export function App() {
     status: ProviderPullState;
     message: string;
   }>({ status: "idle", message: "" });
+  const [tavernScripts, setTavernScripts] = useState<TavernScript[]>(() =>
+    loadTavernScriptsFromStorage(TAVERN_SCRIPTS_STORAGE_KEY),
+  );
+  const [selectedTavernScriptKey, setSelectedTavernScriptKey] = useState("");
+  const [tavernScriptImportState, setTavernScriptImportState] = useState<{
+    status: ProviderPullState;
+    message: string;
+  }>({ status: "idle", message: "" });
+  const [tavernScriptDataDraft, setTavernScriptDataDraft] = useState("{}");
+  const [tavernGlobalVariables, setTavernGlobalVariables] = useState<
+    Record<string, unknown>
+  >(() => {
+    try {
+      return normalizeTavernVariables(
+        JSON.parse(localStorage.getItem(TAVERN_GLOBAL_VARIABLES_STORAGE_KEY) ?? "{}"),
+      );
+    } catch {
+      return {};
+    }
+  });
+  const [tavernRuntimeStatus, setTavernRuntimeStatus] =
+    useState<TavernRuntimeStatus>({ state: "idle", message: "" });
+  const [tavernRuntimeButtons, setTavernRuntimeButtons] = useState<
+    TavernRuntimeButton[]
+  >([]);
+  const [tavernRuntimeLogs, setTavernRuntimeLogs] = useState<TavernRuntimeLog[]>([]);
   const [characterCards, setCharacterCards] = useState<CharacterCard[]>(() =>
     loadCharacterCardsFromStorage(CHARACTER_CARDS_STORAGE_KEY),
   );
@@ -5718,7 +5790,7 @@ export function App() {
   );
   const [editingCharacterCardId, setEditingCharacterCardId] = useState("");
   const [characterEditorTab, setCharacterEditorTab] = useState<
-    "basic" | "advanced" | "greetings" | "worldbook" | "regex"
+    "basic" | "advanced" | "greetings" | "worldbook" | "regex" | "scripts"
   >("basic");
   const [characterSearch, setCharacterSearch] = useState("");
   const [characterImportState, setCharacterImportState] = useState<{
@@ -5855,6 +5927,7 @@ export function App() {
   const presetImportInputRef = useRef<HTMLInputElement>(null);
   const worldBookImportInputRef = useRef<HTMLInputElement>(null);
   const regexImportInputRef = useRef<HTMLInputElement>(null);
+  const tavernScriptImportInputRef = useRef<HTMLInputElement>(null);
   const characterImportInputRef = useRef<HTMLInputElement>(null);
   const characterAvatarInputRef = useRef<HTMLInputElement>(null);
   const mcpImportInputRef = useRef<HTMLInputElement>(null);
@@ -5879,6 +5952,15 @@ export function App() {
     evidence: string;
   } | null>(null);
   const activeChatSessionIdRef = useRef("");
+  const tavernScriptRuntimeRef = useRef<TavernScriptRuntime | null>(null);
+  const chatMessagesRef = useRef<ChatMessage[]>([]);
+  const chatSessionsRef = useRef<ChatSession[]>([]);
+  const characterCardsRef = useRef<CharacterCard[]>([]);
+  const worldBooksRef = useRef<WorldBook[]>([]);
+  const activeWorldBookIdsRef = useRef<string[]>([]);
+  const userProfileRef = useRef<UserProfile>(userProfile);
+  const tavernScriptsRef = useRef<TavernScript[]>(tavernScripts);
+  const tavernGlobalVariablesRef = useRef<Record<string, unknown>>(tavernGlobalVariables);
 
   useEffect(() => {
     setMobileSidebarOpen(false);
@@ -5887,6 +5969,17 @@ export function App() {
   useEffect(() => {
     activeChatSessionIdRef.current = activeChatSessionId;
   }, [activeChatSessionId]);
+
+  useEffect(() => {
+    chatMessagesRef.current = chatMessages;
+    chatSessionsRef.current = chatSessions;
+    characterCardsRef.current = characterCards;
+    worldBooksRef.current = worldBooks;
+    activeWorldBookIdsRef.current = activeWorldBookIds;
+    userProfileRef.current = userProfile;
+    tavernScriptsRef.current = tavernScripts;
+    tavernGlobalVariablesRef.current = tavernGlobalVariables;
+  }, [activeWorldBookIds, characterCards, chatMessages, chatSessions, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     function handleHtmlPreviewResize(event: MessageEvent) {
@@ -5954,6 +6047,7 @@ export function App() {
     const controller = new AbortController();
     activeChatAbortControllerRef.current = controller;
     setChatGenerationState("running");
+    void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.GENERATION_STARTED);
     return controller;
   };
 
@@ -5961,6 +6055,7 @@ export function App() {
     if (activeChatAbortControllerRef.current !== controller) return;
     activeChatAbortControllerRef.current = null;
     setChatGenerationState("idle");
+    void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.GENERATION_ENDED);
   };
 
   const stopChatGeneration = () => {
@@ -6020,6 +6115,22 @@ export function App() {
             normalizeRegexScript(script, index),
           )
         : loadRegexScriptsFromStorage(REGEX_SCRIPTS_STORAGE_KEY);
+      const normalizedTavernScripts = Array.isArray(persistentData?.tavernScripts)
+        ? persistentData.tavernScripts.map((script, index) =>
+            normalizeTavernScript(script, index),
+          )
+        : loadTavernScriptsFromStorage(TAVERN_SCRIPTS_STORAGE_KEY);
+      const nextTavernGlobalVariables = normalizeTavernVariables(
+        persistentData?.tavernGlobalVariables ?? (() => {
+          try {
+            return JSON.parse(
+              localStorage.getItem(TAVERN_GLOBAL_VARIABLES_STORAGE_KEY) ?? "{}",
+            ) as unknown;
+          } catch {
+            return {};
+          }
+        })(),
+      );
       const normalizedCharacterCards =
         Array.isArray(persistentData?.characterCards) && persistentData.characterCards.length > 0
         ? persistentData.characterCards.map((card, index) =>
@@ -6196,6 +6307,11 @@ export function App() {
       setSelectedRegexTargetKey(
         normalizedRegexScripts[0] ? `global:${normalizedRegexScripts[0].id}` : "",
       );
+      setTavernScripts(normalizedTavernScripts);
+      setSelectedTavernScriptKey(
+        normalizedTavernScripts[0] ? `global:${normalizedTavernScripts[0].id}` : "",
+      );
+      setTavernGlobalVariables(nextTavernGlobalVariables);
       setCharacterCards(normalizedCharacterCards);
       setActiveCharacterCardId(nextActiveCharacterCardId);
       setUserProfile(normalizedUserProfile);
@@ -6270,6 +6386,11 @@ export function App() {
     localStorage.setItem(WORLD_BOOKS_STORAGE_KEY, JSON.stringify(worldBooks));
     localStorage.setItem(ACTIVE_WORLD_BOOKS_STORAGE_KEY, JSON.stringify(activeWorldBookIds));
     localStorage.setItem(REGEX_SCRIPTS_STORAGE_KEY, JSON.stringify(regexScripts));
+    localStorage.setItem(TAVERN_SCRIPTS_STORAGE_KEY, JSON.stringify(tavernScripts));
+    localStorage.setItem(
+      TAVERN_GLOBAL_VARIABLES_STORAGE_KEY,
+      JSON.stringify(tavernGlobalVariables),
+    );
     void saveCharacterCardsToDatabase(characterCards);
     try {
       localStorage.setItem(
@@ -6326,6 +6447,8 @@ export function App() {
       worldBooks,
       activeWorldBookIds,
       regexScripts,
+      tavernScripts,
+      tavernGlobalVariables,
       characterCards,
       activeCharacterCardId,
       userProfile,
@@ -6340,7 +6463,7 @@ export function App() {
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     });
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataLoaded, characterCards, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataLoaded, characterCards, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     if (!appDataLoaded) return;
@@ -6944,6 +7067,230 @@ export function App() {
     });
   };
 
+  const tavernScriptTargets = useMemo<TavernScriptTarget[]>(
+    () => [
+      ...tavernScripts.map((script, index) => ({
+        key: `global:${script.id}`,
+        scope: "global" as const,
+        script,
+        index,
+        total: tavernScripts.length,
+      })),
+      ...characterCards.flatMap((card) =>
+        card.tavernScripts.map((script, index) => ({
+          key: `character:${card.id}:${script.id}`,
+          scope: "character" as const,
+          script,
+          index,
+          total: card.tavernScripts.length,
+          characterId: card.id,
+          characterName: card.name,
+        })),
+      ),
+    ],
+    [characterCards, tavernScripts],
+  );
+  const selectedTavernScriptTarget = useMemo(
+    () =>
+      tavernScriptTargets.find((target) => target.key === selectedTavernScriptKey) ??
+      tavernScriptTargets[0],
+    [selectedTavernScriptKey, tavernScriptTargets],
+  );
+
+  useEffect(() => {
+    if (!selectedTavernScriptTarget) {
+      setSelectedTavernScriptKey("");
+      setTavernScriptDataDraft("{}");
+      return;
+    }
+    if (selectedTavernScriptTarget.key !== selectedTavernScriptKey) {
+      setSelectedTavernScriptKey(selectedTavernScriptTarget.key);
+    }
+    setTavernScriptDataDraft(
+      JSON.stringify(selectedTavernScriptTarget.script.data, null, 2),
+    );
+  }, [selectedTavernScriptKey, selectedTavernScriptTarget]);
+
+  const updateTavernScriptTarget = (
+    target: TavernScriptTarget,
+    patch: Partial<TavernScript>,
+  ) => {
+    const updatedAt = new Date().toISOString();
+    if (target.scope === "global") {
+      setTavernScripts((current) =>
+        current.map((script) =>
+          script.id === target.script.id ? { ...script, ...patch, updatedAt } : script,
+        ),
+      );
+      return;
+    }
+    setCharacterCards((current) =>
+      current.map((card) =>
+        card.id === target.characterId
+          ? {
+              ...card,
+              tavernScripts: card.tavernScripts.map((script) =>
+                script.id === target.script.id
+                  ? { ...script, ...patch, updatedAt }
+                  : script,
+              ),
+              updatedAt,
+            }
+          : card,
+      ),
+    );
+  };
+
+  const addTavernScript = () => {
+    const script = createTavernScript(`新酒馆脚本 ${tavernScripts.length + 1}`);
+    setTavernScripts((current) => [...current, script]);
+    setSelectedTavernScriptKey(`global:${script.id}`);
+    setTavernScriptImportState({ status: "idle", message: "" });
+  };
+
+  const importTavernScriptFiles = async (files: FileList | File[]) => {
+    const fileList = Array.from(files);
+    if (fileList.length === 0) return;
+    setTavernScriptImportState({
+      status: "loading",
+      message: `正在解析 ${fileList.length} 个酒馆脚本文件...`,
+    });
+    const imported: TavernScript[] = [];
+    const errors: string[] = [];
+    for (const file of fileList) {
+      try {
+        imported.push(...(await importSillyTavernScriptFile(file)));
+      } catch (error) {
+        errors.push(`${file.name}：${error instanceof Error ? error.message : "格式无效"}`);
+      }
+    }
+    if (imported.length > 0) {
+      setTavernScripts((current) => [...current, ...imported]);
+      setSelectedTavernScriptKey(`global:${imported[0].id}`);
+    }
+    setTavernScriptImportState(
+      errors.length > 0
+        ? { status: "error", message: `部分文件导入失败：${errors.join("；")}` }
+        : { status: "idle", message: "" },
+    );
+    if (tavernScriptImportInputRef.current) {
+      tavernScriptImportInputRef.current.value = "";
+    }
+  };
+
+  const deleteTavernScriptTarget = (target: TavernScriptTarget) => {
+    if (target.scope === "global") {
+      setTavernScripts((current) =>
+        current.filter((script) => script.id !== target.script.id),
+      );
+    } else {
+      setCharacterCards((current) =>
+        current.map((card) =>
+          card.id === target.characterId
+            ? {
+                ...card,
+                tavernScripts: card.tavernScripts.filter(
+                  (script) => script.id !== target.script.id,
+                ),
+                updatedAt: new Date().toISOString(),
+              }
+            : card,
+        ),
+      );
+    }
+    setSelectedTavernScriptKey(
+      tavernScriptTargets.find((candidate) => candidate.key !== target.key)?.key ?? "",
+    );
+  };
+
+  const moveTavernScriptTarget = (target: TavernScriptTarget, direction: -1 | 1) => {
+    const targetIndex = target.index + direction;
+    if (targetIndex < 0 || targetIndex >= target.total) return;
+    const move = (scripts: TavernScript[]) => {
+      const next = [...scripts];
+      [next[target.index], next[targetIndex]] = [next[targetIndex], next[target.index]];
+      return next;
+    };
+    if (target.scope === "global") {
+      setTavernScripts(move);
+      return;
+    }
+    setCharacterCards((current) =>
+      current.map((card) =>
+        card.id === target.characterId
+          ? {
+              ...card,
+              tavernScripts: move(card.tavernScripts),
+              updatedAt: new Date().toISOString(),
+            }
+          : card,
+      ),
+    );
+  };
+
+  const saveTavernScriptData = () => {
+    if (!selectedTavernScriptTarget) return;
+    try {
+      const parsed = JSON.parse(tavernScriptDataDraft) as unknown;
+      if (!isObjectRecord(parsed)) throw new Error("脚本数据必须是 JSON 对象。");
+      updateTavernScriptTarget(selectedTavernScriptTarget, {
+        data: normalizeTavernVariables(parsed),
+      });
+      setTavernScriptImportState({ status: "idle", message: "" });
+    } catch (error) {
+      setTavernScriptImportState({
+        status: "error",
+        message: error instanceof Error ? `脚本数据无效：${error.message}` : "脚本数据无效。",
+      });
+    }
+  };
+
+  const downloadTavernScriptJson = (content: string, name: string) => {
+    const safeName = (name.trim() || "tavern-script").replace(/[\\/:*?"<>|]/g, "_");
+    const url = URL.createObjectURL(
+      new Blob([content], { type: "application/json;charset=utf-8" }),
+    );
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${safeName}.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const runSelectedTavernScript = async () => {
+    if (!selectedTavernScriptTarget) return;
+    const isActive =
+      selectedTavernScriptTarget.scope === "global" ||
+      selectedTavernScriptTarget.characterId === scopedRoleplayCard?.id;
+    if (!isActive) {
+      setTavernScriptImportState({
+        status: "error",
+        message: "角色内置脚本只能在绑定该角色卡的会话中运行。",
+      });
+      return;
+    }
+    const runtime = tavernScriptRuntimeRef.current;
+    if (!runtime?.isReady()) {
+      setTavernScriptImportState({
+        status: "error",
+        message: "请先打开一个会话，等待酒馆脚本运行环境就绪。",
+      });
+      return;
+    }
+    setTavernScriptImportState({ status: "loading", message: "正在运行脚本..." });
+    try {
+      await runtime.executeScript(selectedTavernScriptTarget.script.id);
+      setTavernScriptImportState({ status: "idle", message: "" });
+    } catch (error) {
+      setTavernScriptImportState({
+        status: "error",
+        message: error instanceof Error ? error.message : "脚本运行失败。",
+      });
+    }
+  };
+
   const updateActiveChatPreset = (patch: Partial<ChatPreset>) => {
     if (!activeChatPreset) return;
     setChatPresets((current) =>
@@ -7394,6 +7741,255 @@ export function App() {
     () => scopedRoleplayCard,
     [scopedRoleplayCard],
   );
+  const activeTavernScripts = useMemo(
+    () => [
+      ...tavernScripts,
+      ...(activeSessionRoleplayCard?.tavernScripts ?? []),
+    ],
+    [activeSessionRoleplayCard?.tavernScripts, tavernScripts],
+  );
+  const tavernRuntimeConfigurationKey = useMemo(
+    () =>
+      JSON.stringify(
+        activeTavernScripts.map((script) => ({
+          id: script.id,
+          name: script.name,
+          content: script.content,
+          enabled: script.enabled,
+          autoRun: script.autoRun,
+          runOn: script.runOn,
+          buttonEnabled: script.buttonEnabled,
+          buttons: script.buttons,
+        })),
+      ),
+    [activeTavernScripts],
+  );
+
+  useEffect(() => {
+    if (!appDataLoaded || !activeChatSessionId) return;
+    tavernScriptRuntimeRef.current?.destroy();
+    tavernScriptRuntimeRef.current = null;
+    setTavernRuntimeButtons([]);
+    if (activeTavernScripts.length === 0) {
+      setTavernRuntimeStatus({ state: "idle", message: "" });
+      return;
+    }
+
+    let runtime: TavernScriptRuntime;
+    const updateSessions = (updater: (sessions: ChatSession[]) => ChatSession[]) => {
+      const next = updater(chatSessionsRef.current);
+      chatSessionsRef.current = next;
+      setChatSessions(next);
+    };
+    const updateGlobalScripts = (updater: (scripts: TavernScript[]) => TavernScript[]) => {
+      const next = updater(tavernScriptsRef.current);
+      tavernScriptsRef.current = next;
+      setTavernScripts(next);
+    };
+    const updateCards = (updater: (cards: CharacterCard[]) => CharacterCard[]) => {
+      const next = updater(characterCardsRef.current);
+      characterCardsRef.current = next;
+      setCharacterCards(next);
+    };
+
+    runtime = new TavernScriptRuntime(activeTavernScripts, {
+      getMessages: () => chatMessagesRef.current as TavernRuntimeMessage[],
+      setMessages: (messages) => {
+        const normalized = messages.map((message) =>
+          normalizeChatMessage(message as Partial<ChatMessage>),
+        );
+        chatMessagesRef.current = normalized;
+        setChatMessages(normalized);
+      },
+      getChatVariables: () => {
+        const session = chatSessionsRef.current.find(
+          (candidate) => candidate.id === activeChatSessionIdRef.current,
+        );
+        return normalizeTavernVariables(session?.scriptVariables);
+      },
+      setChatVariables: (variables) => {
+        const sessionId = activeChatSessionIdRef.current;
+        updateSessions((sessions) =>
+          sessions.map((session) =>
+            session.id === sessionId
+              ? {
+                  ...session,
+                  scriptVariables: normalizeTavernVariables(variables),
+                  updatedAt: new Date().toISOString(),
+                }
+              : session,
+          ),
+        );
+      },
+      getGlobalVariables: () => normalizeTavernVariables(tavernGlobalVariablesRef.current),
+      setGlobalVariables: (variables) => {
+        const next = normalizeTavernVariables(variables);
+        tavernGlobalVariablesRef.current = next;
+        setTavernGlobalVariables(next);
+      },
+      getScriptData: (scriptId) => {
+        const globalScript = tavernScriptsRef.current.find((script) => script.id === scriptId);
+        if (globalScript) return normalizeTavernVariables(globalScript.data);
+        for (const card of characterCardsRef.current) {
+          const script = card.tavernScripts.find((candidate) => candidate.id === scriptId);
+          if (script) return normalizeTavernVariables(script.data);
+        }
+        return {};
+      },
+      setScriptData: (scriptId, data) => {
+        const timestamp = new Date().toISOString();
+        if (tavernScriptsRef.current.some((script) => script.id === scriptId)) {
+          updateGlobalScripts((scripts) =>
+            scripts.map((script) =>
+              script.id === scriptId
+                ? { ...script, data: normalizeTavernVariables(data), updatedAt: timestamp }
+                : script,
+            ),
+          );
+          return;
+        }
+        updateCards((cards) =>
+          cards.map((card) =>
+            card.tavernScripts.some((script) => script.id === scriptId)
+              ? {
+                  ...card,
+                  tavernScripts: card.tavernScripts.map((script) =>
+                    script.id === scriptId
+                      ? { ...script, data: normalizeTavernVariables(data), updatedAt: timestamp }
+                      : script,
+                  ),
+                  updatedAt: timestamp,
+                }
+              : card,
+          ),
+        );
+      },
+      getCharacter: () => {
+        const session = chatSessionsRef.current.find(
+          (candidate) => candidate.id === activeChatSessionIdRef.current,
+        );
+        const card = characterCardsRef.current.find(
+          (candidate) => candidate.id === session?.roleplayCharacterCardId,
+        );
+        if (!card) return null;
+        return {
+          id: card.id,
+          name: card.name,
+          description: card.description,
+          personality: card.personality,
+          scenario: card.scenario,
+          firstMessage: card.firstMessage,
+          messageExample: card.messageExample,
+          avatarDataUrl: card.avatarDataUrl,
+          extensions: card.extensions,
+          worldBook: card.characterBook
+            ? {
+                id: card.characterBook.id,
+                name: card.characterBook.name,
+                entries: card.characterBook.entries.map((entry) => ({
+                  id: entry.id,
+                  comment: entry.comment,
+                  content: entry.content,
+                  enabled: entry.enabled,
+                  keys: entry.keys,
+                })),
+              }
+            : null,
+        };
+      },
+      getWorldBooks: () =>
+        worldBooksRef.current
+          .filter((book) => activeWorldBookIdsRef.current.includes(book.id))
+          .map((book) => ({
+            id: book.id,
+            name: book.name,
+            entries: book.entries.map((entry) => ({
+              id: entry.id,
+              comment: entry.comment,
+              content: entry.content,
+              enabled: entry.enabled,
+              keys: entry.keys,
+            })),
+          })),
+      getUserName: () => userProfileRef.current.nickname.trim() || "用户",
+      getChatId: () => activeChatSessionIdRef.current,
+      getModelId: () => getEffectiveProviderModelId(chatProvider),
+      onButtonsChange: (buttons) => {
+        if (tavernScriptRuntimeRef.current === runtime) setTavernRuntimeButtons(buttons);
+      },
+      onLog: (log) => {
+        if (tavernScriptRuntimeRef.current !== runtime) return;
+        setTavernRuntimeLogs((current) => [...current.slice(-119), log]);
+      },
+      onStatus: (status) => {
+        if (tavernScriptRuntimeRef.current === runtime) setTavernRuntimeStatus(status);
+      },
+      onNotice: (level, message, title) => {
+        if (level !== "error" || tavernScriptRuntimeRef.current !== runtime) return;
+        setTavernRuntimeLogs((current) => [
+          ...current.slice(-119),
+          {
+            id: crypto.randomUUID(),
+            level: "error",
+            scriptId: "runtime",
+            scriptName: title || "脚本通知",
+            message,
+            createdAt: new Date().toISOString(),
+          },
+        ]);
+      },
+    });
+    tavernScriptRuntimeRef.current = runtime;
+    void runtime.initialize().catch((error) => {
+      if (tavernScriptRuntimeRef.current !== runtime) return;
+      setTavernRuntimeStatus({
+        state: "error",
+        message: error instanceof Error ? error.message : "酒馆脚本运行环境初始化失败。",
+      });
+    });
+
+    return () => {
+      if (tavernScriptRuntimeRef.current === runtime) {
+        tavernScriptRuntimeRef.current = null;
+      }
+      runtime.destroy();
+    };
+  }, [activeChatSessionId, appDataLoaded, tavernRuntimeConfigurationKey]);
+
+  const emitTavernMessageEvent = (
+    eventName: typeof TAVERN_EVENTS.MESSAGE_SENT | typeof TAVERN_EVENTS.MESSAGE_RECEIVED,
+    messageId: string,
+  ) => {
+    window.setTimeout(() => {
+      const index = chatMessagesRef.current.findIndex((message) => message.id === messageId);
+      if (index < 0) return;
+      void tavernScriptRuntimeRef.current?.emit(eventName, index);
+      void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_RENDERED, index);
+      void tavernScriptRuntimeRef.current?.emit(
+        eventName === TAVERN_EVENTS.MESSAGE_SENT
+          ? TAVERN_EVENTS.USER_MESSAGE_RENDERED
+          : TAVERN_EVENTS.CHARACTER_MESSAGE_RENDERED,
+        index,
+      );
+    }, 0);
+  };
+
+  const triggerTavernScriptButton = async (button: TavernRuntimeButton) => {
+    const runtime = tavernScriptRuntimeRef.current;
+    if (!runtime?.isReady()) {
+      setChatStatus({ status: "error", message: "酒馆脚本运行环境尚未就绪。" });
+      return;
+    }
+    try {
+      await runtime.triggerButton(button);
+    } catch (error) {
+      setChatStatus({
+        status: "error",
+        message: error instanceof Error ? error.message : "脚本按钮执行失败。",
+      });
+    }
+  };
+
   const buildRoleplaySession = (
     session: ChatSession,
     card: CharacterCard,
@@ -7408,6 +8004,7 @@ export function App() {
       ...session,
       title: `角色：${card.name}`,
       messages: greeting ? [greeting] : [],
+      scriptVariables: normalizeTavernVariables(card.tavernVariables),
       roleplayCharacterCardId: card.id,
       roleplayGreetingIndex: greetingIndex,
       updatedAt: new Date().toISOString(),
@@ -10716,6 +11313,7 @@ export function App() {
         });
       }
       setChatStatus({ status: "success", message: options.successMessage ?? "回复已重新生成。" });
+      emitTavernMessageEvent(TAVERN_EVENTS.MESSAGE_RECEIVED, finalAssistantMessage.id);
       return finalAssistantMessage;
     } catch (error) {
       if (isChatAbortError(error)) {
@@ -10895,7 +11493,9 @@ export function App() {
     };
     let accumulatedMessages = [...chatMessages, userMessage];
 
+    chatMessagesRef.current = accumulatedMessages;
     setChatMessages(accumulatedMessages);
+    emitTavernMessageEvent(TAVERN_EVENTS.MESSAGE_SENT, userMessage.id);
     setChatInput("");
     setChatAttachments([]);
     activeUserRequestTextRef.current = content;
@@ -10939,7 +11539,9 @@ export function App() {
     };
     const nextMessages = [...chatMessages, userMessage];
 
+    chatMessagesRef.current = nextMessages;
     setChatMessages(nextMessages);
+    emitTavernMessageEvent(TAVERN_EVENTS.MESSAGE_SENT, userMessage.id);
     setChatInput("");
     setChatAttachments([]);
     const abortController = beginChatGeneration();
@@ -11458,6 +12060,7 @@ export function App() {
         });
       }
       setChatStatus({ status: "success", message: "回复已生成。" });
+      emitTavernMessageEvent(TAVERN_EVENTS.MESSAGE_RECEIVED, assistantMessageId);
     } catch (error) {
       if (isChatAbortError(error)) {
         if (streamingAssistantInserted && assistantMessageId) {
@@ -12376,7 +12979,7 @@ export function App() {
               <div className="module-meta">
                 <span>{characterCards.length} 张角色卡</span>
                 <span>
-                  {characterCards.filter((card) => card.characterBook).length} 本内置世界书 · {characterCards.reduce((total, card) => total + card.regexScripts.length, 0)} 条私有正则
+                  {characterCards.filter((card) => card.characterBook).length} 本内置世界书 · {characterCards.reduce((total, card) => total + card.regexScripts.length, 0)} 条私有正则 · {characterCards.reduce((total, card) => total + card.tavernScripts.length, 0)} 个内置脚本
                 </span>
               </div>
               <button
@@ -12479,7 +13082,7 @@ export function App() {
             <div>
               <div className="eyebrow">SillyTavern Character Cards</div>
               <h1>角色卡管理器</h1>
-              <p>角色卡内置世界书与正则独立保存，只在绑定该角色的会话中生效。</p>
+              <p>角色卡内置世界书、正则与酒馆脚本独立保存，只在绑定该角色的会话中生效。</p>
             </div>
           </div>
           <div className="character-manager-actions">
@@ -12566,6 +13169,7 @@ export function App() {
                 <div className="character-card-badges">
                   {card.characterBook && <span>内置世界书 {card.characterBook.entries.length}</span>}
                   {card.regexScripts.length > 0 && <span>私有正则 {card.regexScripts.length}</span>}
+                  {card.tavernScripts.length > 0 && <span>内置脚本 {card.tavernScripts.length}</span>}
                 </div>
                 <div className="character-card-tags">
                   {card.tags.slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}
@@ -12665,6 +13269,7 @@ export function App() {
                   ["greetings", `问候语 ${1 + editingCharacterCard.alternateGreetings.length}`],
                   ["worldbook", `内置世界书 ${editingCharacterCard.characterBook?.entries.length ?? 0}`],
                   ["regex", `角色正则 ${editingCharacterCard.regexScripts.length}`],
+                  ["scripts", `内置脚本 ${editingCharacterCard.tavernScripts.length}`],
                 ] as const).map(([tab, label]) => (
                   <button
                     type="button"
@@ -12950,6 +13555,143 @@ export function App() {
                     })}><Plus size={15} />增加角色正则</button>
                   </div>
                 )}
+
+                {characterEditorTab === "scripts" && (
+                  <div className="character-private-editor">
+                    <div className="character-private-notice">
+                      <Play size={17} />
+                      <span>这里的脚本只绑定当前角色卡，与设置中的全局脚本分开保存；进入该角色会话时才会运行。</span>
+                    </div>
+                    <div className="character-private-list">
+                      {editingCharacterCard.tavernScripts.map((script, index) => (
+                        <details className="character-private-entry" key={script.id} open={index === 0}>
+                          <summary>
+                            <span>{script.name || `脚本 ${index + 1}`}</span>
+                            <small>{script.enabled ? "启用" : "停用"}</small>
+                          </summary>
+                          <div>
+                            <div className="character-inline-grid">
+                              <label className="field">
+                                <span>脚本名称</span>
+                                <input
+                                  value={script.name}
+                                  onChange={(event) =>
+                                    updateCharacterCard(editingCharacterCard.id, {
+                                      tavernScripts: editingCharacterCard.tavernScripts.map((item) =>
+                                        item.id === script.id
+                                          ? { ...item, name: event.target.value, updatedAt: new Date().toISOString() }
+                                          : item,
+                                      ),
+                                    })
+                                  }
+                                />
+                              </label>
+                              <label className="field">
+                                <span>运行时机</span>
+                                <select
+                                  value={script.runOn}
+                                  onChange={(event) =>
+                                    updateCharacterCard(editingCharacterCard.id, {
+                                      tavernScripts: editingCharacterCard.tavernScripts.map((item) =>
+                                        item.id === script.id
+                                          ? { ...item, runOn: event.target.value as TavernScript["runOn"], updatedAt: new Date().toISOString() }
+                                          : item,
+                                      ),
+                                    })
+                                  }
+                                >
+                                  <option value="startup">进入会话时运行</option>
+                                  <option value="message">首次收发消息时运行</option>
+                                  <option value="manual">仅手动运行</option>
+                                </select>
+                              </label>
+                            </div>
+                            <div className="character-regex-options">
+                              <label className="toggle-field compact-toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={script.enabled}
+                                  onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                                    tavernScripts: editingCharacterCard.tavernScripts.map((item) => item.id === script.id ? { ...item, enabled: event.target.checked, updatedAt: new Date().toISOString() } : item),
+                                  })}
+                                />
+                                <span>启用</span>
+                              </label>
+                              <label className="toggle-field compact-toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={script.autoRun}
+                                  onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                                    tavernScripts: editingCharacterCard.tavernScripts.map((item) => item.id === script.id ? { ...item, autoRun: event.target.checked, updatedAt: new Date().toISOString() } : item),
+                                  })}
+                                />
+                                <span>自动运行</span>
+                              </label>
+                              <label className="toggle-field compact-toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={script.buttonEnabled}
+                                  onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                                    tavernScripts: editingCharacterCard.tavernScripts.map((item) => item.id === script.id ? { ...item, buttonEnabled: event.target.checked, updatedAt: new Date().toISOString() } : item),
+                                  })}
+                                />
+                                <span>脚本按钮</span>
+                              </label>
+                            </div>
+                            <label className="field">
+                              <span>说明</span>
+                              <input
+                                value={script.info}
+                                onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                                  tavernScripts: editingCharacterCard.tavernScripts.map((item) => item.id === script.id ? { ...item, info: event.target.value, updatedAt: new Date().toISOString() } : item),
+                                })}
+                              />
+                            </label>
+                            <label className="field">
+                              <span>脚本内容</span>
+                              <textarea
+                                rows={18}
+                                className="code-textarea"
+                                spellCheck={false}
+                                value={script.content}
+                                onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
+                                  tavernScripts: editingCharacterCard.tavernScripts.map((item) => item.id === script.id ? { ...item, content: event.target.value, updatedAt: new Date().toISOString() } : item),
+                                })}
+                              />
+                            </label>
+                            {script.buttons.length > 0 && (
+                              <div className="character-script-button-summary">
+                                <strong>脚本按钮</strong>
+                                <span>{script.buttons.map((button) => button.name).join("、")}</span>
+                              </div>
+                            )}
+                            <div className="topbar-actions">
+                              <button
+                                type="button"
+                                className="ghost-action"
+                                onClick={() => {
+                                  setSelectedTavernScriptKey(`character:${editingCharacterCard.id}:${script.id}`);
+                                  setEditingCharacterCardId("");
+                                  setSettingsTab("scripts");
+                                  setView("settings");
+                                }}
+                              >
+                                <Settings2 size={14} />
+                                完整管理
+                              </button>
+                              <button type="button" className="ghost-action danger" onClick={() => updateCharacterCard(editingCharacterCard.id, {
+                                tavernScripts: editingCharacterCard.tavernScripts.filter((item) => item.id !== script.id),
+                              })}><Trash2 size={14} />删除脚本</button>
+                            </div>
+                          </div>
+                        </details>
+                      ))}
+                    </div>
+                    <button type="button" className="ghost-action" onClick={() => updateCharacterCard(editingCharacterCard.id, {
+                      tavernScripts: [...editingCharacterCard.tavernScripts, createTavernScript(`角色脚本 ${editingCharacterCard.tavernScripts.length + 1}`)],
+                    })}><Plus size={15} />增加角色脚本</button>
+                  </div>
+                )}
               </div>
 
               <footer className="character-editor-footer">
@@ -13102,6 +13844,17 @@ export function App() {
           </button>
           <button
             type="button"
+            className={`settings-tab ${settingsTab === "scripts" ? "active" : ""}`}
+            onClick={() => {
+              setSettingsTab("scripts");
+              closeMobileSidebar();
+            }}
+          >
+            <Play size={16} />
+            酒馆脚本
+          </button>
+          <button
+            type="button"
             className={`settings-tab ${settingsTab === "user" ? "active" : ""}`}
             onClick={() => {
               setSettingsTab("user");
@@ -13179,15 +13932,17 @@ export function App() {
                         ? "世界书"
                         : settingsTab === "regexes"
                           ? "正则后处理"
-                          : settingsTab === "user"
-                            ? "用户资料"
-                            : settingsTab === "personalization"
-                              ? "个性化"
-                              : settingsTab === "mcp"
-                                ? "MCP 服务器"
-                                : settingsTab === "skills"
-                                  ? "Skills"
-                                  : "手机端"}
+                          : settingsTab === "scripts"
+                            ? "酒馆脚本"
+                            : settingsTab === "user"
+                              ? "用户资料"
+                              : settingsTab === "personalization"
+                                ? "个性化"
+                                : settingsTab === "mcp"
+                                  ? "MCP 服务器"
+                                  : settingsTab === "skills"
+                                    ? "Skills"
+                                    : "手机端"}
               </h1>
             </div>
             {settingsTab === "providers" && (
@@ -13278,6 +14033,47 @@ export function App() {
                 <button type="button" className="small-action" onClick={addRegexScript}>
                   <Plus size={16} />
                   新建正则
+                </button>
+              </div>
+            )}
+            {settingsTab === "scripts" && (
+              <div className="topbar-actions">
+                {tavernScripts.length > 0 && (
+                  <button
+                    type="button"
+                    className="ghost-action"
+                    onClick={() =>
+                      downloadTavernScriptJson(
+                        exportTavernScriptCollectionJson(tavernScripts),
+                        "Renge-酒馆脚本",
+                      )
+                    }
+                  >
+                    <Download size={16} />
+                    导出全局脚本
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="ghost-action"
+                  onClick={() => tavernScriptImportInputRef.current?.click()}
+                >
+                  <Upload size={16} />
+                  导入酒馆脚本
+                </button>
+                <input
+                  ref={tavernScriptImportInputRef}
+                  className="hidden-input"
+                  type="file"
+                  multiple
+                  accept=".json,application/json"
+                  onChange={(event) =>
+                    void importTavernScriptFiles(event.target.files ?? [])
+                  }
+                />
+                <button type="button" className="small-action" onClick={addTavernScript}>
+                  <Plus size={16} />
+                  新建脚本
                 </button>
               </div>
             )}
@@ -14745,6 +15541,379 @@ export function App() {
             </div>
           )}
 
+          {settingsTab === "scripts" && (
+            <div className="settings-grid tavern-script-settings-grid">
+              <aside className="section-block tavern-script-list-panel">
+                <div className="section-heading compact">
+                  <div>
+                    <h2>脚本管理器</h2>
+                    <p>全局脚本作用于所有会话；角色内置脚本只在绑定角色的会话运行。</p>
+                  </div>
+                </div>
+                <div className={`tavern-runtime-summary ${tavernRuntimeStatus.state}`}>
+                  <span>
+                    全局 {tavernScripts.length} · 角色内置 {characterCards.reduce(
+                      (total, card) => total + card.tavernScripts.length,
+                      0,
+                    )}
+                  </span>
+                  <strong>
+                    {tavernRuntimeStatus.state === "ready"
+                      ? "运行中"
+                      : tavernRuntimeStatus.state === "loading"
+                        ? "正在加载"
+                        : tavernRuntimeStatus.state === "error"
+                          ? "运行异常"
+                          : "未启动"}
+                  </strong>
+                </div>
+                {tavernRuntimeStatus.state === "error" && tavernRuntimeStatus.message && (
+                  <div className="provider-status error">{tavernRuntimeStatus.message}</div>
+                )}
+                {tavernScriptImportState.status === "error" && (
+                  <div className="provider-status error">{tavernScriptImportState.message}</div>
+                )}
+                <div className="tavern-script-list">
+                  {tavernScriptTargets.length === 0 ? (
+                    <div className="preset-empty-state">
+                      导入酒馆助手脚本 JSON，或新建一个全局脚本。
+                    </div>
+                  ) : (
+                    tavernScriptTargets.map((target) => {
+                      const characterIsActive =
+                        target.scope === "character" &&
+                        target.characterId === scopedRoleplayCard?.id;
+                      return (
+                        <div
+                          className={`tavern-script-item ${
+                            selectedTavernScriptTarget?.key === target.key ? "active" : ""
+                          }`}
+                          key={target.key}
+                        >
+                          <button
+                            type="button"
+                            className="tavern-script-select"
+                            onClick={() => setSelectedTavernScriptKey(target.key)}
+                          >
+                            <strong>{target.script.name || "未命名脚本"}</strong>
+                            <span>
+                              {target.scope === "global"
+                                ? "全局脚本"
+                                : `角色内置 · ${target.characterName}${
+                                    characterIsActive ? " · 当前生效" : ""
+                                  }`}
+                            </span>
+                            <small>
+                              {target.script.enabled ? "已启用" : "已停用"} · {
+                                target.script.runOn === "startup"
+                                  ? "会话启动"
+                                  : target.script.runOn === "message"
+                                    ? "收到消息"
+                                    : "手动运行"
+                              }
+                            </small>
+                          </button>
+                          <div className="tavern-script-order-actions">
+                            <button
+                              type="button"
+                              title="上移"
+                              disabled={target.index === 0}
+                              onClick={() => moveTavernScriptTarget(target, -1)}
+                            >
+                              ↑
+                            </button>
+                            <button
+                              type="button"
+                              title="下移"
+                              disabled={target.index === target.total - 1}
+                              onClick={() => moveTavernScriptTarget(target, 1)}
+                            >
+                              ↓
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </aside>
+
+              {selectedTavernScriptTarget ? (
+                <section className="section-block tavern-script-editor">
+                  <div className="tavern-script-editor-heading">
+                    <div>
+                      <span>
+                        {selectedTavernScriptTarget.scope === "global"
+                          ? "全局酒馆脚本"
+                          : `角色内置脚本 · ${selectedTavernScriptTarget.characterName}`}
+                      </span>
+                      <h2>{selectedTavernScriptTarget.script.name || "未命名脚本"}</h2>
+                    </div>
+                    <div className="topbar-actions">
+                      <button
+                        type="button"
+                        className="ghost-action"
+                        disabled={tavernScriptImportState.status === "loading"}
+                        onClick={() => void runSelectedTavernScript()}
+                      >
+                        <Play size={15} />
+                        立即运行
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost-action"
+                        onClick={() =>
+                          downloadTavernScriptJson(
+                            exportTavernScriptJson(selectedTavernScriptTarget.script),
+                            selectedTavernScriptTarget.script.name,
+                          )
+                        }
+                      >
+                        <Download size={15} />
+                        导出
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-button danger"
+                        title="删除脚本"
+                        onClick={() => deleteTavernScriptTarget(selectedTavernScriptTarget)}
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="tavern-script-meta-grid">
+                    <label className="field">
+                      <span>脚本名称</span>
+                      <input
+                        value={selectedTavernScriptTarget.script.name}
+                        onChange={(event) =>
+                          updateTavernScriptTarget(selectedTavernScriptTarget, {
+                            name: event.target.value,
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="field">
+                      <span>运行时机</span>
+                      <select
+                        value={selectedTavernScriptTarget.script.runOn}
+                        onChange={(event) =>
+                          updateTavernScriptTarget(selectedTavernScriptTarget, {
+                            runOn: event.target.value as TavernScript["runOn"],
+                          })
+                        }
+                      >
+                        <option value="startup">进入会话时运行</option>
+                        <option value="message">首次收发消息时运行</option>
+                        <option value="manual">仅手动运行</option>
+                      </select>
+                    </label>
+                    <label className="field tavern-script-info-field">
+                      <span>说明</span>
+                      <input
+                        value={selectedTavernScriptTarget.script.info}
+                        placeholder="脚本用途或依赖说明"
+                        onChange={(event) =>
+                          updateTavernScriptTarget(selectedTavernScriptTarget, {
+                            info: event.target.value,
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+
+                  <div className="tavern-script-toggle-grid">
+                    <label className="provider-thinking-toggle active">
+                      <input
+                        type="checkbox"
+                        checked={selectedTavernScriptTarget.script.enabled}
+                        onChange={(event) =>
+                          updateTavernScriptTarget(selectedTavernScriptTarget, {
+                            enabled: event.target.checked,
+                          })
+                        }
+                      />
+                      启用脚本
+                    </label>
+                    <label className="provider-thinking-toggle active">
+                      <input
+                        type="checkbox"
+                        checked={selectedTavernScriptTarget.script.autoRun}
+                        onChange={(event) =>
+                          updateTavernScriptTarget(selectedTavernScriptTarget, {
+                            autoRun: event.target.checked,
+                          })
+                        }
+                      />
+                      自动运行
+                    </label>
+                    <label className="provider-thinking-toggle active">
+                      <input
+                        type="checkbox"
+                        checked={selectedTavernScriptTarget.script.buttonEnabled}
+                        onChange={(event) =>
+                          updateTavernScriptTarget(selectedTavernScriptTarget, {
+                            buttonEnabled: event.target.checked,
+                          })
+                        }
+                      />
+                      显示脚本按钮
+                    </label>
+                  </div>
+
+                  <label className="field tavern-script-content-field">
+                    <span>脚本内容</span>
+                    <textarea
+                      value={selectedTavernScriptTarget.script.content}
+                      spellCheck={false}
+                      placeholder="支持酒馆助手原生 JavaScript 与远程 ES Module import"
+                      onChange={(event) =>
+                        updateTavernScriptTarget(selectedTavernScriptTarget, {
+                          content: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+
+                  <div className="tavern-script-editor-section">
+                    <div className="section-heading compact">
+                      <div>
+                        <h3>脚本按钮</h3>
+                        <p>可见按钮会显示在会话输入框上方，并触发脚本注册的按钮事件。</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="ghost-action"
+                        onClick={() =>
+                          updateTavernScriptTarget(selectedTavernScriptTarget, {
+                            buttons: [
+                              ...selectedTavernScriptTarget.script.buttons,
+                              {
+                                id: crypto.randomUUID(),
+                                name: `按钮 ${selectedTavernScriptTarget.script.buttons.length + 1}`,
+                                visible: true,
+                              },
+                            ],
+                          })
+                        }
+                      >
+                        <Plus size={14} />
+                        添加按钮
+                      </button>
+                    </div>
+                    <div className="tavern-script-button-editor-list">
+                      {selectedTavernScriptTarget.script.buttons.length === 0 ? (
+                        <div className="preset-empty-state">此脚本没有按钮。</div>
+                      ) : (
+                        selectedTavernScriptTarget.script.buttons.map((button) => (
+                          <div className="tavern-script-button-editor" key={button.id}>
+                            <input
+                              value={button.name}
+                              aria-label="按钮名称"
+                              onChange={(event) =>
+                                updateTavernScriptTarget(selectedTavernScriptTarget, {
+                                  buttons: selectedTavernScriptTarget.script.buttons.map((item) =>
+                                    item.id === button.id
+                                      ? { ...item, name: event.target.value }
+                                      : item,
+                                  ),
+                                })
+                              }
+                            />
+                            <label className="tool-toggle">
+                              <input
+                                type="checkbox"
+                                checked={button.visible}
+                                onChange={(event) =>
+                                  updateTavernScriptTarget(selectedTavernScriptTarget, {
+                                    buttons: selectedTavernScriptTarget.script.buttons.map((item) =>
+                                      item.id === button.id
+                                        ? { ...item, visible: event.target.checked }
+                                        : item,
+                                    ),
+                                  })
+                                }
+                              />
+                              <span>可见</span>
+                            </label>
+                            <button
+                              type="button"
+                              className="icon-button danger"
+                              title="删除按钮"
+                              onClick={() =>
+                                updateTavernScriptTarget(selectedTavernScriptTarget, {
+                                  buttons: selectedTavernScriptTarget.script.buttons.filter(
+                                    (item) => item.id !== button.id,
+                                  ),
+                                })
+                              }
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="tavern-script-data-section">
+                    <label className="field">
+                      <span>脚本数据（JSON）</span>
+                      <textarea
+                        value={tavernScriptDataDraft}
+                        spellCheck={false}
+                        onChange={(event) => setTavernScriptDataDraft(event.target.value)}
+                      />
+                    </label>
+                    <button type="button" className="ghost-action" onClick={saveTavernScriptData}>
+                      <Save size={14} />
+                      保存脚本数据
+                    </button>
+                  </div>
+
+                  <details className="tavern-script-log-panel">
+                    <summary>
+                      运行日志
+                      <span>{tavernRuntimeLogs.length} 条</span>
+                    </summary>
+                    <div className="tavern-script-log-list">
+                      {tavernRuntimeLogs.length === 0 ? (
+                        <p>当前还没有脚本运行日志。</p>
+                      ) : (
+                        [...tavernRuntimeLogs].reverse().map((log) => (
+                          <div className={`tavern-script-log ${log.level}`} key={log.id}>
+                            <span>
+                              {new Date(log.createdAt).toLocaleTimeString("zh-CN", {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                                second: "2-digit",
+                              })}
+                            </span>
+                            <strong>{log.scriptName}</strong>
+                            <p>{log.message}</p>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </details>
+
+                  <div className="tavern-script-security-note">
+                    <Braces size={16} />
+                    <span>
+                      酒馆脚本可以运行远程 JavaScript，并能读写当前会话消息和变量。请只启用来源可信的脚本。
+                    </span>
+                  </div>
+                </section>
+              ) : (
+                <section className="section-block preset-empty-state">
+                  没有可编辑的酒馆脚本，请新建或导入 JSON 文件。
+                </section>
+              )}
+            </div>
+          )}
+
           {settingsTab === "user" && (
             <section className="section-block user-profile-settings">
               <div className="section-heading compact">
@@ -15526,7 +16695,7 @@ export function App() {
                 <div>
                   <strong>{activeSessionRoleplayCard.name}</strong>
                   <span>
-                    私有世界书 {activeSessionRoleplayCard.characterBook?.entries.length ?? 0} 条 · 私有正则 {activeSessionRoleplayCard.regexScripts.length} 条
+                    私有世界书 {activeSessionRoleplayCard.characterBook?.entries.length ?? 0} 条 · 私有正则 {activeSessionRoleplayCard.regexScripts.length} 条 · 内置脚本 {activeSessionRoleplayCard.tavernScripts.length} 个
                   </span>
                 </div>
               </div>
@@ -15892,7 +17061,7 @@ export function App() {
                             </span>
                             <span className="chat-character-choice-meta">
                               <small>世界书 {card.characterBook?.entries.length ?? 0}</small>
-                              <small>正则 {card.regexScripts.length}</small>
+                              <small>正则 {card.regexScripts.length} · 脚本 {card.tavernScripts.length}</small>
                             </span>
                           </button>
                         ))}
@@ -16170,6 +17339,27 @@ export function App() {
             )}
           </div>
 
+          {tavernRuntimeButtons.length > 0 && (
+            <div className="chat-tavern-script-buttons" aria-label="酒馆脚本按钮">
+              <span className="chat-tavern-script-buttons-label">
+                <Play size={14} />
+                酒馆脚本
+              </span>
+              <div>
+                {tavernRuntimeButtons.map((button) => (
+                  <button
+                    type="button"
+                    title={`${button.scriptName} · ${button.name}`}
+                    key={`${button.scriptId}:${button.id}:${button.name}`}
+                    onClick={() => void triggerTavernScriptButton(button)}
+                  >
+                    {button.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           <section className="chat-composer">
             {chatStatus.message && (
               <p className={`chat-status ${chatStatus.status}`}>{chatStatus.message}</p>
@@ -16444,7 +17634,7 @@ export function App() {
                               </span>
                               <span>{card.name}</span>
                               <small>
-                                世界书 {card.characterBook?.entries.length ?? 0} · 正则 {card.regexScripts.length}
+                                世界书 {card.characterBook?.entries.length ?? 0} · 正则 {card.regexScripts.length} · 脚本 {card.tavernScripts.length}
                               </small>
                             </button>
                           ))
