@@ -1838,6 +1838,11 @@ summary:focus-visible {
   color: inherit;
 }
 
+.chat-personalized-italic {
+  font-style: italic;
+  font-synthesis: style;
+}
+
 .quote-style-enabled .chat-personalized-quote {
   color: var(--chat-quote-color, #E18A24);
 }
