@@ -6267,7 +6267,7 @@ export function App() {
     setChatPresets((current) => [...current, preset]);
     setActiveChatPresetId(preset.id);
     setSelectedChatPresetPromptId("");
-    setPresetImportState({ status: "success", message: "已创建新的空白预设。" });
+    setPresetImportState({ status: "idle", message: "" });
   };
 
   const duplicateChatPreset = () => {
@@ -6285,7 +6285,7 @@ export function App() {
     setChatPresets((current) => [...current, duplicate]);
     setActiveChatPresetId(duplicate.id);
     setSelectedChatPresetPromptId(duplicate.prompts[0]?.identifier ?? "");
-    setPresetImportState({ status: "success", message: "已另存为新的预设副本。" });
+    setPresetImportState({ status: "idle", message: "" });
   };
 
   const deleteChatPreset = () => {
@@ -6295,7 +6295,7 @@ export function App() {
     setChatPresets(remaining);
     setActiveChatPresetId(remaining[0].id);
     setSelectedChatPresetPromptId(remaining[0].prompts[0]?.identifier ?? "");
-    setPresetImportState({ status: "success", message: `已删除预设「${activeChatPreset.name}」。` });
+    setPresetImportState({ status: "idle", message: "" });
   };
 
   const importChatPresetFile = async (file?: File) => {
@@ -6308,11 +6308,7 @@ export function App() {
       setActiveChatPresetId(importedPreset.id);
       setSelectedChatPresetPromptId(importedPreset.prompts[0]?.identifier ?? "");
       setChatPresetEnabled(true);
-      const enabledCount = importedPreset.prompts.filter((prompt) => prompt.enabled).length;
-      setPresetImportState({
-        status: "success",
-        message: `已导入「${importedPreset.name}」：${importedPreset.prompts.length} 个顺序模块（启用 ${enabledCount} 个），${importedPreset.backupPrompts.length} 个备用模块；已设为当前会话预设。`,
-      });
+      setPresetImportState({ status: "idle", message: "" });
     } catch (error) {
       setPresetImportState({
         status: "error",
@@ -6431,10 +6427,6 @@ export function App() {
     chatPresetEnabled && activeChatPreset
       ? buildChatPresetRequestParameters(activeChatPreset)
       : null;
-  const effectiveChatStreamEnabled =
-    chatPresetEnabled && activeChatPreset
-      ? activeChatPreset.streamOpenAi
-      : chatStreamEnabled;
   const effectiveChatModelId = getEffectiveProviderModelId(chatProvider);
   const multiAgentModelsReady =
     multiAgentPersonas.length >= 2 &&
@@ -9326,7 +9318,7 @@ export function App() {
           getChatApiMessageReasoning(assistantMessage) || reasoning || assistantReasoning;
         assistantContent =
           getChatApiMessageText(assistantMessage).trim() || payload?.output_text?.trim() || "";
-      } else if (effectiveChatStreamEnabled && availableChatTools.length === 0) {
+      } else if (chatStreamEnabled && availableChatTools.length === 0) {
         setChatMessages((current) => [
           ...current,
           {
@@ -10026,7 +10018,7 @@ export function App() {
           getChatApiMessageReasoning(assistantMessage) || reasoning || assistantReasoning;
         assistantContent =
           getChatApiMessageText(assistantMessage).trim() || payload?.output_text?.trim() || "";
-      } else if (effectiveChatStreamEnabled && availableChatTools.length === 0) {
+      } else if (chatStreamEnabled && availableChatTools.length === 0) {
         setChatMessages((current) => [
           ...current,
           {
@@ -11799,8 +11791,8 @@ export function App() {
                   </button>
                 ))}
 
-                {presetImportState.message && (
-                  <p className={`provider-status ${presetImportState.status}`}>
+                {presetImportState.status === "error" && presetImportState.message && (
+                  <p className="provider-status error">
                     {presetImportState.message}
                   </p>
                 )}
@@ -11974,14 +11966,6 @@ export function App() {
                         />
                         合并连续 System 消息
                       </label>
-                      <label className={`provider-thinking-toggle ${activeChatPreset.streamOpenAi ? "active" : ""}`}>
-                        <input
-                          type="checkbox"
-                          checked={activeChatPreset.streamOpenAi}
-                          onChange={(event) => updateActiveChatPreset({ streamOpenAi: event.target.checked })}
-                        />
-                        使用流式输出
-                      </label>
                     </div>
                   </div>
 
@@ -12074,10 +12058,6 @@ export function App() {
                                 updateChatPresetPrompt(selectedChatPresetPrompt.identifier, { name: event.target.value })
                               }
                             />
-                          </label>
-                          <label className="field">
-                            <span>Identifier</span>
-                            <input value={selectedChatPresetPrompt.identifier} readOnly />
                           </label>
                           <div className="preset-prompt-fields-row">
                             <label className="field">
@@ -12920,16 +12900,10 @@ export function App() {
               <label className="tool-toggle">
                 <input
                   type="checkbox"
-                  checked={effectiveChatStreamEnabled}
-                  onChange={(event) => {
-                    if (chatPresetEnabled && activeChatPreset) {
-                      updateActiveChatPreset({ streamOpenAi: event.target.checked });
-                    } else {
-                      setChatStreamEnabled(event.target.checked);
-                    }
-                  }}
+                  checked={chatStreamEnabled}
+                  onChange={(event) => setChatStreamEnabled(event.target.checked)}
                 />
-                <span>流式输出{chatPresetEnabled && activeChatPreset ? "（预设）" : ""}</span>
+                <span>流式输出</span>
               </label>
               <label className="tool-toggle">
                 <input
