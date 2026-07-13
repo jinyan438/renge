@@ -1792,6 +1792,7 @@ const shellLanguages = new Set(["sh", "shell", "bash", "zsh", "cmd", "bat", "pow
 const htmlLanguages = new Set(["html", "htm", "xhtml"]);
 const HTML_PREVIEW_RESIZE_MESSAGE = "renge-html-preview-resize";
 const HTML_PREVIEW_VARIABLES_UPDATE_MESSAGE = "renge-html-preview-variables-update";
+const HYPNOOS_APPEND_OPERATION_MESSAGE = "HYPNOOS_APPEND_OPERATION";
 const HTML_PREVIEW_MAX_HEIGHT = 12000;
 const htmlPreviewStyle = [
   '<style data-renge-html-preview="true">',
@@ -6201,7 +6202,31 @@ export function App() {
         option?: unknown;
         variables?: unknown;
         updates?: unknown;
+        block?: unknown;
       };
+
+      if (payload.type === HYPNOOS_APPEND_OPERATION_MESSAGE) {
+        const sourceFrame = Array.from(htmlPreviewFrameRefs.current.values()).find(
+          (frame) => frame.contentWindow === event.source,
+        );
+        if (!sourceFrame || typeof payload.block !== "string") return;
+        const operationBlock = payload.block.trim();
+        if (!operationBlock) return;
+        setChatInput((current) => {
+          const base = current.replace(/\s*$/, "");
+          return base ? `${base}\n${operationBlock}` : operationBlock;
+        });
+        setChatStatus({ status: "success", message: "已将角色卡 APP 操作写入输入框。" });
+        window.requestAnimationFrame(() => {
+          const input = chatInputRef.current;
+          if (!input) return;
+          input.focus();
+          input.scrollIntoView({ behavior: "smooth", block: "center" });
+          input.setSelectionRange(input.value.length, input.value.length);
+        });
+        return;
+      }
+
       if (typeof payload.id !== "string") {
         return;
       }
