@@ -75,6 +75,17 @@ import {
   type ChatPreset,
   type ChatPresetPrompt,
 } from "./presetUtils";
+import {
+  buildWorldBookPrompt,
+  createWorldBook,
+  createWorldBookEntry,
+  importSillyTavernWorldBook,
+  loadWorldBooksFromStorage,
+  normalizeActiveWorldBookIds,
+  normalizeWorldBook,
+  type WorldBook,
+  type WorldBookEntry,
+} from "./worldbookUtils";
 import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryType } from "./types";
 
 const AVATAR_OUTPUT_SIZE = 512;
@@ -104,7 +115,7 @@ type TypeDragTarget = {
 };
 
 type AppView = "home" | "studio" | "settings" | "chat";
-type SettingsTab = "providers" | "prompts" | "presets" | "user" | "personalization" | "mcp" | "skills" | "device";
+type SettingsTab = "providers" | "prompts" | "presets" | "worldbooks" | "user" | "personalization" | "mcp" | "skills" | "device";
 type ProviderPullState = "idle" | "loading" | "success" | "error";
 type ChatGenerationState = "idle" | "running" | "stopping";
 type ChatMode = "ai" | "persona" | "multi";
@@ -281,6 +292,8 @@ type RengeAppData = {
   chatPresets?: ChatPreset[];
   activeChatPresetId?: string;
   chatPresetEnabled?: boolean;
+  worldBooks?: WorldBook[];
+  activeWorldBookIds?: string[];
   userProfile?: UserProfile;
   chatSender?: ChatSenderIdentity;
   chatMultiBubbleEnabled?: boolean;
@@ -476,6 +489,8 @@ const ACTIVE_SYSTEM_PROMPTS_STORAGE_KEY = "renge_active_system_prompts";
 const CHAT_PRESETS_STORAGE_KEY = "renge_chat_presets";
 const ACTIVE_CHAT_PRESET_STORAGE_KEY = "renge_active_chat_preset";
 const CHAT_PRESET_ENABLED_STORAGE_KEY = "renge_chat_preset_enabled";
+const WORLD_BOOKS_STORAGE_KEY = "renge_world_books";
+const ACTIVE_WORLD_BOOKS_STORAGE_KEY = "renge_active_world_books";
 const USER_PROFILE_STORAGE_KEY = "renge_user_profile";
 const CHAT_SENDER_STORAGE_KEY = "renge_chat_sender";
 const CHAT_MULTI_BUBBLE_STORAGE_KEY = "renge_chat_multi_bubble_enabled";
@@ -5466,6 +5481,27 @@ export function App() {
     status: ProviderPullState;
     message: string;
   }>({ status: "idle", message: "" });
+  const [worldBooks, setWorldBooks] = useState<WorldBook[]>(() =>
+    loadWorldBooksFromStorage(WORLD_BOOKS_STORAGE_KEY),
+  );
+  const [activeWorldBookIds, setActiveWorldBookIds] = useState<string[]>(() => {
+    try {
+      return normalizeActiveWorldBookIds(
+        JSON.parse(localStorage.getItem(ACTIVE_WORLD_BOOKS_STORAGE_KEY) ?? "[]"),
+        worldBooks,
+      );
+    } catch {
+      return [];
+    }
+  });
+  const [selectedWorldBookId, setSelectedWorldBookId] = useState(
+    () => worldBooks[0]?.id ?? "",
+  );
+  const [selectedWorldBookEntryId, setSelectedWorldBookEntryId] = useState("");
+  const [worldBookImportState, setWorldBookImportState] = useState<{
+    status: ProviderPullState;
+    message: string;
+  }>({ status: "idle", message: "" });
   const [userProfile, setUserProfile] = useState<UserProfile>(loadUserProfile);
   const [providerPullState, setProviderPullState] = useState<{
     status: ProviderPullState;
@@ -5580,6 +5616,7 @@ export function App() {
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const userAvatarInputRef = useRef<HTMLInputElement>(null);
   const presetImportInputRef = useRef<HTMLInputElement>(null);
+  const worldBookImportInputRef = useRef<HTMLInputElement>(null);
   const mcpImportInputRef = useRef<HTMLInputElement>(null);
   const skillZipInputRef = useRef<HTMLInputElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
@@ -5734,6 +5771,9 @@ export function App() {
         persistentData?.chatPresets && persistentData.chatPresets.length > 0
           ? persistentData.chatPresets.map((preset, index) => normalizeChatPreset(preset, index))
           : loadChatPresetsFromStorage(CHAT_PRESETS_STORAGE_KEY);
+      const normalizedWorldBooks = Array.isArray(persistentData?.worldBooks)
+        ? persistentData.worldBooks.map(normalizeWorldBook)
+        : loadWorldBooksFromStorage(WORLD_BOOKS_STORAGE_KEY);
       const normalizedUserProfile = persistentData?.userProfile
         ? normalizeUserProfile(persistentData.userProfile)
         : loadUserProfile();
@@ -5860,6 +5900,20 @@ export function App() {
         typeof persistentData?.chatPresetEnabled === "boolean"
           ? persistentData.chatPresetEnabled
           : localStorage.getItem(CHAT_PRESET_ENABLED_STORAGE_KEY) === "true";
+      let storedActiveWorldBookIds: unknown = [];
+      try {
+        storedActiveWorldBookIds = JSON.parse(
+          localStorage.getItem(ACTIVE_WORLD_BOOKS_STORAGE_KEY) ?? "[]",
+        );
+      } catch {
+        storedActiveWorldBookIds = [];
+      }
+      const nextActiveWorldBookIds = normalizeActiveWorldBookIds(
+        Array.isArray(persistentData?.activeWorldBookIds)
+          ? persistentData.activeWorldBookIds
+          : storedActiveWorldBookIds,
+        normalizedWorldBooks,
+      );
 
       setPersonas(normalizedPersonas);
       setActivePersonaId(nextActivePersonaId);
@@ -5871,6 +5925,10 @@ export function App() {
       setChatPresets(normalizedChatPresets);
       setActiveChatPresetId(nextActiveChatPresetId);
       setChatPresetEnabled(nextChatPresetEnabled);
+      setWorldBooks(normalizedWorldBooks);
+      setActiveWorldBookIds(nextActiveWorldBookIds);
+      setSelectedWorldBookId(normalizedWorldBooks[0]?.id ?? "");
+      setSelectedWorldBookEntryId(normalizedWorldBooks[0]?.entries[0]?.id ?? "");
       setUserProfile(normalizedUserProfile);
       setChatSender(nextChatSender);
       setChatMode(nextChatMode);
@@ -5940,6 +5998,8 @@ export function App() {
     localStorage.setItem(CHAT_PRESETS_STORAGE_KEY, JSON.stringify(chatPresets));
     localStorage.setItem(ACTIVE_CHAT_PRESET_STORAGE_KEY, activeChatPresetId);
     localStorage.setItem(CHAT_PRESET_ENABLED_STORAGE_KEY, String(chatPresetEnabled));
+    localStorage.setItem(WORLD_BOOKS_STORAGE_KEY, JSON.stringify(worldBooks));
+    localStorage.setItem(ACTIVE_WORLD_BOOKS_STORAGE_KEY, JSON.stringify(activeWorldBookIds));
     localStorage.setItem(USER_PROFILE_STORAGE_KEY, JSON.stringify(userProfile));
     localStorage.setItem(CHAT_SENDER_STORAGE_KEY, JSON.stringify(chatSender));
     localStorage.setItem(CHAT_MULTI_BUBBLE_STORAGE_KEY, String(chatMultiBubbleEnabled));
@@ -5983,6 +6043,8 @@ export function App() {
       chatPresets,
       activeChatPresetId,
       chatPresetEnabled,
+      worldBooks,
+      activeWorldBookIds,
       userProfile,
       chatSender,
       chatMultiBubbleEnabled,
@@ -5995,7 +6057,7 @@ export function App() {
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     });
-  }, [activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, appDataLoaded, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, skills, systemPrompts, userProfile]);
+  }, [activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataLoaded, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, skills, systemPrompts, userProfile, worldBooks]);
 
   useEffect(() => {
     if (!appDataLoaded) return;
@@ -6250,6 +6312,141 @@ export function App() {
       setSelectedChatPresetPromptId(activeChatPreset.prompts[0]?.identifier ?? "");
     }
   }, [activeChatPreset, selectedChatPresetPromptId]);
+
+  const selectedWorldBook = useMemo(
+    () =>
+      worldBooks.find((worldBook) => worldBook.id === selectedWorldBookId) ??
+      worldBooks[0],
+    [selectedWorldBookId, worldBooks],
+  );
+  const selectedWorldBookEntry = useMemo(
+    () =>
+      selectedWorldBook?.entries.find((entry) => entry.id === selectedWorldBookEntryId) ??
+      selectedWorldBook?.entries[0],
+    [selectedWorldBook, selectedWorldBookEntryId],
+  );
+  const enabledWorldBookEntryCount = useMemo(
+    () =>
+      worldBooks
+        .filter((worldBook) => activeWorldBookIds.includes(worldBook.id))
+        .reduce(
+          (total, worldBook) =>
+            total + worldBook.entries.filter((entry) => entry.enabled).length,
+          0,
+        ),
+    [activeWorldBookIds, worldBooks],
+  );
+
+  useEffect(() => {
+    if (!selectedWorldBook) {
+      setSelectedWorldBookId("");
+      setSelectedWorldBookEntryId("");
+      return;
+    }
+    if (selectedWorldBook.id !== selectedWorldBookId) {
+      setSelectedWorldBookId(selectedWorldBook.id);
+    }
+    if (!selectedWorldBook.entries.some((entry) => entry.id === selectedWorldBookEntryId)) {
+      setSelectedWorldBookEntryId(selectedWorldBook.entries[0]?.id ?? "");
+    }
+  }, [selectedWorldBook, selectedWorldBookEntryId, selectedWorldBookId]);
+
+  const updateSelectedWorldBook = (patch: Partial<WorldBook>) => {
+    if (!selectedWorldBook) return;
+    setWorldBooks((current) =>
+      current.map((worldBook) =>
+        worldBook.id === selectedWorldBook.id
+          ? { ...worldBook, ...patch, updatedAt: new Date().toISOString() }
+          : worldBook,
+      ),
+    );
+  };
+
+  const addWorldBook = () => {
+    const worldBook = createWorldBook(`新世界书 ${worldBooks.length + 1}`);
+    setWorldBooks((current) => [...current, worldBook]);
+    setSelectedWorldBookId(worldBook.id);
+    setSelectedWorldBookEntryId("");
+    setWorldBookImportState({ status: "idle", message: "" });
+  };
+
+  const deleteSelectedWorldBook = () => {
+    if (!selectedWorldBook) return;
+    const remaining = worldBooks.filter((worldBook) => worldBook.id !== selectedWorldBook.id);
+    setWorldBooks(remaining);
+    setActiveWorldBookIds((current) =>
+      current.filter((worldBookId) => worldBookId !== selectedWorldBook.id),
+    );
+    setSelectedWorldBookId(remaining[0]?.id ?? "");
+    setSelectedWorldBookEntryId(remaining[0]?.entries[0]?.id ?? "");
+  };
+
+  const toggleWorldBook = (worldBookId: string) => {
+    setActiveWorldBookIds((current) =>
+      current.includes(worldBookId)
+        ? current.filter((currentId) => currentId !== worldBookId)
+        : [...current, worldBookId],
+    );
+  };
+
+  const importWorldBookFile = async (file?: File) => {
+    if (!file) return;
+    setWorldBookImportState({ status: "loading", message: "正在解析酒馆原生世界书..." });
+    try {
+      const importedWorldBook = importSillyTavernWorldBook(
+        JSON.parse(await file.text()) as unknown,
+        file.name,
+      );
+      setWorldBooks((current) => [...current, importedWorldBook]);
+      setActiveWorldBookIds((current) => [...current, importedWorldBook.id]);
+      setSelectedWorldBookId(importedWorldBook.id);
+      setSelectedWorldBookEntryId(importedWorldBook.entries[0]?.id ?? "");
+      setWorldBookImportState({ status: "idle", message: "" });
+    } catch (error) {
+      setWorldBookImportState({
+        status: "error",
+        message:
+          error instanceof Error
+            ? `导入失败：${error.message}`
+            : "导入失败：世界书格式无效。",
+      });
+    } finally {
+      if (worldBookImportInputRef.current) worldBookImportInputRef.current.value = "";
+    }
+  };
+
+  const addWorldBookEntry = () => {
+    if (!selectedWorldBook) return;
+    const entry = createWorldBookEntry(selectedWorldBook.entries.length);
+    updateSelectedWorldBook({ entries: [...selectedWorldBook.entries, entry] });
+    setSelectedWorldBookEntryId(entry.id);
+  };
+
+  const updateWorldBookEntry = (entryId: string, patch: Partial<WorldBookEntry>) => {
+    if (!selectedWorldBook) return;
+    updateSelectedWorldBook({
+      entries: selectedWorldBook.entries.map((entry) =>
+        entry.id === entryId ? { ...entry, ...patch } : entry,
+      ),
+    });
+  };
+
+  const deleteWorldBookEntry = (entryId: string) => {
+    if (!selectedWorldBook) return;
+    const entries = selectedWorldBook.entries.filter((entry) => entry.id !== entryId);
+    updateSelectedWorldBook({ entries });
+    setSelectedWorldBookEntryId(entries[0]?.id ?? "");
+  };
+
+  const moveWorldBookEntry = (entryId: string, direction: -1 | 1) => {
+    if (!selectedWorldBook) return;
+    const index = selectedWorldBook.entries.findIndex((entry) => entry.id === entryId);
+    const targetIndex = index + direction;
+    if (index < 0 || targetIndex < 0 || targetIndex >= selectedWorldBook.entries.length) return;
+    const entries = [...selectedWorldBook.entries];
+    [entries[index], entries[targetIndex]] = [entries[targetIndex], entries[index]];
+    updateSelectedWorldBook({ entries });
+  };
 
   const updateActiveChatPreset = (patch: Partial<ChatPreset>) => {
     if (!activeChatPreset) return;
@@ -9176,6 +9373,15 @@ export function App() {
       const heartbeatSystemPrompt = options.exposeHeartbeatTools
         ? buildHeartbeatSystemPrompt(activeChatSession?.heartbeat)
         : "";
+      const worldBookSystemPrompt = buildWorldBookPrompt(
+        worldBooks,
+        activeWorldBookIds,
+        messagesForApi.map((message) => ({ role: message.role, content: message.content })),
+        {
+          userName: userProfile.nickname,
+          characterName: responderPersona.name,
+        },
+      );
       const systemPrompt = [
         selectedSystemPrompt,
         skillSystemPrompt,
@@ -9184,6 +9390,7 @@ export function App() {
         personaMemoryPrompt,
         chatSenderContextPrompt,
         multiAgentSystemPrompt,
+        worldBookSystemPrompt,
         toolSystemPrompt,
         mcpToolsSystemPrompt,
         heartbeatSystemPrompt,
@@ -9880,6 +10087,15 @@ export function App() {
       const heartbeatSystemPrompt = exposeHeartbeatTools
         ? buildHeartbeatSystemPrompt(activeChatSession?.heartbeat)
         : "";
+      const worldBookSystemPrompt = buildWorldBookPrompt(
+        worldBooks,
+        activeWorldBookIds,
+        messagesForApi.map((message) => ({ role: message.role, content: message.content })),
+        {
+          userName: userProfile.nickname,
+          characterName: chatPersona.name,
+        },
+      );
       const systemPrompt = [
         selectedSystemPrompt,
         skillSystemPrompt,
@@ -9887,6 +10103,7 @@ export function App() {
         personaSystemPrompt,
         personaMemoryPrompt,
         chatSenderContextPrompt,
+        worldBookSystemPrompt,
         toolSystemPrompt,
         mcpToolsSystemPrompt,
         heartbeatSystemPrompt,
@@ -11296,6 +11513,17 @@ export function App() {
           </button>
           <button
             type="button"
+            className={`settings-tab ${settingsTab === "worldbooks" ? "active" : ""}`}
+            onClick={() => {
+              setSettingsTab("worldbooks");
+              closeMobileSidebar();
+            }}
+          >
+            <Bookmark size={16} />
+            世界书
+          </button>
+          <button
+            type="button"
             className={`settings-tab ${settingsTab === "user" ? "active" : ""}`}
             onClick={() => {
               setSettingsTab("user");
@@ -11369,15 +11597,17 @@ export function App() {
                     ? "提示词"
                     : settingsTab === "presets"
                       ? "预设"
-                      : settingsTab === "user"
-                        ? "用户资料"
-                        : settingsTab === "personalization"
-                          ? "个性化"
-                          : settingsTab === "mcp"
-                            ? "MCP 服务器"
-                            : settingsTab === "skills"
-                              ? "Skills"
-                              : "手机端"}
+                      : settingsTab === "worldbooks"
+                        ? "世界书"
+                        : settingsTab === "user"
+                          ? "用户资料"
+                          : settingsTab === "personalization"
+                            ? "个性化"
+                            : settingsTab === "mcp"
+                              ? "MCP 服务器"
+                              : settingsTab === "skills"
+                                ? "Skills"
+                                : "手机端"}
               </h1>
             </div>
             {settingsTab === "providers" && (
@@ -11422,6 +11652,29 @@ export function App() {
                 <button type="button" className="small-action" onClick={addChatPreset}>
                   <Plus size={16} />
                   新建预设
+                </button>
+              </div>
+            )}
+            {settingsTab === "worldbooks" && (
+              <div className="topbar-actions">
+                <button
+                  type="button"
+                  className="ghost-action"
+                  onClick={() => worldBookImportInputRef.current?.click()}
+                >
+                  <Upload size={16} />
+                  导入酒馆世界书
+                </button>
+                <input
+                  ref={worldBookImportInputRef}
+                  className="hidden-input"
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={(event) => void importWorldBookFile(event.target.files?.[0])}
+                />
+                <button type="button" className="small-action" onClick={addWorldBook}>
+                  <Plus size={16} />
+                  新建世界书
                 </button>
               </div>
             )}
@@ -12146,6 +12399,426 @@ export function App() {
               ) : (
                 <section className="section-block preset-empty-state">
                   没有可编辑的预设，请新建或导入酒馆 JSON 预设。
+                </section>
+              )}
+            </div>
+          )}
+
+          {settingsTab === "worldbooks" && (
+            <div className="settings-grid worldbook-settings-grid">
+              <aside className="worldbook-list-panel section-block">
+                <div className="section-heading compact">
+                  <div>
+                    <h2>全局世界书</h2>
+                    <p>勾选的世界书会共同作用于普通、人格和多 Agent 会话。</p>
+                  </div>
+                </div>
+                <div className="worldbook-active-summary">
+                  <strong>{activeWorldBookIds.length}</strong>
+                  <span>本已启用 · {enabledWorldBookEntryCount} 个可用条目</span>
+                </div>
+                {worldBookImportState.status === "error" && (
+                  <div className="provider-status error">{worldBookImportState.message}</div>
+                )}
+                <div className="worldbook-list">
+                  {worldBooks.length === 0 ? (
+                    <div className="preset-empty-state">
+                      尚未添加世界书。可导入酒馆原生 JSON，或新建一本世界书。
+                    </div>
+                  ) : (
+                    worldBooks.map((worldBook) => {
+                      const active = activeWorldBookIds.includes(worldBook.id);
+                      return (
+                        <div
+                          className={`worldbook-list-item ${
+                            worldBook.id === selectedWorldBook?.id ? "selected" : ""
+                          } ${active ? "enabled" : ""}`}
+                          key={worldBook.id}
+                        >
+                          <input
+                            type="checkbox"
+                            aria-label={`在会话中启用 ${worldBook.name}`}
+                            checked={active}
+                            onChange={() => toggleWorldBook(worldBook.id)}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedWorldBookId(worldBook.id);
+                              setSelectedWorldBookEntryId(worldBook.entries[0]?.id ?? "");
+                            }}
+                          >
+                            <strong>{worldBook.name}</strong>
+                            <span>
+                              {worldBook.entries.filter((entry) => entry.enabled).length}/
+                              {worldBook.entries.length} 个条目启用
+                            </span>
+                          </button>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </aside>
+
+              {selectedWorldBook ? (
+                <section className="worldbook-editor section-block">
+                  <div className="worldbook-editor-heading">
+                    <div>
+                      <h2>世界书编辑器</h2>
+                      <p>
+                        {selectedWorldBook.sourceFormat === "sillytavern"
+                          ? `酒馆原生世界书${selectedWorldBook.sourceFileName ? ` · ${selectedWorldBook.sourceFileName}` : ""}`
+                          : "Renge 世界书"}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="danger-action"
+                      onClick={deleteSelectedWorldBook}
+                    >
+                      <Trash2 size={15} />
+                      删除世界书
+                    </button>
+                  </div>
+
+                  <div className="worldbook-book-fields">
+                    <label className="field">
+                      <span>世界书名称</span>
+                      <input
+                        value={selectedWorldBook.name}
+                        onChange={(event) => updateSelectedWorldBook({ name: event.target.value })}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>描述</span>
+                      <textarea
+                        value={selectedWorldBook.description}
+                        placeholder="说明这本世界书的用途（可选）"
+                        onChange={(event) =>
+                          updateSelectedWorldBook({ description: event.target.value })
+                        }
+                      />
+                    </label>
+                  </div>
+
+                  <div className="worldbook-entry-heading">
+                    <div>
+                      <h3>条目</h3>
+                      <p>常驻条目始终生效；其他条目在最近对话命中关键词后生效。</p>
+                    </div>
+                    <button type="button" className="small-action" onClick={addWorldBookEntry}>
+                      <Plus size={15} />
+                      添加条目
+                    </button>
+                  </div>
+
+                  <div className="worldbook-entry-workspace">
+                    <div className="worldbook-entry-list">
+                      {selectedWorldBook.entries.length === 0 ? (
+                        <div className="preset-empty-state">当前世界书没有条目。</div>
+                      ) : (
+                        selectedWorldBook.entries.map((entry, index) => (
+                          <div
+                            className={`worldbook-entry-item ${
+                              entry.id === selectedWorldBookEntry?.id ? "active" : ""
+                            } ${entry.enabled ? "" : "disabled"}`}
+                            key={entry.id}
+                          >
+                            <input
+                              type="checkbox"
+                              aria-label={`启用 ${entry.comment || `条目 ${index + 1}`}`}
+                              checked={entry.enabled}
+                              onChange={(event) =>
+                                updateWorldBookEntry(entry.id, { enabled: event.target.checked })
+                              }
+                            />
+                            <button
+                              type="button"
+                              className="worldbook-entry-select"
+                              onClick={() => setSelectedWorldBookEntryId(entry.id)}
+                            >
+                              <strong>{entry.comment || `条目 ${index + 1}`}</strong>
+                              <span>
+                                {entry.constant
+                                  ? "常驻"
+                                  : entry.keys.length > 0
+                                    ? entry.keys.join("、")
+                                    : "无触发词"}
+                              </span>
+                            </button>
+                            <div className="worldbook-entry-order-actions">
+                              <button
+                                type="button"
+                                title="上移"
+                                disabled={index === 0}
+                                onClick={() => moveWorldBookEntry(entry.id, -1)}
+                              >
+                                ↑
+                              </button>
+                              <button
+                                type="button"
+                                title="下移"
+                                disabled={index === selectedWorldBook.entries.length - 1}
+                                onClick={() => moveWorldBookEntry(entry.id, 1)}
+                              >
+                                ↓
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+
+                    {selectedWorldBookEntry ? (
+                      <div className="worldbook-entry-editor">
+                        <div className="worldbook-entry-editor-title">
+                          <strong>编辑条目</strong>
+                          <button
+                            type="button"
+                            className="danger-action"
+                            onClick={() => deleteWorldBookEntry(selectedWorldBookEntry.id)}
+                          >
+                            <Trash2 size={14} />
+                            删除条目
+                          </button>
+                        </div>
+                        <label className="field">
+                          <span>条目名称</span>
+                          <input
+                            value={selectedWorldBookEntry.comment}
+                            onChange={(event) =>
+                              updateWorldBookEntry(selectedWorldBookEntry.id, {
+                                comment: event.target.value,
+                              })
+                            }
+                          />
+                        </label>
+                        <div className="worldbook-key-fields">
+                          <label className="field">
+                            <span>主关键词</span>
+                            <textarea
+                              value={selectedWorldBookEntry.keys.join("\n")}
+                              placeholder="每行一个，或使用逗号分隔"
+                              onChange={(event) =>
+                                updateWorldBookEntry(selectedWorldBookEntry.id, {
+                                  keys: event.target.value
+                                    .split(/[\n,，]+/)
+                                    .map((value) => value.trim())
+                                    .filter(Boolean),
+                                })
+                              }
+                            />
+                          </label>
+                          <label className="field">
+                            <span>次关键词</span>
+                            <textarea
+                              value={selectedWorldBookEntry.secondaryKeys.join("\n")}
+                              placeholder="选择性匹配时使用"
+                              onChange={(event) =>
+                                updateWorldBookEntry(selectedWorldBookEntry.id, {
+                                  secondaryKeys: event.target.value
+                                    .split(/[\n,，]+/)
+                                    .map((value) => value.trim())
+                                    .filter(Boolean),
+                                })
+                              }
+                            />
+                          </label>
+                        </div>
+                        <label className="field worldbook-content-field">
+                          <span>条目内容</span>
+                          <textarea
+                            value={selectedWorldBookEntry.content}
+                            placeholder="命中后注入会话的设定、规则或背景内容"
+                            onChange={(event) =>
+                              updateWorldBookEntry(selectedWorldBookEntry.id, {
+                                content: event.target.value,
+                              })
+                            }
+                          />
+                        </label>
+
+                        <div className="worldbook-toggle-grid">
+                          <label className={`provider-thinking-toggle ${selectedWorldBookEntry.constant ? "active" : ""}`}>
+                            <input
+                              type="checkbox"
+                              checked={selectedWorldBookEntry.constant}
+                              onChange={(event) =>
+                                updateWorldBookEntry(selectedWorldBookEntry.id, {
+                                  constant: event.target.checked,
+                                })
+                              }
+                            />
+                            常驻条目
+                          </label>
+                          <label className={`provider-thinking-toggle ${selectedWorldBookEntry.selective ? "active" : ""}`}>
+                            <input
+                              type="checkbox"
+                              checked={selectedWorldBookEntry.selective}
+                              onChange={(event) =>
+                                updateWorldBookEntry(selectedWorldBookEntry.id, {
+                                  selective: event.target.checked,
+                                })
+                              }
+                            />
+                            选择性匹配
+                          </label>
+                          <label className={`provider-thinking-toggle ${selectedWorldBookEntry.caseSensitive ? "active" : ""}`}>
+                            <input
+                              type="checkbox"
+                              checked={selectedWorldBookEntry.caseSensitive}
+                              onChange={(event) =>
+                                updateWorldBookEntry(selectedWorldBookEntry.id, {
+                                  caseSensitive: event.target.checked,
+                                })
+                              }
+                            />
+                            区分大小写
+                          </label>
+                          <label className={`provider-thinking-toggle ${selectedWorldBookEntry.matchWholeWords ? "active" : ""}`}>
+                            <input
+                              type="checkbox"
+                              checked={selectedWorldBookEntry.matchWholeWords}
+                              onChange={(event) =>
+                                updateWorldBookEntry(selectedWorldBookEntry.id, {
+                                  matchWholeWords: event.target.checked,
+                                })
+                              }
+                            />
+                            完整词匹配
+                          </label>
+                          <label className={`provider-thinking-toggle ${selectedWorldBookEntry.useRegex ? "active" : ""}`}>
+                            <input
+                              type="checkbox"
+                              checked={selectedWorldBookEntry.useRegex}
+                              onChange={(event) =>
+                                updateWorldBookEntry(selectedWorldBookEntry.id, {
+                                  useRegex: event.target.checked,
+                                })
+                              }
+                            />
+                            正则匹配
+                          </label>
+                          <label className={`provider-thinking-toggle ${selectedWorldBookEntry.useProbability ? "active" : ""}`}>
+                            <input
+                              type="checkbox"
+                              checked={selectedWorldBookEntry.useProbability}
+                              onChange={(event) =>
+                                updateWorldBookEntry(selectedWorldBookEntry.id, {
+                                  useProbability: event.target.checked,
+                                })
+                              }
+                            />
+                            使用触发概率
+                          </label>
+                        </div>
+
+                        <div className="worldbook-advanced-fields">
+                          <label className="field">
+                            <span>次关键词逻辑</span>
+                            <select
+                              value={selectedWorldBookEntry.selectiveLogic}
+                              disabled={!selectedWorldBookEntry.selective}
+                              onChange={(event) =>
+                                updateWorldBookEntry(selectedWorldBookEntry.id, {
+                                  selectiveLogic: Number(event.target.value),
+                                })
+                              }
+                            >
+                              <option value={0}>任一命中</option>
+                              <option value={3}>全部命中</option>
+                              <option value={2}>全部不命中</option>
+                              <option value={1}>非全部命中</option>
+                            </select>
+                          </label>
+                          <label className="field">
+                            <span>注入位置</span>
+                            <select
+                              value={selectedWorldBookEntry.position}
+                              onChange={(event) =>
+                                updateWorldBookEntry(selectedWorldBookEntry.id, {
+                                  position: event.target.value as WorldBookEntry["position"],
+                                })
+                              }
+                            >
+                              <option value="before_char">角色定义之前</option>
+                              <option value="after_char">角色定义之后</option>
+                              <option value="before_an">作者注释之前</option>
+                              <option value="after_an">作者注释之后</option>
+                              <option value="at_depth">指定聊天深度</option>
+                            </select>
+                          </label>
+                          <label className="field">
+                            <span>注入深度</span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={selectedWorldBookEntry.depth}
+                              onChange={(event) =>
+                                updateWorldBookEntry(selectedWorldBookEntry.id, {
+                                  depth: Math.max(0, Number(event.target.value)),
+                                })
+                              }
+                            />
+                          </label>
+                          <label className="field">
+                            <span>扫描深度</span>
+                            <input
+                              type="number"
+                              min="1"
+                              step="1"
+                              value={selectedWorldBookEntry.scanDepth ?? ""}
+                              placeholder="默认 8"
+                              onChange={(event) =>
+                                updateWorldBookEntry(selectedWorldBookEntry.id, {
+                                  scanDepth: event.target.value
+                                    ? Math.max(1, Number(event.target.value))
+                                    : null,
+                                })
+                              }
+                            />
+                          </label>
+                          <label className="field">
+                            <span>排序</span>
+                            <input
+                              type="number"
+                              step="1"
+                              value={selectedWorldBookEntry.order}
+                              onChange={(event) =>
+                                updateWorldBookEntry(selectedWorldBookEntry.id, {
+                                  order: Number(event.target.value),
+                                })
+                              }
+                            />
+                          </label>
+                          <label className="field">
+                            <span>触发概率（%）</span>
+                            <input
+                              type="number"
+                              min="0"
+                              max="100"
+                              step="1"
+                              disabled={!selectedWorldBookEntry.useProbability}
+                              value={selectedWorldBookEntry.probability}
+                              onChange={(event) =>
+                                updateWorldBookEntry(selectedWorldBookEntry.id, {
+                                  probability: Math.min(100, Math.max(0, Number(event.target.value))),
+                                })
+                              }
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="preset-empty-state">选择一个条目后可编辑匹配规则和内容。</div>
+                    )}
+                  </div>
+                </section>
+              ) : (
+                <section className="section-block preset-empty-state">
+                  没有可编辑的世界书，请新建或导入酒馆 JSON 世界书。
                 </section>
               )}
             </div>
@@ -12896,6 +13569,28 @@ export function App() {
                 ))}
               </select>
             </label>
+            <details className="chat-worldbook-control">
+              <summary>
+                <span>世界书</span>
+                <strong>{activeWorldBookIds.length > 0 ? `${activeWorldBookIds.length} 本已启用` : "未启用"}</strong>
+              </summary>
+              <div className="chat-worldbook-options">
+                {worldBooks.length === 0 ? (
+                  <p>请先在设置的“世界书”中导入或新建。</p>
+                ) : (
+                  worldBooks.map((worldBook) => (
+                    <label className="tool-toggle" key={worldBook.id}>
+                      <input
+                        type="checkbox"
+                        checked={activeWorldBookIds.includes(worldBook.id)}
+                        onChange={() => toggleWorldBook(worldBook.id)}
+                      />
+                      <span>{worldBook.name}</span>
+                    </label>
+                  ))
+                )}
+              </div>
+            </details>
             <div className="chat-output-options">
               <label className="tool-toggle">
                 <input
