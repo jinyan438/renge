@@ -7925,18 +7925,24 @@ export function App() {
         if (tavernScriptRuntimeRef.current === runtime) setTavernRuntimeStatus(status);
       },
       onNotice: (level, message, title) => {
-        if (level !== "error" || tavernScriptRuntimeRef.current !== runtime) return;
+        if (tavernScriptRuntimeRef.current !== runtime) return;
+        const logLevel =
+          level === "warning" ? "warn" : level === "success" ? "info" : level;
         setTavernRuntimeLogs((current) => [
           ...current.slice(-119),
           {
             id: crypto.randomUUID(),
-            level: "error",
+            level: logLevel,
             scriptId: "runtime",
             scriptName: title || "脚本通知",
             message,
             createdAt: new Date().toISOString(),
           },
         ]);
+        setChatStatus({
+          status: level === "error" || level === "warning" ? "error" : "success",
+          message: title ? `${title}：${message}` : message,
+        });
       },
     });
     tavernScriptRuntimeRef.current = runtime;
@@ -7980,8 +7986,18 @@ export function App() {
       setChatStatus({ status: "error", message: "酒馆脚本运行环境尚未就绪。" });
       return;
     }
+    const pendingMessage = `正在执行酒馆脚本按钮「${button.name}」...`;
+    setChatStatus({ status: "loading", message: pendingMessage });
     try {
       await runtime.triggerButton(button);
+      setChatStatus((current) =>
+        current.status === "loading" && current.message === pendingMessage
+          ? {
+              status: "success",
+              message: `酒馆脚本按钮「${button.name}」已执行。`,
+            }
+          : current,
+      );
     } catch (error) {
       setChatStatus({
         status: "error",
@@ -17351,6 +17367,9 @@ export function App() {
                     type="button"
                     title={`${button.scriptName} · ${button.name}`}
                     key={`${button.scriptId}:${button.id}:${button.name}`}
+                    disabled={
+                      tavernRuntimeStatus.state !== "ready" || chatStatus.status === "loading"
+                    }
                     onClick={() => void triggerTavernScriptButton(button)}
                   >
                     {button.name}

@@ -657,6 +657,7 @@ export class TavernScriptRuntime {
         const message = messages[index];
         if (!message) return;
         if (typeof update.message === "string") message.content = update.message;
+        else if (typeof update.content === "string") message.content = update.content;
         if (update.role === "user" || update.role === "assistant") message.role = update.role;
         if (isRecord(update.data)) message.variables = cloneValue(update.data);
         if (isRecord(update.extra)) message.extra = cloneValue(update.extra);
@@ -899,8 +900,19 @@ export class TavernScriptRuntime {
     win.tavernHelper = api;
     win.tavernHelperAPI = api;
     win.th = api;
-    win.setChatMessage = async (messageId: unknown, content: unknown) =>
-      setChatMessages([{ message_id: messageId, message: String(content ?? "") }]);
+    win.setChatMessage = async (messageOrId: unknown, idOrContent: unknown) => {
+      if (isRecord(messageOrId)) {
+        return await setChatMessages([
+          {
+            ...cloneValue(messageOrId),
+            message_id: idOrContent,
+          },
+        ]);
+      }
+      return await setChatMessages([
+        { message_id: messageOrId, message: String(idOrContent ?? "") },
+      ]);
+    };
     win.getvar = (path: unknown, fallback?: unknown) =>
       getPath(getVariables(), String(path), fallback);
     win.setvar = async (path: unknown, value: unknown) => {
