@@ -6417,6 +6417,16 @@ export function App() {
         .includes(query),
     );
   }, [characterCards, characterSearch]);
+  const roleplayPickerCards = useMemo(
+    () =>
+      [...characterCards].sort(
+        (left, right) =>
+          (Date.parse(right.updatedAt) || 0) -
+            (Date.parse(left.updatedAt) || 0) ||
+          left.name.localeCompare(right.name, "zh-CN"),
+      ),
+    [characterCards],
+  );
   const multiAgentPersonas = useMemo(
     () =>
       multiAgentPersonaIds
@@ -7290,32 +7300,99 @@ export function App() {
     () => scopedRoleplayCard,
     [scopedRoleplayCard],
   );
-  const startRoleplayWithCharacter = (card: CharacterCard, greetingIndex = 0) => {
+  const buildRoleplaySession = (
+    session: ChatSession,
+    card: CharacterCard,
+    greetingIndex = 0,
+  ) => {
     const greeting = createRoleplayGreetingMessage(
       card,
       userProfile.nickname.trim() || "用户",
       greetingIndex,
     );
-    const session = createChatSession(
-      workspaceInfo.key,
-      workspaceInfo.name,
-      workspaceInfo.path,
-      { characterCardId: card.id, greetingIndex },
-    );
-    session.title = `角色：${card.name}`;
-    session.messages = greeting ? [greeting] : [];
+    return {
+      ...session,
+      title: `角色：${card.name}`,
+      messages: greeting ? [greeting] : [],
+      roleplayCharacterCardId: card.id,
+      roleplayGreetingIndex: greetingIndex,
+      updatedAt: new Date().toISOString(),
+    };
+  };
+  const markCharacterCardUsed = (cardId: string) => {
     setCharacterCards((current) =>
       current.map((item) =>
-        item.id === card.id ? { ...item, updatedAt: new Date().toISOString() } : item,
+        item.id === cardId ? { ...item, updatedAt: new Date().toISOString() } : item,
       ),
     );
-    setActiveCharacterCardId(card.id);
+  };
+  const activateRoleplaySession = (session: ChatSession) => {
+    setActiveCharacterCardId(session.roleplayCharacterCardId ?? "");
     setChatMode("roleplay");
-    setChatSessions((current) => [...current, session]);
     setActiveChatSessionId(session.id);
     setChatMessages(session.messages);
+    setEditingChatMessage(null);
+    setChatMessageMenu(null);
     setChatStatus({ status: "idle", message: "" });
     setView("chat");
+  };
+  const startRoleplayInCurrentWorkspace = (card: CharacterCard, greetingIndex = 0) => {
+    const canBindCurrentSession = Boolean(
+      activeChatSession &&
+      activeChatSession.id === activeChatSessionId &&
+      chatMessages.length === 0 &&
+      (!activeChatSession.roleplayCharacterCardId ||
+        activeChatSession.roleplayCharacterCardId === card.id),
+    );
+    const baseSession = canBindCurrentSession && activeChatSession
+      ? activeChatSession
+      : createChatSession(
+          activeChatSession?.workspaceKey ?? workspaceInfo.key,
+          activeChatSession?.workspaceName ?? workspaceInfo.name,
+          activeChatSession?.workspacePath ?? workspaceInfo.path,
+          { characterCardId: card.id, greetingIndex },
+        );
+    const session = buildRoleplaySession(baseSession, card, greetingIndex);
+
+    markCharacterCardUsed(card.id);
+    setChatSessions((current) =>
+      canBindCurrentSession
+        ? current.map((item) => (item.id === session.id ? session : item))
+        : [...current, session],
+    );
+    activateRoleplaySession(session);
+  };
+  const openOrCreateCharacterRoleplay = (card: CharacterCard) => {
+    const existingSession = chatSessions
+      .filter((session) => session.roleplayCharacterCardId === card.id)
+      .sort(
+        (left, right) =>
+          (Date.parse(right.updatedAt) || 0) - (Date.parse(left.updatedAt) || 0),
+      )[0];
+    markCharacterCardUsed(card.id);
+    setView("chat");
+
+    if (existingSession) {
+      void openChatSession(existingSession.id);
+      return;
+    }
+
+    const session = buildRoleplaySession(
+      createChatSession(
+        DEFAULT_WORKSPACE_KEY,
+        DEFAULT_WORKSPACE_NAME,
+        undefined,
+        { characterCardId: card.id, greetingIndex: 0 },
+      ),
+      card,
+      0,
+    );
+    workspaceAutoRestoreDisabledRef.current = true;
+    setLocalWorkspaceHandle(null);
+    setLocalToolsEnabled(false);
+    restoredWorkspacePathRef.current = "";
+    setChatSessions((current) => [...current, session]);
+    activateRoleplaySession(session);
   };
   const cycleRoleplayGreeting = () => {
     if (!activeChatSession || !activeSessionRoleplayCard) return;
@@ -8143,10 +8220,13 @@ export function App() {
     workspaceKey = workspaceInfo.key,
     workspaceName = workspaceInfo.name,
   ) => {
+    const knownWorkspacePath = chatSessions.find(
+      (session) => session.workspaceKey === workspaceKey && session.workspacePath,
+    )?.workspacePath;
     const session = createChatSession(
       workspaceKey,
       workspaceName,
-      workspaceKey === workspaceInfo.key ? workspaceInfo.path : undefined,
+      workspaceKey === workspaceInfo.key ? workspaceInfo.path : knownWorkspacePath,
     );
     setChatSessions((current) => [...current, session]);
     setActiveChatSessionId(session.id);
@@ -12374,7 +12454,7 @@ export function App() {
                   type="button"
                   className="character-cover-button"
                   title={`以 ${card.name} 开始角色扮演`}
-                  onClick={() => startRoleplayWithCharacter(card)}
+                  onClick={() => openOrCreateCharacterRoleplay(card)}
                 >
                   {card.avatarDataUrl ? (
                     <img src={card.avatarDataUrl} alt={`${card.name} 封面`} />
@@ -12400,7 +12480,7 @@ export function App() {
                   <button
                     type="button"
                     title="开始角色扮演"
-                    onClick={() => startRoleplayWithCharacter(card)}
+                    onClick={() => openOrCreateCharacterRoleplay(card)}
                   >
                     <Play size={15} />
                   </button>
@@ -15671,62 +15751,118 @@ export function App() {
 
           <div className="chat-thread" onScroll={() => setChatMessageMenu(null)}>
             {visibleChatMessages.length === 0 ? (
-              <div className="chat-empty">
-                <div className="chat-empty-icon">
-                  {chatMode === "ai" ? <Sparkles size={24} /> : chatMode === "roleplay" ? <BookOpen size={24} /> : <Bot size={24} />}
-                </div>
-                <h2>
-                  {chatMode === "persona"
-                    ? activePersona.name
-                    : chatMode === "multi"
-                      ? `多 Agent · 已选 ${multiAgentPersonas.length} 个`
-                      : chatMode === "roleplay"
-                        ? activeSessionRoleplayCard?.name ?? "选择一张角色卡"
-                      : "AI 直连"}
-                </h2>
-                <div className={`chat-empty-model ${chatModelReady ? "ready" : "attention"}`}>
-                  <Server size={14} />
-                  {chatModelReady ? chatModelLabel : "尚未配置模型"}
-                </div>
-                {!chatModelReady && chatMode === "roleplay" && !activeSessionRoleplayCard && (
-                  <button
-                    type="button"
-                    className="chat-empty-action"
-                    onClick={() => setView("characters")}
-                  >
-                    <BookOpen size={16} />
-                    打开角色卡管理器
-                  </button>
-                )}
-                {!chatModelReady && !(chatMode === "roleplay" && !activeSessionRoleplayCard) && (
-                  <button
-                    type="button"
-                    className="chat-empty-action"
-                    onClick={() => {
-                      setSettingsTab("providers");
-                      setView("settings");
-                    }}
-                  >
-                    <Settings2 size={16} />
-                    配置模型
-                  </button>
-                )}
-                {chatModelReady && (
-                  <div className="chat-empty-suggestions" aria-label="快捷开场">
-                    {chatStarterPrompts.map((promptText) => (
+              <div
+                className={`chat-empty ${
+                  chatMode === "roleplay" && !activeSessionRoleplayCard
+                    ? "chat-character-picker"
+                    : ""
+                }`}
+              >
+                {chatMode === "roleplay" && !activeSessionRoleplayCard ? (
+                  <>
+                    <div className="chat-empty-icon">
+                      <BookOpen size={24} />
+                    </div>
+                    <h2>选择一张角色卡</h2>
+                    <p className="chat-character-picker-description">
+                      点击封面后，角色卡会直接绑定到当前工作区的这个新会话。
+                    </p>
+                    <div
+                      className={`chat-empty-model ${
+                        effectiveChatModelId ? "ready" : "attention"
+                      }`}
+                    >
+                      <Server size={14} />
+                      {effectiveChatModelId || "尚未配置模型，可先选择角色卡"}
+                    </div>
+                    {roleplayPickerCards.length > 0 ? (
+                      <div className="chat-character-picker-grid" aria-label="可选角色卡">
+                        {roleplayPickerCards.map((card) => (
+                          <button
+                            type="button"
+                            className="chat-character-choice"
+                            aria-label={`选择角色：${card.name}`}
+                            key={card.id}
+                            onClick={() => startRoleplayInCurrentWorkspace(card)}
+                          >
+                            <span className="chat-character-choice-cover">
+                              {card.avatarDataUrl ? (
+                                <img src={card.avatarDataUrl} alt={`${card.name} 封面`} />
+                              ) : (
+                                <span className="chat-character-choice-placeholder">
+                                  <UserRound size={38} />
+                                </span>
+                              )}
+                              <span className="chat-character-choice-gradient" />
+                              <strong>{card.name || "未命名角色"}</strong>
+                            </span>
+                            <span className="chat-character-choice-meta">
+                              <small>世界书 {card.characterBook?.entries.length ?? 0}</small>
+                              <small>正则 {card.regexScripts.length}</small>
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
                       <button
                         type="button"
-                        key={promptText}
+                        className="chat-empty-action"
+                        onClick={() => setView("characters")}
+                      >
+                        <BookOpen size={16} />
+                        导入角色卡
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <div className="chat-empty-icon">
+                      {chatMode === "ai" ? <Sparkles size={24} /> : chatMode === "roleplay" ? <BookOpen size={24} /> : <Bot size={24} />}
+                    </div>
+                    <h2>
+                      {chatMode === "persona"
+                        ? activePersona.name
+                        : chatMode === "multi"
+                          ? `多 Agent · 已选 ${multiAgentPersonas.length} 个`
+                          : chatMode === "roleplay"
+                            ? activeSessionRoleplayCard?.name ?? "选择一张角色卡"
+                          : "AI 直连"}
+                    </h2>
+                    <div className={`chat-empty-model ${chatModelReady ? "ready" : "attention"}`}>
+                      <Server size={14} />
+                      {chatModelReady ? chatModelLabel : "尚未配置模型"}
+                    </div>
+                    {!chatModelReady && (
+                      <button
+                        type="button"
+                        className="chat-empty-action"
                         onClick={() => {
-                          setChatInput(promptText);
-                          requestAnimationFrame(() => chatInputRef.current?.focus());
+                          setSettingsTab("providers");
+                          setView("settings");
                         }}
                       >
-                        <Play size={14} />
-                        <span>{promptText}</span>
+                        <Settings2 size={16} />
+                        配置模型
                       </button>
-                    ))}
-                  </div>
+                    )}
+                    {chatModelReady && (
+                      <div className="chat-empty-suggestions" aria-label="快捷开场">
+                        {chatStarterPrompts.map((promptText) => (
+                          <button
+                            type="button"
+                            key={promptText}
+                            onClick={() => {
+                              setChatInput(promptText);
+                              requestAnimationFrame(() => chatInputRef.current?.focus());
+                            }}
+                          >
+                            <Play size={14} />
+                            <span>{promptText}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             ) : (
@@ -16205,7 +16341,7 @@ export function App() {
                               className={card.id === activeSessionRoleplayCard?.id ? "active character-option" : "character-option"}
                               key={card.id}
                               onClick={(event) => {
-                                startRoleplayWithCharacter(card);
+                                startRoleplayInCurrentWorkspace(card);
                                 event.currentTarget.closest("details")?.removeAttribute("open");
                               }}
                             >
