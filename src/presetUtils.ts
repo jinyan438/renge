@@ -28,7 +28,6 @@ export type ChatPreset = {
   presencePenalty: number;
   maxTokens: number;
   maxContext: number;
-  streamOpenAi: boolean;
   squashSystemMessages: boolean;
   prompts: ChatPresetPrompt[];
   backupPrompts: ChatPresetPrompt[];
@@ -112,7 +111,6 @@ export function createDefaultChatPreset(name = "默认预设"): ChatPreset {
     presencePenalty: 0,
     maxTokens: 4096,
     maxContext: 128000,
-    streamOpenAi: true,
     squashSystemMessages: false,
     prompts: [],
     backupPrompts: [],
@@ -187,7 +185,6 @@ export function normalizeChatPreset(rawPreset: unknown, index = 0): ChatPreset {
     ),
     maxTokens: integerNumber(raw.maxTokens ?? raw.openai_max_tokens, fallback.maxTokens),
     maxContext: integerNumber(raw.maxContext ?? raw.openai_max_context, fallback.maxContext),
-    streamOpenAi: booleanValue(raw.streamOpenAi ?? raw.stream_openai, fallback.streamOpenAi),
     squashSystemMessages: booleanValue(
       raw.squashSystemMessages ?? raw.squash_system_messages,
       fallback.squashSystemMessages,
@@ -304,7 +301,6 @@ export function importSillyTavernPreset(rawPreset: unknown, fileName: string): C
     presencePenalty: finiteNumber(rawPreset.presence_penalty, fallback.presencePenalty),
     maxTokens: integerNumber(rawPreset.openai_max_tokens, fallback.maxTokens),
     maxContext: integerNumber(rawPreset.openai_max_context, fallback.maxContext),
-    streamOpenAi: booleanValue(rawPreset.stream_openai, fallback.streamOpenAi),
     squashSystemMessages: booleanValue(rawPreset.squash_system_messages, false),
     prompts: orderedPrompts,
     backupPrompts,
