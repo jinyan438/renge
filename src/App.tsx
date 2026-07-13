@@ -1758,6 +1758,22 @@ type ChatContentPart =
   | { type: "text"; content: string }
   | { type: "code"; content: string; language: string; executable: boolean };
 
+type HtmlPreviewContext = {
+  currentMessageIndex: number;
+  messages: Array<{
+    role: ChatRole;
+    content: string;
+    variables: Record<string, unknown>;
+    extra: Record<string, unknown>;
+  }>;
+  chatVariables: Record<string, unknown>;
+  characterVariables: Record<string, unknown>;
+  globalVariables: Record<string, unknown>;
+  userName: string;
+  characterName: string;
+  chatId: string;
+};
+
 type ChatToolProgressLink = {
   label: string;
   href?: string;
@@ -1775,6 +1791,7 @@ const executableCommandNames = new Set(["npm", "pnpm", "yarn", "node", "git"]);
 const shellLanguages = new Set(["sh", "shell", "bash", "zsh", "cmd", "bat", "powershell", "ps1"]);
 const htmlLanguages = new Set(["html", "htm", "xhtml"]);
 const HTML_PREVIEW_RESIZE_MESSAGE = "renge-html-preview-resize";
+const HTML_PREVIEW_VARIABLES_UPDATE_MESSAGE = "renge-html-preview-variables-update";
 const HTML_PREVIEW_MAX_HEIGHT = 12000;
 const htmlPreviewStyle = [
   '<style data-renge-html-preview="true">',
@@ -1912,7 +1929,175 @@ const htmlPreviewBootstrapScript = [
   "})();",
   "</script>",
 ].join("");
-const htmlPreviewHeadInjection = `${htmlPreviewStyle}${htmlPreviewBootstrapScript}`;
+
+function serializeHtmlPreviewValue(value: unknown) {
+  return (JSON.stringify(value) ?? "null")
+    .replace(/</g, "\\u003c")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreviewContext) {
+  const previewIdLiteral = serializeHtmlPreviewValue(previewId);
+  const messageTypeLiteral = serializeHtmlPreviewValue(HTML_PREVIEW_VARIABLES_UPDATE_MESSAGE);
+  const contextLiteral = serializeHtmlPreviewValue(context);
+
+  return [
+    '<script data-renge-html-preview-variables="true">',
+    "(() => {",
+    `const previewId = ${previewIdLiteral};`,
+    `const updateMessageType = ${messageTypeLiteral};`,
+    `const snapshot = ${contextLiteral};`,
+    "const clone = (value) => {",
+    "  if (value == null) return value;",
+    "  try { return structuredClone(value); } catch {}",
+    "  try { return JSON.parse(JSON.stringify(value)); } catch { return value; }",
+    "};",
+    "const isRecord = (value) => Boolean(value) && typeof value === \"object\" && !Array.isArray(value);",
+    "const normalizeMessageId = (value, defaultToCurrent = true) => {",
+    "  if (value == null || value === \"current\") return defaultToCurrent ? snapshot.currentMessageIndex : snapshot.messages.length - 1;",
+    "  if (value === \"latest\") return snapshot.messages.length - 1;",
+    "  const parsed = Number(value);",
+    "  if (!Number.isInteger(parsed)) return defaultToCurrent ? snapshot.currentMessageIndex : snapshot.messages.length - 1;",
+    "  return parsed < 0 ? snapshot.messages.length + parsed : parsed;",
+    "};",
+    "const normalizeVariableOption = (option) => {",
+    "  if (isRecord(option)) return option;",
+    "  if (typeof option === \"number\" || typeof option === \"string\") return { type: \"message\", message_id: option };",
+    "  return { type: \"message\", message_id: snapshot.currentMessageIndex };",
+    "};",
+    "const resolveVariables = (option) => {",
+    "  const normalized = normalizeVariableOption(option);",
+    "  const type = String(normalized.type || \"message\").toLowerCase();",
+    "  if (type === \"global\") return snapshot.globalVariables;",
+    "  if (type === \"chat\") return snapshot.chatVariables;",
+    "  if (type === \"character\" || type === \"char\") return snapshot.characterVariables;",
+    "  const index = normalizeMessageId(normalized.message_id, true);",
+    "  return snapshot.messages[index]?.variables || {};",
+    "};",
+    "const assignVariables = (variables, option) => {",
+    "  const normalized = normalizeVariableOption(option);",
+    "  const type = String(normalized.type || \"message\").toLowerCase();",
+    "  const next = isRecord(variables) ? clone(variables) : {};",
+    "  if (type === \"global\") snapshot.globalVariables = next;",
+    "  else if (type === \"chat\") snapshot.chatVariables = next;",
+    "  else if (type === \"character\" || type === \"char\") snapshot.characterVariables = next;",
+    "  else {",
+    "    const index = normalizeMessageId(normalized.message_id, true);",
+    "    if (snapshot.messages[index]) snapshot.messages[index].variables = next;",
+    "  }",
+    "  try {",
+    "    parent.postMessage({",
+    "      type: updateMessageType,",
+    "      id: previewId,",
+    "      operation: \"replaceVariables\",",
+    "      option: clone(normalized),",
+    "      variables: clone(next),",
+    "    }, \"*\");",
+    "  } catch {}",
+    "  return clone(next);",
+    "};",
+    "const getVariables = (option) => clone(resolveVariables(option) || {});",
+    "const replaceVariables = async (variables, option) => assignVariables(variables, option);",
+    "const updateVariablesWith = async (updater, option) => {",
+    "  const current = getVariables(option);",
+    "  let next = current;",
+    "  if (typeof updater === \"function\") {",
+    "    const result = await updater(current);",
+    "    if (isRecord(result)) next = result;",
+    "  } else if (isRecord(updater)) next = { ...current, ...clone(updater) };",
+    "  return assignVariables(next, option);",
+    "};",
+    "const insertOrAssignVariables = async (variables, option) => {",
+    "  const current = getVariables(option);",
+    "  return assignVariables(isRecord(variables) ? { ...current, ...clone(variables) } : current, option);",
+    "};",
+    "const formatMessage = (message, index, sillyTavern = false) => {",
+    "  const variables = clone(message.variables || {});",
+    "  const extra = clone(message.extra || {});",
+    "  return {",
+    "    message_id: index, mesid: index, id: index,",
+    "    name: message.role === \"user\" ? snapshot.userName : snapshot.characterName,",
+    "    role: message.role, is_user: message.role === \"user\", is_system: false, is_hidden: false,",
+    "    message: message.content, mes: message.content, data: variables,",
+    "    variables: sillyTavern ? [clone(variables)] : variables, extra, swipe_id: 0,",
+    "    swipes: [message.content], swipes_data: [clone(variables)], swipes_info: [clone(extra)],",
+    "  };",
+    "};",
+    "const getChatMessages = (range = null, options = {}) => {",
+    "  const formatted = snapshot.messages.map((message, index) => formatMessage(message, index));",
+    "  const filter = (items) => !isRecord(options) || options.role == null || options.role === \"all\"",
+    "    ? items : items.filter((item) => item.role === options.role);",
+    "  if (range == null || range === \"\") return filter(formatted);",
+    "  if (typeof range === \"number\" || /^-?\\d+$/.test(String(range).trim())) {",
+    "    const index = normalizeMessageId(range, false);",
+    "    return filter(formatted[index] ? [formatted[index]] : []);",
+    "  }",
+    "  const match = /^(-?\\d+)\\s*-\\s*(-?\\d+)$/.exec(String(range).trim());",
+    "  if (!match) return [];",
+    "  const start = normalizeMessageId(match[1], false);",
+    "  const end = normalizeMessageId(match[2], false);",
+    "  return filter(formatted.slice(Math.max(0, start), Math.max(0, end) + 1));",
+    "};",
+    "const applyMessageUpdates = (updates) => {",
+    "  if (!Array.isArray(updates)) return false;",
+    "  updates.forEach((update) => {",
+    "    if (!isRecord(update)) return;",
+    "    const index = normalizeMessageId(update.message_id, false);",
+    "    const message = snapshot.messages[index];",
+    "    if (!message) return;",
+    "    if (typeof update.message === \"string\") message.content = update.message;",
+    "    else if (typeof update.content === \"string\") message.content = update.content;",
+    "    const swipeIndex = Number.isInteger(Number(update.swipe_id)) ? Math.max(0, Number(update.swipe_id)) : 0;",
+    "    if (Array.isArray(update.swipes) && typeof update.swipes[swipeIndex] === \"string\") message.content = update.swipes[swipeIndex];",
+    "    if (update.role === \"user\" || update.role === \"assistant\") message.role = update.role;",
+    "    if (isRecord(update.data)) message.variables = clone(update.data);",
+    "    else if (Array.isArray(update.swipes_data) && isRecord(update.swipes_data[swipeIndex])) message.variables = clone(update.swipes_data[swipeIndex]);",
+    "    else if (Array.isArray(update.variables) && isRecord(update.variables[swipeIndex])) message.variables = clone(update.variables[swipeIndex]);",
+    "    else if (isRecord(update.variables)) message.variables = clone(update.variables);",
+    "    if (isRecord(update.extra)) message.extra = clone(update.extra);",
+    "    else if (Array.isArray(update.swipes_info) && isRecord(update.swipes_info[swipeIndex])) message.extra = clone(update.swipes_info[swipeIndex]);",
+    "  });",
+    "  return true;",
+    "};",
+    "const setChatMessages = async (updates) => {",
+    "  if (!applyMessageUpdates(updates)) return false;",
+    "  try { parent.postMessage({ type: updateMessageType, id: previewId, operation: \"setChatMessages\", updates: clone(updates) }, \"*\"); } catch {}",
+    "  return true;",
+    "};",
+    "const getContext = () => ({",
+    "  chat: snapshot.messages.map((message, index) => formatMessage(message, index, true)),",
+    "  characters: [], characterId: snapshot.characterName ? \"0\" : undefined,",
+    "  name1: snapshot.userName, name2: snapshot.characterName, chatId: snapshot.chatId,",
+    "  saveChat: async () => true, getRequestHeaders: () => ({ \"Content-Type\": \"application/json\" }),",
+    "});",
+    "const api = {",
+    "  getVariables, setVariables: replaceVariables, replaceVariables, updateVariablesWith, insertOrAssignVariables,",
+    "  getCurrentMessageId: () => snapshot.currentMessageIndex,",
+    "  getLastMessageId: () => snapshot.messages.length - 1,",
+    "  getChatMessages, setChatMessages, getContext,",
+    "};",
+    "Object.assign(window, api);",
+    "window.getCurrentMessage = () => getChatMessages(snapshot.currentMessageIndex)[0] || null;",
+    "window.setChatMessage = async (messageOrId, idOrContent) => isRecord(messageOrId)",
+    "  ? setChatMessages([{ ...clone(messageOrId), message_id: idOrContent }])",
+    "  : setChatMessages([{ message_id: messageOrId, message: String(idOrContent ?? \"\") }]);",
+    "window.TavernHelper = window.tavernHelper = window.tavernHelperAPI = window.th = api;",
+    "const sillyTavern = { version: \"3.5.0\", getContext, getCurrentChatId: () => snapshot.chatId, saveChat: async () => true };",
+    "Object.defineProperties(sillyTavern, {",
+    "  chat: { get: () => snapshot.messages.map((message, index) => formatMessage(message, index, true)), configurable: true },",
+    "  name1: { get: () => snapshot.userName, configurable: true },",
+    "  name2: { get: () => snapshot.characterName, configurable: true },",
+    "});",
+    "window.SillyTavern = sillyTavern;",
+    "const mvu = isRecord(window.Mvu) ? window.Mvu : {};",
+    "mvu.getMvuData = (option) => getVariables(option);",
+    "mvu.setMvuData = (variables, option) => replaceVariables(variables, option);",
+    "window.Mvu = mvu;",
+    "})();",
+    "</script>",
+  ].join("");
+}
 const toolActionTitleMap: Array<[string, string]> = [
   ["列出文件", "列出文件"],
   ["预览电脑图片", "预览图片"],
@@ -2806,24 +2991,29 @@ function appendHtmlPreviewScript(documentContent: string, previewId: string) {
   return `${documentContent}${previewScript}`;
 }
 
-function injectHtmlPreviewHead(documentContent: string) {
+function injectHtmlPreviewHead(documentContent: string, headInjection: string) {
   if (/<head[\s>]/i.test(documentContent)) {
-    return documentContent.replace(/<head([^>]*)>/i, `<head$1>${htmlPreviewHeadInjection}`);
+    return documentContent.replace(/<head([^>]*)>/i, `<head$1>${headInjection}`);
   }
   if (/<html[\s>]/i.test(documentContent)) {
-    return documentContent.replace(/<html([^>]*)>/i, `<html$1><head>${htmlPreviewHeadInjection}</head>`);
+    return documentContent.replace(/<html([^>]*)>/i, `<html$1><head>${headInjection}</head>`);
   }
-  return `<head>${htmlPreviewHeadInjection}</head>${documentContent}`;
+  return `<head>${headInjection}</head>${documentContent}`;
 }
 
-function buildHtmlPreviewDocument(content: string, previewId: string) {
+function buildHtmlPreviewDocument(
+  content: string,
+  previewId: string,
+  context: HtmlPreviewContext,
+) {
   const trimmedContent = content.trim();
+  const headInjection = `${htmlPreviewStyle}${htmlPreviewBootstrapScript}${buildHtmlPreviewVariablesScript(previewId, context)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
-    return appendHtmlPreviewScript(injectHtmlPreviewHead(trimmedContent), previewId);
+    return appendHtmlPreviewScript(injectHtmlPreviewHead(trimmedContent, headInjection), previewId);
   }
   if (/<head[\s>]|<body[\s>]/i.test(trimmedContent)) {
     return appendHtmlPreviewScript(
-      `<!doctype html><html lang="zh-CN">${injectHtmlPreviewHead(trimmedContent)}</html>`,
+      `<!doctype html><html lang="zh-CN">${injectHtmlPreviewHead(trimmedContent, headInjection)}</html>`,
       previewId,
     );
   }
@@ -2836,7 +3026,7 @@ function buildHtmlPreviewDocument(content: string, previewId: string) {
     '<meta charset="utf-8" />',
     '<meta name="viewport" content="width=device-width, initial-scale=1" />',
     "<style>html,body{min-height:100%;}body{margin:0;}</style>",
-    htmlPreviewHeadInjection,
+    headInjection,
     "</head>",
     "<body>",
     trimmedContent,
@@ -5998,7 +6188,7 @@ export function App() {
   }, [activeWorldBookIds, characterCards, chatMessages, chatSessions, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
-    function handleHtmlPreviewResize(event: MessageEvent) {
+    function handleHtmlPreviewMessage(event: MessageEvent) {
       const data = event.data;
       if (!data || typeof data !== "object") return;
 
@@ -6007,13 +6197,158 @@ export function App() {
         id?: unknown;
         height?: unknown;
         intrinsic?: unknown;
+        operation?: unknown;
+        option?: unknown;
+        variables?: unknown;
+        updates?: unknown;
       };
-      if (payload.type !== HTML_PREVIEW_RESIZE_MESSAGE || typeof payload.id !== "string") {
+      if (typeof payload.id !== "string") {
         return;
       }
 
       const frame = htmlPreviewFrameRefs.current.get(payload.id);
-      if (!frame) return;
+      if (!frame || frame.contentWindow !== event.source) return;
+
+      if (payload.type === HTML_PREVIEW_VARIABLES_UPDATE_MESSAGE) {
+        const messages = chatMessagesRef.current;
+        const valuesEqual = (left: unknown, right: unknown) =>
+          JSON.stringify(left) === JSON.stringify(right);
+        const currentMessageIndex = messages.findIndex(
+          (message) => message.id === frame.dataset.messageId,
+        );
+        const normalizeMessageIndex = (value: unknown, defaultToCurrent: boolean) => {
+          if (value == null || value === "current") {
+            return defaultToCurrent ? currentMessageIndex : messages.length - 1;
+          }
+          if (value === "latest") return messages.length - 1;
+          const parsed = Number(value);
+          if (!Number.isInteger(parsed)) {
+            return defaultToCurrent ? currentMessageIndex : messages.length - 1;
+          }
+          return parsed < 0 ? messages.length + parsed : parsed;
+        };
+
+        if (payload.operation === "replaceVariables") {
+          const normalizedOption = isObjectRecord(payload.option)
+            ? payload.option
+            : typeof payload.option === "number" || typeof payload.option === "string"
+              ? { type: "message", message_id: payload.option }
+              : { type: "message", message_id: currentMessageIndex };
+          const variableType = String(normalizedOption.type ?? "message").toLowerCase();
+          const nextVariables = normalizeTavernVariables(payload.variables);
+
+          if (variableType === "global") {
+            if (valuesEqual(tavernGlobalVariablesRef.current, nextVariables)) return;
+            tavernGlobalVariablesRef.current = nextVariables;
+            setTavernGlobalVariables(nextVariables);
+            return;
+          }
+          if (variableType === "chat") {
+            const sessionId = activeChatSessionIdRef.current;
+            const currentSession = chatSessionsRef.current.find(
+              (session) => session.id === sessionId,
+            );
+            if (valuesEqual(currentSession?.scriptVariables ?? {}, nextVariables)) return;
+            const nextSessions = chatSessionsRef.current.map((session) =>
+              session.id === sessionId
+                ? {
+                    ...session,
+                    scriptVariables: nextVariables,
+                    updatedAt: new Date().toISOString(),
+                  }
+                : session,
+            );
+            chatSessionsRef.current = nextSessions;
+            setChatSessions(nextSessions);
+            return;
+          }
+          if (variableType === "character" || variableType === "char") {
+            const session = chatSessionsRef.current.find(
+              (candidate) => candidate.id === activeChatSessionIdRef.current,
+            );
+            if (!session?.roleplayCharacterCardId) return;
+            const currentCard = characterCardsRef.current.find(
+              (card) => card.id === session.roleplayCharacterCardId,
+            );
+            if (valuesEqual(currentCard?.tavernVariables ?? {}, nextVariables)) return;
+            const updatedAt = new Date().toISOString();
+            const nextCards = characterCardsRef.current.map((card) =>
+              card.id === session.roleplayCharacterCardId
+                ? { ...card, tavernVariables: nextVariables, updatedAt }
+                : card,
+            );
+            characterCardsRef.current = nextCards;
+            setCharacterCards(nextCards);
+            return;
+          }
+
+          const messageIndex = normalizeMessageIndex(
+            normalizedOption.message_id,
+            true,
+          );
+          if (!messages[messageIndex]) return;
+          if (valuesEqual(messages[messageIndex].variables ?? {}, nextVariables)) return;
+          const nextMessages = messages.map((message, index) =>
+            index === messageIndex ? { ...message, variables: nextVariables } : message,
+          );
+          chatMessagesRef.current = nextMessages;
+          setChatMessages(nextMessages);
+          return;
+        }
+
+        if (payload.operation === "setChatMessages" && Array.isArray(payload.updates)) {
+          const nextMessages = messages.map((message) => ({ ...message }));
+          payload.updates.forEach((rawUpdate) => {
+            if (!isObjectRecord(rawUpdate)) return;
+            const messageIndex = normalizeMessageIndex(rawUpdate.message_id, false);
+            const message = nextMessages[messageIndex];
+            if (!message) return;
+            if (typeof rawUpdate.message === "string") message.content = rawUpdate.message;
+            else if (typeof rawUpdate.content === "string") message.content = rawUpdate.content;
+            const swipeIndex = Number.isInteger(Number(rawUpdate.swipe_id))
+              ? Math.max(0, Number(rawUpdate.swipe_id))
+              : 0;
+            if (
+              Array.isArray(rawUpdate.swipes) &&
+              typeof rawUpdate.swipes[swipeIndex] === "string"
+            ) {
+              message.content = rawUpdate.swipes[swipeIndex];
+            }
+            if (rawUpdate.role === "user" || rawUpdate.role === "assistant") {
+              message.role = rawUpdate.role;
+            }
+            if (isObjectRecord(rawUpdate.data)) {
+              message.variables = normalizeTavernVariables(rawUpdate.data);
+            } else if (
+              Array.isArray(rawUpdate.swipes_data) &&
+              isObjectRecord(rawUpdate.swipes_data[swipeIndex])
+            ) {
+              message.variables = normalizeTavernVariables(rawUpdate.swipes_data[swipeIndex]);
+            } else if (
+              Array.isArray(rawUpdate.variables) &&
+              isObjectRecord(rawUpdate.variables[swipeIndex])
+            ) {
+              message.variables = normalizeTavernVariables(rawUpdate.variables[swipeIndex]);
+            } else if (isObjectRecord(rawUpdate.variables)) {
+              message.variables = normalizeTavernVariables(rawUpdate.variables);
+            }
+            if (isObjectRecord(rawUpdate.extra)) {
+              message.extra = normalizeTavernVariables(rawUpdate.extra);
+            } else if (
+              Array.isArray(rawUpdate.swipes_info) &&
+              isObjectRecord(rawUpdate.swipes_info[swipeIndex])
+            ) {
+              message.extra = normalizeTavernVariables(rawUpdate.swipes_info[swipeIndex]);
+            }
+          });
+          if (valuesEqual(messages, nextMessages)) return;
+          chatMessagesRef.current = nextMessages;
+          setChatMessages(nextMessages);
+        }
+        return;
+      }
+
+      if (payload.type !== HTML_PREVIEW_RESIZE_MESSAGE) return;
 
       const nextHeight = Number(payload.height);
       if (!Number.isFinite(nextHeight)) return;
@@ -6030,8 +6365,8 @@ export function App() {
       frame.style.height = `${clampedHeight}px`;
     }
 
-    window.addEventListener("message", handleHtmlPreviewResize);
-    return () => window.removeEventListener("message", handleHtmlPreviewResize);
+    window.addEventListener("message", handleHtmlPreviewMessage);
+    return () => window.removeEventListener("message", handleHtmlPreviewMessage);
   }, []);
 
   useEffect(() => {
@@ -10618,6 +10953,30 @@ export function App() {
     }
 
     const parts = parseChatContentParts(content);
+    let htmlPreviewContext: HtmlPreviewContext | null = null;
+    const getHtmlPreviewContext = () => {
+      if (htmlPreviewContext) return htmlPreviewContext;
+      const currentMessageIndex = chatMessages.findIndex(
+        (message) => message.id === messageId,
+      );
+      htmlPreviewContext = {
+        currentMessageIndex:
+          currentMessageIndex >= 0 ? currentMessageIndex : Math.max(0, chatMessages.length - 1),
+        messages: chatMessages.map((message) => ({
+          role: message.role,
+          content: message.content,
+          variables: message.variables ?? {},
+          extra: message.extra ?? {},
+        })),
+        chatVariables: activeChatSession?.scriptVariables ?? {},
+        characterVariables: activeSessionRoleplayCard?.tavernVariables ?? {},
+        globalVariables: tavernGlobalVariables,
+        userName: userProfile.nickname.trim() || "用户",
+        characterName: activeSessionRoleplayCard?.name || "Assistant",
+        chatId: activeChatSession?.id ?? activeChatSessionId,
+      };
+      return htmlPreviewContext;
+    };
 
     return (
       <div className="chat-rendered-content">
@@ -10631,6 +10990,7 @@ export function App() {
                     className="chat-html-frame"
                     allow="autoplay; fullscreen; gamepad"
                     allowFullScreen
+                    data-message-id={messageId}
                     loading="eager"
                     onLoad={resizeHtmlPreviewFrame}
                     ref={(frame) => {
@@ -10641,7 +11001,11 @@ export function App() {
                       }
                     }}
                     referrerPolicy="no-referrer"
-                    srcDoc={buildHtmlPreviewDocument(part.content, previewId)}
+                    srcDoc={buildHtmlPreviewDocument(
+                      part.content,
+                      previewId,
+                      getHtmlPreviewContext(),
+                    )}
                     tabIndex={0}
                     title="HTML 预览"
                   />
@@ -10664,6 +11028,7 @@ export function App() {
                   className="chat-html-frame"
                   allow="autoplay; fullscreen; gamepad"
                   allowFullScreen
+                  data-message-id={messageId}
                   loading="eager"
                   onLoad={resizeHtmlPreviewFrame}
                   ref={(frame) => {
@@ -10674,7 +11039,11 @@ export function App() {
                     }
                   }}
                   referrerPolicy="no-referrer"
-                  srcDoc={buildHtmlPreviewDocument(part.content, previewId)}
+                  srcDoc={buildHtmlPreviewDocument(
+                    part.content,
+                    previewId,
+                    getHtmlPreviewContext(),
+                  )}
                   tabIndex={0}
                   title="HTML 预览"
                 />
