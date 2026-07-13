@@ -1,0 +1,44 @@
+plugins {
+    id "com.android.application"
+}
+
+def frontendDir = rootProject.projectDir.parentFile
+def frontendDistDir = new File(frontendDir, "dist")
+def androidWebAssetsDir = file("src/main/assets/www")
+
+tasks.register("buildFrontend", Exec) {
+    workingDir frontendDir
+    if (System.getProperty("os.name").toLowerCase().contains("windows")) {
+        commandLine "cmd", "/c", "npm", "run", "build"
+    } else {
+        commandLine "npm", "run", "build"
+    }
+}
+
+tasks.register("syncFrontendDist", Sync) {
+    dependsOn "buildFrontend"
+    from frontendDistDir
+    into androidWebAssetsDir
+}
+
+android {
+    namespace "com.renge.agentlab"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.renge.agentlab"
+        minSdk 23
+        targetSdk 35
+        versionCode 1
+        versionName "0.1.0"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn "syncFrontendDist"
+}
