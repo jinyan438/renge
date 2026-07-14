@@ -1775,6 +1775,7 @@ type HtmlPreviewContext = {
   userName: string;
   characterName: string;
   chatId: string;
+  chatInput: string;
 };
 
 type ChatToolProgressLink = {
@@ -1796,8 +1797,68 @@ const htmlLanguages = new Set(["html", "htm", "xhtml"]);
 const HTML_PREVIEW_RESIZE_MESSAGE = "renge-html-preview-resize";
 const HTML_PREVIEW_VARIABLES_UPDATE_MESSAGE = "renge-html-preview-variables-update";
 const HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE = "renge-html-preview-context-update";
+const HTML_PREVIEW_COMMAND_MESSAGE = "renge-html-preview-command";
+const HTML_PREVIEW_COMMAND_RESULT_MESSAGE = "renge-html-preview-command-result";
 const HYPNOOS_APPEND_OPERATION_MESSAGE = "HYPNOOS_APPEND_OPERATION";
 const HTML_PREVIEW_MAX_HEIGHT = 12000;
+
+type ParsedTavernSlashCommand =
+  | { type: "set-input"; text: string; append: boolean; submit: boolean }
+  | { type: "send-as"; text: string; name: string }
+  | { type: "trigger" };
+
+function parseTavernSlashCommand(command: string): ParsedTavernSlashCommand | null {
+  const normalized = command.trim();
+  if (!normalized) return null;
+  const parts = normalized.split(/\s*\|\s*(?=\/)/);
+  const primary = parts.shift()?.trim() ?? "";
+  const hasTrigger = parts.some((part) => /^\/(?:trigger|gen)\b/i.test(part.trim()));
+
+  const sendAsMatch = /^\/sendas\b\s*([\s\S]*)$/i.exec(primary);
+  if (sendAsMatch) {
+    let remainder = sendAsMatch[1].trim();
+    let name = "";
+    const nameMatch = /^name=(?:"([^"]*)"|'([^']*)'|(\S+))\s*/i.exec(remainder);
+    if (nameMatch) {
+      name = nameMatch[1] ?? nameMatch[2] ?? nameMatch[3] ?? "";
+      remainder = remainder.slice(nameMatch[0].length);
+    }
+    return remainder ? { type: "send-as", text: remainder, name } : null;
+  }
+
+  const setInputMatch = /^\/setinput(?:\s+([\s\S]*))?$/i.exec(primary);
+  if (setInputMatch) {
+    return {
+      type: "set-input",
+      text: setInputMatch[1] ?? "",
+      append: false,
+      submit: hasTrigger,
+    };
+  }
+
+  const appendInputMatch = /^\/appendinput(?:\s+([\s\S]*))?$/i.exec(primary);
+  if (appendInputMatch) {
+    return {
+      type: "set-input",
+      text: appendInputMatch[1] ?? "",
+      append: true,
+      submit: hasTrigger,
+    };
+  }
+
+  const sendMatch = /^\/send(?:\s+([\s\S]*))?$/i.exec(primary);
+  if (sendMatch) {
+    return {
+      type: "set-input",
+      text: sendMatch[1] ?? "",
+      append: false,
+      submit: true,
+    };
+  }
+
+  if (/^\/(?:trigger|gen)\b/i.test(primary)) return { type: "trigger" };
+  return null;
+}
 const htmlPreviewStyle = [
   '<style data-renge-html-preview="true">',
   "html,body{overflow:hidden!important;}",
@@ -1953,6 +2014,10 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
   const contextMessageTypeLiteral = serializeHtmlPreviewValue(
     HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
   );
+  const commandMessageTypeLiteral = serializeHtmlPreviewValue(HTML_PREVIEW_COMMAND_MESSAGE);
+  const commandResultMessageTypeLiteral = serializeHtmlPreviewValue(
+    HTML_PREVIEW_COMMAND_RESULT_MESSAGE,
+  );
   const contextLiteral = serializeHtmlPreviewValue(context);
 
   return [
@@ -1961,6 +2026,8 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     `const previewId = ${previewIdLiteral};`,
     `const updateMessageType = ${messageTypeLiteral};`,
     `const contextUpdateMessageType = ${contextMessageTypeLiteral};`,
+    `const commandMessageType = ${commandMessageTypeLiteral};`,
+    `const commandResultMessageType = ${commandResultMessageTypeLiteral};`,
     `const snapshot = ${contextLiteral};`,
     "const clone = (value) => {",
     "  if (value == null) return value;",
@@ -1984,6 +2051,8 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "}",
     "window._ = lodashCompat;",
     "const bridgeEventHandlers = new Map();",
+    "const pendingCommandRequests = new Map();",
+    "let commandRequestSequence = 0;",
     "const eventOn = (eventName, callback) => {",
     "  if (typeof callback !== \"function\") return callback;",
     "  const key = String(eventName);",
@@ -2013,11 +2082,35 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "const emitVariableUpdate = () => void eventEmit(String(window.Mvu?.events?.VARIABLE_UPDATE_ENDED || \"mag_variable_update_ended\"), clone(snapshot));",
     "window.addEventListener(\"message\", (event) => {",
     "  if (event.source !== parent || !isRecord(event.data)) return;",
+    "  if (event.data.type === commandResultMessageType && event.data.id === previewId) {",
+    "    const pending = pendingCommandRequests.get(String(event.data.requestId));",
+    "    if (!pending) return;",
+    "    pendingCommandRequests.delete(String(event.data.requestId));",
+    "    clearTimeout(pending.timeoutId);",
+    "    if (event.data.error) pending.reject(new Error(String(event.data.error)));",
+    "    else pending.resolve(clone(event.data.result));",
+    "    return;",
+    "  }",
     "  if (event.data.type !== contextUpdateMessageType || event.data.id !== previewId) return;",
     "  if (!isRecord(event.data.context)) return;",
     "  Object.assign(snapshot, clone(event.data.context));",
     "  emitVariableUpdate();",
     "  try { window.dispatchEvent(new CustomEvent(\"renge-html-preview-context-updated\", { detail: clone(snapshot) })); } catch {}",
+    "});",
+    "const requestParentCommand = (operation, data = {}) => new Promise((resolve, reject) => {",
+    "  const requestId = `${previewId}:${Date.now()}:${++commandRequestSequence}`;",
+    "  const timeoutId = setTimeout(() => {",
+    "    pendingCommandRequests.delete(requestId);",
+    "    reject(new Error(`Renge 命令执行超时：${String(operation)}`));",
+    "  }, 15000);",
+    "  pendingCommandRequests.set(requestId, { resolve, reject, timeoutId });",
+    "  try {",
+    "    parent.postMessage({ type: commandMessageType, id: previewId, requestId, operation, ...clone(data) }, \"*\");",
+    "  } catch (error) {",
+    "    clearTimeout(timeoutId);",
+    "    pendingCommandRequests.delete(requestId);",
+    "    reject(error);",
+    "  }",
     "});",
     "const normalizeMessageId = (value, defaultToCurrent = true) => {",
     "  if (value == null || value === \"current\") return defaultToCurrent ? snapshot.currentMessageIndex : snapshot.messages.length - 1;",
@@ -2161,6 +2254,22 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  try { return await callback(...args); }",
     "  catch (error) { console.error(\"[TavernHelper] HTML 脚本执行失败\", error); return null; }",
     "};",
+    "const getInput = () => String(snapshot.chatInput ?? \"\");",
+    "const setInput = async (text) => {",
+    "  snapshot.chatInput = String(text ?? \"\");",
+    "  return requestParentCommand(\"setInput\", { text: snapshot.chatInput });",
+    "};",
+    "const appendInput = async (text) => {",
+    "  const value = String(text ?? \"\");",
+    "  snapshot.chatInput = `${getInput()}${value}`;",
+    "  return requestParentCommand(\"appendInput\", { text: value });",
+    "};",
+    "const triggerSlash = (command) => requestParentCommand(\"triggerSlash\", { command: String(command ?? \"\") });",
+    "const sendMessage = (text = getInput()) => requestParentCommand(\"send\", { text: String(text ?? \"\") });",
+    "const generate = (config = {}) => {",
+    "  const text = isRecord(config) ? String(config.user_input ?? config.prompt ?? getInput()) : String(config ?? getInput());",
+    "  return requestParentCommand(\"send\", { text });",
+    "};",
     "const getContext = () => ({",
     "  chat: snapshot.messages.map((message, index) => formatMessage(message, index, true)),",
     "  characters: [], characterId: snapshot.characterName ? \"0\" : undefined,",
@@ -2170,6 +2279,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "const api = {",
     "  getVariables, setVariables: replaceVariables, replaceVariables, updateVariablesWith, insertOrAssignVariables,",
     "  getAllVariables, waitGlobalInitialized, errorCatched,",
+    "  getInput, setInput, appendInput, triggerSlash, sendMessage, generate,",
     "  getCurrentMessageId: () => snapshot.currentMessageIndex,",
     "  getLastMessageId: () => snapshot.messages.length - 1,",
     "  getChatMessages, setChatMessages, getContext, eventOn, eventOnce, eventEmit, eventRemoveListener,",
@@ -6351,6 +6461,7 @@ export function App() {
   const mcpImportInputRef = useRef<HTMLInputElement>(null);
   const skillZipInputRef = useRef<HTMLInputElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
+  const chatSendButtonRef = useRef<HTMLButtonElement>(null);
   const chatAttachmentInputRef = useRef<HTMLInputElement>(null);
   const chatAttachmentFilesRef = useRef<Map<string, File>>(new Map());
   const chatAttachmentMetadataRef = useRef<Map<string, ChatAttachment>>(new Map());
@@ -6400,6 +6511,91 @@ export function App() {
   }, [activeWorldBookIds, characterCards, chatMessages, chatSessions, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
+    const focusChatInput = (submit: boolean) => {
+      window.requestAnimationFrame(() => {
+        const input = chatInputRef.current;
+        if (input) {
+          input.focus();
+          input.scrollIntoView({ behavior: "smooth", block: "center" });
+          input.setSelectionRange(input.value.length, input.value.length);
+        }
+        if (!submit) return;
+        window.requestAnimationFrame(() => {
+          const sendButton = chatSendButtonRef.current;
+          if (
+            sendButton &&
+            !sendButton.disabled &&
+            sendButton.getAttribute("aria-label") === "发送"
+          ) {
+            sendButton.click();
+          }
+        });
+      });
+    };
+
+    const writeChatInput = (text: string, append: boolean, submit: boolean) => {
+      setChatInput((current) => (append ? `${current}${text}` : text));
+      setChatStatus({
+        status: "success",
+        message: submit ? "角色卡已写入输入框并请求发送。" : "角色卡已写入会话输入框。",
+      });
+      focusChatInput(submit);
+      return true;
+    };
+
+    const appendSendAsMessage = (text: string, name: string) => {
+      const message: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: text,
+        createdAt: new Date().toISOString(),
+        ...(name ? { extra: { sendAsName: name } } : {}),
+      };
+      const nextMessages = [...chatMessagesRef.current, message];
+      chatMessagesRef.current = nextMessages;
+      setChatMessages(nextMessages);
+      window.setTimeout(() => {
+        const index = chatMessagesRef.current.findIndex((candidate) => candidate.id === message.id);
+        if (index < 0) return;
+        void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_RECEIVED, index);
+        void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_RENDERED, index);
+        void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.CHARACTER_MESSAGE_RENDERED, index);
+      }, 0);
+      return { messageId: message.id };
+    };
+
+    const executeSlashCommand = (command: string) => {
+      const parsed = parseTavernSlashCommand(command);
+      if (!parsed) throw new Error(`暂不支持该酒馆命令：${command.trim() || "空命令"}`);
+      if (parsed.type === "send-as") {
+        return appendSendAsMessage(parsed.text, parsed.name);
+      }
+      if (parsed.type === "trigger") {
+        focusChatInput(true);
+        return true;
+      }
+      return writeChatInput(parsed.text, parsed.append, parsed.submit);
+    };
+
+    const respondToHtmlCommand = (
+      frame: HTMLIFrameElement,
+      id: string,
+      requestId: unknown,
+      result?: unknown,
+      error?: unknown,
+    ) => {
+      if (typeof requestId !== "string") return;
+      frame.contentWindow?.postMessage(
+        {
+          type: HTML_PREVIEW_COMMAND_RESULT_MESSAGE,
+          id,
+          requestId,
+          ...(error ? { error: error instanceof Error ? error.message : String(error) } : { result }),
+        },
+        "*",
+      );
+    };
+
     function handleHtmlPreviewMessage(event: MessageEvent) {
       const data = event.data;
       if (!data || typeof data !== "object") return;
@@ -6414,6 +6610,9 @@ export function App() {
         variables?: unknown;
         updates?: unknown;
         block?: unknown;
+        command?: unknown;
+        text?: unknown;
+        requestId?: unknown;
       };
 
       if (payload.type === HYPNOOS_APPEND_OPERATION_MESSAGE) {
@@ -6438,12 +6637,63 @@ export function App() {
         return;
       }
 
+      if (payload.type === "TH_TRIGGER_SLASH") {
+        const sourceFrameEntry = Array.from(htmlPreviewFrameRefs.current.entries()).find(
+          ([, frame]) => frame.contentWindow === event.source,
+        );
+        if (!sourceFrameEntry || typeof payload.command !== "string") return;
+        const [, frame] = sourceFrameEntry;
+        try {
+          const result = executeSlashCommand(payload.command);
+          frame.contentWindow?.postMessage(
+            { type: "TH_TRIGGER_SLASH_RESPONSE", requestId: payload.requestId, result },
+            "*",
+          );
+        } catch (error) {
+          frame.contentWindow?.postMessage(
+            {
+              type: "TH_TRIGGER_SLASH_RESPONSE",
+              requestId: payload.requestId,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            "*",
+          );
+        }
+        return;
+      }
+
       if (typeof payload.id !== "string") {
         return;
       }
 
       const frame = htmlPreviewFrameRefs.current.get(payload.id);
       if (!frame || frame.contentWindow !== event.source) return;
+
+      if (payload.type === HTML_PREVIEW_COMMAND_MESSAGE) {
+        try {
+          let result: unknown;
+          if (payload.operation === "triggerSlash") {
+            if (typeof payload.command !== "string") throw new Error("酒馆命令内容为空。");
+            result = executeSlashCommand(payload.command);
+          } else if (payload.operation === "setInput") {
+            result = writeChatInput(typeof payload.text === "string" ? payload.text : "", false, false);
+          } else if (payload.operation === "appendInput") {
+            result = writeChatInput(typeof payload.text === "string" ? payload.text : "", true, false);
+          } else if (payload.operation === "send") {
+            result = writeChatInput(typeof payload.text === "string" ? payload.text : "", false, true);
+          } else {
+            throw new Error(`未知的角色卡命令：${String(payload.operation ?? "")}`);
+          }
+          respondToHtmlCommand(frame, payload.id, payload.requestId, result);
+        } catch (error) {
+          setChatStatus({
+            status: "error",
+            message: error instanceof Error ? error.message : "角色卡命令执行失败。",
+          });
+          respondToHtmlCommand(frame, payload.id, payload.requestId, undefined, error);
+        }
+        return;
+      }
 
       if (payload.type === HTML_PREVIEW_VARIABLES_UPDATE_MESSAGE) {
         const messages = chatMessagesRef.current;
@@ -11224,6 +11474,7 @@ export function App() {
         userName: userProfile.nickname.trim() || "用户",
         characterName: activeSessionRoleplayCard?.name || "Assistant",
         chatId: activeChatSession?.id ?? activeChatSessionId,
+        chatInput,
       };
       return htmlPreviewContext;
     };
@@ -18035,6 +18286,7 @@ export function App() {
                 onChange={(event) => void handleChatAttachmentChange(event.target.files)}
               />
               <textarea
+                id="send_textarea"
                 ref={chatInputRef}
                 value={chatInput}
                 placeholder="输入消息"
@@ -18430,6 +18682,8 @@ export function App() {
                   </details>
                 </div>
                 <button
+                  id="send_but"
+                  ref={chatSendButtonRef}
                   type="button"
                   className={`send-button ${chatGenerationState !== "idle" ? "stop" : ""}`}
                   disabled={
