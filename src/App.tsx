@@ -92,6 +92,7 @@ import {
   type WorldBookEntry,
 } from "./worldbookUtils";
 import {
+  appendSillyTavernStatusPlaceholderToGreeting,
   applyRegexScripts,
   createRegexScript,
   getRegexScriptError,
@@ -8718,16 +8719,26 @@ export function App() {
           personas,
           chatMode === "persona" ? activePersona : undefined,
         );
-        const content = applyRegexScripts(message.content, effectiveRegexScripts, {
+        const depth = visibleChatMessages.length - index - 1;
+        const regexOptions = {
           placement: 2,
-          destination: "display",
-          depth: visibleChatMessages.length - index - 1,
+          destination: "display" as const,
+          depth,
           userName: userProfile.nickname,
           characterName:
             chatMode === "roleplay" && activeSessionRoleplayCard
               ? activeSessionRoleplayCard.name
               : assistantPersona?.name ?? activePersona?.name ?? "AI",
-        });
+        };
+        const displaySource =
+          message.source === "roleplay-greeting" && activeSessionRoleplayCard
+            ? appendSillyTavernStatusPlaceholderToGreeting(
+                message.content,
+                activeSessionRoleplayCard.regexScripts,
+                regexOptions,
+              )
+            : message.content;
+        const content = applyRegexScripts(displaySource, effectiveRegexScripts, regexOptions);
         return content === message.content ? message : { ...message, content };
       }),
     [activePersona, activeSessionRoleplayCard, chatMode, effectiveRegexScripts, personas, userProfile.nickname, visibleChatMessages],
