@@ -6490,6 +6490,10 @@ export function App() {
   const characterCardsRef = useRef<CharacterCard[]>([]);
   const worldBooksRef = useRef<WorldBook[]>([]);
   const activeWorldBookIdsRef = useRef<string[]>([]);
+  const regexScriptsRef = useRef<RegexScript[]>(regexScripts);
+  const chatPresetsRef = useRef<ChatPreset[]>(chatPresets);
+  const activeChatPresetIdRef = useRef(activeChatPresetId);
+  const chatPresetEnabledRef = useRef(chatPresetEnabled);
   const userProfileRef = useRef<UserProfile>(userProfile);
   const tavernScriptsRef = useRef<TavernScript[]>(tavernScripts);
   const tavernGlobalVariablesRef = useRef<Record<string, unknown>>(tavernGlobalVariables);
@@ -6515,10 +6519,14 @@ export function App() {
     characterCardsRef.current = characterCards;
     worldBooksRef.current = worldBooks;
     activeWorldBookIdsRef.current = activeWorldBookIds;
+    regexScriptsRef.current = regexScripts;
+    chatPresetsRef.current = chatPresets;
+    activeChatPresetIdRef.current = activeChatPresetId;
+    chatPresetEnabledRef.current = chatPresetEnabled;
     userProfileRef.current = userProfile;
     tavernScriptsRef.current = tavernScripts;
     tavernGlobalVariablesRef.current = tavernGlobalVariables;
-  }, [activeWorldBookIds, characterCards, chatMessages, chatSessions, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeChatPresetId, activeWorldBookIds, characterCards, chatMessages, chatPresetEnabled, chatPresets, chatSessions, regexScripts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     const focusChatInput = () => {
@@ -8789,6 +8797,72 @@ export function App() {
               keys: entry.keys,
             })),
           })),
+      getRegexes: () => {
+        const session = chatSessionsRef.current.find(
+          (candidate) => candidate.id === activeChatSessionIdRef.current,
+        );
+        const card = characterCardsRef.current.find(
+          (candidate) => candidate.id === session?.roleplayCharacterCardId,
+        );
+        const preset = chatPresetEnabledRef.current
+          ? chatPresetsRef.current.find(
+              (candidate) => candidate.id === activeChatPresetIdRef.current,
+            )
+          : undefined;
+        return [
+          ...regexScriptsRef.current.map((regex) => ({ ...regex, scope: "global" })),
+          ...(preset?.regexScripts ?? []).map((regex) => ({ ...regex, scope: "preset" })),
+          ...(card?.regexScripts ?? []).map((regex) => ({ ...regex, scope: "character" })),
+        ];
+      },
+      setRegexes: (values) => {
+        const normalizeScope = (scope: "global" | "preset" | "character") =>
+          values
+            .filter((value) => value.scope === scope)
+            .map((value, index) =>
+              normalizeRegexScript(
+                value,
+                index,
+                typeof value.sourceFileName === "string" ? value.sourceFileName : "",
+              ),
+            );
+        const nextGlobalRegexes = normalizeScope("global");
+        regexScriptsRef.current = nextGlobalRegexes;
+        setRegexScripts(nextGlobalRegexes);
+
+        const session = chatSessionsRef.current.find(
+          (candidate) => candidate.id === activeChatSessionIdRef.current,
+        );
+        if (session?.roleplayCharacterCardId) {
+          const nextCharacterRegexes = normalizeScope("character");
+          updateCards((cards) =>
+            cards.map((card) =>
+              card.id === session.roleplayCharacterCardId
+                ? {
+                    ...card,
+                    regexScripts: nextCharacterRegexes,
+                    updatedAt: new Date().toISOString(),
+                  }
+                : card,
+            ),
+          );
+        }
+
+        if (chatPresetEnabledRef.current && activeChatPresetIdRef.current) {
+          const nextPresetRegexes = normalizeScope("preset");
+          const nextPresets = chatPresetsRef.current.map((preset) =>
+            preset.id === activeChatPresetIdRef.current
+              ? {
+                  ...preset,
+                  regexScripts: nextPresetRegexes,
+                  updatedAt: new Date().toISOString(),
+                }
+              : preset,
+          );
+          chatPresetsRef.current = nextPresets;
+          setChatPresets(nextPresets);
+        }
+      },
       getUserName: () => userProfileRef.current.nickname.trim() || "用户",
       getChatId: () => activeChatSessionIdRef.current,
       getModelId: () => getEffectiveProviderModelId(chatProvider),

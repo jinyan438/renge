@@ -68,6 +68,8 @@ export type TavernScriptRuntimeAdapter = {
   setScriptData(scriptId: string, data: Record<string, unknown>): void;
   getCharacter(): TavernRuntimeCharacter | null;
   getWorldBooks(): TavernRuntimeWorldBook[];
+  getRegexes(): Array<Record<string, unknown>>;
+  setRegexes(regexes: Array<Record<string, unknown>>): void;
   getUserName(): string;
   getChatId(): string;
   getModelId?(): string;
@@ -159,6 +161,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function buildZodGlobal(zodModule: Record<string, unknown>) {
+  const zodApi = isRecord(zodModule.z)
+    ? zodModule.z
+    : isRecord(zodModule.default)
+      ? zodModule.default
+      : zodModule;
+
+  // Tavern scripts use both the normal `z.object()` API and the Zod 4
+  // module namespace shape (`z.z.ZodObject`). Keep both views available.
+  return {
+    ...zodModule,
+    ...zodApi,
+    default: zodApi,
+    z: zodApi,
+  };
+}
+
 function cloneValue<T>(value: T): T {
   if (typeof structuredClone === "function") {
     try {
@@ -172,6 +191,77 @@ function cloneValue<T>(value: T): T {
   } catch {
     return value;
   }
+}
+
+function normalizeTavernRegexRecord(
+  value: unknown,
+  fallbackScope = "global",
+): Record<string, unknown> {
+  const raw = isRecord(value) ? cloneValue(value) : {};
+  const disabled =
+    typeof raw.disabled === "boolean"
+      ? raw.disabled
+      : typeof raw.enabled === "boolean"
+        ? !raw.enabled
+        : false;
+  const placement = Array.isArray(raw.placement)
+    ? raw.placement.map(Number).filter(Number.isFinite)
+    : [2];
+  const scriptName = String(raw.script_name ?? raw.scriptName ?? raw.name ?? "Unnamed Regex");
+  const findRegex = String(raw.find_regex ?? raw.findRegex ?? "");
+  const replaceString = String(raw.replace_string ?? raw.replaceString ?? "");
+  const rawTrimStrings = raw.trim_strings ?? raw.trimStrings;
+  const trimStrings = Array.isArray(rawTrimStrings)
+    ? rawTrimStrings.map(String)
+    : [];
+  const markdownOnly = Boolean(raw.markdown_only ?? raw.markdownOnly ?? true);
+  const promptOnly = Boolean(raw.prompt_only ?? raw.promptOnly ?? false);
+  const scope = ["global", "character", "preset"].includes(String(raw.scope))
+    ? String(raw.scope)
+    : fallbackScope;
+
+  return {
+    ...raw,
+    id: String(raw.id ?? `regex-${crypto.randomUUID()}`),
+    scope,
+    script_name: scriptName,
+    scriptName,
+    find_regex: findRegex,
+    findRegex,
+    replace_string: replaceString,
+    replaceString,
+    trim_strings: trimStrings,
+    trimStrings,
+    placement,
+    disabled,
+    enabled: !disabled,
+    markdown_only: markdownOnly,
+    markdownOnly,
+    prompt_only: promptOnly,
+    promptOnly,
+    run_on_edit: Boolean(raw.run_on_edit ?? raw.runOnEdit ?? true),
+    runOnEdit: Boolean(raw.run_on_edit ?? raw.runOnEdit ?? true),
+    substitute_regex: Number(raw.substitute_regex ?? raw.substituteRegex ?? 0) || 0,
+    substituteRegex: Number(raw.substitute_regex ?? raw.substituteRegex ?? 0) || 0,
+    min_depth: raw.min_depth ?? raw.minDepth ?? null,
+    minDepth: raw.min_depth ?? raw.minDepth ?? null,
+    max_depth: raw.max_depth ?? raw.maxDepth ?? null,
+    maxDepth: raw.max_depth ?? raw.maxDepth ?? null,
+    source: isRecord(raw.source)
+      ? raw.source
+      : {
+          user_input: placement.includes(1),
+          ai_output: placement.includes(2),
+          slash_command: placement.includes(3),
+          world_info: placement.includes(5),
+        },
+    destination: isRecord(raw.destination)
+      ? raw.destination
+      : {
+          display: !promptOnly,
+          prompt: !markdownOnly,
+        },
+  };
 }
 
 function toErrorMessage(error: unknown) {
@@ -487,7 +577,7 @@ export class TavernScriptRuntime {
     if (!zodModule) {
       throw new Error(`Zod 4 加载失败：${toErrorMessage(lastError)}`);
     }
-    win.z = isRecord(zodModule.default) ? zodModule.default : zodModule;
+    win.z = buildZodGlobal(zodModule);
     let yamlModule: Record<string, unknown> | null = null;
     lastError = null;
     for (const source of YAML_SOURCES) {
@@ -792,6 +882,130 @@ export class TavernScriptRuntime {
         .replace(/{{\s*char\s*}}/gi, getCharacter()?.name || "角色")
         .replace(/<USER>/gi, this.adapter.getUserName() || "用户")
         .replace(/<BOT>/gi, getCharacter()?.name || "角色");
+    const getTavernRegexes = (options: unknown = {}) => {
+      const normalizedOptions = isRecord(options) ? options : {};
+      const scope = String(normalizedOptions.scope ?? "all");
+      const enableState = String(normalizedOptions.enable_state ?? "all");
+      return this.adapter
+        .getRegexes()
+        .map((regex) => normalizeTavernRegexRecord(regex))
+        .filter((regex) => scope === "all" || regex.scope === scope)
+        .filter((regex) => {
+          if (enableState === "enabled") return regex.disabled !== true;
+          if (enableState === "disabled") return regex.disabled === true;
+          return true;
+        })
+        .map((regex) => cloneValue(regex));
+    };
+    const replaceTavernRegexes = async (values: unknown, options: unknown = {}) => {
+      if (!Array.isArray(values)) return false;
+      const normalizedOptions = isRecord(options) ? options : {};
+      const scope = String(normalizedOptions.scope ?? "all");
+      const incoming = values.map((value) =>
+        normalizeTavernRegexRecord(value, scope === "all" ? "global" : scope),
+      );
+      if (scope === "all") {
+        this.adapter.setRegexes(incoming);
+        return true;
+      }
+      const retained = getTavernRegexes({ scope: "all", enable_state: "all" }).filter(
+        (regex) => regex.scope !== scope,
+      );
+      this.adapter.setRegexes([
+        ...retained,
+        ...incoming.map((regex) => ({ ...regex, scope })),
+      ]);
+      return true;
+    };
+    const updateTavernRegexesWith = async (updater: unknown, options: unknown = {}) => {
+      const current = getTavernRegexes(options);
+      const updated =
+        typeof updater === "function"
+          ? await (updater as (regexes: Array<Record<string, unknown>>) => unknown)(current)
+          : current;
+      const next = Array.isArray(updated) ? updated : current;
+      await replaceTavernRegexes(next, options);
+      return cloneValue(next);
+    };
+    const importRawTavernRegex = (fileNameOrValue: unknown, rawValue?: unknown) => {
+      const sourceFileName = rawValue === undefined ? "" : String(fileNameOrValue ?? "");
+      let parsed: unknown = rawValue === undefined ? fileNameOrValue : rawValue;
+      if (typeof parsed === "string") parsed = JSON.parse(parsed);
+      const values = Array.isArray(parsed) ? parsed : [parsed];
+      const imported = values.filter(isRecord).map((value) =>
+        normalizeTavernRegexRecord(
+          {
+            ...value,
+            scope: value.scope ?? "global",
+            sourceFormat: "sillytavern",
+            sourceFileName,
+          },
+          "global",
+        ),
+      );
+      if (imported.length === 0) throw new Error("没有找到可导入的酒馆正则。");
+      this.adapter.setRegexes([
+        ...getTavernRegexes({ scope: "all", enable_state: "all" }),
+        ...imported,
+      ]);
+      return cloneValue(imported);
+    };
+    const createTavernRegex = (value: unknown, scope = "global") => {
+      const created = normalizeTavernRegexRecord(
+        {
+          ...(isRecord(value) ? value : {}),
+          id: isRecord(value) && value.id ? value.id : `regex-${crypto.randomUUID()}`,
+          scope,
+        },
+        scope,
+      );
+      this.adapter.setRegexes([
+        ...getTavernRegexes({ scope: "all", enable_state: "all" }),
+        created,
+      ]);
+      return cloneValue(created);
+    };
+    const deleteTavernRegex = (regexId: unknown, scope = "all") => {
+      const current = getTavernRegexes({ scope: "all", enable_state: "all" });
+      const next = current.filter(
+        (regex) =>
+          regex.id !== String(regexId) || (scope !== "all" && regex.scope !== scope),
+      );
+      if (next.length === current.length) return false;
+      this.adapter.setRegexes(next);
+      return true;
+    };
+    const formatAsTavernRegexedString = (
+      value: unknown,
+      source = "ai_output",
+      destination = "display",
+      options: unknown = {},
+    ) => {
+      const normalizedOptions = isRecord(options) ? options : {};
+      const depth = Number(normalizedOptions.depth ?? 0) || 0;
+      return getTavernRegexes({ scope: "all", enable_state: "enabled" }).reduce(
+        (result, regex) => {
+          const regexSource = isRecord(regex.source) ? regex.source : {};
+          const regexDestination = isRecord(regex.destination) ? regex.destination : {};
+          if (regexSource[source] === false || regexDestination[destination] === false) {
+            return result;
+          }
+          const minDepth = regex.min_depth == null ? null : Number(regex.min_depth);
+          const maxDepth = regex.max_depth == null ? null : Number(regex.max_depth);
+          if (minDepth !== null && depth < minDepth) return result;
+          if (maxDepth !== null && depth > maxDepth) return result;
+          try {
+            const findRegex = String(regex.find_regex ?? "");
+            const match = /^\/([\s\S]*)\/([dgimsuvy]*)$/.exec(findRegex);
+            const pattern = match ? new RegExp(match[1], match[2]) : new RegExp(findRegex, "g");
+            return result.replace(pattern, String(regex.replace_string ?? ""));
+          } catch {
+            return result;
+          }
+        },
+        substitudeMacros(value),
+      );
+    };
     const getContext = () => ({
       chat: this.getSillyTavernChat(),
       characters: this.getSillyTavernCharacters(),
@@ -905,6 +1119,15 @@ export class TavernScriptRuntime {
       getLorebookEntries,
       getLorebookSettings,
       setLorebookSettings: async () => true,
+      getTavernRegexes,
+      formatAsTavernRegexedString,
+      isCharacterTavernRegexesEnabled: () =>
+        getTavernRegexes({ scope: "character", enable_state: "all" }).length > 0,
+      importRawTavernRegex,
+      createTavernRegex,
+      replaceTavernRegexes,
+      updateTavernRegexesWith,
+      deleteTavernRegex,
       substitudeMacros,
       getScriptId,
       getScriptButtons,
