@@ -3717,6 +3717,7 @@ summary:focus-visible {
 }
 
 .chat-bubble {
+  position: relative;
   flex: 0 1 auto;
   width: fit-content;
   min-width: 0;
@@ -3729,6 +3730,54 @@ summary:focus-visible {
   box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
   overflow: hidden;
   overflow-wrap: anywhere;
+}
+
+.chat-bubble-context-edges {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: none;
+  pointer-events: none;
+}
+
+.chat-bubble:has(.chat-html-preview) > .chat-bubble-context-edges {
+  display: block;
+}
+
+.chat-bubble-context-edge {
+  position: absolute;
+  display: block;
+  pointer-events: auto;
+}
+
+.chat-bubble-context-edge.top,
+.chat-bubble-context-edge.bottom {
+  right: 0;
+  left: 0;
+  height: 10px;
+}
+
+.chat-bubble-context-edge.top {
+  top: 0;
+}
+
+.chat-bubble-context-edge.bottom {
+  bottom: 0;
+}
+
+.chat-bubble-context-edge.right,
+.chat-bubble-context-edge.left {
+  top: 10px;
+  bottom: 10px;
+  width: 10px;
+}
+
+.chat-bubble-context-edge.right {
+  right: 0;
+}
+
+.chat-bubble-context-edge.left {
+  left: 0;
 }
 
 .chat-message.assistant .chat-bubble:has(.chat-html-preview) {
