@@ -1826,6 +1826,7 @@ const HTML_PREVIEW_VARIABLES_UPDATE_MESSAGE = "renge-html-preview-variables-upda
 const HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE = "renge-html-preview-context-update";
 const HTML_PREVIEW_COMMAND_MESSAGE = "renge-html-preview-command";
 const HTML_PREVIEW_COMMAND_RESULT_MESSAGE = "renge-html-preview-command-result";
+const HTML_PREVIEW_GENERATION_EVENT_MESSAGE = "renge-html-preview-generation-event";
 const HTML_PREVIEW_CONTEXT_MENU_MESSAGE = "renge-html-preview-context-menu";
 const HYPNOOS_APPEND_OPERATION_MESSAGE = "HYPNOOS_APPEND_OPERATION";
 const HTML_PREVIEW_MAX_HEIGHT = 12000;
@@ -2113,6 +2114,9 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
   const commandResultMessageTypeLiteral = serializeHtmlPreviewValue(
     HTML_PREVIEW_COMMAND_RESULT_MESSAGE,
   );
+  const generationEventMessageTypeLiteral = serializeHtmlPreviewValue(
+    HTML_PREVIEW_GENERATION_EVENT_MESSAGE,
+  );
   const contextMenuMessageTypeLiteral = serializeHtmlPreviewValue(
     HTML_PREVIEW_CONTEXT_MENU_MESSAGE,
   );
@@ -2126,6 +2130,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     `const contextUpdateMessageType = ${contextMessageTypeLiteral};`,
     `const commandMessageType = ${commandMessageTypeLiteral};`,
     `const commandResultMessageType = ${commandResultMessageTypeLiteral};`,
+    `const generationEventMessageType = ${generationEventMessageTypeLiteral};`,
     `const contextMenuMessageType = ${contextMenuMessageTypeLiteral};`,
     `const snapshot = ${contextLiteral};`,
     "const clone = (value) => {",
@@ -2190,6 +2195,12 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "    else pending.resolve(clone(event.data.result));",
     "    return;",
     "  }",
+    "  if (event.data.type === generationEventMessageType && event.data.id === previewId) {",
+    "    if (typeof event.data.eventName !== \"string\") return;",
+    "    const args = Array.isArray(event.data.args) ? clone(event.data.args) : [];",
+    "    void eventEmit(event.data.eventName, ...args);",
+    "    return;",
+    "  }",
     "  if (event.data.type !== contextUpdateMessageType || event.data.id !== previewId) return;",
     "  if (!isRecord(event.data.context)) return;",
     "  Object.assign(snapshot, clone(event.data.context));",
@@ -2198,10 +2209,11 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "});",
     "const requestParentCommand = (operation, data = {}) => new Promise((resolve, reject) => {",
     "  const requestId = `${previewId}:${Date.now()}:${++commandRequestSequence}`;",
+    "  const timeoutMs = operation === \"generate\" ? 10 * 60 * 1000 : 15000;",
     "  const timeoutId = setTimeout(() => {",
     "    pendingCommandRequests.delete(requestId);",
     "    reject(new Error(`Renge 命令执行超时：${String(operation)}`));",
-    "  }, 15000);",
+    "  }, timeoutMs);",
     "  pendingCommandRequests.set(requestId, { resolve, reject, timeoutId });",
     "  try {",
     "    parent.postMessage({ type: commandMessageType, id: previewId, requestId, operation, ...clone(data) }, \"*\");",
@@ -2369,9 +2381,15 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "const triggerSlash = (command) => requestParentCommand(\"triggerSlash\", { command: String(command ?? \"\") });",
     "const sendMessage = (text = getInput()) => requestParentCommand(\"send\", { text: String(text ?? \"\") });",
     "const generate = (config = {}) => {",
-    "  const text = isRecord(config) ? String(config.user_input ?? config.prompt ?? getInput()) : String(config ?? getInput());",
-    "  return requestParentCommand(\"send\", { text });",
+    "  const normalized = isRecord(config) ? config : { user_input: config };",
+    "  const userInput = String(normalized.user_input ?? normalized.prompt ?? getInput());",
+    "  return requestParentCommand(\"generate\", {",
+    "    userInput,",
+    "    shouldStream: normalized.should_stream,",
+    "    disableExtras: normalized.disable_extras === true,",
+    "  });",
     "};",
+    "const stopAllGeneration = () => requestParentCommand(\"stopGeneration\");",
     "const getContext = () => ({",
     "  chat: snapshot.messages.map((message, index) => formatMessage(message, index, true)),",
     "  characters: [], characterId: snapshot.characterName ? \"0\" : undefined,",
@@ -2381,7 +2399,8 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "const api = {",
     "  getVariables, setVariables: replaceVariables, replaceVariables, updateVariablesWith, insertOrAssignVariables,",
     "  getAllVariables, waitGlobalInitialized, errorCatched,",
-    "  getInput, setInput, appendInput, triggerSlash, sendMessage, generate,",
+    "  getInput, setInput, appendInput, triggerSlash, sendMessage, generate, generateRaw: generate,",
+    "  stopAllGeneration, stopGenerationById: stopAllGeneration,",
     "  getCurrentMessageId: () => snapshot.currentMessageIndex,",
     "  getLastMessageId: () => snapshot.messages.length - 1,",
     "  getChatMessages, setChatMessages, getContext, eventOn, eventOnce, eventEmit, eventRemoveListener,",
@@ -6846,6 +6865,11 @@ export function App() {
   const sendChatMessageRef = useRef<
     (contentOverride?: string, attachmentsOverride?: ChatAttachment[]) => Promise<void>
   >(async () => {});
+  const generateHtmlPreviewTextRef = useRef<
+    (config?: unknown, sourceFrame?: HTMLIFrameElement) => Promise<string>
+  >(async () => {
+    throw new Error("独立前端 API 尚未初始化。");
+  });
   const chatAttachmentInputRef = useRef<HTMLInputElement>(null);
   const chatAttachmentFilesRef = useRef<Map<string, File>>(new Map());
   const chatAttachmentMetadataRef = useRef<Map<string, ChatAttachment>>(new Map());
@@ -6995,7 +7019,7 @@ export function App() {
       );
     };
 
-    function handleHtmlPreviewMessage(event: MessageEvent) {
+    async function handleHtmlPreviewMessage(event: MessageEvent) {
       const data = event.data;
       if (!data || typeof data !== "object") return;
 
@@ -7011,6 +7035,9 @@ export function App() {
         block?: unknown;
         command?: unknown;
         text?: unknown;
+        userInput?: unknown;
+        shouldStream?: unknown;
+        disableExtras?: unknown;
         requestId?: unknown;
         x?: unknown;
         y?: unknown;
@@ -7098,6 +7125,23 @@ export function App() {
             result = writeChatInput(typeof payload.text === "string" ? payload.text : "", true, false);
           } else if (payload.operation === "send") {
             result = writeChatInput(typeof payload.text === "string" ? payload.text : "", false, true);
+          } else if (payload.operation === "generate") {
+            result = await generateHtmlPreviewTextRef.current(
+              {
+                user_input: typeof payload.userInput === "string" ? payload.userInput : "",
+                should_stream: payload.shouldStream,
+                disable_extras: payload.disableExtras === true,
+              },
+              frame,
+            );
+          } else if (payload.operation === "stopGeneration") {
+            const controller = activeChatAbortControllerRef.current;
+            result = Boolean(controller);
+            if (controller && !controller.signal.aborted) {
+              setChatGenerationState("stopping");
+              setChatStatus({ status: "loading", message: "正在停止独立前端输出..." });
+              controller.abort(createChatAbortError());
+            }
           } else {
             throw new Error(`未知的角色卡命令：${String(payload.operation ?? "")}`);
           }
@@ -7322,6 +7366,46 @@ export function App() {
       controller.abort(createChatAbortError());
     }
   };
+
+  useEffect(() => {
+    const hostWindow = window as Window & {
+      TavernHelper?: Record<string, unknown>;
+    };
+    const previousTavernHelper = hostWindow.TavernHelper;
+    const inheritedApi = isObjectRecord(previousTavernHelper) ? previousTavernHelper : {};
+    const resolveFocusedPreviewFrame = () => {
+      const activeElement = document.activeElement;
+      if (!(activeElement instanceof HTMLIFrameElement)) return undefined;
+      return Array.from(htmlPreviewFrameRefs.current.values()).includes(activeElement)
+        ? activeElement
+        : undefined;
+    };
+    const stopAllGeneration = () => {
+      const controller = activeChatAbortControllerRef.current;
+      if (!controller) return false;
+      setChatGenerationState("stopping");
+      setChatStatus({ status: "loading", message: "正在停止独立前端输出..." });
+      if (!controller.signal.aborted) controller.abort(createChatAbortError());
+      return true;
+    };
+    const parentTavernHelper = {
+      ...inheritedApi,
+      generate: (config?: unknown) =>
+        generateHtmlPreviewTextRef.current(config, resolveFocusedPreviewFrame()),
+      generateRaw: (config?: unknown) =>
+        generateHtmlPreviewTextRef.current(config, resolveFocusedPreviewFrame()),
+      stopAllGeneration,
+      stopGenerationById: stopAllGeneration,
+      isGenerating: () => Boolean(activeChatAbortControllerRef.current),
+    };
+
+    hostWindow.TavernHelper = parentTavernHelper;
+    return () => {
+      if (hostWindow.TavernHelper !== parentTavernHelper) return;
+      if (previousTavernHelper === undefined) delete hostWindow.TavernHelper;
+      else hostWindow.TavernHelper = previousTavernHelper;
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -13423,6 +13507,250 @@ export function App() {
     activeUserRequestTextRef.current = content;
     await runMultiAgentResponses(accumulatedMessages, currentChatSender, content);
   };
+
+  const emitHtmlPreviewGenerationEvent = (
+    eventName: string,
+    args: unknown[],
+    sourceFrame?: HTMLIFrameElement,
+  ) => {
+    const targets = Array.from(htmlPreviewFrameRefs.current.entries()).filter(
+      ([, frame]) => !sourceFrame || frame === sourceFrame,
+    );
+    targets.forEach(([id, frame]) => {
+      frame.contentWindow?.postMessage(
+        {
+          type: HTML_PREVIEW_GENERATION_EVENT_MESSAGE,
+          id,
+          eventName,
+          args,
+        },
+        "*",
+      );
+    });
+  };
+
+  const generateHtmlPreviewText = async (
+    config?: unknown,
+    sourceFrame?: HTMLIFrameElement,
+  ) => {
+    const normalizedConfig = isObjectRecord(config) ? config : { user_input: config };
+    const userInput = String(
+      normalizedConfig.user_input ?? normalizedConfig.prompt ?? chatInputRef.current?.value ?? "",
+    );
+    if (!userInput.trim()) {
+      await sendChatMessageRef.current();
+      return "";
+    }
+    if (activeChatAbortControllerRef.current) {
+      throw new Error("已有生成任务正在运行，请等待完成或先停止当前生成。");
+    }
+
+    const requestModelId = getEffectiveProviderModelId(chatProvider);
+    if (!chatProvider?.apiBaseUrl || !requestModelId) {
+      throw new Error("请先在设置中配置可用的供应商 API 地址和模型 ID。");
+    }
+
+    const disableExtras = normalizedConfig.disable_extras === true;
+    const onStream =
+      typeof normalizedConfig.on_stream === "function"
+        ? (normalizedConfig.on_stream as (delta: string, fullText: string) => unknown)
+        : null;
+    const abortController = beginChatGeneration();
+    const abortSignal = abortController.signal;
+    const rawSourceMessages: ChatMessage[] = [
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: userInput,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    const responseCharacter =
+      chatMode === "roleplay" && activeSessionRoleplayCard
+        ? activeSessionRoleplayCard
+        : null;
+    const responseName = responseCharacter?.name ?? chatPersona.name;
+    let generatedText = "";
+
+    emitHtmlPreviewGenerationEvent("generation_started", [], sourceFrame);
+    try {
+      setChatStatus({ status: "loading", message: "独立前端正在调用当前会话 API..." });
+      const selectedSystemPrompt = selectedSystemPrompts
+        .map((promptProfile) => promptProfile.content.trim())
+        .filter(Boolean)
+        .join("\n\n");
+      const skillSystemPrompt = await loadEnabledSkillPrompt();
+      throwIfChatAborted(abortSignal);
+      const userProfileSystemPrompt =
+        userProfile.sendToAi && (userProfile.nickname.trim() || userProfile.bio.trim())
+          ? [
+              "当前用户资料：",
+              userProfile.nickname.trim() ? `- 昵称：${userProfile.nickname.trim()}` : "",
+              userProfile.bio.trim() ? `- 简介：${userProfile.bio.trim()}` : "",
+            ]
+              .filter(Boolean)
+              .join("\n")
+          : "";
+      const personaSystemPrompt =
+        !disableExtras && chatMode === "persona" && chatPersona
+          ? buildPersonaPrompt(chatPersona)
+          : "";
+      const roleplaySystemPrompt =
+        !disableExtras && responseCharacter
+          ? buildCharacterCardPrompt(responseCharacter, userProfile.nickname.trim() || "用户")
+          : "";
+      const promptTriggerMessages = [{ role: "user" as const, content: userInput }];
+      const worldBookSystemPrompt = buildWorldBookPrompt(
+        filterPromptTemplateSpecialEntries(worldBooks, promptTemplateEnabled),
+        activeWorldBookIds,
+        promptTriggerMessages,
+        {
+          userName: userProfile.nickname,
+          characterName: responseName,
+        },
+      );
+      const activeCharacterWorldBook = responseCharacter
+        ? resolveCharacterWorldBook(responseCharacter, worldBooks)
+        : null;
+      const characterWorldBookSystemPrompt =
+        responseCharacter &&
+        activeCharacterWorldBook &&
+        !activeWorldBookIds.includes(activeCharacterWorldBook.id)
+          ? buildWorldBookPrompt(
+              filterPromptTemplateSpecialEntries(
+                [activeCharacterWorldBook],
+                promptTemplateEnabled,
+              ),
+              [activeCharacterWorldBook.id],
+              promptTriggerMessages,
+              {
+                userName: userProfile.nickname,
+                characterName: responseName,
+              },
+            )
+          : "";
+      const systemPrompt = [
+        selectedSystemPrompt,
+        skillSystemPrompt,
+        userProfileSystemPrompt,
+        personaSystemPrompt,
+        roleplaySystemPrompt,
+        worldBookSystemPrompt,
+        characterWorldBookSystemPrompt,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      const promptTemplateCharacter = disableExtras ? null : responseCharacter;
+      const apiMessages = await applyPromptTemplateToApiMessages(
+        applyPromptRegexToApiMessages(
+          composeChatApiMessages(
+            systemPrompt,
+            [{ role: "user", content: userInput }],
+            !disableExtras && chatMode === "persona" ? chatPersona : undefined,
+            promptTemplateCharacter
+              ? {
+                  name: promptTemplateCharacter.name,
+                  description: roleplaySystemPrompt,
+                }
+              : disableExtras
+                ? { name: responseName, description: "" }
+                : undefined,
+          ),
+          responseName,
+        ),
+        rawSourceMessages,
+        promptTemplateCharacter,
+        responseName,
+        requestModelId,
+      );
+      throwIfChatAborted(abortSignal);
+
+      const response = await fetch("/api/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: abortSignal,
+        body: JSON.stringify({
+          apiBaseUrl: trimTrailingSlash(chatProvider.apiBaseUrl),
+          apiKey: chatProvider.apiKey,
+          sessionId: activeChatSessionId,
+          request: {
+            model: requestModelId,
+            messages: apiMessages,
+            ...(activeChatPresetRequestParameters ?? {
+              temperature: chatMode === "persona" ? 0.72 : 0.6,
+            }),
+            ...buildProviderReasoningRequest(chatProvider),
+            stream: chatStreamEnabled,
+          },
+        }),
+      });
+
+      if (chatStreamEnabled) {
+        const streamResult = await readChatStream(
+          response,
+          (delta) => {
+            generatedText = `${generatedText}${delta}`;
+            try {
+              onStream?.(delta, generatedText);
+            } catch (error) {
+              console.warn("独立前端流式回调执行失败", error);
+            }
+            emitHtmlPreviewGenerationEvent(
+              "js_stream_token_received_incrementally",
+              [delta],
+              sourceFrame,
+            );
+            emitHtmlPreviewGenerationEvent(
+              "stream_token_received",
+              [{ token: delta, fullText: generatedText }],
+              sourceFrame,
+            );
+          },
+          () => undefined,
+          abortSignal,
+        );
+        generatedText = streamResult.content || generatedText;
+      } else {
+        const payload = (await response.json()) as {
+          error?: string | { message?: string };
+          choices?: Array<{ message?: ChatApiMessage }>;
+          output_text?: string;
+        };
+        if (!response.ok) {
+          const errorMessage =
+            typeof payload.error === "string" ? payload.error : payload.error?.message;
+          throw new Error(
+            errorMessage
+              ? `请求失败：${response.status} ${errorMessage}`
+              : `请求失败：${response.status}`,
+          );
+        }
+        generatedText =
+          getChatApiMessageText(payload.choices?.[0]?.message).trim() ||
+          payload.output_text?.trim() ||
+          "";
+      }
+
+      throwIfChatAborted(abortSignal);
+      if (!generatedText.trim()) throw new Error("API 响应中没有可用的文本内容。");
+      setChatStatus({ status: "success", message: "独立前端 API 调用完成。" });
+      return generatedText.trim();
+    } catch (error) {
+      if (isChatAbortError(error)) {
+        setChatStatus({ status: "success", message: "已停止独立前端输出。" });
+      } else {
+        setChatStatus({
+          status: "error",
+          message: error instanceof Error ? error.message : "独立前端 API 调用失败。",
+        });
+      }
+      throw error;
+    } finally {
+      emitHtmlPreviewGenerationEvent("generation_ended", [generatedText], sourceFrame);
+      finishChatGeneration(abortController);
+    }
+  };
+  generateHtmlPreviewTextRef.current = generateHtmlPreviewText;
 
   const sendChatMessage = async (
     contentOverride?: string,
