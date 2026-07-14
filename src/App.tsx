@@ -135,6 +135,7 @@ import {
   type TavernRuntimeLog,
   type TavernRuntimeMessage,
   type TavernRuntimeStatus,
+  type TavernRuntimeWorldBook,
 } from "./tavernScriptRuntime";
 import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryType } from "./types";
 
@@ -4793,6 +4794,25 @@ function resolveCharacterWorldBook(
   );
 }
 
+function toTavernRuntimeWorldBook(
+  worldBook: WorldBook,
+  scope: TavernRuntimeWorldBook["scope"],
+  active: boolean,
+): TavernRuntimeWorldBook {
+  return {
+    id: worldBook.id,
+    name: worldBook.name,
+    description: worldBook.description,
+    scope,
+    active,
+    sourceFormat: worldBook.sourceFormat,
+    sourceFileName: worldBook.sourceFileName,
+    createdAt: worldBook.createdAt,
+    updatedAt: worldBook.updatedAt,
+    entries: worldBook.entries.map((entry) => ({ ...entry })),
+  };
+}
+
 function stringArg(args: Record<string, unknown>, key: string, fallback = "") {
   const value = args[key];
   return value === undefined || value === null ? fallback : String(value);
@@ -8801,34 +8821,69 @@ export function App() {
           avatarDataUrl: card.avatarDataUrl,
           extensions: card.extensions,
           worldBook: characterWorldBook
-            ? {
-                id: characterWorldBook.id,
-                name: characterWorldBook.name,
-                entries: characterWorldBook.entries.map((entry) => ({
-                  id: entry.id,
-                  comment: entry.comment,
-                  content: entry.content,
-                  enabled: entry.enabled,
-                  keys: entry.keys,
-                })),
-              }
+            ? toTavernRuntimeWorldBook(
+                characterWorldBook,
+                card.characterBook?.id === characterWorldBook.id ? "character" : "global",
+                true,
+              )
             : null,
         };
       },
       getWorldBooks: () =>
-        worldBooksRef.current
-          .filter((book) => activeWorldBookIdsRef.current.includes(book.id))
-          .map((book) => ({
-            id: book.id,
-            name: book.name,
-            entries: book.entries.map((entry) => ({
-              id: entry.id,
-              comment: entry.comment,
-              content: entry.content,
-              enabled: entry.enabled,
-              keys: entry.keys,
-            })),
-          })),
+        worldBooksRef.current.map((book) =>
+          toTavernRuntimeWorldBook(
+            book,
+            "global",
+            activeWorldBookIdsRef.current.includes(book.id),
+          ),
+        ),
+      setWorldBook: (worldBook) => {
+        const normalized = normalizeWorldBook({
+          id: worldBook.id,
+          name: worldBook.name,
+          description: worldBook.description,
+          sourceFormat: worldBook.sourceFormat,
+          sourceFileName: worldBook.sourceFileName,
+          createdAt: worldBook.createdAt,
+          updatedAt: worldBook.updatedAt ?? new Date().toISOString(),
+          entries: worldBook.entries,
+        });
+        if (worldBook.scope === "character") {
+          const session = chatSessionsRef.current.find(
+            (candidate) => candidate.id === activeChatSessionIdRef.current,
+          );
+          if (!session?.roleplayCharacterCardId) return;
+          updateCards((cards) =>
+            cards.map((card) =>
+              card.id === session.roleplayCharacterCardId
+                ? {
+                    ...card,
+                    characterBook: normalized,
+                    updatedAt: new Date().toISOString(),
+                  }
+                : card,
+            ),
+          );
+          return;
+        }
+
+        const existingIndex = worldBooksRef.current.findIndex(
+          (book) => book.id === normalized.id || book.name === normalized.name,
+        );
+        const nextWorldBooks =
+          existingIndex >= 0
+            ? worldBooksRef.current.map((book, index) =>
+                index === existingIndex ? normalized : book,
+              )
+            : [...worldBooksRef.current, normalized];
+        worldBooksRef.current = nextWorldBooks;
+        setWorldBooks(nextWorldBooks);
+        const nextActiveIds = worldBook.active
+          ? Array.from(new Set([...activeWorldBookIdsRef.current, normalized.id]))
+          : activeWorldBookIdsRef.current.filter((bookId) => bookId !== normalized.id);
+        activeWorldBookIdsRef.current = nextActiveIds;
+        setActiveWorldBookIds(nextActiveIds);
+      },
       getRegexes: () => {
         const session = chatSessionsRef.current.find(
           (candidate) => candidate.id === activeChatSessionIdRef.current,

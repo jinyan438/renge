@@ -16,16 +16,37 @@ export type TavernRuntimeMessage = {
 
 export type TavernRuntimeWorldBookEntry = {
   id: string;
+  uid: string;
   comment: string;
   content: string;
   enabled: boolean;
-  keys?: string[];
+  keys: string[];
+  secondaryKeys: string[];
+  constant: boolean;
+  selective: boolean;
+  selectiveLogic: number;
+  position: "before_char" | "after_char" | "before_an" | "after_an" | "at_depth";
+  depth: number;
+  scanDepth: number | null;
+  order: number;
+  probability: number;
+  useProbability: boolean;
+  caseSensitive: boolean;
+  matchWholeWords: boolean;
+  useRegex: boolean;
 };
 
 export type TavernRuntimeWorldBook = {
   id: string;
   name: string;
+  description: string;
   entries: TavernRuntimeWorldBookEntry[];
+  scope: "global" | "character";
+  active: boolean;
+  sourceFormat?: "renge" | "sillytavern";
+  sourceFileName?: string;
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 export type TavernRuntimeCharacter = {
@@ -73,6 +94,7 @@ export type TavernScriptRuntimeAdapter = {
   setScriptData(scriptId: string, data: Record<string, unknown>): void;
   getCharacter(): TavernRuntimeCharacter | null;
   getWorldBooks(): TavernRuntimeWorldBook[];
+  setWorldBook(worldBook: TavernRuntimeWorldBook): void;
   getRegexes(): Array<Record<string, unknown>>;
   setRegexes(regexes: Array<Record<string, unknown>>): void;
   getUserName(): string;
@@ -269,6 +291,186 @@ function mapTavernVariableStrings<T>(
     output[key] = mapTavernVariableStrings(item, mapper, seen);
   });
   return output as T;
+}
+
+function toTavernStringArray(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.map(String).map((item) => item.trim()).filter(Boolean);
+  }
+  if (typeof value !== "string") return [];
+  return value
+    .split(/[,，\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function toTavernBoolean(value: unknown, fallback: boolean) {
+  if (typeof value === "boolean") return value;
+  if (value === 1 || value === "1" || value === "true") return true;
+  if (value === 0 || value === "0" || value === "false") return false;
+  return fallback;
+}
+
+function toTavernNumber(value: unknown, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizeTavernWorldBookPosition(
+  value: unknown,
+  fallback: TavernRuntimeWorldBookEntry["position"] = "after_char",
+) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (normalized === "before_char" || normalized === "0") return "before_char";
+  if (normalized === "after_char" || normalized === "1") return "after_char";
+  if (normalized === "before_an" || normalized === "2" || normalized === "5") {
+    return "before_an";
+  }
+  if (normalized === "after_an" || normalized === "3" || normalized === "6") {
+    return "after_an";
+  }
+  if (normalized === "at_depth" || normalized === "4") return "at_depth";
+  return fallback;
+}
+
+function formatTavernWorldBookEntry(entry: TavernRuntimeWorldBookEntry) {
+  const keys = cloneValue(entry.keys);
+  const secondaryKeys = cloneValue(entry.secondaryKeys);
+  return {
+    id: entry.id,
+    uid: entry.uid || entry.id,
+    name: entry.comment,
+    comment: entry.comment,
+    content: entry.content,
+    enabled: entry.enabled,
+    disabled: !entry.enabled,
+    keys,
+    key: cloneValue(keys),
+    secondaryKeys,
+    secondary_keys: cloneValue(secondaryKeys),
+    keysecondary: cloneValue(secondaryKeys),
+    constant: entry.constant,
+    selective: entry.selective,
+    selective_logic: entry.selectiveLogic,
+    insertion_order: entry.order,
+    order: entry.order,
+    priority: entry.order,
+    depth: entry.depth,
+    scan_depth: entry.scanDepth,
+    probability: entry.probability,
+    use_probability: entry.useProbability,
+    case_sensitive: entry.caseSensitive,
+    match_whole_words: entry.matchWholeWords,
+    use_regex: entry.useRegex,
+    strategy: {
+      type: entry.constant ? "constant" : "selective",
+      keys: cloneValue(keys),
+      keys_secondary: cloneValue(secondaryKeys),
+      selective_logic: entry.selectiveLogic,
+      scan_depth: entry.scanDepth,
+      probability: entry.probability,
+      use_probability: entry.useProbability,
+      case_sensitive: entry.caseSensitive,
+      match_whole_words: entry.matchWholeWords,
+      use_regex: entry.useRegex,
+    },
+    position: {
+      type: entry.position,
+      role: "system",
+      depth: entry.depth,
+      order: entry.order,
+    },
+  };
+}
+
+function normalizeTavernWorldBookEntry(
+  value: unknown,
+  index: number,
+  fallback?: TavernRuntimeWorldBookEntry,
+): TavernRuntimeWorldBookEntry {
+  const raw = isRecord(value) ? value : {};
+  const strategy = isRecord(raw.strategy) ? raw.strategy : {};
+  const position = isRecord(raw.position) ? raw.position : {};
+  const fallbackId = fallback?.id ?? `worldbook-entry-${crypto.randomUUID()}`;
+  const id = String(raw.id ?? raw.uid ?? fallbackId);
+  const strategyType = String(strategy.type ?? "").toLowerCase();
+  const rawEnabled = raw.enabled ?? (raw.disabled === undefined ? undefined : !raw.disabled);
+  return {
+    id,
+    uid: String(raw.uid ?? raw.id ?? fallback?.uid ?? id),
+    comment: String(raw.name ?? raw.comment ?? raw.memo ?? fallback?.comment ?? `条目 ${index + 1}`),
+    content: String(raw.content ?? fallback?.content ?? ""),
+    enabled: toTavernBoolean(rawEnabled, fallback?.enabled ?? true),
+    keys: toTavernStringArray(raw.keys ?? raw.key ?? strategy.keys ?? fallback?.keys),
+    secondaryKeys: toTavernStringArray(
+      raw.secondaryKeys ??
+        raw.secondary_keys ??
+        raw.keysecondary ??
+        strategy.keys_secondary ??
+        fallback?.secondaryKeys,
+    ),
+    constant: toTavernBoolean(
+      raw.constant,
+      strategyType === "constant" || (fallback?.constant ?? false),
+    ),
+    selective: toTavernBoolean(
+      raw.selective,
+      strategyType === "selective" || (fallback?.selective ?? false),
+    ),
+    selectiveLogic: Math.max(
+      0,
+      Math.round(
+        toTavernNumber(
+          raw.selectiveLogic ?? raw.selective_logic ?? strategy.selective_logic,
+          fallback?.selectiveLogic ?? 0,
+        ),
+      ),
+    ),
+    position: normalizeTavernWorldBookPosition(
+      isRecord(raw.position) ? raw.position.type : raw.position,
+      fallback?.position,
+    ),
+    depth: Math.max(
+      0,
+      Math.round(toTavernNumber(raw.depth ?? position.depth, fallback?.depth ?? 4)),
+    ),
+    scanDepth: (() => {
+      const scanDepth =
+        raw.scanDepth ?? raw.scan_depth ?? strategy.scan_depth ?? fallback?.scanDepth ?? null;
+      return scanDepth === null
+        ? null
+        : Math.max(1, Math.round(toTavernNumber(scanDepth, fallback?.scanDepth ?? 8)));
+    })(),
+    order: Math.round(
+      toTavernNumber(
+        raw.order ?? raw.insertion_order ?? raw.priority ?? position.order,
+        fallback?.order ?? 100,
+      ),
+    ),
+    probability: Math.min(
+      100,
+      Math.max(
+        0,
+        toTavernNumber(raw.probability ?? strategy.probability, fallback?.probability ?? 100),
+      ),
+    ),
+    useProbability: toTavernBoolean(
+      raw.useProbability ?? raw.use_probability ?? strategy.use_probability,
+      fallback?.useProbability ?? false,
+    ),
+    caseSensitive: toTavernBoolean(
+      raw.caseSensitive ?? raw.case_sensitive ?? strategy.case_sensitive,
+      fallback?.caseSensitive ?? false,
+    ),
+    matchWholeWords: toTavernBoolean(
+      raw.matchWholeWords ?? raw.match_whole_words ?? strategy.match_whole_words,
+      fallback?.matchWholeWords ?? false,
+    ),
+    useRegex: toTavernBoolean(
+      raw.useRegex ?? raw.use_regex ?? strategy.use_regex,
+      fallback?.useRegex ?? false,
+    ),
+  };
 }
 
 function normalizeTavernRegexRecord(
@@ -1037,23 +1239,174 @@ export class TavernScriptRuntime {
     };
 
     const getCharacter = () => this.localizePlaceholderImages(this.adapter.getCharacter());
+    const getGlobalWorldBooks = () =>
+      this.adapter.getWorldBooks().filter((book) => book.scope === "global");
+    const getCharacterWorldBook = () => getCharacter()?.worldBook ?? null;
     const getWorldBooks = () => {
-      const books = this.adapter.getWorldBooks();
-      const characterBook = getCharacter()?.worldBook;
-      return characterBook ? [...books, characterBook] : books;
+      const characterBook = getCharacterWorldBook();
+      const globalBooks = getGlobalWorldBooks();
+      if (!characterBook) return globalBooks;
+      return [
+        characterBook,
+        ...globalBooks.filter(
+          (book) => book.id !== characterBook.id || book.name !== characterBook.name,
+        ),
+      ];
     };
-    const getLorebookEntries = async (name: unknown) =>
-      cloneValue(
-        getWorldBooks().find((book) => book.name === String(name))?.entries ?? [],
-      );
-    const getCharWorldbookNames = () => ({
-      primary: getCharacter()?.worldBook?.name ?? null,
-      additional: [] as string[],
-    });
+    const findWorldBook = (name: unknown) => {
+      const normalizedName = String(name ?? "").trim();
+      if (!normalizedName) return null;
+      const characterBook = getCharacterWorldBook();
+      if (characterBook?.name === normalizedName) return characterBook;
+      return getGlobalWorldBooks().find((book) => book.name === normalizedName) ?? null;
+    };
+    const getWorldbookNames = () =>
+      Array.from(new Set(getWorldBooks().map((book) => book.name)));
+    const getGlobalWorldbookNames = () => getGlobalWorldBooks().map((book) => book.name);
+    const getWorldbook = (name: unknown) =>
+      cloneValue(findWorldBook(name)?.entries.map(formatTavernWorldBookEntry) ?? []);
+    const getLorebooks = () =>
+      getWorldBooks().map((book) => ({
+        id: book.id,
+        name: book.name,
+        description: book.description,
+        global: book.scope === "global",
+        active: book.active,
+        entries: getWorldbook(book.name),
+      }));
+    const getLorebookEntries = async (name: unknown) => getWorldbook(name);
+    const getCharWorldbookNames = () => {
+      const primary = getCharacterWorldBook()?.name ?? null;
+      const additional = getGlobalWorldBooks()
+        .filter((book) => book.active && book.name !== primary)
+        .map((book) => book.name);
+      return { primary, additional };
+    };
     const getCharLorebooks = async () => getCharWorldbookNames();
-    const getLorebookSettings = async () => ({
-      selected_global_lorebooks: this.adapter.getWorldBooks().map((book) => book.name),
-      selected_world_info: this.adapter.getWorldBooks().map((book) => book.name),
+    const getCurrentCharPrimaryLorebook = () => getCharacterWorldBook()?.name ?? null;
+    const persistWorldBookEntries = (
+      book: TavernRuntimeWorldBook,
+      values: unknown[],
+    ) => {
+      const fallbackEntries = new Map(
+        book.entries.flatMap((entry) => [
+          [entry.id, entry],
+          [entry.uid, entry],
+        ]),
+      );
+      const entries = values.map((value, index) => {
+        const raw = isRecord(value) ? value : {};
+        const fallback = fallbackEntries.get(String(raw.id ?? raw.uid ?? ""));
+        return normalizeTavernWorldBookEntry(value, index, fallback);
+      });
+      const nextBook: TavernRuntimeWorldBook = {
+        ...book,
+        entries,
+        updatedAt: new Date().toISOString(),
+      };
+      this.adapter.setWorldBook(nextBook);
+      return entries.map(formatTavernWorldBookEntry);
+    };
+    const setLorebookEntries = async (name: unknown, entries: unknown) => {
+      const book = findWorldBook(name);
+      if (!book || !Array.isArray(entries)) return false;
+      persistWorldBookEntries(book, entries);
+      return true;
+    };
+    const updateWorldbookWith = async (name: unknown, updater: unknown) => {
+      const book = findWorldBook(name);
+      if (!book || typeof updater !== "function") return [];
+      const currentEntries = getWorldbook(book.name);
+      const result = await (updater as (entries: Array<Record<string, unknown>>) => unknown)(
+        currentEntries,
+      );
+      const nextEntries = Array.isArray(result)
+        ? result
+        : isRecord(result) && Array.isArray(result.entries)
+          ? result.entries
+          : currentEntries;
+      return cloneValue(persistWorldBookEntries(book, nextEntries));
+    };
+    const createWorldbookEntries = async (name: unknown, entries: unknown) => {
+      const book = findWorldBook(name);
+      if (!book || !Array.isArray(entries)) return [];
+      const additions = entries.map((entry, index) =>
+        normalizeTavernWorldBookEntry(entry, book.entries.length + index),
+      );
+      persistWorldBookEntries(book, [...book.entries, ...additions]);
+      return cloneValue(additions.map(formatTavernWorldBookEntry));
+    };
+    const createLorebookEntry = async (name: unknown, entry: unknown) =>
+      (await createWorldbookEntries(name, [entry]))[0] ?? null;
+    const deleteWorldbookEntries = async (name: unknown, idsOrPredicate: unknown) => {
+      const book = findWorldBook(name);
+      if (!book) return false;
+      const formattedEntries = book.entries.map(formatTavernWorldBookEntry);
+      let retainedEntries: TavernRuntimeWorldBookEntry[];
+      if (typeof idsOrPredicate === "function") {
+        retainedEntries = book.entries.filter((entry, index) => {
+          try {
+            return !(idsOrPredicate as (value: Record<string, unknown>, index: number) => unknown)(
+              formattedEntries[index],
+              index,
+            );
+          } catch {
+            return true;
+          }
+        });
+      } else {
+        const values = Array.isArray(idsOrPredicate) ? idsOrPredicate : [idsOrPredicate];
+        const ids = new Set(values.map(String));
+        retainedEntries = book.entries.filter(
+          (entry) => !ids.has(entry.id) && !ids.has(entry.uid),
+        );
+      }
+      persistWorldBookEntries(book, retainedEntries);
+      return true;
+    };
+    const deleteLorebookEntry = async (name: unknown, entryId: unknown) =>
+      await deleteWorldbookEntries(name, [entryId]);
+    const updateWorldbookEntry = async (
+      name: unknown,
+      entryId: unknown,
+      updates: unknown,
+    ) => {
+      const book = findWorldBook(name);
+      if (!book || !isRecord(updates)) return null;
+      const id = String(entryId);
+      const currentEntries = book.entries.map(formatTavernWorldBookEntry);
+      const index = currentEntries.findIndex(
+        (entry) => String(entry.id) === id || String(entry.uid) === id,
+      );
+      if (index < 0) return null;
+      currentEntries[index] = { ...currentEntries[index], ...cloneValue(updates) };
+      return persistWorldBookEntries(book, currentEntries)[index] ?? null;
+    };
+    const getWorldbookEntry = (name: unknown, entryId: unknown) => {
+      const id = String(entryId);
+      return (
+        getWorldbook(name).find(
+          (entry) => String(entry.id) === id || String(entry.uid) === id,
+        ) ?? null
+      );
+    };
+    const getWorldbookEntryByKey = (name: unknown, key: unknown) => {
+      const normalizedKey = String(key ?? "").trim();
+      return (
+        getWorldbook(name).find(
+          (entry) =>
+            entry.name === normalizedKey ||
+            entry.keys.some((entryKey: string) => entryKey === normalizedKey),
+        ) ?? null
+      );
+    };
+    const getLorebookSettings = async () => {
+      const activeGlobalNames = getGlobalWorldBooks()
+        .filter((book) => book.active)
+        .map((book) => book.name);
+      return {
+      selected_global_lorebooks: activeGlobalNames,
+      selected_world_info: activeGlobalNames,
       scan_depth: 10,
       context_percentage: 50,
       budget_cap: 0,
@@ -1067,7 +1420,29 @@ export class TavernScriptRuntime {
       match_whole_words: false,
       use_group_scoring: false,
       overflow_alert: true,
-    });
+      };
+    };
+    const worldbookManager = {
+      getWorldbookNames,
+      getGlobalWorldbookNames,
+      getWorldbook,
+      getLorebooks,
+      getLorebookEntries,
+      getLorebookSettings,
+      setLorebookSettings: async () => true,
+      setLorebookEntries,
+      createLorebookEntry,
+      deleteLorebookEntry,
+      getCharWorldbookNames,
+      getCharLorebooks,
+      getCurrentCharPrimaryLorebook,
+      updateWorldbookWith,
+      createWorldbookEntries,
+      deleteWorldbookEntries,
+      updateWorldbookEntry,
+      getWorldbookEntry,
+      getWorldbookEntryByKey,
+    };
 
     const substitudeMacros = (value: unknown) =>
       String(value ?? "")
@@ -1252,6 +1627,17 @@ export class TavernScriptRuntime {
       getCurrentChatId: () => this.adapter.getChatId(),
       getRequestHeaders: () => ({ "Content-Type": "application/json" }),
       getChatCompletionModel: () => this.adapter.getModelId?.() ?? "",
+      getWorldbookNames,
+      getGlobalWorldbookNames,
+      getWorldbook,
+      getLorebooks,
+      getLorebookEntries,
+      getLorebookSettings,
+      getCharWorldbookNames,
+      getCharLorebooks,
+      getCurrentCharPrimaryLorebook,
+      worldbookManager,
+      lorebookManager: worldbookManager,
       registerMacro: () => true,
       unregisterMacro: () => true,
       unregisterFunctionTool: () => true,
@@ -1306,12 +1692,25 @@ export class TavernScriptRuntime {
       eventEmit: (eventName: string, ...args: unknown[]) => this.emit(eventName, ...args),
       eventRemoveListener,
       getCharData: () => this.getSillyTavernCharacters()[0]?.data ?? null,
+      getWorldbookNames,
+      getGlobalWorldbookNames,
+      getWorldbook,
+      getLorebooks,
       getCharLorebooks,
       getCharWorldbookNames,
-      getCurrentCharPrimaryLorebook: () => getCharacter()?.worldBook?.name ?? null,
+      getCurrentCharPrimaryLorebook,
       getLorebookEntries,
       getLorebookSettings,
       setLorebookSettings: async () => true,
+      setLorebookEntries,
+      createLorebookEntry,
+      deleteLorebookEntry,
+      updateWorldbookWith,
+      createWorldbookEntries,
+      deleteWorldbookEntries,
+      updateWorldbookEntry,
+      getWorldbookEntry,
+      getWorldbookEntryByKey,
       getTavernRegexes,
       formatAsTavernRegexedString,
       isCharacterTavernRegexesEnabled: () =>
@@ -1339,6 +1738,8 @@ export class TavernScriptRuntime {
       SillyTavern: sillyTavern,
     };
     Object.assign(win, api);
+    win.worldbookManager = worldbookManager;
+    win.lorebookManager = worldbookManager;
     win.TavernHelper = api;
     win.tavernHelper = api;
     win.tavernHelperAPI = api;
