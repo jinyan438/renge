@@ -56,6 +56,7 @@ import {
   useRef,
   useState,
 } from "react";
+import jquerySource from "jquery/dist/jquery.min.js?raw";
 import {
   buildPersonaPrompt,
   createPersonaFromPromptText,
@@ -1803,6 +1804,11 @@ const htmlPreviewStyle = [
   "body{box-sizing:border-box;}",
   "</style>",
 ].join("");
+const htmlPreviewJqueryScript = [
+  '<script data-renge-html-preview-jquery="true">',
+  jquerySource.replace(/<\/script/gi, "<\\/script"),
+  "</script>",
+].join("");
 const htmlPreviewBootstrapScript = [
   '<script data-renge-html-preview-bootstrap="true">',
   "(() => {",
@@ -1962,6 +1968,21 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  try { return JSON.parse(JSON.stringify(value)); } catch { return value; }",
     "};",
     "const isRecord = (value) => Boolean(value) && typeof value === \"object\" && !Array.isArray(value);",
+    "const lodashCompat = window._ && (typeof window._ === \"object\" || typeof window._ === \"function\") ? window._ : {};",
+    "if (typeof lodashCompat.get !== \"function\") {",
+    "  lodashCompat.get = (source, path, fallback) => {",
+    "    const segments = Array.isArray(path) ? path : String(path ?? \"\").replace(/\\[([^\\]]+)\\]/g, \".$1\").split(\".\");",
+    "    let current = source;",
+    "    for (const rawSegment of segments) {",
+    "      const segment = String(rawSegment).trim().replace(/^['\\\"]|['\\\"]$/g, \"\");",
+    "      if (!segment) continue;",
+    "      if (current == null || !(segment in Object(current))) return fallback;",
+    "      current = current[segment];",
+    "    }",
+    "    return current === undefined ? fallback : current;",
+    "  };",
+    "}",
+    "window._ = lodashCompat;",
     "const bridgeEventHandlers = new Map();",
     "const eventOn = (eventName, callback) => {",
     "  if (typeof callback !== \"function\") return callback;",
@@ -2110,6 +2131,36 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  try { parent.postMessage({ type: updateMessageType, id: previewId, operation: \"setChatMessages\", updates: clone(updates) }, \"*\"); } catch {}",
     "  return true;",
     "};",
+    "const getAllVariables = () => {",
+    "  const messageVariables = snapshot.messages",
+    "    .slice(0, Math.max(0, snapshot.currentMessageIndex) + 1)",
+    "    .map((message) => message?.variables)",
+    "    .filter(isRecord);",
+    "  return clone(Object.assign(",
+    "    {},",
+    "    isRecord(snapshot.globalVariables) ? snapshot.globalVariables : {},",
+    "    isRecord(snapshot.characterVariables) ? snapshot.characterVariables : {},",
+    "    isRecord(snapshot.chatVariables) ? snapshot.chatVariables : {},",
+    "    ...messageVariables,",
+    "  ));",
+    "};",
+    "const waitGlobalInitialized = (globalName = \"Mvu\", timeout = 30000) => new Promise((resolve, reject) => {",
+    "  const startedAt = Date.now();",
+    "  const check = () => {",
+    "    const value = window[String(globalName)];",
+    "    if (value != null) { resolve(value); return; }",
+    "    if (Date.now() - startedAt >= Math.max(0, Number(timeout) || 0)) {",
+    "      reject(new Error(`等待 ${String(globalName)} 初始化超时`));",
+    "      return;",
+    "    }",
+    "    setTimeout(check, 25);",
+    "  };",
+    "  check();",
+    "});",
+    "const errorCatched = (callback) => async (...args) => {",
+    "  try { return await callback(...args); }",
+    "  catch (error) { console.error(\"[TavernHelper] HTML 脚本执行失败\", error); return null; }",
+    "};",
     "const getContext = () => ({",
     "  chat: snapshot.messages.map((message, index) => formatMessage(message, index, true)),",
     "  characters: [], characterId: snapshot.characterName ? \"0\" : undefined,",
@@ -2118,6 +2169,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "});",
     "const api = {",
     "  getVariables, setVariables: replaceVariables, replaceVariables, updateVariablesWith, insertOrAssignVariables,",
+    "  getAllVariables, waitGlobalInitialized, errorCatched,",
     "  getCurrentMessageId: () => snapshot.currentMessageIndex,",
     "  getLastMessageId: () => snapshot.messages.length - 1,",
     "  getChatMessages, setChatMessages, getContext, eventOn, eventOnce, eventEmit, eventRemoveListener,",
@@ -3080,7 +3132,7 @@ function buildHtmlPreviewDocument(
   context: HtmlPreviewContext,
 ) {
   const trimmedContent = content.trim();
-  const headInjection = `${htmlPreviewStyle}${htmlPreviewBootstrapScript}${buildHtmlPreviewVariablesScript(previewId, context)}`;
+  const headInjection = `${htmlPreviewStyle}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${buildHtmlPreviewVariablesScript(previewId, context)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
     return appendHtmlPreviewScript(injectHtmlPreviewHead(trimmedContent, headInjection), previewId);
   }
