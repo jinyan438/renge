@@ -255,6 +255,39 @@ function compileRegex(findRegex: string) {
   return new RegExp(findRegex, "g");
 }
 
+function expandRegexReplacement(
+  replacement: string,
+  replaceArguments: unknown[],
+) {
+  const wholeMatch = String(replaceArguments[0] ?? "");
+  const possibleGroups = replaceArguments[replaceArguments.length - 1];
+  const namedGroups =
+    possibleGroups && typeof possibleGroups === "object" && !Array.isArray(possibleGroups)
+      ? (possibleGroups as Record<string, unknown>)
+      : null;
+  const captureCount = Math.max(
+    0,
+    replaceArguments.length - (namedGroups ? 4 : 3),
+  );
+
+  return replacement
+    .replace(/{{match}}/gi, "$0")
+    .replace(/\$(\d+)|\$<([^>]+)>/g, (token, captureIndex, captureName) => {
+      if (captureName) {
+        return namedGroups && captureName in namedGroups
+          ? String(namedGroups[captureName] ?? "")
+          : token;
+      }
+      const index = Number(captureIndex);
+      if (!Number.isInteger(index) || index < 0) return token;
+      return index === 0
+        ? wholeMatch
+        : index <= captureCount
+          ? String(replaceArguments[index] ?? "")
+          : token;
+    });
+}
+
 export function getRegexScriptError(script: RegexScript) {
   if (!script.findRegex.trim()) return "请输入查找正则。";
   try {
@@ -288,7 +321,11 @@ export function applyRegexScripts(
       const replaceString = script.substituteRegex
         ? replaceRegexMacros(script.replaceString, options)
         : script.replaceString;
-      let nextResult = result.replace(compileRegex(findRegex), replaceString);
+      let nextResult = result.replace(
+        compileRegex(findRegex),
+        (...replaceArguments: unknown[]) =>
+          expandRegexReplacement(replaceString, replaceArguments),
+      );
       script.trimStrings.forEach((trimString) => {
         if (trimString) nextResult = nextResult.split(trimString).join("");
       });
