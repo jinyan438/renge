@@ -1,4 +1,9 @@
 import type { TavernScript, TavernScriptButton } from "./tavernScriptUtils";
+import fontAwesomeCss from "@fortawesome/fontawesome-free/css/all.min.css?raw";
+import fontAwesomeBrandsUrl from "@fortawesome/fontawesome-free/webfonts/fa-brands-400.woff2?url";
+import fontAwesomeRegularUrl from "@fortawesome/fontawesome-free/webfonts/fa-regular-400.woff2?url";
+import fontAwesomeSolidUrl from "@fortawesome/fontawesome-free/webfonts/fa-solid-900.woff2?url";
+import fontAwesomeV4CompatibilityUrl from "@fortawesome/fontawesome-free/webfonts/fa-v4compatibility.woff2?url";
 
 export type TavernRuntimeMessage = {
   id: string;
@@ -264,6 +269,101 @@ function normalizeTavernRegexRecord(
   };
 }
 
+function buildLocalFontAwesomeCss(baseUrl: string) {
+  const withoutTrueTypeFallbacks = fontAwesomeCss.replace(
+    /,url\(\.\.\/webfonts\/fa-(?:brands-400|regular-400|solid-900|v4compatibility)\.ttf\) format\("truetype"\)/g,
+    "",
+  );
+  const fontAssets = [
+    ["../webfonts/fa-brands-400.woff2", fontAwesomeBrandsUrl],
+    ["../webfonts/fa-regular-400.woff2", fontAwesomeRegularUrl],
+    ["../webfonts/fa-solid-900.woff2", fontAwesomeSolidUrl],
+    ["../webfonts/fa-v4compatibility.woff2", fontAwesomeV4CompatibilityUrl],
+  ] as const;
+  return fontAssets.reduce(
+    (css, [source, assetUrl]) => css.replaceAll(source, new URL(assetUrl, baseUrl).href),
+    withoutTrueTypeFallbacks,
+  );
+}
+
+function installLocalFontAwesomeShadowSupport(
+  targetWindow: Window & typeof globalThis,
+  assetBaseUrl: string,
+) {
+  const { document } = targetWindow;
+  const elementPrototype = targetWindow.Element.prototype;
+  const originalAttachShadow = elementPrototype.attachShadow;
+  const css = buildLocalFontAwesomeCss(assetBaseUrl);
+  const solidUrl = new URL(fontAwesomeSolidUrl, assetBaseUrl).href;
+  const regularUrl = new URL(fontAwesomeRegularUrl, assetBaseUrl).href;
+  const brandsUrl = new URL(fontAwesomeBrandsUrl, assetBaseUrl).href;
+  const fontFaces = [
+    new targetWindow.FontFace("Font Awesome 6 Free", `url("${solidUrl}") format("woff2")`, {
+      style: "normal",
+      weight: "900",
+    }),
+    new targetWindow.FontFace("Font Awesome 6 Free", `url("${regularUrl}") format("woff2")`, {
+      style: "normal",
+      weight: "400",
+    }),
+    new targetWindow.FontFace("Font Awesome 6 Brands", `url("${brandsUrl}") format("woff2")`, {
+      style: "normal",
+      weight: "400",
+    }),
+  ];
+  fontFaces.forEach((fontFace) => document.fonts.add(fontFace));
+  const ready = Promise.all(fontFaces.map((fontFace) => fontFace.load())).then(() => undefined);
+  const links = new Set<HTMLLinkElement>();
+  const styles = new Set<HTMLStyleElement>();
+  const documentStyle = document.createElement("style");
+  documentStyle.dataset.rengeFontawesome = "true";
+  documentStyle.textContent = css;
+  document.head.appendChild(documentStyle);
+
+  const inject = (root: ShadowRoot) => {
+    if (root.querySelector('[data-renge-fontawesome="true"]')) return;
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = "data:text/css;charset=utf-8,/*renge-fontawesome*/";
+    link.dataset.rengeFontawesome = "true";
+    const style = document.createElement("style");
+    style.dataset.rengeFontawesomeStyle = "true";
+    style.textContent = css;
+    root.prepend(style);
+    root.prepend(link);
+    links.add(link);
+    styles.add(style);
+  };
+
+  const patchedAttachShadow: typeof Element.prototype.attachShadow = function (
+    this: Element,
+    init: ShadowRootInit,
+  ) {
+    const root = originalAttachShadow.call(this, init);
+    inject(root);
+    return root;
+  };
+  elementPrototype.attachShadow = patchedAttachShadow;
+  document.querySelectorAll("*").forEach((element) => {
+    if (element.shadowRoot) inject(element.shadowRoot);
+  });
+
+  return {
+    ready,
+    cleanup: () => {
+      if (elementPrototype.attachShadow === patchedAttachShadow) {
+        elementPrototype.attachShadow = originalAttachShadow;
+      }
+      links.forEach((link) => link.remove());
+      links.clear();
+      styles.forEach((style) => style.remove());
+      styles.clear();
+      documentStyle.remove();
+      fontFaces.forEach((fontFace) => document.fonts.delete(fontFace));
+    },
+  };
+}
+
 function toErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error || "未知错误");
 }
@@ -351,6 +451,7 @@ export class TavernScriptRuntime {
   private executedScriptIds = new Set<string>();
   private eventHandlers = new Map<string, Set<(...args: unknown[]) => unknown>>();
   private scriptButtons = new Map<string, TavernScriptButton[]>();
+  private fontAwesomeCleanups: Array<() => void> = [];
 
   constructor(scripts: TavernScript[], adapter: TavernScriptRuntimeAdapter) {
     this.scripts = scripts.map((script) => cloneValue(script));
@@ -368,6 +469,16 @@ export class TavernScriptRuntime {
     if (this.destroyed) throw new Error("脚本运行时已销毁。");
     this.reportStatus("loading", "正在初始化酒馆脚本运行环境...");
     await this.createIframe();
+    const fontAwesomeSupports = [
+      installLocalFontAwesomeShadowSupport(window, window.location.href),
+    ];
+    if (this.runtimeWindow) {
+      fontAwesomeSupports.push(
+        installLocalFontAwesomeShadowSupport(this.runtimeWindow, window.location.href),
+      );
+    }
+    this.fontAwesomeCleanups.push(...fontAwesomeSupports.map((support) => support.cleanup));
+    await Promise.all(fontAwesomeSupports.map((support) => support.ready));
     this.installCompatibilityApi();
     await this.loadDependencies();
     this.publishButtons();
@@ -483,6 +594,10 @@ export class TavernScriptRuntime {
     const parentWindow = window as Window & { Mvu?: unknown };
     if (parentWindow.Mvu) delete parentWindow.Mvu;
     this.iframe?.remove();
+    this.fontAwesomeCleanups
+      .splice(0)
+      .reverse()
+      .forEach((cleanup) => cleanup());
     this.iframe = null;
     this.runtimeWindow = null;
     this.reportStatus("idle", "");
