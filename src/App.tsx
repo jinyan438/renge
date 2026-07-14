@@ -56,6 +56,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import {
   buildPersonaPrompt,
@@ -1799,6 +1800,7 @@ const HTML_PREVIEW_VARIABLES_UPDATE_MESSAGE = "renge-html-preview-variables-upda
 const HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE = "renge-html-preview-context-update";
 const HTML_PREVIEW_COMMAND_MESSAGE = "renge-html-preview-command";
 const HTML_PREVIEW_COMMAND_RESULT_MESSAGE = "renge-html-preview-command-result";
+const HTML_PREVIEW_CONTEXT_MENU_MESSAGE = "renge-html-preview-context-menu";
 const HYPNOOS_APPEND_OPERATION_MESSAGE = "HYPNOOS_APPEND_OPERATION";
 const HTML_PREVIEW_MAX_HEIGHT = 12000;
 
@@ -2018,6 +2020,9 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
   const commandResultMessageTypeLiteral = serializeHtmlPreviewValue(
     HTML_PREVIEW_COMMAND_RESULT_MESSAGE,
   );
+  const contextMenuMessageTypeLiteral = serializeHtmlPreviewValue(
+    HTML_PREVIEW_CONTEXT_MENU_MESSAGE,
+  );
   const contextLiteral = serializeHtmlPreviewValue(context);
 
   return [
@@ -2028,6 +2033,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     `const contextUpdateMessageType = ${contextMessageTypeLiteral};`,
     `const commandMessageType = ${commandMessageTypeLiteral};`,
     `const commandResultMessageType = ${commandResultMessageTypeLiteral};`,
+    `const contextMenuMessageType = ${contextMenuMessageTypeLiteral};`,
     `const snapshot = ${contextLiteral};`,
     "const clone = (value) => {",
     "  if (value == null) return value;",
@@ -2188,11 +2194,14 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  const filter = (items) => !isRecord(options) || options.role == null || options.role === \"all\"",
     "    ? items : items.filter((item) => item.role === options.role);",
     "  if (range == null || range === \"\") return filter(formatted);",
-    "  if (typeof range === \"number\" || /^-?\\d+$/.test(String(range).trim())) {",
-    "    const index = normalizeMessageId(range, false);",
+    "  const expandedRange = typeof range === \"string\"",
+    "    ? range.replace(/\\{\\{\\s*lastMessageId\\s*\\}\\}/gi, String(snapshot.messages.length - 1)).replace(/\\{\\{\\s*currentMessageId\\s*\\}\\}/gi, String(snapshot.currentMessageIndex))",
+    "    : range;",
+    "  if (typeof expandedRange === \"number\" || /^-?\\d+$/.test(String(expandedRange).trim())) {",
+    "    const index = normalizeMessageId(expandedRange, false);",
     "    return filter(formatted[index] ? [formatted[index]] : []);",
     "  }",
-    "  const match = /^(-?\\d+)\\s*-\\s*(-?\\d+)$/.exec(String(range).trim());",
+    "  const match = /^(-?\\d+)\\s*-\\s*(-?\\d+)$/.exec(String(expandedRange).trim());",
     "  if (!match) return [];",
     "  const start = normalizeMessageId(match[1], false);",
     "  const end = normalizeMessageId(match[2], false);",
@@ -2304,6 +2313,11 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "mvu.getMvuData = (option) => getVariables(option);",
     "mvu.setMvuData = (variables, option) => replaceVariables(variables, option);",
     "window.Mvu = mvu;",
+    "document.addEventListener(\"contextmenu\", (event) => {",
+    "  event.preventDefault();",
+    "  event.stopPropagation();",
+    "  try { parent.postMessage({ type: contextMenuMessageType, id: previewId, x: event.clientX, y: event.clientY }, \"*\"); } catch {}",
+    "}, true);",
     "})();",
     "</script>",
   ].join("");
@@ -6631,6 +6645,8 @@ export function App() {
         command?: unknown;
         text?: unknown;
         requestId?: unknown;
+        x?: unknown;
+        y?: unknown;
       };
 
       if (payload.type === HYPNOOS_APPEND_OPERATION_MESSAGE) {
@@ -6686,6 +6702,22 @@ export function App() {
 
       const frame = htmlPreviewFrameRefs.current.get(payload.id);
       if (!frame || frame.contentWindow !== event.source) return;
+
+      if (payload.type === HTML_PREVIEW_CONTEXT_MENU_MESSAGE) {
+        const messageId = frame.dataset.messageId;
+        if (!messageId) return;
+        const frameRect = frame.getBoundingClientRect();
+        const frameX = Number(payload.x);
+        const frameY = Number(payload.y);
+        const clientX = frameRect.left + (Number.isFinite(frameX) ? frameX : 0);
+        const clientY = frameRect.top + (Number.isFinite(frameY) ? frameY : 0);
+        setChatMessageMenu({
+          messageId,
+          x: clamp(clientX, 8, window.innerWidth - 180),
+          y: clamp(clientY, 8, window.innerHeight - 92),
+        });
+        return;
+      }
 
       if (payload.type === HTML_PREVIEW_COMMAND_MESSAGE) {
         try {
@@ -9632,12 +9664,20 @@ export function App() {
   const deleteChatMessage = (messageId: string) => {
     if (chatStatus.status === "loading") return;
 
-    setChatMessages((current) => current.filter((message) => message.id !== messageId));
+    const messageIndex = chatMessagesRef.current.findIndex((message) => message.id === messageId);
+    commitChatMessages((current) => current.filter((message) => message.id !== messageId));
     if (editingChatMessage?.messageId === messageId) {
       setEditingChatMessage(null);
     }
     setChatMessageMenu(null);
     setChatStatus({ status: "idle", message: "消息已删除。" });
+    if (messageIndex >= 0) {
+      void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_DELETED, messageIndex);
+      void tavernScriptRuntimeRef.current?.emit(
+        TAVERN_EVENTS.CHAT_CHANGED,
+        activeChatSessionIdRef.current,
+      );
+    }
   };
 
   const startEditingChatMessage = (messageId: string) => {
@@ -13225,13 +13265,23 @@ export function App() {
     const content = editingChatMessage.content.trim();
     if (!content) return;
 
-    setChatMessages((current) =>
+    const messageId = editingChatMessage.messageId;
+    const messageIndex = chatMessagesRef.current.findIndex((message) => message.id === messageId);
+    commitChatMessages((current) =>
       current.map((message) =>
-        message.id === editingChatMessage.messageId ? { ...message, content } : message,
+        message.id === messageId ? { ...message, content } : message,
       ),
     );
     setEditingChatMessage(null);
     setChatStatus({ status: "success", message: "AI 消息已保存。" });
+    if (messageIndex >= 0) {
+      void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_EDITED, messageIndex);
+      void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_UPDATED, messageIndex);
+      void tavernScriptRuntimeRef.current?.emit(
+        TAVERN_EVENTS.CHAT_CHANGED,
+        activeChatSessionIdRef.current,
+      );
+    }
   };
 
   const saveEditedUserMessage = () => {
@@ -13240,13 +13290,23 @@ export function App() {
     const content = editingChatMessage.content.trim();
     if (!content) return;
 
-    setChatMessages((current) =>
+    const messageId = editingChatMessage.messageId;
+    const messageIndex = chatMessagesRef.current.findIndex((message) => message.id === messageId);
+    commitChatMessages((current) =>
       current.map((message) =>
-        message.id === editingChatMessage.messageId ? { ...message, content } : message,
+        message.id === messageId ? { ...message, content } : message,
       ),
     );
     setEditingChatMessage(null);
     setChatStatus({ status: "success", message: "用户消息已保存，后续对话未改变。" });
+    if (messageIndex >= 0) {
+      void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_EDITED, messageIndex);
+      void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_UPDATED, messageIndex);
+      void tavernScriptRuntimeRef.current?.emit(
+        TAVERN_EVENTS.CHAT_CHANGED,
+        activeChatSessionIdRef.current,
+      );
+    }
   };
 
   const resendEditedUserMessage = async () => {
@@ -13279,6 +13339,11 @@ export function App() {
     setChatSender(requestSender);
     commitChatMessages(nextMessages);
     setEditingChatMessage(null);
+    void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_EDITED, messageIndex);
+    void tavernScriptRuntimeRef.current?.emit(
+      TAVERN_EVENTS.CHAT_CHANGED,
+      activeChatSessionIdRef.current,
+    );
     if (chatMode === "multi") {
       await runMultiAgentResponses(nextMessages, requestSender, content);
     } else {
@@ -18311,32 +18376,35 @@ export function App() {
                 });
               })
             )}
-            {chatMessageMenu && chatMessageMenuMessage && (
-              <div
-                className="chat-message-menu"
-                style={{ left: chatMessageMenu.x, top: chatMessageMenu.y }}
-                onClick={(event) => event.stopPropagation()}
-                onContextMenu={(event) => event.preventDefault()}
-              >
-                <button
-                  type="button"
-                  disabled={chatStatus.status === "loading"}
-                  onClick={() => startEditingChatMessage(chatMessageMenuMessage.id)}
+            {chatMessageMenu &&
+              chatMessageMenuMessage &&
+              createPortal(
+                <div
+                  className="chat-message-menu"
+                  style={{ left: chatMessageMenu.x, top: chatMessageMenu.y }}
+                  onClick={(event) => event.stopPropagation()}
+                  onContextMenu={(event) => event.preventDefault()}
                 >
-                  <Pencil size={14} />
-                  编辑
-                </button>
-                <button
-                  type="button"
-                  className="danger"
-                  disabled={chatStatus.status === "loading"}
-                  onClick={() => deleteChatMessage(chatMessageMenuMessage.id)}
-                >
-                  <Trash2 size={14} />
-                  删除
-                </button>
-              </div>
-            )}
+                  <button
+                    type="button"
+                    disabled={chatStatus.status === "loading"}
+                    onClick={() => startEditingChatMessage(chatMessageMenuMessage.id)}
+                  >
+                    <Pencil size={14} />
+                    编辑
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    disabled={chatStatus.status === "loading"}
+                    onClick={() => deleteChatMessage(chatMessageMenuMessage.id)}
+                  >
+                    <Trash2 size={14} />
+                    删除
+                  </button>
+                </div>,
+                document.body,
+              )}
           </div>
 
           {tavernRuntimeButtons.length > 0 && (
