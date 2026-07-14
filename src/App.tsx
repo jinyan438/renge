@@ -3098,7 +3098,6 @@ function appendFencedHtmlDocumentParts(
       executable: false,
     });
   }
-  node.children.forEach((child) => appendFencedHtmlDocumentParts(parts, content, child));
 }
 
 function parseGenericChatContentParts(content: string): ChatContentPart[] {
