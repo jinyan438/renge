@@ -1738,6 +1738,10 @@ export class TavernScriptRuntime {
       SillyTavern: sillyTavern,
     };
     Object.assign(win, api);
+    const promptTemplateApi = (
+      globalThis as typeof globalThis & { EjsTemplate?: Record<string, unknown> }
+    ).EjsTemplate;
+    if (promptTemplateApi) win.EjsTemplate = promptTemplateApi;
     win.worldbookManager = worldbookManager;
     win.lorebookManager = worldbookManager;
     win.TavernHelper = api;

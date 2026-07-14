@@ -10,6 +10,7 @@ import {
   Copy,
   Database,
   Download,
+  ExternalLink,
   Eye,
   EyeOff,
   FileJson,
@@ -26,6 +27,7 @@ import {
   Pencil,
   Play,
   Plus,
+  Puzzle,
   RefreshCw,
   Save,
   Search,
@@ -137,6 +139,27 @@ import {
   type TavernRuntimeStatus,
   type TavernRuntimeWorldBook,
 } from "./tavernScriptRuntime";
+import {
+  DEFAULT_PROMPT_TEMPLATE_SETTINGS,
+  ST_PROMPT_TEMPLATE_EXTENSION_ID,
+  ST_PROMPT_TEMPLATE_SOURCE_URL,
+  installKnownTavernExtension,
+  loadInstalledExtensions,
+  normalizeInstalledExtensions,
+  type InstalledExtension,
+  type PromptTemplateExtensionSettings,
+} from "./extensionUtils";
+import {
+  evaluatePromptTemplateCode,
+  filterPromptTemplateSpecialEntries,
+  getPromptTemplateInitialVariables,
+  preparePromptTemplateContext,
+  processPromptTemplateApiMessages,
+  processPromptTemplateRenderedMessage,
+  type PromptTemplateApiMessage,
+  type PromptTemplateRuntimeOptions,
+  type PromptTemplateStoredMessage,
+} from "./promptTemplateExtension";
 import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryType } from "./types";
 
 const AVATAR_OUTPUT_SIZE = 512;
@@ -165,7 +188,7 @@ type TypeDragTarget = {
   placement: DragPlacement;
 };
 
-type AppView = "home" | "studio" | "characters" | "settings" | "chat";
+type AppView = "home" | "studio" | "characters" | "extensions" | "settings" | "chat";
 type SettingsTab = "providers" | "prompts" | "presets" | "worldbooks" | "regexes" | "scripts" | "user" | "personalization" | "mcp" | "skills" | "device";
 type ProviderPullState = "idle" | "loading" | "success" | "error";
 type ChatGenerationState = "idle" | "running" | "stopping";
@@ -386,6 +409,7 @@ type RengeAppData = {
   chatPersonalization?: ChatPersonalizationSettings;
   mcpServers?: McpServerConfig[];
   skills?: SkillProfile[];
+  extensions?: InstalledExtension[];
   pcConnection?: PcConnectionData;
   updatedAt?: string;
 };
@@ -588,6 +612,7 @@ const CHAT_HEARTBEAT_REMINDER_VISIBLE_STORAGE_KEY = "renge_chat_heartbeat_remind
 const CHAT_PERSONALIZATION_STORAGE_KEY = "renge_chat_personalization";
 const MCP_SERVERS_STORAGE_KEY = "renge_mcp_servers";
 const SKILLS_STORAGE_KEY = "renge_skills";
+const EXTENSIONS_STORAGE_KEY = "renge_extensions";
 const PC_SERVER_URL_STORAGE_KEY = "renge_pc_server_url";
 const PC_WORKSPACE_PATH_STORAGE_KEY = "renge_pc_workspace_path";
 const PC_WORKSPACE_NAME_STORAGE_KEY = "renge_pc_workspace_name";
@@ -6424,6 +6449,16 @@ export function App() {
     status: ProviderPullState;
     message: string;
   }>({ status: "idle", message: "" });
+  const [extensions, setExtensions] = useState<InstalledExtension[]>(() =>
+    loadInstalledExtensions(EXTENSIONS_STORAGE_KEY),
+  );
+  const [extensionInstallUrl, setExtensionInstallUrl] = useState(
+    ST_PROMPT_TEMPLATE_SOURCE_URL,
+  );
+  const [extensionStatus, setExtensionStatus] = useState<{
+    status: ProviderPullState;
+    message: string;
+  }>({ status: "idle", message: "" });
   const [chatInput, setChatInput] = useState("");
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
   const [chatMessageMenu, setChatMessageMenu] = useState<{
@@ -7110,6 +7145,11 @@ export function App() {
             normalizeSkillProfile(skill as Partial<SkillProfile> & Record<string, unknown>),
           )
         : loadSkills();
+      const nextExtensions = normalizeInstalledExtensions(
+        Array.isArray(persistentData?.extensions)
+          ? persistentData.extensions
+          : loadInstalledExtensions(EXTENSIONS_STORAGE_KEY),
+      );
       const storedPcConnection = getStoredPcConnection();
       const persistentPcConnection = persistentData?.pcConnection;
       const nextPcConnection =
@@ -7238,6 +7278,7 @@ export function App() {
       setActiveMcpServerId(nextMcpServers[0]?.id ?? "");
       setSkills(nextSkills);
       setActiveSkillId(nextSkills[0]?.id ?? "");
+      setExtensions(nextExtensions);
       setChatSessions(normalizedChatSessions);
       setActiveChatSessionId(normalizedChatSessions[0]?.id ?? "");
       setChatMessages(normalizedChatSessions[0]?.messages ?? []);
@@ -7323,6 +7364,7 @@ export function App() {
     );
     localStorage.setItem(MCP_SERVERS_STORAGE_KEY, JSON.stringify(mcpServers));
     localStorage.setItem(SKILLS_STORAGE_KEY, JSON.stringify(skills));
+    localStorage.setItem(EXTENSIONS_STORAGE_KEY, JSON.stringify(extensions));
     const pcConnection: PcConnectionData = {
       baseUrl: pcTransferWorkspace?.baseUrl ?? pcServerUrl.trim(),
       ...(pcTransferWorkspace
@@ -7367,10 +7409,11 @@ export function App() {
       chatPersonalization,
       mcpServers,
       skills,
+      extensions,
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     });
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataLoaded, characterCards, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataLoaded, characterCards, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     if (!appDataLoaded) return;
@@ -8671,6 +8714,360 @@ export function App() {
       ),
     [activeTavernScripts],
   );
+  const promptTemplateExtension = useMemo(
+    () =>
+      extensions.find(
+        (extension) => extension.id === ST_PROMPT_TEMPLATE_EXTENSION_ID,
+      ) ?? null,
+    [extensions],
+  );
+  const promptTemplateEnabled = Boolean(
+    promptTemplateExtension?.enabled && promptTemplateExtension.status === "installed",
+  );
+
+  const installTavernExtension = () => {
+    try {
+      const next = installKnownTavernExtension(extensionInstallUrl, extensions);
+      setExtensions(next);
+      setExtensionStatus({
+        status: "success",
+        message: "ST-Prompt-Template 已安装，并启用 Renge 原生兼容层。",
+      });
+    } catch (error) {
+      setExtensionStatus({
+        status: "error",
+        message: error instanceof Error ? error.message : "扩展安装失败。",
+      });
+    }
+  };
+
+  const updateInstalledExtension = (
+    extensionId: string,
+    patch: Partial<InstalledExtension>,
+  ) => {
+    setExtensions((current) =>
+      current.map((extension) =>
+        extension.id === extensionId
+          ? {
+              ...extension,
+              ...patch,
+              updatedAt: new Date().toISOString(),
+            }
+          : extension,
+      ),
+    );
+  };
+
+  const updatePromptTemplateSettings = (
+    patch: Partial<PromptTemplateExtensionSettings>,
+  ) => {
+    if (!promptTemplateExtension) return;
+    updateInstalledExtension(promptTemplateExtension.id, {
+      settings: {
+        ...promptTemplateExtension.settings,
+        ...patch,
+      },
+    });
+  };
+
+  const resetPromptTemplateSettings = () => {
+    if (!promptTemplateExtension) return;
+    updateInstalledExtension(promptTemplateExtension.id, {
+      settings: { ...DEFAULT_PROMPT_TEMPLATE_SETTINGS },
+      status: "installed",
+      statusMessage: "已恢复 ST-Prompt-Template 默认兼容设置",
+    });
+    setExtensionStatus({ status: "success", message: "扩展设置已恢复默认值。" });
+  };
+
+  const getPromptTemplateWorldBooks = (character: CharacterCard | null) => {
+    const globalBooks = worldBooksRef.current;
+    const characterBook = character
+      ? resolveCharacterWorldBook(character, worldBooksRef.current)
+      : null;
+    if (!characterBook) return globalBooks;
+    return [
+      characterBook,
+      ...globalBooks.filter(
+        (book) => book.id !== characterBook.id || book.name !== characterBook.name,
+      ),
+    ];
+  };
+
+  const createPromptTemplateRuntimeOptions = (
+    sourceMessages: ChatMessage[],
+    character: CharacterCard | null,
+    assistantName: string,
+    modelId: string,
+  ): PromptTemplateRuntimeOptions | null => {
+    if (!promptTemplateEnabled || !promptTemplateExtension) return null;
+    const characterBook = character
+      ? resolveCharacterWorldBook(character, worldBooksRef.current)
+      : null;
+    return {
+      settings: promptTemplateExtension.settings,
+      worldBooks: getPromptTemplateWorldBooks(character),
+      activeWorldBookIds: Array.from(
+        new Set([
+          ...activeWorldBookIdsRef.current,
+          ...(characterBook ? [characterBook.id] : []),
+        ]),
+      ),
+      character,
+      preset: chatPresetEnabled ? activeChatPreset ?? null : null,
+      userName: userProfileRef.current.nickname.trim() || "User",
+      assistantName,
+      chatId: activeChatSessionIdRef.current,
+      modelId,
+      variables: {
+        getGlobalVariables: () =>
+          normalizeTavernVariables(tavernGlobalVariablesRef.current),
+        setGlobalVariables: (variables) => {
+          const normalized = normalizeTavernVariables(variables);
+          tavernGlobalVariablesRef.current = normalized;
+          setTavernGlobalVariables(normalized);
+        },
+        getChatVariables: () => {
+          const session = chatSessionsRef.current.find(
+            (candidate) => candidate.id === activeChatSessionIdRef.current,
+          );
+          return normalizeTavernVariables(session?.scriptVariables);
+        },
+        setChatVariables: (variables) => {
+          const sessionId = activeChatSessionIdRef.current;
+          const normalized = normalizeTavernVariables(variables);
+          const nextSessions = chatSessionsRef.current.map((session) =>
+            session.id === sessionId
+              ? {
+                  ...session,
+                  scriptVariables: normalized,
+                  updatedAt: new Date().toISOString(),
+                }
+              : session,
+          );
+          chatSessionsRef.current = nextSessions;
+          setChatSessions(nextSessions);
+        },
+        getMessages: () =>
+          sourceMessages.map((message) => ({
+            ...message,
+            variables: normalizeTavernVariables(message.variables),
+          })) as PromptTemplateStoredMessage[],
+        setMessageVariables: (index, variables) => {
+          const messageId = sourceMessages[index]?.id;
+          if (!messageId) return;
+          const normalized = normalizeTavernVariables(variables);
+          const nextMessages = chatMessagesRef.current.map((message) =>
+            message.id === messageId ? { ...message, variables: normalized } : message,
+          );
+          chatMessagesRef.current = nextMessages;
+          setChatMessages(nextMessages);
+        },
+      },
+      debug: (message, detail) => {
+        if (promptTemplateExtension.settings.debug) {
+          console.debug(`[ST-Prompt-Template] ${message}`, detail ?? "");
+        }
+      },
+    };
+  };
+
+  const applyPromptTemplateToApiMessages = async (
+    apiMessages: ChatApiMessage[],
+    sourceMessages: ChatMessage[],
+    character: CharacterCard | null,
+    assistantName: string,
+    modelId: string,
+  ) => {
+    const options = createPromptTemplateRuntimeOptions(
+      sourceMessages,
+      character,
+      assistantName,
+      modelId,
+    );
+    if (!options) return apiMessages;
+    return (await processPromptTemplateApiMessages(
+      apiMessages as PromptTemplateApiMessage[],
+      options,
+    )) as ChatApiMessage[];
+  };
+
+  const applyPromptTemplateToRenderedMessage = async (
+    content: string,
+    sourceMessages: ChatMessage[],
+    character: CharacterCard | null,
+    assistantName: string,
+    modelId: string,
+  ) => {
+    const options = createPromptTemplateRuntimeOptions(
+      sourceMessages,
+      character,
+      assistantName,
+      modelId,
+    );
+    if (!options) return { content, messageVariables: {} as Record<string, unknown> };
+    return await processPromptTemplateRenderedMessage(
+      content,
+      sourceMessages.length,
+      options,
+    );
+  };
+
+  useEffect(() => {
+    const host = window as unknown as {
+      EjsTemplate?: Record<string, unknown>;
+    };
+    if (!appDataLoaded || !promptTemplateEnabled || !promptTemplateExtension) {
+      delete host.EjsTemplate;
+      return;
+    }
+
+    const getRuntimeOptions = () => {
+      const character = activeSessionRoleplayCard ?? null;
+      return createPromptTemplateRuntimeOptions(
+        chatMessagesRef.current,
+        character,
+        character?.name ?? chatPersona.name,
+        effectiveChatModelId,
+      );
+    };
+    const getFeatures = () => ({
+      enabled: promptTemplateExtension.enabled,
+      generate_enabled: promptTemplateExtension.settings.processGeneratedPrompts,
+      generate_loader_enabled:
+        promptTemplateExtension.settings.injectGenerateWorldBookEntries,
+      inject_loader_enabled:
+        promptTemplateExtension.settings.injectPromptWorldBookEntries,
+      render_enabled: promptTemplateExtension.settings.processRenderedMessages,
+      render_loader_enabled:
+        promptTemplateExtension.settings.injectRenderWorldBookEntries,
+      raw_message_evaluation_enabled:
+        promptTemplateExtension.settings.processRawMessages,
+      preload_worldinfo_enabled: promptTemplateExtension.settings.preloadWorldBooks,
+      depth_limit: promptTemplateExtension.settings.depthLimit,
+      debug_enabled: promptTemplateExtension.settings.debug,
+    });
+    const setFeatures = (features: Record<string, unknown>) => {
+      if (typeof features.enabled === "boolean") {
+        updateInstalledExtension(promptTemplateExtension.id, {
+          enabled: features.enabled,
+        });
+      }
+      updatePromptTemplateSettings({
+        ...(typeof features.generate_enabled === "boolean"
+          ? { processGeneratedPrompts: features.generate_enabled }
+          : {}),
+        ...(typeof features.generate_loader_enabled === "boolean"
+          ? { injectGenerateWorldBookEntries: features.generate_loader_enabled }
+          : {}),
+        ...(typeof features.inject_loader_enabled === "boolean"
+          ? { injectPromptWorldBookEntries: features.inject_loader_enabled }
+          : {}),
+        ...(typeof features.render_enabled === "boolean"
+          ? { processRenderedMessages: features.render_enabled }
+          : {}),
+        ...(typeof features.render_loader_enabled === "boolean"
+          ? { injectRenderWorldBookEntries: features.render_loader_enabled }
+          : {}),
+        ...(typeof features.raw_message_evaluation_enabled === "boolean"
+          ? { processRawMessages: features.raw_message_evaluation_enabled }
+          : {}),
+        ...(typeof features.preload_worldinfo_enabled === "boolean"
+          ? { preloadWorldBooks: features.preload_worldinfo_enabled }
+          : {}),
+        ...(features.depth_limit !== undefined
+          ? {
+              depthLimit: Number.isFinite(Number(features.depth_limit))
+                ? Math.max(-1, Math.floor(Number(features.depth_limit)))
+                : -1,
+            }
+          : {}),
+        ...(typeof features.debug_enabled === "boolean"
+          ? { debug: features.debug_enabled }
+          : {}),
+      });
+    };
+    const api = {
+      version: promptTemplateExtension.version,
+      evalTemplate: async (
+        code: string,
+        context: Record<string, unknown> | null = null,
+      ) => {
+        const options = getRuntimeOptions();
+        if (!options) return code;
+        return await evaluatePromptTemplateCode(
+          code,
+          context ?? {},
+          chatMessagesRef.current.length - 1,
+          options,
+        );
+      },
+      prepareContext: async (
+        context: Record<string, unknown> = {},
+        end = chatMessagesRef.current.length - 1,
+      ) => {
+        const options = getRuntimeOptions();
+        return options
+          ? await preparePromptTemplateContext(context, end, options)
+          : context;
+      },
+      getFeatures,
+      setFeatures,
+      resetFeatures: resetPromptTemplateSettings,
+      allVariables: async () => {
+        const options = getRuntimeOptions();
+        const context = options
+          ? await preparePromptTemplateContext(
+              {},
+              chatMessagesRef.current.length - 1,
+              options,
+            )
+          : {};
+        return (context as { variables?: unknown }).variables ?? {};
+      },
+      saveVariables: async () => true,
+      refreshWorldInfo: async () => true,
+      compileTemplate: async (code: string) =>
+        async (context: Record<string, unknown> = {}) => {
+          const options = getRuntimeOptions();
+          return options
+            ? await evaluatePromptTemplateCode(
+                code,
+                context,
+                chatMessagesRef.current.length - 1,
+                options,
+              )
+            : code;
+        },
+      parseJSON: (value: string) => JSON.parse(value),
+      jsonPatch: (value: unknown) => value,
+      finalization: {},
+    };
+    Object.defineProperties(api, {
+      initialVariables: {
+        enumerable: true,
+        get: () => {
+          const options = getRuntimeOptions();
+          return options ? getPromptTemplateInitialVariables(options) : {};
+        },
+      },
+      defines: {
+        enumerable: true,
+        get: () => ({}),
+      },
+    });
+    host.EjsTemplate = api;
+    return () => {
+      if (host.EjsTemplate === api) delete host.EjsTemplate;
+    };
+  }, [
+    activeChatSessionId,
+    activeSessionRoleplayCard,
+    appDataLoaded,
+    effectiveChatModelId,
+    promptTemplateEnabled,
+    promptTemplateExtension,
+  ]);
 
   useEffect(() => {
     if (!appDataLoaded || !activeChatSessionId) return;
@@ -8999,7 +9396,13 @@ export function App() {
       }
       runtime.destroy();
     };
-  }, [activeChatSessionId, appDataLoaded, tavernRuntimeConfigurationKey]);
+  }, [
+    activeChatSessionId,
+    appDataLoaded,
+    promptTemplateEnabled,
+    promptTemplateExtension?.updatedAt,
+    tavernRuntimeConfigurationKey,
+  ]);
 
   const emitTavernMessageEvent = (
     eventName: typeof TAVERN_EVENTS.MESSAGE_SENT | typeof TAVERN_EVENTS.MESSAGE_RECEIVED,
@@ -9072,6 +9475,47 @@ export function App() {
       ),
     );
   };
+  const processRoleplayGreeting = (session: ChatSession, card: CharacterCard) => {
+    const greetingIndex = session.messages.findIndex(
+      (message) => message.source === "roleplay-greeting",
+    );
+    if (greetingIndex < 0 || !promptTemplateEnabled) return;
+    window.setTimeout(() => {
+      const options = createPromptTemplateRuntimeOptions(
+        session.messages,
+        card,
+        card.name,
+        effectiveChatModelId,
+      );
+      if (!options) return;
+      void processPromptTemplateRenderedMessage(
+        session.messages[greetingIndex].content,
+        greetingIndex,
+        options,
+      ).then((result) => {
+        const nextMessages = chatMessagesRef.current.map((message) =>
+          message.id === session.messages[greetingIndex].id
+            ? {
+                ...message,
+                content: result.content,
+                ...(Object.keys(result.messageVariables).length > 0
+                  ? { variables: result.messageVariables }
+                  : {}),
+              }
+            : message,
+        );
+        chatMessagesRef.current = nextMessages;
+        setChatMessages(nextMessages);
+        setChatSessions((current) =>
+          current.map((candidate) =>
+            candidate.id === session.id
+              ? { ...candidate, messages: nextMessages, updatedAt: new Date().toISOString() }
+              : candidate,
+          ),
+        );
+      });
+    }, 0);
+  };
   const activateRoleplaySession = (session: ChatSession) => {
     setActiveCharacterCardId(session.roleplayCharacterCardId ?? "");
     setChatMode("roleplay");
@@ -9081,6 +9525,10 @@ export function App() {
     setChatMessageMenu(null);
     setChatStatus({ status: "idle", message: "" });
     setView("chat");
+    const card = characterCardsRef.current.find(
+      (candidate) => candidate.id === session.roleplayCharacterCardId,
+    );
+    if (card) processRoleplayGreeting(session, card);
   };
   const startRoleplayInCurrentWorkspace = (card: CharacterCard, greetingIndex = 0) => {
     const canBindCurrentSession = Boolean(
@@ -9159,14 +9607,18 @@ export function App() {
           message.source === "roleplay-greeting" ? { ...greeting, id: message.id } : message,
         )
       : [greeting, ...chatMessages];
+    chatMessagesRef.current = nextMessages;
     setChatMessages(nextMessages);
+    const nextSession = {
+      ...activeChatSession,
+      roleplayGreetingIndex: nextIndex,
+      messages: nextMessages,
+      updatedAt: new Date().toISOString(),
+    };
     setChatSessions((current) =>
-      current.map((session) =>
-        session.id === activeChatSession.id
-          ? { ...session, roleplayGreetingIndex: nextIndex, messages: nextMessages }
-          : session,
-      ),
+      current.map((session) => (session.id === activeChatSession.id ? nextSession : session)),
     );
+    processRoleplayGreeting(nextSession, activeSessionRoleplayCard);
   };
   const recentChatSessions = useMemo(
     () =>
@@ -11957,7 +12409,7 @@ export function App() {
         ? buildHeartbeatSystemPrompt(activeChatSession?.heartbeat)
         : "";
       const worldBookSystemPrompt = buildWorldBookPrompt(
-        worldBooks,
+        filterPromptTemplateSpecialEntries(worldBooks, promptTemplateEnabled),
         activeWorldBookIds,
         messagesForApi.map((message) => ({ role: message.role, content: message.content })),
         {
@@ -11973,7 +12425,10 @@ export function App() {
         responderCharacterWorldBook &&
         !activeWorldBookIds.includes(responderCharacterWorldBook.id)
           ? buildWorldBookPrompt(
-              [responderCharacterWorldBook],
+              filterPromptTemplateSpecialEntries(
+                [responderCharacterWorldBook],
+                promptTemplateEnabled,
+              ),
               [responderCharacterWorldBook.id],
               messagesForApi.map((message) => ({
                 role: message.role,
@@ -12002,28 +12457,37 @@ export function App() {
       ]
         .filter(Boolean)
         .join("\n\n");
-      const apiMessages = applyPromptRegexToApiMessages(composeChatApiMessages(
-        systemPrompt,
-        messagesForApi.map((message) =>
-          buildChatMessageForApi(
-            message,
-            personas,
-            userProfile,
+      const apiMessages = await applyPromptTemplateToApiMessages(
+        applyPromptRegexToApiMessages(
+          composeChatApiMessages(
+            systemPrompt,
+            messagesForApi.map((message) =>
+              buildChatMessageForApi(
+                message,
+                personas,
+                userProfile,
+                responseMode === "persona" ? responderPersona : undefined,
+                {
+                  sendImageAttachmentsToProvider,
+                  hasImageRecognitionMcp,
+                },
+              ),
+            ),
             responseMode === "persona" ? responderPersona : undefined,
-            {
-            sendImageAttachmentsToProvider,
-            hasImageRecognitionMcp,
-            },
+            responderCharacterCard
+              ? {
+                  name: responderCharacterCard.name,
+                  description: roleplaySystemPrompt,
+                }
+              : undefined,
           ),
+          responderName,
         ),
-        responseMode === "persona" ? responderPersona : undefined,
-        responderCharacterCard
-          ? {
-              name: responderCharacterCard.name,
-              description: roleplaySystemPrompt,
-            }
-          : undefined,
-      ), responderName);
+        messagesForApi,
+        responderCharacterCard ?? null,
+        responderName,
+        requestModelId,
+      );
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);
@@ -12034,6 +12498,7 @@ export function App() {
       }
       let assistantContent = "";
       let assistantReasoning = "";
+      let assistantMessageVariables: Record<string, unknown> = {};
       let hasVisibleToolResult = false;
       let pendingMcpObservationPrompt = "";
       let pendingMcpObservationRetries = 0;
@@ -12356,6 +12821,17 @@ export function App() {
       }
 
       throwIfChatAborted(abortSignal);
+      if (assistantContent) {
+        const templateResult = await applyPromptTemplateToRenderedMessage(
+          assistantContent,
+          messagesForApi,
+          responderCharacterCard ?? null,
+          responderName,
+          requestModelId,
+        );
+        assistantContent = templateResult.content;
+        assistantMessageVariables = templateResult.messageVariables;
+      }
       if (!assistantContent) {
         if (hasVisibleToolResult) {
           setChatStatus({ status: "success", message: options.successMessage ?? "工具执行完成。" });
@@ -12368,6 +12844,9 @@ export function App() {
         id: assistantMessageId,
         role: "assistant",
         content: assistantContent,
+        ...(Object.keys(assistantMessageVariables).length > 0
+          ? { variables: assistantMessageVariables }
+          : {}),
         ...(assistantReasoning.trim() ? { reasoning: assistantReasoning.trim() } : {}),
         ...(assistantSender ? { sender: assistantSender } : {}),
         createdAt: new Date().toISOString(),
@@ -12729,7 +13208,7 @@ export function App() {
         ? buildHeartbeatSystemPrompt(activeChatSession?.heartbeat)
         : "";
       const worldBookSystemPrompt = buildWorldBookPrompt(
-        worldBooks,
+        filterPromptTemplateSpecialEntries(worldBooks, promptTemplateEnabled),
         activeWorldBookIds,
         messagesForApi.map((message) => ({ role: message.role, content: message.content })),
         {
@@ -12749,7 +13228,10 @@ export function App() {
         activeCharacterWorldBook &&
         !activeWorldBookIds.includes(activeCharacterWorldBook.id)
           ? buildWorldBookPrompt(
-              [activeCharacterWorldBook],
+              filterPromptTemplateSpecialEntries(
+                [activeCharacterWorldBook],
+                promptTemplateEnabled,
+              ),
               [activeCharacterWorldBook.id],
               messagesForApi.map((message) => ({
                 role: message.role,
@@ -12777,30 +13259,40 @@ export function App() {
       ]
         .filter(Boolean)
         .join("\n\n");
-      const apiMessages = applyPromptRegexToApiMessages(composeChatApiMessages(
-        systemPrompt,
-        messagesForApi.map((message) =>
-          buildChatMessageForApi(
-            message,
-            personas,
-            userProfile,
+      const responseCharacter =
+        chatMode === "roleplay" ? activeSessionRoleplayCard ?? null : null;
+      const responseName = responseCharacter?.name ?? chatPersona.name;
+      const apiMessages = await applyPromptTemplateToApiMessages(
+        applyPromptRegexToApiMessages(
+          composeChatApiMessages(
+            systemPrompt,
+            messagesForApi.map((message) =>
+              buildChatMessageForApi(
+                message,
+                personas,
+                userProfile,
+                chatMode === "persona" ? chatPersona : undefined,
+                {
+                  sendImageAttachmentsToProvider,
+                  hasImageRecognitionMcp,
+                },
+              ),
+            ),
             chatMode === "persona" ? chatPersona : undefined,
-            {
-              sendImageAttachmentsToProvider,
-              hasImageRecognitionMcp,
-            },
+            responseCharacter
+              ? {
+                  name: responseCharacter.name,
+                  description: roleplaySystemPrompt,
+                }
+              : undefined,
           ),
+          responseName,
         ),
-        chatMode === "persona" ? chatPersona : undefined,
-        chatMode === "roleplay" && activeSessionRoleplayCard
-          ? {
-              name: activeSessionRoleplayCard.name,
-              description: roleplaySystemPrompt,
-            }
-          : undefined,
-      ), chatMode === "roleplay" && activeSessionRoleplayCard
-        ? activeSessionRoleplayCard.name
-        : chatPersona.name);
+        messagesForApi,
+        responseCharacter,
+        responseName,
+        requestModelId,
+      );
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);
@@ -12811,6 +13303,7 @@ export function App() {
       }
       let assistantContent = "";
       let assistantReasoning = "";
+      let assistantMessageVariables: Record<string, unknown> = {};
       let hasVisibleToolResult = false;
       let pendingMcpObservationPrompt = "";
       let pendingMcpObservationRetries = 0;
@@ -13116,6 +13609,17 @@ export function App() {
       }
 
       throwIfChatAborted(abortSignal);
+      if (assistantContent) {
+        const templateResult = await applyPromptTemplateToRenderedMessage(
+          assistantContent,
+          messagesForApi,
+          responseCharacter,
+          responseName,
+          requestModelId,
+        );
+        assistantContent = templateResult.content;
+        assistantMessageVariables = templateResult.messageVariables;
+      }
       if (!assistantContent) {
         if (hasVisibleToolResult) {
           setChatStatus({ status: "success", message: "工具执行完成。" });
@@ -13131,6 +13635,9 @@ export function App() {
               ? {
                   ...message,
                   content: assistantContent,
+                  ...(Object.keys(assistantMessageVariables).length > 0
+                    ? { variables: assistantMessageVariables }
+                    : {}),
                   ...(assistantReasoning.trim() ? { reasoning: assistantReasoning.trim() } : {}),
                 }
               : message,
@@ -13147,6 +13654,9 @@ export function App() {
               id: assistantMessageId,
               role: "assistant",
               content: assistantContent,
+              ...(Object.keys(assistantMessageVariables).length > 0
+                ? { variables: assistantMessageVariables }
+                : {}),
               ...(assistantReasoning.trim() ? { reasoning: assistantReasoning.trim() } : {}),
               createdAt: new Date().toISOString(),
             },
@@ -14029,6 +14539,10 @@ export function App() {
               <BookOpen size={16} />
               角色卡
             </button>
+            <button type="button" title="扩展管理器" onClick={() => setView("extensions")}>
+              <Puzzle size={16} />
+              扩展
+            </button>
             <button type="button" title="对话" onClick={() => setView("chat")}>
               <MessageSquare size={16} />
               对话
@@ -14112,6 +14626,28 @@ export function App() {
               </button>
             </article>
 
+            <article className="module-card extension-module-card">
+              <div className="module-icon">
+                <Puzzle size={24} />
+              </div>
+              <div className="module-card-copy">
+                <h2>扩展管理器</h2>
+                <p>安装和运行酒馆扩展兼容层，为会话增加模板、变量和提示词处理能力。</p>
+              </div>
+              <div className="module-meta">
+                <span>{extensions.length} 个已安装扩展</span>
+                <span>{extensions.filter((extension) => extension.enabled).length} 个已启用</span>
+              </div>
+              <button
+                type="button"
+                className="home-primary-action"
+                onClick={() => setView("extensions")}
+              >
+                <Puzzle size={16} />
+                管理扩展
+              </button>
+            </article>
+
             <article className="module-card">
               <div className="module-icon">
                 <MessageSquare size={24} />
@@ -14184,6 +14720,275 @@ export function App() {
               ))}
             </div>
           </section>
+        </section>
+        {pcBrowserModal}
+      </main>
+    );
+  }
+
+  if (view === "extensions") {
+    return (
+      <main className="extension-manager-shell">
+        <header className="extension-manager-header">
+          <div>
+            <button type="button" className="ghost-action" onClick={() => setView("home")}>
+              <ArrowLeft size={16} />
+              主页
+            </button>
+            <div>
+              <div className="eyebrow">SillyTavern Extensions</div>
+              <h1>扩展管理器</h1>
+              <p>酒馆扩展通过 Renge 原生兼容层接入会话、角色卡、世界书与变量系统。</p>
+            </div>
+          </div>
+          <div className="extension-manager-summary">
+            <span>{extensions.length} 个已安装</span>
+            <span>{extensions.filter((extension) => extension.enabled).length} 个运行中</span>
+          </div>
+        </header>
+
+        <section className="extension-install-panel" aria-labelledby="extension-install-title">
+          <div>
+            <div className="eyebrow">Install from GitHub</div>
+            <h2 id="extension-install-title">安装酒馆扩展</h2>
+            <p>当前首个原生兼容扩展为 zonde306/ST-Prompt-Template。</p>
+          </div>
+          <div className="extension-install-form">
+            <label className="field">
+              <span>扩展仓库地址</span>
+              <input
+                value={extensionInstallUrl}
+                onChange={(event) => setExtensionInstallUrl(event.target.value)}
+                placeholder={ST_PROMPT_TEMPLATE_SOURCE_URL}
+              />
+            </label>
+            <button type="button" className="small-action" onClick={installTavernExtension}>
+              <Download size={16} />
+              {promptTemplateExtension ? "重新安装兼容层" : "安装扩展"}
+            </button>
+          </div>
+        </section>
+
+        {extensionStatus.status !== "idle" && (
+          <div className={`provider-status extension-manager-status ${extensionStatus.status}`}>
+            {extensionStatus.message}
+          </div>
+        )}
+
+        <section className="extension-list" aria-label="已安装扩展">
+          {promptTemplateExtension && (
+            <article className={`extension-card ${promptTemplateExtension.enabled ? "enabled" : ""}`}>
+              <header className="extension-card-header">
+                <div className="extension-card-brand">
+                  <span className="extension-card-icon">
+                    <Braces size={25} />
+                  </span>
+                  <div>
+                    <div className="extension-title-row">
+                      <h2>{promptTemplateExtension.displayName}</h2>
+                      <span className="extension-version">v{promptTemplateExtension.version}</span>
+                      <span className="extension-compatibility">Renge 原生兼容</span>
+                    </div>
+                    <p>{promptTemplateExtension.description}</p>
+                  </div>
+                </div>
+                <label className="switch extension-main-switch" title="启用扩展">
+                  <input
+                    type="checkbox"
+                    checked={promptTemplateExtension.enabled}
+                    onChange={(event) =>
+                      updateInstalledExtension(promptTemplateExtension.id, {
+                        enabled: event.target.checked,
+                        statusMessage: event.target.checked
+                          ? "扩展已启用"
+                          : "扩展已停用",
+                      })
+                    }
+                  />
+                  <span />
+                </label>
+              </header>
+
+              <div className="extension-metadata">
+                <span>作者：{promptTemplateExtension.author}</span>
+                <span>许可证：{promptTemplateExtension.license}</span>
+                <span>{promptTemplateExtension.statusMessage}</span>
+                <a
+                  href={promptTemplateExtension.homePage}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  GitHub
+                  <ExternalLink size={14} />
+                </a>
+              </div>
+
+              <div className="extension-card-body">
+                <section className="extension-capabilities">
+                  <h3>已接入能力</h3>
+                  <div>
+                    {promptTemplateExtension.capabilities.map((capability) => (
+                      <span key={capability}>
+                        <Check size={14} />
+                        {capability}
+                      </span>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="extension-settings-panel">
+                  <div className="extension-settings-heading">
+                    <div>
+                      <h3>Prompt Template 设置</h3>
+                      <p>对应上游扩展的生成处理、楼层处理、世界书加载和调试开关。</p>
+                    </div>
+                    <button type="button" className="ghost-action" onClick={resetPromptTemplateSettings}>
+                      <RefreshCw size={15} />
+                      恢复默认
+                    </button>
+                  </div>
+
+                  <div className="extension-settings-grid">
+                    <label className="extension-setting-row">
+                      <span>
+                        <strong>处理生成提示词</strong>
+                        <small>发送给模型前执行所有消息中的 EJS。</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={promptTemplateExtension.settings.processGeneratedPrompts}
+                        onChange={(event) =>
+                          updatePromptTemplateSettings({ processGeneratedPrompts: event.target.checked })
+                        }
+                      />
+                    </label>
+                    <label className="extension-setting-row">
+                      <span>
+                        <strong>加载 [GENERATE] 世界书条目</strong>
+                        <small>支持 BEFORE、AFTER、消息索引和正则注入。</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={promptTemplateExtension.settings.injectGenerateWorldBookEntries}
+                        onChange={(event) =>
+                          updatePromptTemplateSettings({
+                            injectGenerateWorldBookEntries: event.target.checked,
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="extension-setting-row">
+                      <span>
+                        <strong>启用 @INJECT</strong>
+                        <small>允许世界书按绝对位置、目标角色或正则插入消息。</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={promptTemplateExtension.settings.injectPromptWorldBookEntries}
+                        onChange={(event) =>
+                          updatePromptTemplateSettings({
+                            injectPromptWorldBookEntries: event.target.checked,
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="extension-setting-row">
+                      <span>
+                        <strong>处理回复消息</strong>
+                        <small>模型完成输出后执行回复中的 EJS。</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={promptTemplateExtension.settings.processRenderedMessages}
+                        onChange={(event) =>
+                          updatePromptTemplateSettings({ processRenderedMessages: event.target.checked })
+                        }
+                      />
+                    </label>
+                    <label className="extension-setting-row">
+                      <span>
+                        <strong>加载 [RENDER] 世界书条目</strong>
+                        <small>在回复显示内容前后注入渲染专用模板。</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={promptTemplateExtension.settings.injectRenderWorldBookEntries}
+                        onChange={(event) =>
+                          updatePromptTemplateSettings({
+                            injectRenderWorldBookEntries: event.target.checked,
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="extension-setting-row">
+                      <span>
+                        <strong>写回处理后的原消息</strong>
+                        <small>处理后的回复保存到当前 Renge 会话。</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={promptTemplateExtension.settings.processRawMessages}
+                        onChange={(event) =>
+                          updatePromptTemplateSettings({ processRawMessages: event.target.checked })
+                        }
+                      />
+                    </label>
+                    <label className="extension-setting-row">
+                      <span>
+                        <strong>立即加载世界书初始变量</strong>
+                        <small>读取 [InitialVariables] 和 @@initial_variables。</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={promptTemplateExtension.settings.preloadWorldBooks}
+                        onChange={(event) =>
+                          updatePromptTemplateSettings({ preloadWorldBooks: event.target.checked })
+                        }
+                      />
+                    </label>
+                    <label className="extension-setting-row">
+                      <span>
+                        <strong>调试日志</strong>
+                        <small>在开发者控制台输出模板处理结果。</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={promptTemplateExtension.settings.debug}
+                        onChange={(event) =>
+                          updatePromptTemplateSettings({ debug: event.target.checked })
+                        }
+                      />
+                    </label>
+                    <label className="extension-setting-row depth-setting-row">
+                      <span>
+                        <strong>回复处理深度</strong>
+                        <small>-1 表示不限制；0 只处理最新回复。</small>
+                      </span>
+                      <input
+                        type="number"
+                        min={-1}
+                        value={promptTemplateExtension.settings.depthLimit}
+                        onChange={(event) =>
+                          updatePromptTemplateSettings({
+                            depthLimit: Number.isFinite(Number(event.target.value))
+                              ? Math.max(-1, Math.floor(Number(event.target.value)))
+                              : -1,
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+                </section>
+              </div>
+
+              <div className="extension-security-note">
+                <Wrench size={17} />
+                <span>
+                  此扩展会执行角色卡、预设、世界书或模型回复里的 JavaScript 模板。只导入并启用你信任的内容。
+                </span>
+              </div>
+            </article>
+          )}
         </section>
         {pcBrowserModal}
       </main>
