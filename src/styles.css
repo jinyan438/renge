@@ -4516,6 +4516,45 @@ summary:focus-visible {
   box-shadow: none;
 }
 
+.chat-html-preview.heavy.pending {
+  display: grid;
+  min-height: clamp(420px, 78vh, 760px);
+  place-items: center;
+  border: 1px dashed rgba(100, 116, 139, 0.28);
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.72);
+}
+
+.chat-html-preview-placeholder {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 18px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-align: center;
+}
+
+.chat-html-preview-placeholder button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(7, 193, 96, 0.34);
+  border-radius: 999px;
+  color: var(--color-brand-strong);
+  background: rgba(230, 248, 239, 0.94);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.chat-html-preview-placeholder button:hover,
+.chat-html-preview-placeholder button:focus-visible {
+  border-color: rgba(7, 193, 96, 0.56);
+  background: rgba(218, 244, 230, 0.98);
+}
+
 .chat-html-frame {
   display: block;
   width: 100%;

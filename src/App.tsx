@@ -1829,6 +1829,73 @@ const HTML_PREVIEW_COMMAND_RESULT_MESSAGE = "renge-html-preview-command-result";
 const HTML_PREVIEW_CONTEXT_MENU_MESSAGE = "renge-html-preview-context-menu";
 const HYPNOOS_APPEND_OPERATION_MESSAGE = "HYPNOOS_APPEND_OPERATION";
 const HTML_PREVIEW_MAX_HEIGHT = 12000;
+const HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD = 512 * 1024;
+const HTML_PREVIEW_HEAVY_MOUNT_GAP = 900;
+const HTML_PREVIEW_HEAVY_AUTO_LOAD_DELAY = 5000;
+
+type HeavyHtmlPreviewMountTask = {
+  cancelled: boolean;
+  mount: () => void;
+};
+
+const heavyHtmlPreviewMountQueue: HeavyHtmlPreviewMountTask[] = [];
+let heavyHtmlPreviewMountActive = false;
+let activeHeavyHtmlPreviewId = "";
+const heavyHtmlPreviewListeners = new Map<string, (active: boolean) => void>();
+
+function activateHeavyHtmlPreview(previewId: string) {
+  if (activeHeavyHtmlPreviewId === previewId) return;
+  activeHeavyHtmlPreviewId = previewId;
+  heavyHtmlPreviewListeners.forEach((listener, candidateId) => {
+    listener(candidateId === previewId);
+  });
+}
+
+function subscribeHeavyHtmlPreview(
+  previewId: string,
+  listener: (active: boolean) => void,
+) {
+  heavyHtmlPreviewListeners.set(previewId, listener);
+  listener(activeHeavyHtmlPreviewId === previewId);
+  return () => {
+    heavyHtmlPreviewListeners.delete(previewId);
+    if (activeHeavyHtmlPreviewId === previewId) activeHeavyHtmlPreviewId = "";
+  };
+}
+
+function drainHeavyHtmlPreviewMountQueue() {
+  if (heavyHtmlPreviewMountActive) return;
+  const task = heavyHtmlPreviewMountQueue.shift();
+  if (!task) return;
+  if (task.cancelled) {
+    window.setTimeout(drainHeavyHtmlPreviewMountQueue, 0);
+    return;
+  }
+
+  heavyHtmlPreviewMountActive = true;
+  const mount = () => {
+    if (!task.cancelled) task.mount();
+    window.setTimeout(() => {
+      heavyHtmlPreviewMountActive = false;
+      drainHeavyHtmlPreviewMountQueue();
+    }, HTML_PREVIEW_HEAVY_MOUNT_GAP);
+  };
+
+  if (typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(mount, { timeout: 1200 });
+  } else {
+    window.setTimeout(mount, 0);
+  }
+}
+
+function enqueueHeavyHtmlPreviewMount(mount: () => void) {
+  const task: HeavyHtmlPreviewMountTask = { cancelled: false, mount };
+  heavyHtmlPreviewMountQueue.push(task);
+  drainHeavyHtmlPreviewMountQueue();
+  return () => {
+    task.cancelled = true;
+  };
+}
 
 type ParsedTavernSlashCommand =
   | { type: "set-input"; text: string; append: boolean; submit: boolean }
@@ -2998,9 +3065,46 @@ function parsePlainChatContent(content: string): ChatContentPart[] {
   return parts;
 }
 
-function parseChatContentParts(content: string): ChatContentPart[] {
+type FencedHtmlDocumentNode = {
+  openStart: number;
+  contentStart: number;
+  contentEnd: number;
+  closeEnd: number;
+  children: FencedHtmlDocumentNode[];
+};
+
+function getFencedHtmlDocumentContent(content: string, node: FencedHtmlDocumentNode) {
+  let documentContent = content.slice(node.contentStart, node.contentEnd);
+  [...node.children].reverse().forEach((child) => {
+    const childStart = Math.max(0, child.openStart - node.contentStart);
+    const childEnd = Math.max(childStart, child.closeEnd - node.contentStart);
+    documentContent =
+      documentContent.slice(0, childStart) + documentContent.slice(childEnd);
+  });
+  return documentContent.trim();
+}
+
+function appendFencedHtmlDocumentParts(
+  parts: ChatContentPart[],
+  content: string,
+  node: FencedHtmlDocumentNode,
+) {
+  const documentContent = getFencedHtmlDocumentContent(content, node);
+  if (looksLikeRenderableHtml(documentContent)) {
+    parts.push({
+      type: "code",
+      content: documentContent,
+      language: "html",
+      executable: false,
+    });
+  }
+  node.children.forEach((child) => appendFencedHtmlDocumentParts(parts, content, child));
+}
+
+function parseGenericChatContentParts(content: string): ChatContentPart[] {
   const parts: ChatContentPart[] = [];
-  const fencePattern = /```([A-Za-z0-9_-]*)[ \t]*\n?([\s\S]*?)```/g;
+  const fencePattern =
+    /^[ \t]*```([A-Za-z0-9_-]*)[ \t]*\r?\n([\s\S]*?)^[ \t]*```[ \t]*\r?$/gm;
   let cursor = 0;
   let match: RegExpExecArray | null;
 
@@ -3022,6 +3126,64 @@ function parseChatContentParts(content: string): ChatContentPart[] {
 
   parts.push(...parsePlainChatContent(content.slice(cursor)));
   return parts.filter((part) => part.content.length > 0);
+}
+
+function parseFencedHtmlDocuments(content: string): ChatContentPart[] | null {
+  const fenceLinePattern = /^[ \t]*```([A-Za-z0-9_-]*)([^\r\n]*)(?:\r?\n|$)/gim;
+  const roots: FencedHtmlDocumentNode[] = [];
+  const stack: FencedHtmlDocumentNode[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = fenceLinePattern.exec(content))) {
+    const language = match[1].toLowerCase();
+    const trailingContent = match[2].trim();
+    const backtickOffset = match[0].indexOf("```");
+    const tokenStart = match.index + Math.max(0, backtickOffset);
+
+    if (language === "html" && !trailingContent) {
+      const node: FencedHtmlDocumentNode = {
+        openStart: match.index,
+        contentStart: match.index + match[0].length,
+        contentEnd: -1,
+        closeEnd: -1,
+        children: [],
+      };
+      const parent = stack[stack.length - 1];
+      if (parent) parent.children.push(node);
+      else roots.push(node);
+      stack.push(node);
+      continue;
+    }
+
+    if (language || stack.length === 0) continue;
+    const currentNode = stack[stack.length - 1];
+    const candidateContent = content.slice(currentNode.contentStart, tokenStart).trimEnd();
+    if (!/<\/html>\s*$/i.test(candidateContent)) continue;
+
+    currentNode.contentEnd = tokenStart;
+    currentNode.closeEnd = tokenStart + 3;
+    stack.pop();
+  }
+
+  if (roots.length === 0 || stack.length > 0 || roots.some((node) => node.closeEnd < 0)) {
+    return null;
+  }
+
+  const parts: ChatContentPart[] = [];
+  let cursor = 0;
+  roots.forEach((root) => {
+    if (root.openStart > cursor) {
+      parts.push(...parseGenericChatContentParts(content.slice(cursor, root.openStart)));
+    }
+    appendFencedHtmlDocumentParts(parts, content, root);
+    cursor = root.closeEnd;
+  });
+  parts.push(...parseGenericChatContentParts(content.slice(cursor)));
+  return parts.filter((part) => part.content.length > 0);
+}
+
+function parseChatContentParts(content: string): ChatContentPart[] {
+  return parseFencedHtmlDocuments(content) ?? parseGenericChatContentParts(content);
 }
 
 function looksLikeRenderableHtml(content: string) {
@@ -3052,7 +3214,22 @@ function shouldRenderHtmlCodePart(part: Extract<ChatContentPart, { type: "code" 
   );
 }
 
-function buildHtmlPreviewScript(previewId: string) {
+function getHtmlPreviewContentRevision(content: string) {
+  const length = content.length;
+  if (length === 0) return "0-0";
+
+  let hash = 2166136261;
+  const sampleStep = Math.max(1, Math.floor(length / 4096));
+  for (let index = 0; index < length; index += sampleStep) {
+    hash ^= content.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  hash ^= content.charCodeAt(length - 1);
+  hash = Math.imul(hash, 16777619);
+  return `${length}-${(hash >>> 0).toString(36)}`;
+}
+
+function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
   const previewIdLiteral = JSON.stringify(previewId);
   const messageTypeLiteral = JSON.stringify(HTML_PREVIEW_RESIZE_MESSAGE);
 
@@ -3062,10 +3239,12 @@ function buildHtmlPreviewScript(previewId: string) {
     `const previewId = ${previewIdLiteral};`,
     `const messageType = ${messageTypeLiteral};`,
     `const maxHeight = ${HTML_PREVIEW_MAX_HEIGHT};`,
+    `const heavyContent = ${heavyContent ? "true" : "false"};`,
     "const defaultHeight = 420;",
     "const minHeight = 220;",
     "const padding = 12;",
     "let rafId = 0;",
+    "let heavyPostTimer = 0;",
     "let lastHeight = 0;",
     "let lastMeasuredContentHeight = 0;",
     "let lastMeasuredViewportHeight = 0;",
@@ -3098,6 +3277,13 @@ function buildHtmlPreviewScript(previewId: string) {
     "  let maxRight = 0;",
     "  let maxBottom = 0;",
     "  let hasIntrinsicElement = false;",
+    "  if (heavyContent) {",
+    "    const bodyRect = body?.getBoundingClientRect();",
+    "    const contentWidth = Math.max(root?.scrollWidth || 0, body?.scrollWidth || 0, bodyRect?.width || 0);",
+    "    const contentHeight = Math.max(root?.scrollHeight || 0, body?.scrollHeight || 0, body?.offsetHeight || 0, bodyRect?.height || 0);",
+    "    hasIntrinsicElement = Boolean(document.querySelector(\"canvas,img,video,svg\"));",
+    "    return { width: contentWidth, height: contentHeight, hasIntrinsicElement };",
+    "  }",
     "  document.querySelectorAll(\"body *\").forEach((element) => {",
     "    const rect = element.getBoundingClientRect();",
     "    if (!Number.isFinite(rect.right) || !Number.isFinite(rect.bottom)) return;",
@@ -3215,8 +3401,16 @@ function buildHtmlPreviewScript(previewId: string) {
     "  } catch {}",
     "};",
     "const schedulePost = () => {",
-    "  if (rafId) return;",
-    "  rafId = requestAnimationFrame(postHeight);",
+    "  if (!heavyContent) {",
+    "    if (rafId) return;",
+    "    rafId = requestAnimationFrame(postHeight);",
+    "    return;",
+    "  }",
+    "  if (heavyPostTimer) return;",
+    "  heavyPostTimer = window.setTimeout(() => {",
+    "    heavyPostTimer = 0;",
+    "    if (!rafId) rafId = requestAnimationFrame(postHeight);",
+    "  }, 160);",
     "};",
     'window.addEventListener("load", () => { naturalLayoutDirty = true; schedulePost(); });',
     'window.addEventListener("resize", schedulePost);',
@@ -3237,31 +3431,50 @@ function buildHtmlPreviewScript(previewId: string) {
     "    if (hasMeaningfulMutation) naturalLayoutDirty = true;",
     "    schedulePost();",
     "  });",
-    "  mutationObserver.observe(document.documentElement, {",
-    "    attributes: true,",
-    "    childList: true,",
-    "    subtree: true,",
-    "    characterData: true,",
-    "  });",
-    "  window.addEventListener(\"unload\", () => mutationObserver.disconnect(), { once: true });",
+    "  mutationObserver.observe(document.documentElement, heavyContent",
+    "    ? { childList: true, subtree: true }",
+    "    : { attributes: true, childList: true, subtree: true, characterData: true });",
+    "  window.addEventListener(\"unload\", () => {",
+    "    mutationObserver.disconnect();",
+    "    if (heavyPostTimer) window.clearTimeout(heavyPostTimer);",
+    "  }, { once: true });",
     "} catch {}",
     "document.addEventListener(\"DOMContentLoaded\", () => { naturalLayoutDirty = true; schedulePost(); }, { once: true });",
     "schedulePost();",
-    "[80, 240, 600, 1200, 2400, 4000].forEach((delay) => setTimeout(() => { naturalLayoutDirty = true; schedulePost(); }, delay));",
-    "const intervalId = setInterval(schedulePost, 500);",
-    "setTimeout(() => clearInterval(intervalId), 6000);",
+    "(heavyContent ? [240, 1000, 3000, 6000] : [80, 240, 600, 1200, 2400, 4000]).forEach((delay) => setTimeout(() => { naturalLayoutDirty = true; schedulePost(); }, delay));",
+    "if (!heavyContent) {",
+    "  const intervalId = setInterval(schedulePost, 500);",
+    "  setTimeout(() => clearInterval(intervalId), 6000);",
+    "}",
     "})();",
     "</script>",
   ].join("");
 }
 
-function appendHtmlPreviewScript(documentContent: string, previewId: string) {
-  const previewScript = buildHtmlPreviewScript(previewId);
-  if (/<\/body>/i.test(documentContent)) {
-    return documentContent.replace(/<\/body>/i, `${previewScript}</body>`);
-  }
-  if (/<\/html>/i.test(documentContent)) {
-    return documentContent.replace(/<\/html>/i, `${previewScript}</html>`);
+function appendHtmlPreviewScript(
+  documentContent: string,
+  previewId: string,
+  heavyContent: boolean,
+) {
+  const previewScript = buildHtmlPreviewScript(previewId, heavyContent);
+  const insertBeforeLastClosingTag = (tagName: "body" | "html") => {
+    const pattern = new RegExp(`<\\/${tagName}\\s*>`, "gi");
+    let lastMatch: RegExpExecArray | null = null;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(documentContent))) lastMatch = match;
+    if (!lastMatch) return null;
+    return (
+      documentContent.slice(0, lastMatch.index) +
+      previewScript +
+      documentContent.slice(lastMatch.index)
+    );
+  };
+
+  const bodyDocument = insertBeforeLastClosingTag("body");
+  if (bodyDocument) return bodyDocument;
+  const htmlDocument = insertBeforeLastClosingTag("html");
+  if (htmlDocument) {
+    return htmlDocument;
   }
   return `${documentContent}${previewScript}`;
 }
@@ -3282,14 +3495,20 @@ function buildHtmlPreviewDocument(
   context: HtmlPreviewContext,
 ) {
   const trimmedContent = content.trim();
+  const heavyContent = trimmedContent.length >= HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD;
   const headInjection = `${htmlPreviewStyle}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${buildHtmlPreviewVariablesScript(previewId, context)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
-    return appendHtmlPreviewScript(injectHtmlPreviewHead(trimmedContent, headInjection), previewId);
+    return appendHtmlPreviewScript(
+      injectHtmlPreviewHead(trimmedContent, headInjection),
+      previewId,
+      heavyContent,
+    );
   }
   if (/<head[\s>]|<body[\s>]/i.test(trimmedContent)) {
     return appendHtmlPreviewScript(
       `<!doctype html><html lang="zh-CN">${injectHtmlPreviewHead(trimmedContent, headInjection)}</html>`,
       previewId,
+      heavyContent,
     );
   }
 
@@ -3309,6 +3528,7 @@ function buildHtmlPreviewDocument(
     "</html>",
     ].join(""),
     previewId,
+    heavyContent,
   );
 }
 
@@ -3327,7 +3547,11 @@ function ChatHtmlPreview({
   previewId,
   frameRegistry,
 }: ChatHtmlPreviewProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
+  const requestHeavyMountRef = useRef<() => void>(() => {});
+  const heavyContent = content.trim().length >= HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD;
+  const [renderReady, setRenderReady] = useState(!heavyContent);
   const sourceDocumentRef = useRef<{
     content: string;
     previewId: string;
@@ -3335,9 +3559,10 @@ function ChatHtmlPreview({
   } | null>(null);
 
   if (
-    !sourceDocumentRef.current ||
-    sourceDocumentRef.current.content !== content ||
-    sourceDocumentRef.current.previewId !== previewId
+    renderReady &&
+    (!sourceDocumentRef.current ||
+      sourceDocumentRef.current.content !== content ||
+      sourceDocumentRef.current.previewId !== previewId)
   ) {
     sourceDocumentRef.current = {
       content,
@@ -3345,6 +3570,79 @@ function ChatHtmlPreview({
       value: buildHtmlPreviewDocument(content, previewId, context),
     };
   }
+
+  useEffect(() => {
+    if (!heavyContent) {
+      setRenderReady(true);
+      return;
+    }
+
+    const container = containerRef.current;
+    if (!container) return;
+    const unsubscribeHeavyPreview = subscribeHeavyHtmlPreview(
+      previewId,
+      setRenderReady,
+    );
+    let cancelQueuedMount: (() => void) | null = null;
+    let visibilityTimer = 0;
+    let queued = false;
+    const queueMount = () => {
+      if (queued) return;
+      queued = true;
+      cancelQueuedMount = enqueueHeavyHtmlPreviewMount(() => {
+        queued = false;
+        cancelQueuedMount = null;
+        activateHeavyHtmlPreview(previewId);
+      });
+    };
+    requestHeavyMountRef.current = queueMount;
+
+    if (typeof IntersectionObserver !== "function") {
+      const fallbackTimer = window.setTimeout(
+        queueMount,
+        HTML_PREVIEW_HEAVY_AUTO_LOAD_DELAY,
+      );
+      return () => {
+        window.clearTimeout(fallbackTimer);
+        requestHeavyMountRef.current = () => {};
+        cancelQueuedMount?.();
+        unsubscribeHeavyPreview();
+      };
+    }
+
+    let observer: IntersectionObserver | null = null;
+    const observerStartTimer = window.setTimeout(() => {
+      observer = new IntersectionObserver(
+        (entries) => {
+          const steadilyVisible = entries.some(
+            (entry) => entry.isIntersecting && entry.intersectionRatio >= 0.6,
+          );
+          if (!steadilyVisible) {
+            if (visibilityTimer) window.clearTimeout(visibilityTimer);
+            visibilityTimer = 0;
+            return;
+          }
+          if (visibilityTimer) return;
+          visibilityTimer = window.setTimeout(() => {
+            visibilityTimer = 0;
+            observer?.disconnect();
+            queueMount();
+          }, 300);
+        },
+        { threshold: [0.6] },
+      );
+      observer.observe(container);
+    }, HTML_PREVIEW_HEAVY_AUTO_LOAD_DELAY);
+
+    return () => {
+      window.clearTimeout(observerStartTimer);
+      observer?.disconnect();
+      if (visibilityTimer) window.clearTimeout(visibilityTimer);
+      requestHeavyMountRef.current = () => {};
+      cancelQueuedMount?.();
+      unsubscribeHeavyPreview();
+    };
+  }, [heavyContent, previewId]);
 
   const sendContextUpdate = useCallback(() => {
     const frameWindow = frameRef.current?.contentWindow;
@@ -3381,20 +3679,35 @@ function ChatHtmlPreview({
   );
 
   return (
-    <div className="chat-html-preview">
-      <iframe
-        className="chat-html-frame"
-        allow="autoplay; fullscreen; gamepad"
-        allowFullScreen
-        data-message-id={messageId}
-        loading="eager"
-        onLoad={handleLoad}
-        ref={registerFrame}
-        referrerPolicy="no-referrer"
-        srcDoc={sourceDocumentRef.current.value}
-        tabIndex={0}
-        title="HTML 预览"
-      />
+    <div
+      className={`chat-html-preview ${heavyContent ? "heavy" : ""} ${
+        renderReady ? "" : "pending"
+      }`}
+      data-preview-id={previewId}
+      ref={containerRef}
+    >
+      {renderReady && sourceDocumentRef.current ? (
+        <iframe
+          className="chat-html-frame"
+          allow="autoplay; fullscreen; gamepad"
+          allowFullScreen
+          data-message-id={messageId}
+          loading="eager"
+          onLoad={handleLoad}
+          ref={registerFrame}
+          referrerPolicy="no-referrer"
+          srcDoc={sourceDocumentRef.current.value}
+          tabIndex={0}
+          title="HTML 预览"
+        />
+      ) : (
+        <div className="chat-html-preview-placeholder" role="status">
+          <span>大型 HTML 一次只运行一个，避免会话卡死。</span>
+          <button type="button" onClick={() => requestHeavyMountRef.current()}>
+            立即加载
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -12163,7 +12476,7 @@ export function App() {
         {parts.map((part, partIndex) => {
           if (part.type === "text") {
             if (chatHtmlRenderEnabled && looksLikeStandaloneRenderableHtml(part.content)) {
-              const previewId = `${messageId}-html-text-${partIndex}`;
+              const previewId = `${messageId}-html-text-${partIndex}-${getHtmlPreviewContentRevision(part.content)}`;
               return (
                 <ChatHtmlPreview
                   content={part.content}
@@ -12184,7 +12497,7 @@ export function App() {
           }
 
           if (chatHtmlRenderEnabled && shouldRenderHtmlCodePart(part)) {
-            const previewId = `${messageId}-html-${partIndex}`;
+            const previewId = `${messageId}-html-${partIndex}-${getHtmlPreviewContentRevision(part.content)}`;
             return (
               <ChatHtmlPreview
                 content={part.content}
