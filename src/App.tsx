@@ -6494,6 +6494,13 @@ export function App() {
   const tavernScriptsRef = useRef<TavernScript[]>(tavernScripts);
   const tavernGlobalVariablesRef = useRef<Record<string, unknown>>(tavernGlobalVariables);
 
+  const commitChatMessages: Dispatch<SetStateAction<ChatMessage[]>> = (update) => {
+    const nextMessages =
+      typeof update === "function" ? update(chatMessagesRef.current) : update;
+    chatMessagesRef.current = nextMessages;
+    setChatMessages(nextMessages);
+  };
+
   useEffect(() => {
     setMobileSidebarOpen(false);
   }, [view]);
@@ -6552,9 +6559,7 @@ export function App() {
         createdAt: new Date().toISOString(),
         ...(name ? { extra: { sendAsName: name } } : {}),
       };
-      const nextMessages = [...chatMessagesRef.current, message];
-      chatMessagesRef.current = nextMessages;
-      setChatMessages(nextMessages);
+      commitChatMessages((current) => [...current, message]);
       window.setTimeout(() => {
         const index = chatMessagesRef.current.findIndex((candidate) => candidate.id === message.id);
         if (index < 0) return;
@@ -11184,7 +11189,7 @@ export function App() {
           prompt: visualObservationPrompt,
         };
         appendAssistantTimelineMessage(
-          setChatMessages,
+          commitChatMessages,
           [
             `执行 MCP 工具：${imageTool.serverName}/${imageTool.originalName}`,
             `参数：${compactOneLine(JSON.stringify({
@@ -11204,7 +11209,7 @@ export function App() {
         );
         const text = extractImageRecognitionText(result);
         appendAssistantTimelineMessage(
-          setChatMessages,
+          commitChatMessages,
           [
             "MCP 工具执行完成。",
             `图片：${attachment.name}`,
@@ -11224,7 +11229,7 @@ export function App() {
       } catch (error) {
         const message = error instanceof Error ? error.message : "图像识别 MCP 调用失败";
         appendAssistantTimelineMessage(
-          setChatMessages,
+          commitChatMessages,
           [
             `MCP 工具失败：${imageTool.serverName}/${imageTool.originalName}`,
             `图片：${attachment.name}`,
@@ -11300,7 +11305,7 @@ export function App() {
       };
 
       appendAssistantTimelineMessage(
-        setChatMessages,
+        commitChatMessages,
         formatToolActionMessage(toolCall, localWorkspaceHandle),
       );
 
@@ -11311,13 +11316,13 @@ export function App() {
               );
               const toolResultAttachments = getToolResultAttachments(toolResult);
               appendAssistantTimelineMessage(
-                setChatMessages,
+                commitChatMessages,
                 formatToolResultMessage(toolCall, toolResult),
                 toolResultAttachments,
               );
       } catch (error) {
         appendAssistantTimelineMessage(
-          setChatMessages,
+          commitChatMessages,
           formatToolErrorMessage(toolCall, error),
         );
       }
@@ -11935,7 +11940,7 @@ export function App() {
         };
       };
       const appendStreamingAssistant = (delta: string) => {
-        setChatMessages((current) =>
+        commitChatMessages((current) =>
           current.map((message) =>
             message.id === assistantMessageId
               ? { ...message, content: `${message.content}${delta}` }
@@ -11945,7 +11950,7 @@ export function App() {
       };
       const appendStreamingAssistantReasoning = (delta: string) => {
         assistantReasoning = `${assistantReasoning}${delta}`;
-        setChatMessages((current) =>
+        commitChatMessages((current) =>
           current.map((message) =>
             message.id === assistantMessageId
               ? { ...message, reasoning: `${message.reasoning ?? ""}${delta}` }
@@ -11969,7 +11974,7 @@ export function App() {
         assistantContent =
           getChatApiMessageText(assistantMessage).trim() || payload?.output_text?.trim() || "";
       } else if (chatStreamEnabled && availableChatTools.length === 0) {
-        setChatMessages((current) => [
+        commitChatMessages((current) => [
           ...current,
           {
             id: assistantMessageId,
@@ -12053,7 +12058,7 @@ export function App() {
               shouldAutoContinueLocalTask(assistantContent)
             ) {
               appendAssistantTimelineMessage(
-                setChatMessages,
+                commitChatMessages,
                 assistantContent,
                 [],
                 assistantReasoning,
@@ -12078,7 +12083,7 @@ export function App() {
 
           if (assistantMessageContent && !hasSilentControlTool) {
             appendAssistantTimelineMessage(
-              setChatMessages,
+              commitChatMessages,
               assistantMessageContent,
               [],
               assistantMessageReasoning,
@@ -12103,7 +12108,7 @@ export function App() {
             const silentControl = isSilentChatControlTool(toolCall.function.name);
             if (!silentControl) {
               appendAssistantTimelineMessage(
-                setChatMessages,
+                commitChatMessages,
                 formatToolActionMessage(toolCall, localWorkspaceHandle, requestMcpTools),
                 [],
                 "",
@@ -12130,7 +12135,7 @@ export function App() {
                 const toolResultMessage = formatToolResultMessage(toolCall, toolResult);
                 const toolResultAttachments = getToolResultAttachments(toolResult);
                 appendAssistantTimelineMessage(
-                  setChatMessages,
+                  commitChatMessages,
                   toolResultMessage,
                   toolResultAttachments,
                   "",
@@ -12156,7 +12161,7 @@ export function App() {
               };
               if (!silentControl) {
                 appendAssistantTimelineMessage(
-                  setChatMessages,
+                  commitChatMessages,
                   formatToolErrorMessage(toolCall, toolError),
                   [],
                   "",
@@ -12200,7 +12205,7 @@ export function App() {
       };
 
       if (streamingAssistantInserted) {
-        setChatMessages((current) =>
+        commitChatMessages((current) =>
           current.map((message) =>
             message.id === assistantMessageId
               ? {
@@ -12213,7 +12218,7 @@ export function App() {
       }
 
       if (!streamingAssistantInserted) {
-        setChatMessages((current) => {
+        commitChatMessages((current) => {
           if (current.some((message) => message.id === assistantMessageId)) return current;
           return [
             ...current,
@@ -12227,7 +12232,7 @@ export function App() {
     } catch (error) {
       if (isChatAbortError(error)) {
         if (streamingAssistantInserted && assistantMessageId) {
-          setChatMessages((current) =>
+          commitChatMessages((current) =>
             current.filter(
               (message) => message.id !== assistantMessageId || message.content.trim(),
             ),
@@ -12238,7 +12243,7 @@ export function App() {
       }
 
       const message = error instanceof Error ? error.message : "调用失败。";
-      setChatMessages((current) => [
+      commitChatMessages((current) => [
         ...current,
         {
           id: crypto.randomUUID(),
@@ -12712,7 +12717,7 @@ export function App() {
         };
       };
       const appendStreamingAssistant = (delta: string) => {
-        setChatMessages((current) =>
+        commitChatMessages((current) =>
           current.map((message) =>
             message.id === assistantMessageId
               ? { ...message, content: `${message.content}${delta}` }
@@ -12722,7 +12727,7 @@ export function App() {
       };
       const appendStreamingAssistantReasoning = (delta: string) => {
         assistantReasoning = `${assistantReasoning}${delta}`;
-        setChatMessages((current) =>
+        commitChatMessages((current) =>
           current.map((message) =>
             message.id === assistantMessageId
               ? { ...message, reasoning: `${message.reasoning ?? ""}${delta}` }
@@ -12743,7 +12748,7 @@ export function App() {
         assistantContent =
           getChatApiMessageText(assistantMessage).trim() || payload?.output_text?.trim() || "";
       } else if (chatStreamEnabled && availableChatTools.length === 0) {
-        setChatMessages((current) => [
+        commitChatMessages((current) => [
           ...current,
           {
             id: assistantMessageId,
@@ -12823,7 +12828,7 @@ export function App() {
               shouldAutoContinueLocalTask(assistantContent)
             ) {
               appendAssistantTimelineMessage(
-                setChatMessages,
+                commitChatMessages,
                 assistantContent,
                 [],
                 assistantReasoning,
@@ -12847,7 +12852,7 @@ export function App() {
 
           if (assistantMessageContent && !hasSilentControlTool) {
             appendAssistantTimelineMessage(
-              setChatMessages,
+              commitChatMessages,
               assistantMessageContent,
               [],
               assistantMessageReasoning,
@@ -12871,7 +12876,7 @@ export function App() {
             const silentControl = isSilentChatControlTool(toolCall.function.name);
             if (!silentControl) {
               appendAssistantTimelineMessage(
-                setChatMessages,
+                commitChatMessages,
                 formatToolActionMessage(toolCall, localWorkspaceHandle, requestMcpTools),
               );
             }
@@ -12895,7 +12900,7 @@ export function App() {
                 const toolResultMessage = formatToolResultMessage(toolCall, toolResult);
                 const toolResultAttachments = getToolResultAttachments(toolResult);
                 appendAssistantTimelineMessage(
-                  setChatMessages,
+                  commitChatMessages,
                   toolResultMessage,
                   toolResultAttachments,
                 );
@@ -12919,7 +12924,7 @@ export function App() {
               };
               if (!silentControl) {
                 appendAssistantTimelineMessage(
-                  setChatMessages,
+                  commitChatMessages,
                   formatToolErrorMessage(toolCall, toolError),
                 );
                 hasVisibleToolResult = true;
@@ -12951,7 +12956,7 @@ export function App() {
       }
 
       if (streamingAssistantInserted) {
-        setChatMessages((current) =>
+        commitChatMessages((current) =>
           current.map((message) =>
             message.id === assistantMessageId
               ? {
@@ -12965,7 +12970,7 @@ export function App() {
       }
 
       if (!streamingAssistantInserted) {
-        setChatMessages((current) => {
+        commitChatMessages((current) => {
           if (current.some((message) => message.id === assistantMessageId)) return current;
           return [
             ...current,
@@ -12984,7 +12989,7 @@ export function App() {
     } catch (error) {
       if (isChatAbortError(error)) {
         if (streamingAssistantInserted && assistantMessageId) {
-          setChatMessages((current) =>
+          commitChatMessages((current) =>
             current.filter(
               (message) => message.id !== assistantMessageId || message.content.trim(),
             ),
@@ -12995,7 +13000,7 @@ export function App() {
       }
 
       const message = error instanceof Error ? error.message : "调用失败。";
-      setChatMessages((current) => [
+      commitChatMessages((current) => [
         ...current,
         {
           id: crypto.randomUUID(),
@@ -13078,7 +13083,7 @@ export function App() {
     };
     const nextMessages = [...chatMessages, heartbeatMessage];
 
-    setChatMessages(nextMessages);
+    commitChatMessages(nextMessages);
 
     try {
       await generateAssistantForMessages(nextMessages, { kind: "system" }, {
@@ -13198,7 +13203,7 @@ export function App() {
     }
 
     setChatSender(requestSender);
-    setChatMessages(nextMessages);
+    commitChatMessages(nextMessages);
     setEditingChatMessage(null);
     if (chatMode === "multi") {
       await runMultiAgentResponses(nextMessages, requestSender, content);
