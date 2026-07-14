@@ -1827,7 +1827,7 @@ const HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE = "renge-html-preview-context-update";
 const HTML_PREVIEW_COMMAND_MESSAGE = "renge-html-preview-command";
 const HTML_PREVIEW_COMMAND_RESULT_MESSAGE = "renge-html-preview-command-result";
 const HTML_PREVIEW_GENERATION_EVENT_MESSAGE = "renge-html-preview-generation-event";
-const HTML_PREVIEW_CONTEXT_MENU_MESSAGE = "renge-html-preview-context-menu";
+const HTML_PREVIEW_INTERACTION_MESSAGE = "renge-html-preview-interaction";
 const HYPNOOS_APPEND_OPERATION_MESSAGE = "HYPNOOS_APPEND_OPERATION";
 const HTML_PREVIEW_MAX_HEIGHT = 12000;
 const HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD = 512 * 1024;
@@ -2117,8 +2117,8 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
   const generationEventMessageTypeLiteral = serializeHtmlPreviewValue(
     HTML_PREVIEW_GENERATION_EVENT_MESSAGE,
   );
-  const contextMenuMessageTypeLiteral = serializeHtmlPreviewValue(
-    HTML_PREVIEW_CONTEXT_MENU_MESSAGE,
+  const interactionMessageTypeLiteral = serializeHtmlPreviewValue(
+    HTML_PREVIEW_INTERACTION_MESSAGE,
   );
   const contextLiteral = serializeHtmlPreviewValue(context);
 
@@ -2131,7 +2131,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     `const commandMessageType = ${commandMessageTypeLiteral};`,
     `const commandResultMessageType = ${commandResultMessageTypeLiteral};`,
     `const generationEventMessageType = ${generationEventMessageTypeLiteral};`,
-    `const contextMenuMessageType = ${contextMenuMessageTypeLiteral};`,
+    `const interactionMessageType = ${interactionMessageTypeLiteral};`,
     `const snapshot = ${contextLiteral};`,
     "const clone = (value) => {",
     "  if (value == null) return value;",
@@ -2425,11 +2425,11 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "mvu.getMvuData = (option) => getVariables(option);",
     "mvu.setMvuData = (variables, option) => replaceVariables(variables, option);",
     "window.Mvu = mvu;",
-    "document.addEventListener(\"contextmenu\", (event) => {",
-    "  event.preventDefault();",
-    "  event.stopPropagation();",
-    "  try { parent.postMessage({ type: contextMenuMessageType, id: previewId, x: event.clientX, y: event.clientY }, \"*\"); } catch {}",
-    "}, true);",
+    "const notifyParentInteraction = () => {",
+    "  try { parent.postMessage({ type: interactionMessageType, id: previewId }, \"*\"); } catch {}",
+    "};",
+    "document.addEventListener(\"pointerdown\", notifyParentInteraction, true);",
+    "document.addEventListener(\"contextmenu\", notifyParentInteraction, true);",
     "})();",
     "</script>",
   ].join("");
@@ -7039,8 +7039,6 @@ export function App() {
         shouldStream?: unknown;
         disableExtras?: unknown;
         requestId?: unknown;
-        x?: unknown;
-        y?: unknown;
       };
 
       if (payload.type === HYPNOOS_APPEND_OPERATION_MESSAGE) {
@@ -7097,19 +7095,8 @@ export function App() {
       const frame = htmlPreviewFrameRefs.current.get(payload.id);
       if (!frame || frame.contentWindow !== event.source) return;
 
-      if (payload.type === HTML_PREVIEW_CONTEXT_MENU_MESSAGE) {
-        const messageId = frame.dataset.messageId;
-        if (!messageId) return;
-        const frameRect = frame.getBoundingClientRect();
-        const frameX = Number(payload.x);
-        const frameY = Number(payload.y);
-        const clientX = frameRect.left + (Number.isFinite(frameX) ? frameX : 0);
-        const clientY = frameRect.top + (Number.isFinite(frameY) ? frameY : 0);
-        setChatMessageMenu({
-          messageId,
-          x: clamp(clientX, 8, window.innerWidth - 180),
-          y: clamp(clientY, 8, window.innerHeight - 92),
-        });
+      if (payload.type === HTML_PREVIEW_INTERACTION_MESSAGE) {
+        setChatMessageMenu(null);
         return;
       }
 
@@ -10610,6 +10597,15 @@ export function App() {
       x: clamp(event.clientX, 8, window.innerWidth - 180),
       y: clamp(event.clientY, 8, window.innerHeight - 92),
     });
+  };
+
+  const handleChatBubbleContextMenu = (
+    messageId: string,
+    event: MouseEvent<HTMLDivElement>,
+  ) => {
+    const bubble = event.currentTarget;
+    if (bubble.querySelector(".chat-html-preview") && event.target !== bubble) return;
+    openChatMessageMenu(messageId, event);
   };
 
   const deleteChatMessage = (messageId: string) => {
@@ -19847,8 +19843,20 @@ export function App() {
                         className={`chat-bubble ${isEditingMessage ? "editing" : ""} ${
                           showGreetingSwitch ? "roleplay-greeting-bubble" : ""
                         }`}
-                        onContextMenu={(event) => openChatMessageMenu(message.id, event)}
+                        onContextMenu={(event) =>
+                          handleChatBubbleContextMenu(message.id, event)
+                        }
                       >
+                        <div
+                          aria-hidden="true"
+                          className="chat-bubble-context-edges"
+                          onContextMenu={(event) => openChatMessageMenu(message.id, event)}
+                        >
+                          <span className="chat-bubble-context-edge top" />
+                          <span className="chat-bubble-context-edge right" />
+                          <span className="chat-bubble-context-edge bottom" />
+                          <span className="chat-bubble-context-edge left" />
+                        </div>
                         {isEditingMessage ? (
                           <div className="chat-inline-editor">
                             <textarea
