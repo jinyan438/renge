@@ -26,6 +26,8 @@ export type ApplyRegexScriptsOptions = {
   characterName?: string;
 };
 
+const SILLY_TAVERN_STATUS_PLACEHOLDER = "<StatusPlaceHolderImpl/>";
+
 type UnknownRecord = Record<string, unknown>;
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -295,4 +297,35 @@ export function applyRegexScripts(
       return result;
     }
   }, content);
+}
+
+export function appendSillyTavernStatusPlaceholderToGreeting(
+  content: string,
+  scripts: RegexScript[],
+  options: ApplyRegexScriptsOptions = {},
+) {
+  if (/StatusPlaceHolderImpl/i.test(content)) return content;
+
+  const statusRendererScripts = scripts.filter((script) =>
+    /StatusPlaceHolderImpl/i.test(script.findRegex),
+  );
+  if (statusRendererScripts.length === 0) return content;
+
+  const renderedPlaceholder = applyRegexScripts(
+    SILLY_TAVERN_STATUS_PLACEHOLDER,
+    statusRendererScripts,
+    {
+      ...options,
+      placement: 2,
+      destination: "display",
+    },
+  );
+  if (
+    renderedPlaceholder === SILLY_TAVERN_STATUS_PLACEHOLDER ||
+    !renderedPlaceholder.trim()
+  ) {
+    return content;
+  }
+
+  return `${content.trimEnd()}\n${SILLY_TAVERN_STATUS_PLACEHOLDER}`;
 }
