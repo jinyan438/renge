@@ -917,7 +917,10 @@ export class TavernScriptRuntime {
         const index = normalizeMessageId(range, messages);
         return filter(formatted[index] ? [formatted[index]] : []);
       }
-      const value = String(range).trim();
+      const value = String(range)
+        .trim()
+        .replace(/\{\{\s*lastMessageId\s*\}\}/gi, String(messages.length - 1))
+        .replace(/\{\{\s*currentMessageId\s*\}\}/gi, String(messages.length - 1));
       if (/^-?\d+$/.test(value)) {
         const index = normalizeMessageId(value, messages);
         return filter(formatted[index] ? [formatted[index]] : []);
