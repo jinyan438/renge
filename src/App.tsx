@@ -8691,6 +8691,23 @@ export function App() {
     () => scopedRoleplayCard,
     [scopedRoleplayCard],
   );
+  const activeRoleplayGreetings = useMemo(
+    () =>
+      activeSessionRoleplayCard
+        ? getCharacterCardGreetings(
+            activeSessionRoleplayCard,
+            userProfile.nickname.trim() || "用户",
+          )
+        : [],
+    [activeSessionRoleplayCard, userProfile.nickname],
+  );
+  const activeRoleplayGreetingIndex = Math.max(
+    0,
+    Math.min(
+      activeChatSession?.roleplayGreetingIndex ?? 0,
+      Math.max(0, activeRoleplayGreetings.length - 1),
+    ),
+  );
   const activeTavernScripts = useMemo(
     () => [
       ...tavernScripts,
@@ -9475,11 +9492,35 @@ export function App() {
       ),
     );
   };
-  const processRoleplayGreeting = (session: ChatSession, card: CharacterCard) => {
+  const processRoleplayGreeting = (
+    session: ChatSession,
+    card: CharacterCard,
+    emitSwipeEvent = false,
+  ) => {
     const greetingIndex = session.messages.findIndex(
       (message) => message.source === "roleplay-greeting",
     );
-    if (greetingIndex < 0 || !promptTemplateEnabled) return;
+    if (greetingIndex < 0) return;
+    const greetingMessageId = session.messages[greetingIndex].id;
+    const emitGreetingEvents = () => {
+      if (!emitSwipeEvent) return;
+      window.setTimeout(() => {
+        const messageIndex = chatMessagesRef.current.findIndex(
+          (message) => message.id === greetingMessageId,
+        );
+        if (messageIndex < 0) return;
+        void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_SWIPED, messageIndex);
+        void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_RENDERED, messageIndex);
+        void tavernScriptRuntimeRef.current?.emit(
+          TAVERN_EVENTS.CHARACTER_MESSAGE_RENDERED,
+          messageIndex,
+        );
+      }, 0);
+    };
+    if (!promptTemplateEnabled) {
+      emitGreetingEvents();
+      return;
+    }
     window.setTimeout(() => {
       const options = createPromptTemplateRuntimeOptions(
         session.messages,
@@ -9487,7 +9528,10 @@ export function App() {
         card.name,
         effectiveChatModelId,
       );
-      if (!options) return;
+      if (!options) {
+        emitGreetingEvents();
+        return;
+      }
       void processPromptTemplateRenderedMessage(
         session.messages[greetingIndex].content,
         greetingIndex,
@@ -9513,7 +9557,15 @@ export function App() {
               : candidate,
           ),
         );
-      });
+      }).catch((error) => {
+        setChatStatus({
+          status: "error",
+          message:
+            error instanceof Error
+              ? `开场白模板处理失败：${error.message}`
+              : "开场白模板处理失败。",
+        });
+      }).finally(emitGreetingEvents);
     }, 0);
   };
   const activateRoleplaySession = (session: ChatSession) => {
@@ -9590,12 +9642,8 @@ export function App() {
   };
   const cycleRoleplayGreeting = () => {
     if (!activeChatSession || !activeSessionRoleplayCard) return;
-    const greetings = getCharacterCardGreetings(
-      activeSessionRoleplayCard,
-      userProfile.nickname.trim() || "用户",
-    );
-    if (greetings.length < 2) return;
-    const nextIndex = ((activeChatSession.roleplayGreetingIndex ?? 0) + 1) % greetings.length;
+    if (activeRoleplayGreetings.length < 2) return;
+    const nextIndex = (activeRoleplayGreetingIndex + 1) % activeRoleplayGreetings.length;
     const greeting = createRoleplayGreetingMessage(
       activeSessionRoleplayCard,
       userProfile.nickname.trim() || "用户",
@@ -9618,7 +9666,7 @@ export function App() {
     setChatSessions((current) =>
       current.map((session) => (session.id === activeChatSession.id ? nextSession : session)),
     );
-    processRoleplayGreeting(nextSession, activeSessionRoleplayCard);
+    processRoleplayGreeting(nextSession, activeSessionRoleplayCard, true);
   };
   const recentChatSessions = useMemo(
     () =>
@@ -18896,22 +18944,6 @@ export function App() {
                 <Bookmark size={16} />
                 {activeSessionMemoryEnabled ? "取消记忆" : "设为记忆"}
               </button>
-              {chatMode === "roleplay" &&
-                activeSessionRoleplayCard &&
-                getCharacterCardGreetings(
-                  activeSessionRoleplayCard,
-                  userProfile.nickname.trim() || "用户",
-                ).length > 1 && (
-                  <button
-                    type="button"
-                    className="ghost-action"
-                    title="切换开场白"
-                    onClick={cycleRoleplayGreeting}
-                  >
-                    <RefreshCw size={16} />
-                    切换问候
-                  </button>
-                )}
               <button
                 type="button"
                 className="ghost-action"
@@ -19110,9 +19142,18 @@ export function App() {
                     ? item.segments.map((segment) => ({ kind: "segment" as const, ...segment }))
                     : [item];
 
-                return renderedSegments.map(({ id, message, segment, segmentIndex, showTime }) => {
+                return renderedSegments.map((
+                  { id, message, segment, segmentIndex, showTime },
+                  renderedSegmentIndex,
+                ) => {
                 const isEditingMessage = editingChatMessage?.messageId === message.id;
                 if (isEditingMessage && segmentIndex > 0) return null;
+                const showGreetingSwitch =
+                  !isEditingMessage &&
+                  message.source === "roleplay-greeting" &&
+                  message.role === "assistant" &&
+                  activeRoleplayGreetings.length > 1 &&
+                  renderedSegmentIndex === renderedSegments.length - 1;
                 const messageSender = message.role === "user" ? (message.sender ?? { kind: "user" as const }) : undefined;
                 const assistantPersona =
                   message.role === "assistant"
@@ -19163,7 +19204,9 @@ export function App() {
                         </div>
                       </div>
                       <div
-                        className={`chat-bubble ${isEditingMessage ? "editing" : ""}`}
+                        className={`chat-bubble ${isEditingMessage ? "editing" : ""} ${
+                          showGreetingSwitch ? "roleplay-greeting-bubble" : ""
+                        }`}
                         onContextMenu={(event) => openChatMessageMenu(message.id, event)}
                       >
                         {isEditingMessage ? (
@@ -19227,6 +19270,29 @@ export function App() {
                             {renderChatContent(segment, id, message.id)}
                             {segmentIndex === 0 &&
                               renderChatAttachments(message.attachments ?? [])}
+                            {showGreetingSwitch && (
+                              <button
+                                type="button"
+                                className="roleplay-greeting-switch"
+                                disabled={chatStatus.status === "loading"}
+                                title={`切换开场白（${activeRoleplayGreetingIndex + 1}/${activeRoleplayGreetings.length}）`}
+                                aria-label={`切换开场白，当前第 ${activeRoleplayGreetingIndex + 1} 个，共 ${activeRoleplayGreetings.length} 个`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setChatMessageMenu(null);
+                                  cycleRoleplayGreeting();
+                                }}
+                                onContextMenu={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                }}
+                              >
+                                <RefreshCw size={13} />
+                                <span>
+                                  {activeRoleplayGreetingIndex + 1}/{activeRoleplayGreetings.length}
+                                </span>
+                              </button>
+                            )}
                           </>
                         )}
                       </div>
