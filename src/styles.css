@@ -3731,6 +3731,12 @@ summary:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.chat-message.assistant .chat-bubble:has(.chat-html-preview) {
+  flex: 0 1 960px;
+  width: 960px;
+  max-width: calc(100% - 60px);
+}
+
 .chat-bubble.roleplay-greeting-bubble {
   position: relative;
   padding-bottom: 48px;
