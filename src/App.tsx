@@ -6462,6 +6462,9 @@ export function App() {
   const skillZipInputRef = useRef<HTMLInputElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatSendButtonRef = useRef<HTMLButtonElement>(null);
+  const sendChatMessageRef = useRef<
+    (contentOverride?: string, attachmentsOverride?: ChatAttachment[]) => Promise<void>
+  >(async () => {});
   const chatAttachmentInputRef = useRef<HTMLInputElement>(null);
   const chatAttachmentFilesRef = useRef<Map<string, File>>(new Map());
   const chatAttachmentMetadataRef = useRef<Map<string, ChatAttachment>>(new Map());
@@ -6511,7 +6514,7 @@ export function App() {
   }, [activeWorldBookIds, characterCards, chatMessages, chatSessions, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
-    const focusChatInput = (submit: boolean) => {
+    const focusChatInput = () => {
       window.requestAnimationFrame(() => {
         const input = chatInputRef.current;
         if (input) {
@@ -6519,27 +6522,25 @@ export function App() {
           input.scrollIntoView({ behavior: "smooth", block: "center" });
           input.setSelectionRange(input.value.length, input.value.length);
         }
-        if (!submit) return;
-        window.requestAnimationFrame(() => {
-          const sendButton = chatSendButtonRef.current;
-          if (
-            sendButton &&
-            !sendButton.disabled &&
-            sendButton.getAttribute("aria-label") === "发送"
-          ) {
-            sendButton.click();
-          }
-        });
       });
     };
 
     const writeChatInput = (text: string, append: boolean, submit: boolean) => {
-      setChatInput((current) => (append ? `${current}${text}` : text));
+      let nextInput = text;
+      setChatInput((current) => {
+        nextInput = append ? `${current}${text}` : text;
+        return nextInput;
+      });
       setChatStatus({
         status: "success",
         message: submit ? "角色卡已写入输入框并请求发送。" : "角色卡已写入会话输入框。",
       });
-      focusChatInput(submit);
+      focusChatInput();
+      if (submit) {
+        window.requestAnimationFrame(() => {
+          void sendChatMessageRef.current(nextInput, []);
+        });
+      }
       return true;
     };
 
@@ -6571,7 +6572,11 @@ export function App() {
         return appendSendAsMessage(parsed.text, parsed.name);
       }
       if (parsed.type === "trigger") {
-        focusChatInput(true);
+        const input = chatInputRef.current?.value ?? "";
+        focusChatInput();
+        window.requestAnimationFrame(() => {
+          void sendChatMessageRef.current(input, []);
+        });
         return true;
       }
       return writeChatInput(parsed.text, parsed.append, parsed.submit);
@@ -12395,7 +12400,7 @@ export function App() {
       sender: currentChatSender,
       ...(attachmentsToSend.length > 0 ? { attachments: attachmentsToSend } : {}),
     };
-    let accumulatedMessages = [...chatMessages, userMessage];
+    let accumulatedMessages = [...chatMessagesRef.current, userMessage];
 
     chatMessagesRef.current = accumulatedMessages;
     setChatMessages(accumulatedMessages);
@@ -12406,9 +12411,14 @@ export function App() {
     await runMultiAgentResponses(accumulatedMessages, currentChatSender, content);
   };
 
-  const sendChatMessage = async () => {
-    const content = chatInput.trim();
-    const attachmentsToSend = chatAttachments;
+  const sendChatMessage = async (
+    contentOverride?: string,
+    attachmentsOverride?: ChatAttachment[],
+  ) => {
+    const hasContentOverride = contentOverride !== undefined;
+    const content = (hasContentOverride ? contentOverride : chatInput).trim();
+    const attachmentsToSend =
+      attachmentsOverride ?? (hasContentOverride ? [] : chatAttachments);
     if ((!content && attachmentsToSend.length === 0) || chatStatus.status === "loading") return;
     if (chatMode === "multi") {
       await sendMultiAgentMessage(content, attachmentsToSend);
@@ -12441,7 +12451,7 @@ export function App() {
       sender: currentChatSender,
       ...(attachmentsToSend.length > 0 ? { attachments: attachmentsToSend } : {}),
     };
-    const nextMessages = [...chatMessages, userMessage];
+    const nextMessages = [...chatMessagesRef.current, userMessage];
 
     chatMessagesRef.current = nextMessages;
     setChatMessages(nextMessages);
@@ -13002,6 +13012,7 @@ export function App() {
       finishChatGeneration(abortController);
     }
   };
+  sendChatMessageRef.current = sendChatMessage;
 
   const finalizeHeartbeatRun = (sessionId: string) => {
     const timestamp = new Date().toISOString();
