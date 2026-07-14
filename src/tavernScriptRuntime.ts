@@ -198,6 +198,79 @@ function cloneValue<T>(value: T): T {
   }
 }
 
+function buildLocalTavernPlaceholderImage(value: string) {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return value;
+  }
+  if (
+    !/^https?:$/.test(url.protocol) ||
+    url.hostname.toLowerCase() !== "via.placeholder.com"
+  ) {
+    return value;
+  }
+
+  const pathSegments = url.pathname.split("/").filter(Boolean);
+  const sizeMatch = /^(\d{1,4})(?:x(\d{1,4}))?$/i.exec(pathSegments[0] ?? "");
+  if (!sizeMatch) return value;
+  const width = Math.min(4096, Math.max(1, Number(sizeMatch[1])));
+  const height = Math.min(4096, Math.max(1, Number(sizeMatch[2] ?? sizeMatch[1])));
+  const normalizeColor = (color: string | undefined, fallback: string) =>
+    color && /^(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(color)
+      ? `#${color}`
+      : fallback;
+  const background = normalizeColor(pathSegments[1], "#e5e7eb");
+  const foreground = normalizeColor(pathSegments[2], "#94a3b8");
+  const label = (url.searchParams.get("text") ?? "").trim().slice(0, 40);
+  const escapeXml = (text: string) =>
+    text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&apos;");
+  const scale = Math.min(width, height);
+  const centerX = Math.round(width / 2);
+  const centerY = Math.round(height / 2);
+  const graphic = label
+    ? `<text x="${centerX}" y="${centerY}" fill="${foreground}" font-family="system-ui,sans-serif" font-size="${Math.max(10, Math.round(scale * 0.16))}" text-anchor="middle" dominant-baseline="central">${escapeXml(label)}</text>`
+    : [
+        `<circle cx="${centerX}" cy="${Math.round(centerY - scale * 0.12)}" r="${Math.max(2, Math.round(scale * 0.14))}" fill="${foreground}"/>`,
+        `<ellipse cx="${centerX}" cy="${Math.round(centerY + scale * 0.2)}" rx="${Math.max(4, Math.round(scale * 0.28))}" ry="${Math.max(3, Math.round(scale * 0.18))}" fill="${foreground}"/>`,
+      ].join("");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="100%" height="100%" fill="${background}"/>${graphic}</svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function mapTavernVariableStrings<T>(
+  value: T,
+  mapper: (text: string) => string,
+  seen = new WeakMap<object, unknown>(),
+): T {
+  if (typeof value === "string") return mapper(value) as T;
+  if (!value || typeof value !== "object") return value;
+  const objectValue = value as object;
+  const existing = seen.get(objectValue);
+  if (existing !== undefined) return existing as T;
+  if (Array.isArray(value)) {
+    const output: unknown[] = [];
+    seen.set(objectValue, output);
+    value.forEach((item) => output.push(mapTavernVariableStrings(item, mapper, seen)));
+    return output as T;
+  }
+  if (!isRecord(value) || Object.prototype.toString.call(value) !== "[object Object]") {
+    return value;
+  }
+  const output: Record<string, unknown> = {};
+  seen.set(objectValue, output);
+  Object.entries(value).forEach(([key, item]) => {
+    output[key] = mapTavernVariableStrings(item, mapper, seen);
+  });
+  return output as T;
+}
+
 function normalizeTavernRegexRecord(
   value: unknown,
   fallbackScope = "global",
@@ -452,6 +525,7 @@ export class TavernScriptRuntime {
   private eventHandlers = new Map<string, Set<(...args: unknown[]) => unknown>>();
   private scriptButtons = new Map<string, TavernScriptButton[]>();
   private fontAwesomeCleanups: Array<() => void> = [];
+  private localPlaceholderImageSources = new Map<string, string>();
 
   constructor(scripts: TavernScript[], adapter: TavernScriptRuntimeAdapter) {
     this.scripts = scripts.map((script) => cloneValue(script));
@@ -499,7 +573,7 @@ export class TavernScriptRuntime {
     this.ready = true;
     await this.emit(TAVERN_EVENTS.APP_READY);
     await this.emit(TAVERN_EVENTS.CHAT_CHANGED, this.adapter.getChatId());
-    const character = this.adapter.getCharacter();
+    const character = this.localizePlaceholderImages(this.adapter.getCharacter());
     if (character) {
       await this.emit(TAVERN_EVENTS.CHARACTER_SELECTED, {
         characterId: character.id,
@@ -598,6 +672,7 @@ export class TavernScriptRuntime {
       .splice(0)
       .reverse()
       .forEach((cleanup) => cleanup());
+    this.localPlaceholderImageSources.clear();
     this.iframe = null;
     this.runtimeWindow = null;
     this.reportStatus("idle", "");
@@ -925,7 +1000,7 @@ export class TavernScriptRuntime {
 
     const getVariables = (option?: unknown) => {
       const resolved = this.resolveVariables(option, getScriptId());
-      return cloneValue(resolved);
+      return this.localizePlaceholderImages(cloneValue(resolved));
     };
     const replaceVariables = async (variables: unknown, option?: unknown) => {
       const next = isRecord(variables) ? cloneValue(variables) : {};
@@ -958,7 +1033,7 @@ export class TavernScriptRuntime {
       return deleted;
     };
 
-    const getCharacter = () => this.adapter.getCharacter();
+    const getCharacter = () => this.localizePlaceholderImages(this.adapter.getCharacter());
     const getWorldBooks = () => {
       const books = this.adapter.getWorldBooks();
       const characterBook = getCharacter()?.worldBook;
@@ -1316,7 +1391,7 @@ export class TavernScriptRuntime {
     scriptId: string,
     variables: Record<string, unknown>,
   ) {
-    const next = cloneValue(variables);
+    const next = this.restorePlaceholderImages(cloneValue(variables));
     const messages = this.adapter.getMessages();
     const normalized: VariableOption = isRecord(option)
       ? option
@@ -1364,8 +1439,8 @@ export class TavernScriptRuntime {
       is_hidden: false,
       message: message.content,
       mes: message.content,
-      data: cloneValue(message.variables ?? {}),
-      variables: cloneValue(message.variables ?? {}),
+      data: this.localizePlaceholderImages(cloneValue(message.variables ?? {})),
+      variables: this.localizePlaceholderImages(cloneValue(message.variables ?? {})),
       extra: cloneValue(message.extra ?? {}),
       swipe_id: 0,
       swipes: [message.content],
@@ -1379,7 +1454,7 @@ export class TavernScriptRuntime {
       const formatted = this.formatHelperMessage(message, index);
       return {
         ...formatted,
-        variables: [cloneValue(message.variables ?? {})],
+        variables: [this.localizePlaceholderImages(cloneValue(message.variables ?? {}))],
       };
     });
   }
@@ -1390,7 +1465,7 @@ export class TavernScriptRuntime {
     return [
       {
         name: character.name,
-        avatar: character.avatarDataUrl,
+        avatar: this.localizePlaceholderImages(character.avatarDataUrl),
         data: {
           name: character.name,
           description: character.description,
@@ -1399,13 +1474,28 @@ export class TavernScriptRuntime {
           first_mes: character.firstMessage,
           mes_example: character.messageExample,
           extensions: {
-            ...cloneValue(character.extensions),
+            ...this.localizePlaceholderImages(cloneValue(character.extensions)),
             ...(character.worldBook ? { world: character.worldBook.name } : {}),
           },
           character_book: character.worldBook,
         },
       },
     ];
+  }
+
+  private localizePlaceholderImages<T>(value: T): T {
+    return mapTavernVariableStrings(value, (text) => {
+      const localized = buildLocalTavernPlaceholderImage(text);
+      if (localized !== text) this.localPlaceholderImageSources.set(localized, text);
+      return localized;
+    });
+  }
+
+  private restorePlaceholderImages<T>(value: T): T {
+    return mapTavernVariableStrings(
+      value,
+      (text) => this.localPlaceholderImageSources.get(text) ?? text,
+    );
   }
 
   private normalizeRuntimeButtons(values: unknown[], scriptId: string) {
