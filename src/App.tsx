@@ -3332,6 +3332,7 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "const minHeight = 220;",
     "const padding = 12;",
     "let rafId = 0;",
+    "let rafFallbackTimer = 0;",
     "let heavyPostTimer = 0;",
     "let lastHeight = 0;",
     "let lastExpandedDetailsHeight = 0;",
@@ -3501,6 +3502,8 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "  };",
     "};",
     "const postHeight = () => {",
+    "  if (rafFallbackTimer) window.clearTimeout(rafFallbackTimer);",
+    "  rafFallbackTimer = 0;",
     "  rafId = 0;",
     "  const measurement = measure();",
     "  const height = measurement.height;",
@@ -3515,16 +3518,26 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     '    parent.postMessage({ type: messageType, id: previewId, height, intrinsic: measurement.hasIntrinsicElement === true, expanded: hasExpandedDetails, expandedHeight: reportedExpandedHeight }, "*");',
     "  } catch {}",
     "};",
+    "const requestPostFrame = () => {",
+    "  if (rafId || rafFallbackTimer) return;",
+    "  rafId = requestAnimationFrame(postHeight);",
+    "  rafFallbackTimer = window.setTimeout(() => {",
+    "    rafFallbackTimer = 0;",
+    "    if (!rafId) return;",
+    "    cancelAnimationFrame(rafId);",
+    "    rafId = 0;",
+    "    postHeight();",
+    "  }, 120);",
+    "};",
     "const schedulePost = () => {",
     "  if (!heavyContent) {",
-    "    if (rafId) return;",
-    "    rafId = requestAnimationFrame(postHeight);",
+    "    requestPostFrame();",
     "    return;",
     "  }",
     "  if (heavyPostTimer) return;",
     "  heavyPostTimer = window.setTimeout(() => {",
     "    heavyPostTimer = 0;",
-    "    if (!rafId) rafId = requestAnimationFrame(postHeight);",
+    "    requestPostFrame();",
     "  }, 160);",
     "};",
     'window.addEventListener("load", () => { naturalLayoutDirty = true; schedulePost(); });',
@@ -3551,48 +3564,22 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "    : { attributes: true, childList: true, subtree: true, characterData: true });",
     "  window.addEventListener(\"unload\", () => {",
     "    mutationObserver.disconnect();",
+    "    if (rafId) cancelAnimationFrame(rafId);",
+    "    if (rafFallbackTimer) window.clearTimeout(rafFallbackTimer);",
     "    if (heavyPostTimer) window.clearTimeout(heavyPostTimer);",
     "  }, { once: true });",
     "} catch {}",
     'document.addEventListener("toggle", () => { naturalLayoutDirty = true; schedulePost(); }, true);',
     "document.addEventListener(\"DOMContentLoaded\", () => { naturalLayoutDirty = true; schedulePost(); }, { once: true });",
     "schedulePost();",
-    "(heavyContent ? [240, 1000, 3000, 6000] : [80, 240, 600, 1200, 2400, 4000]).forEach((delay) => setTimeout(() => { naturalLayoutDirty = true; schedulePost(); }, delay));",
+    "(heavyContent ? [240, 1000, 3000, 6000, 12000, 24000] : [80, 240, 600, 1200, 2400, 4000, 8000, 12000, 20000, 30000]).forEach((delay) => setTimeout(() => { naturalLayoutDirty = true; schedulePost(); }, delay));",
     "if (!heavyContent) {",
-    "  const intervalId = setInterval(schedulePost, 500);",
-    "  setTimeout(() => clearInterval(intervalId), 6000);",
+    "  const intervalId = setInterval(() => { naturalLayoutDirty = true; schedulePost(); }, 750);",
+    "  setTimeout(() => clearInterval(intervalId), 30000);",
     "}",
     "})();",
     "</script>",
   ].join("");
-}
-
-function appendHtmlPreviewScript(
-  documentContent: string,
-  previewId: string,
-  heavyContent: boolean,
-) {
-  const previewScript = buildHtmlPreviewScript(previewId, heavyContent);
-  const insertBeforeLastClosingTag = (tagName: "body" | "html") => {
-    const pattern = new RegExp(`<\\/${tagName}\\s*>`, "gi");
-    let lastMatch: RegExpExecArray | null = null;
-    let match: RegExpExecArray | null;
-    while ((match = pattern.exec(documentContent))) lastMatch = match;
-    if (!lastMatch) return null;
-    return (
-      documentContent.slice(0, lastMatch.index) +
-      previewScript +
-      documentContent.slice(lastMatch.index)
-    );
-  };
-
-  const bodyDocument = insertBeforeLastClosingTag("body");
-  if (bodyDocument) return bodyDocument;
-  const htmlDocument = insertBeforeLastClosingTag("html");
-  if (htmlDocument) {
-    return htmlDocument;
-  }
-  return `${documentContent}${previewScript}`;
 }
 
 function injectHtmlPreviewHead(documentContent: string, headInjection: string) {
@@ -3664,24 +3651,19 @@ function buildHtmlPreviewDocument(
     stabilizeHtmlPreviewViewportUnits(content.trim()),
   );
   const heavyContent = trimmedContent.length >= HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD;
-  const headInjection = `${htmlPreviewStyle}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${buildHtmlPreviewVariablesScript(previewId, context)}`;
+  // SillyTavern frontends can replace the complete body through
+  // `$("body").load(...)`. Install the resize runtime in the head before card
+  // scripts start, so asynchronous body replacement cannot remove the only
+  // path that reports the finished layout height to the host.
+  const headInjection = `${htmlPreviewStyle}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewScript(previewId, heavyContent)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
-    return appendHtmlPreviewScript(
-      injectHtmlPreviewHead(trimmedContent, headInjection),
-      previewId,
-      heavyContent,
-    );
+    return injectHtmlPreviewHead(trimmedContent, headInjection);
   }
   if (/<head[\s>]|<body[\s>]/i.test(trimmedContent)) {
-    return appendHtmlPreviewScript(
-      `<!doctype html><html lang="zh-CN">${injectHtmlPreviewHead(trimmedContent, headInjection)}</html>`,
-      previewId,
-      heavyContent,
-    );
+    return `<!doctype html><html lang="zh-CN">${injectHtmlPreviewHead(trimmedContent, headInjection)}</html>`;
   }
 
-  return appendHtmlPreviewScript(
-    [
+  return [
     "<!doctype html>",
     '<html lang="zh-CN">',
     "<head>",
@@ -3694,10 +3676,7 @@ function buildHtmlPreviewDocument(
     trimmedContent,
     "</body>",
     "</html>",
-    ].join(""),
-    previewId,
-    heavyContent,
-  );
+  ].join("");
 }
 
 type ChatHtmlPreviewProps = {
@@ -3979,8 +3958,13 @@ function measureHtmlPreviewHeight(frame: HTMLIFrameElement) {
 
 function fitHtmlPreviewFrame(frame: HTMLIFrameElement) {
   try {
-    const height = Math.ceil(measureHtmlPreviewHeight(frame) + 12);
-    if (height > 0) frame.style.height = `${Math.max(220, height)}px`;
+    const measuredHeight = measureHtmlPreviewHeight(frame);
+    // The sandbox deliberately withholds contentDocument from the host. A
+    // missing measurement is not a 0px document: leave the provisional frame
+    // height intact until the child resize bridge reports its real layout.
+    if (measuredHeight <= 0) return;
+    const height = Math.ceil(measuredHeight + 12);
+    frame.style.height = `${Math.max(220, height)}px`;
   } catch {
     // Preview internals should not break chat rendering.
   }
