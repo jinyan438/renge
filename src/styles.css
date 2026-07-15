@@ -7461,6 +7461,8 @@ input[type="range"] {
 }
 
 .extension-list {
+  display: grid;
+  gap: 16px;
   margin-top: 18px;
 }
 
@@ -7504,6 +7506,12 @@ input[type="range"] {
   background: #f2efff;
 }
 
+.extension-card-icon.generic {
+  border-color: #b7d8ee;
+  color: #176b9d;
+  background: #eef8ff;
+}
+
 .extension-title-row {
   display: flex;
   align-items: center;
@@ -7521,6 +7529,43 @@ input[type="range"] {
   background: var(--color-brand-soft);
 }
 
+.extension-compatibility.web {
+  border-color: #b7d8ee;
+  color: #176b9d;
+  background: #eef8ff;
+}
+
+.extension-runtime-badge {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  padding: 4px 9px;
+  border: 1px solid #e1e6ef;
+  border-radius: 7px;
+  color: #64748b;
+  background: #f8fafc;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.extension-runtime-badge.active {
+  border-color: #a8ebcb;
+  color: var(--color-brand-strong);
+  background: var(--color-brand-soft);
+}
+
+.extension-runtime-badge.loading {
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+  background: #eff6ff;
+}
+
+.extension-runtime-badge.error {
+  border-color: #fecaca;
+  color: #b42318;
+  background: #fff1f2;
+}
+
 .extension-card p {
   max-width: 780px;
   font-size: 13px;
@@ -7529,6 +7574,33 @@ input[type="range"] {
 .extension-main-switch {
   flex: 0 0 auto;
   margin-top: 5px;
+}
+
+.extension-card-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 9px;
+}
+
+.extension-delete-action {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  color: #b42318;
+  background: #fff7f7;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.extension-delete-action:hover {
+  border-color: #fda4af;
+  background: #fff1f2;
 }
 
 .extension-metadata {
@@ -7546,10 +7618,64 @@ input[type="range"] {
   background: #f5f2ff;
 }
 
+.extension-metadata > span.error {
+  border-color: #fecaca;
+  color: #b42318;
+  background: #fff1f2;
+}
+
 .extension-card-body {
   display: grid;
   grid-template-columns: minmax(210px, 0.48fr) minmax(0, 1.52fr);
   min-height: 360px;
+}
+
+.extension-generic-body {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.62fr) minmax(0, 1.38fr);
+  min-height: 170px;
+}
+
+.extension-runtime-details {
+  display: grid;
+  align-content: start;
+  gap: 9px;
+  padding: 22px;
+}
+
+.extension-runtime-details h3 {
+  font-size: 15px;
+}
+
+.extension-runtime-details p,
+.extension-runtime-details small {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.extension-empty-state {
+  display: grid;
+  min-height: 220px;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  padding: 28px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 14px;
+  color: #64748b;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.extension-empty-state strong {
+  color: #253047;
+}
+
+.extension-empty-state span {
+  max-width: 480px;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .extension-capabilities {
@@ -7678,7 +7804,8 @@ input[type="range"] {
 @media (max-width: 900px) {
   .extension-manager-header,
   .extension-install-panel,
-  .extension-card-body {
+  .extension-card-body,
+  .extension-generic-body {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -7687,7 +7814,8 @@ input[type="range"] {
   }
 
   .extension-install-panel,
-  .extension-card-body {
+  .extension-card-body,
+  .extension-generic-body {
     display: grid;
   }
 
@@ -7743,6 +7871,10 @@ input[type="range"] {
 
   .extension-main-switch {
     justify-self: end;
+  }
+
+  .extension-card-actions {
+    justify-content: flex-end;
   }
 
   .extension-card-brand {

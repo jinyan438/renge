@@ -60,6 +60,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
+import lodashSource from "lodash/lodash.min.js?raw";
 import {
   buildPersonaPrompt,
   createPersonaFromPromptText,
@@ -143,8 +144,8 @@ import {
   DEFAULT_PROMPT_TEMPLATE_SETTINGS,
   ST_PROMPT_TEMPLATE_EXTENSION_ID,
   ST_PROMPT_TEMPLATE_SOURCE_URL,
-  installKnownTavernExtension,
   loadInstalledExtensions,
+  normalizeInstalledExtension,
   normalizeInstalledExtensions,
   type InstalledExtension,
   type PromptTemplateExtensionSettings,
@@ -192,6 +193,10 @@ type AppView = "home" | "studio" | "characters" | "extensions" | "settings" | "c
 type SettingsTab = "providers" | "prompts" | "presets" | "worldbooks" | "regexes" | "scripts" | "user" | "personalization" | "mcp" | "skills" | "device";
 type ProviderPullState = "idle" | "loading" | "success" | "error";
 type ChatGenerationState = "idle" | "running" | "stopping";
+type ExtensionRuntimeState = {
+  status: "idle" | "loading" | "active" | "error";
+  message: string;
+};
 type ChatMode = "ai" | "persona" | "multi" | "roleplay";
 type ChatRole = "user" | "assistant";
 type ChatApiRole = "system" | "user" | "assistant" | "tool";
@@ -613,6 +618,7 @@ const CHAT_PERSONALIZATION_STORAGE_KEY = "renge_chat_personalization";
 const MCP_SERVERS_STORAGE_KEY = "renge_mcp_servers";
 const SKILLS_STORAGE_KEY = "renge_skills";
 const EXTENSIONS_STORAGE_KEY = "renge_extensions";
+const EXTENSION_SETTINGS_STORAGE_KEY = "renge_sillytavern_extension_settings";
 const PC_SERVER_URL_STORAGE_KEY = "renge_pc_server_url";
 const PC_WORKSPACE_PATH_STORAGE_KEY = "renge_pc_workspace_path";
 const PC_WORKSPACE_NAME_STORAGE_KEY = "renge_pc_workspace_name";
@@ -5134,6 +5140,56 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
+function createTavernExtensionEventBus() {
+  const handlers = new Map<string, Set<(...args: unknown[]) => unknown>>();
+  const on = (eventName: unknown, callback: unknown) => {
+    if (typeof callback !== "function") return callback;
+    const name = String(eventName);
+    const callbacks = handlers.get(name) ?? new Set();
+    callbacks.add(callback as (...args: unknown[]) => unknown);
+    handlers.set(name, callbacks);
+    return callback;
+  };
+  const off = (eventName: unknown, callback: unknown) => {
+    const callbacks = handlers.get(String(eventName));
+    if (!callbacks || typeof callback !== "function") return false;
+    const removed = callbacks.delete(callback as (...args: unknown[]) => unknown);
+    if (callbacks.size === 0) handlers.delete(String(eventName));
+    return removed;
+  };
+  const once = (eventName: unknown, callback: unknown) => {
+    if (typeof callback !== "function") return callback;
+    const wrapped = (...args: unknown[]) => {
+      off(eventName, wrapped);
+      return (callback as (...values: unknown[]) => unknown)(...args);
+    };
+    on(eventName, wrapped);
+    return wrapped;
+  };
+  const emit = async (eventName: unknown, ...args: unknown[]) => {
+    const callbacks = Array.from(handlers.get(String(eventName)) ?? []);
+    for (const callback of callbacks) await callback(...args);
+    return callbacks.length > 0;
+  };
+  return {
+    on,
+    once,
+    off,
+    removeListener: off,
+    emit,
+  };
+}
+
+function getExtensionAssetUrl(extension: InstalledExtension, filePath: string) {
+  const encodedPath = filePath
+    .split("/")
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join("/");
+  const version = encodeURIComponent(extension.updatedAt || extension.version);
+  return `${extension.assetBaseUrl}/${encodedPath}?v=${version}`;
+}
+
 function resolveCharacterWorldBook(
   card: CharacterCard,
   availableWorldBooks: WorldBook[],
@@ -6790,6 +6846,9 @@ export function App() {
     status: ProviderPullState;
     message: string;
   }>({ status: "idle", message: "" });
+  const [extensionRuntimeStates, setExtensionRuntimeStates] = useState<
+    Record<string, ExtensionRuntimeState>
+  >({});
   const [chatInput, setChatInput] = useState("");
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
   const [chatMessageMenu, setChatMessageMenu] = useState<{
@@ -6893,6 +6952,8 @@ export function App() {
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const chatSessionsRef = useRef<ChatSession[]>([]);
   const characterCardsRef = useRef<CharacterCard[]>([]);
+  const personasRef = useRef<AgentPersona[]>([]);
+  const activePersonaIdRef = useRef(activePersonaId);
   const worldBooksRef = useRef<WorldBook[]>([]);
   const activeWorldBookIdsRef = useRef<string[]>([]);
   const regexScriptsRef = useRef<RegexScript[]>(regexScripts);
@@ -6902,6 +6963,7 @@ export function App() {
   const userProfileRef = useRef<UserProfile>(userProfile);
   const tavernScriptsRef = useRef<TavernScript[]>(tavernScripts);
   const tavernGlobalVariablesRef = useRef<Record<string, unknown>>(tavernGlobalVariables);
+  const tavernExtensionEventBusRef = useRef(createTavernExtensionEventBus());
 
   const commitChatMessages: Dispatch<SetStateAction<ChatMessage[]>> = (update) => {
     const nextMessages =
@@ -6922,6 +6984,8 @@ export function App() {
     chatMessagesRef.current = chatMessages;
     chatSessionsRef.current = chatSessions;
     characterCardsRef.current = characterCards;
+    personasRef.current = personas;
+    activePersonaIdRef.current = activePersonaId;
     worldBooksRef.current = worldBooks;
     activeWorldBookIdsRef.current = activeWorldBookIds;
     regexScriptsRef.current = regexScripts;
@@ -6931,7 +6995,7 @@ export function App() {
     userProfileRef.current = userProfile;
     tavernScriptsRef.current = tavernScripts;
     tavernGlobalVariablesRef.current = tavernGlobalVariables;
-  }, [activeChatPresetId, activeWorldBookIds, characterCards, chatMessages, chatPresetEnabled, chatPresets, chatSessions, regexScripts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeChatPresetId, activePersonaId, activeWorldBookIds, characterCards, chatMessages, chatPresetEnabled, chatPresets, chatSessions, personas, regexScripts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     const focusChatInput = () => {
@@ -9125,18 +9189,106 @@ export function App() {
     promptTemplateExtension?.enabled && promptTemplateExtension.status === "installed",
   );
 
-  const installTavernExtension = () => {
+  const installTavernExtension = async () => {
+    const sourceUrl = extensionInstallUrl.trim();
+    if (!sourceUrl) {
+      setExtensionStatus({ status: "error", message: "请先填写扩展 Git 仓库地址。" });
+      return;
+    }
+    setExtensionStatus({ status: "loading", message: "正在克隆仓库并读取酒馆扩展清单..." });
     try {
-      const next = installKnownTavernExtension(extensionInstallUrl, extensions);
-      setExtensions(next);
+      const response = await fetch("/api/extensions/install", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceUrl }),
+      });
+      const payload = (await response.json()) as {
+        extension?: InstalledExtension;
+        error?: string;
+      };
+      if (!response.ok || payload.error || !payload.extension) {
+        throw new Error(payload.error || `扩展安装失败：${response.status}`);
+      }
+      const installed = normalizeInstalledExtension(payload.extension);
+      if (!installed) throw new Error("扩展安装结果缺少必要的 manifest 信息。");
+      setExtensions((current) => {
+        const previous = current.find((extension) => extension.id === installed.id);
+        const merged = previous
+          ? {
+              ...installed,
+              installedAt: previous.installedAt,
+              settings:
+                installed.id === ST_PROMPT_TEMPLATE_EXTENSION_ID
+                  ? previous.settings
+                  : installed.settings,
+            }
+          : installed;
+        return [...current.filter((extension) => extension.id !== installed.id), merged].sort(
+          (left, right) => left.loadingOrder - right.loadingOrder,
+        );
+      });
+      setExtensionInstallUrl("");
       setExtensionStatus({
         status: "success",
-        message: "ST-Prompt-Template 已安装，并启用 Renge 原生兼容层。",
+        message: `${installed.displayName} 已安装并启用。`,
       });
     } catch (error) {
       setExtensionStatus({
         status: "error",
         message: error instanceof Error ? error.message : "扩展安装失败。",
+      });
+    }
+  };
+
+  const deleteInstalledExtension = async (extension: InstalledExtension) => {
+    const confirmed = window.confirm(
+      `确定删除扩展「${extension.displayName}」吗？本地扩展文件和配置记录都会移除。`,
+    );
+    if (!confirmed) return;
+    setExtensionStatus({ status: "loading", message: `正在删除 ${extension.displayName}...` });
+    try {
+      const response = await fetch(`/api/extensions/${encodeURIComponent(extension.id)}`, {
+        method: "DELETE",
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok || payload.error) {
+        throw new Error(payload.error || `扩展删除失败：${response.status}`);
+      }
+      const extensionSettingAliases = new Set(
+        [
+          extension.id,
+          extension.packageName,
+          extension.packageName.split("/").at(-1),
+          extension.displayName,
+        ]
+          .filter((value): value is string => Boolean(value?.trim()))
+          .map((value) => value.trim()),
+      );
+      try {
+        const host = window as Window & { extension_settings?: Record<string, unknown> };
+        const stored = JSON.parse(
+          localStorage.getItem(EXTENSION_SETTINGS_STORAGE_KEY) ?? "{}",
+        ) as unknown;
+        const settings = isObjectRecord(host.extension_settings)
+          ? host.extension_settings
+          : isObjectRecord(stored)
+            ? stored
+            : {};
+        extensionSettingAliases.forEach((alias) => delete settings[alias]);
+        host.extension_settings = settings;
+        localStorage.setItem(EXTENSION_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+      } catch {}
+      setExtensions((current) => current.filter((item) => item.id !== extension.id));
+      setExtensionRuntimeStates((current) => {
+        const next = { ...current };
+        delete next[extension.id];
+        return next;
+      });
+      setExtensionStatus({ status: "success", message: `${extension.displayName} 已删除。` });
+    } catch (error) {
+      setExtensionStatus({
+        status: "error",
+        message: error instanceof Error ? error.message : "扩展删除失败。",
       });
     }
   };
@@ -9156,6 +9308,20 @@ export function App() {
           : extension,
       ),
     );
+  };
+
+  const setInstalledExtensionEnabled = (
+    extension: InstalledExtension,
+    enabled: boolean,
+  ) => {
+    updateInstalledExtension(extension.id, {
+      enabled,
+      statusMessage: enabled ? "扩展已启用" : "扩展已关闭",
+    });
+    setExtensionStatus({
+      status: "success",
+      message: `${extension.displayName} 已${enabled ? "启用" : "关闭"}。`,
+    });
   };
 
   const updatePromptTemplateSettings = (
@@ -9179,6 +9345,262 @@ export function App() {
     });
     setExtensionStatus({ status: "success", message: "扩展设置已恢复默认值。" });
   };
+
+  useEffect(() => {
+    if (!appDataLoaded) return;
+    const host = window as Window & {
+      $?: unknown;
+      jQuery?: unknown;
+      _?: unknown;
+      TavernHelper?: Record<string, unknown>;
+      tavernHelper?: Record<string, unknown>;
+      tavernHelperAPI?: Record<string, unknown>;
+      th?: Record<string, unknown>;
+      SillyTavern?: Record<string, unknown>;
+      eventSource?: ReturnType<typeof createTavernExtensionEventBus>;
+      event_types?: Record<string, string>;
+      extension_settings?: Record<string, unknown>;
+      saveSettingsDebounced?: () => void;
+      __rengeTavernCompat?: Record<string, unknown>;
+    };
+    try {
+      if (typeof host.jQuery !== "function") window.eval(jquerySource);
+      if (!host._) window.eval(lodashSource);
+    } catch (error) {
+      console.warn("酒馆扩展基础库初始化失败", error);
+    }
+
+    const eventBus = tavernExtensionEventBusRef.current;
+    const getContext = () => {
+      const session = chatSessionsRef.current.find(
+        (item) => item.id === activeChatSessionIdRef.current,
+      );
+      const card = session?.roleplayCharacterCardId
+        ? characterCardsRef.current.find(
+            (item) => item.id === session.roleplayCharacterCardId,
+          )
+        : null;
+      const persona = personasRef.current.find(
+        (item) => item.id === activePersonaIdRef.current,
+      );
+      const userName = userProfileRef.current.nickname.trim() || "User";
+      const characterName = card?.name || persona?.name || "Assistant";
+      const messages = chatMessagesRef.current.map((message, index) => ({
+        message_id: index,
+        mesid: index,
+        name: message.role === "user" ? userName : characterName,
+        role: message.role,
+        is_user: message.role === "user",
+        is_system: false,
+        mes: message.content,
+        message: message.content,
+        extra: message.extra ?? {},
+        variables: [message.variables ?? {}],
+      }));
+      return {
+        chat: messages,
+        chatId: session?.id ?? activeChatSessionIdRef.current,
+        characterId: card?.id,
+        name1: userName,
+        name2: characterName,
+        eventSource: eventBus,
+        event_types: host.event_types,
+        saveChat: async () => true,
+        getRequestHeaders: () => ({ "Content-Type": "application/json" }),
+      };
+    };
+    const getChatMessages = () => getContext().chat;
+    const getVariables = () => {
+      const session = chatSessionsRef.current.find(
+        (item) => item.id === activeChatSessionIdRef.current,
+      );
+      const card = session?.roleplayCharacterCardId
+        ? characterCardsRef.current.find(
+            (item) => item.id === session.roleplayCharacterCardId,
+          )
+        : null;
+      return {
+        ...tavernGlobalVariablesRef.current,
+        ...(card?.tavernVariables ?? {}),
+        ...(session?.scriptVariables ?? {}),
+      };
+    };
+    const eventTypes = {
+      APP_READY: "app_ready",
+      CHAT_CHANGED: TAVERN_EVENTS.CHAT_CHANGED,
+      MESSAGE_SENT: TAVERN_EVENTS.MESSAGE_SENT,
+      MESSAGE_RECEIVED: TAVERN_EVENTS.MESSAGE_RECEIVED,
+      MESSAGE_RENDERED: TAVERN_EVENTS.MESSAGE_RENDERED,
+      MESSAGE_DELETED: TAVERN_EVENTS.MESSAGE_DELETED,
+      MESSAGE_EDITED: TAVERN_EVENTS.MESSAGE_EDITED,
+      GENERATION_STARTED: TAVERN_EVENTS.GENERATION_STARTED,
+      GENERATION_ENDED: TAVERN_EVENTS.GENERATION_ENDED,
+      EXTENSION_LOADED: "extension_loaded",
+      EXTENSION_UNLOADED: "extension_unloaded",
+    };
+    host.eventSource = eventBus;
+    host.event_types = eventTypes;
+    const tavernHelper = isObjectRecord(host.TavernHelper) ? host.TavernHelper : {};
+    Object.assign(tavernHelper, {
+      getContext,
+      getChatMessages,
+      getVariables,
+      getAllVariables: getVariables,
+      eventOn: eventBus.on,
+      eventOnce: eventBus.once,
+      eventEmit: eventBus.emit,
+      eventRemoveListener: eventBus.off,
+    });
+    host.TavernHelper = tavernHelper;
+    host.tavernHelper = tavernHelper;
+    host.tavernHelperAPI = tavernHelper;
+    host.th = tavernHelper;
+    host.SillyTavern = {
+      ...(isObjectRecord(host.SillyTavern) ? host.SillyTavern : {}),
+      version: "1.12.0-renge",
+      getContext,
+      eventSource: eventBus,
+      event_types: eventTypes,
+    };
+    let storedExtensionSettings: Record<string, unknown> = {};
+    try {
+      const stored = JSON.parse(
+        localStorage.getItem(EXTENSION_SETTINGS_STORAGE_KEY) ?? "{}",
+      ) as unknown;
+      if (isObjectRecord(stored)) storedExtensionSettings = stored;
+    } catch {}
+    host.extension_settings = storedExtensionSettings;
+    host.saveSettingsDebounced = () => {
+      try {
+        localStorage.setItem(
+          EXTENSION_SETTINGS_STORAGE_KEY,
+          JSON.stringify(host.extension_settings ?? {}),
+        );
+      } catch {}
+    };
+    host.__rengeTavernCompat = {
+      getContext,
+      getChatMessages,
+      getVariables,
+      eventSource: eventBus,
+      event_types: eventTypes,
+      extension_settings: host.extension_settings,
+      saveSettingsDebounced: host.saveSettingsDebounced,
+      TavernHelper: tavernHelper,
+      SillyTavern: host.SillyTavern,
+      $: host.$,
+      jQuery: host.jQuery,
+      _: host._,
+    };
+
+    const runtimeNodes: Array<HTMLScriptElement | HTMLLinkElement> = [];
+    let cancelled = false;
+    const enabledExtensions = extensions.filter(
+      (extension) => extension.enabled && extension.status === "installed",
+    );
+    const availableRequirementNames = new Set(
+      enabledExtensions.flatMap((extension) => [
+        extension.id.toLowerCase(),
+        extension.packageName.toLowerCase(),
+        extension.displayName.toLowerCase(),
+      ]),
+    );
+    setExtensionRuntimeStates(
+      Object.fromEntries(
+        extensions.map((extension) => [
+          extension.id,
+          extension.enabled
+            ? extension.compatibility === "native"
+              ? { status: "active", message: "Renge 原生兼容层运行中" }
+              : { status: "loading", message: "正在加载扩展资源..." }
+            : { status: "idle", message: "扩展已关闭" },
+        ]),
+      ),
+    );
+
+    const updateRuntimeState = (extensionId: string, state: ExtensionRuntimeState) => {
+      if (cancelled) return;
+      setExtensionRuntimeStates((current) => ({ ...current, [extensionId]: state }));
+    };
+    const appendStyle = (extension: InstalledExtension, filePath: string) =>
+      new Promise<void>((resolvePromise, rejectPromise) => {
+        const link = document.createElement("link");
+        link.rel = "stylesheet";
+        link.href = getExtensionAssetUrl(extension, filePath);
+        link.dataset.rengeExtensionId = extension.id;
+        link.onload = () => resolvePromise();
+        link.onerror = () => rejectPromise(new Error(`CSS 加载失败：${filePath}`));
+        runtimeNodes.push(link);
+        document.head.appendChild(link);
+      });
+    const appendScript = (extension: InstalledExtension, filePath: string) =>
+      new Promise<void>((resolvePromise, rejectPromise) => {
+        const script = document.createElement("script");
+        script.type = "module";
+        script.src = getExtensionAssetUrl(extension, filePath);
+        script.dataset.rengeExtensionId = extension.id;
+        script.onload = () => resolvePromise();
+        script.onerror = () => rejectPromise(new Error(`JavaScript 加载失败：${filePath}`));
+        runtimeNodes.push(script);
+        document.head.appendChild(script);
+      });
+
+    void (async () => {
+      for (const extension of enabledExtensions
+        .filter((item) => item.compatibility === "web")
+        .sort((left, right) => left.loadingOrder - right.loadingOrder)) {
+        if (cancelled) return;
+        const missingRequirements = extension.requires.filter(
+          (requirement) => !availableRequirementNames.has(requirement.toLowerCase()),
+        );
+        if (missingRequirements.length > 0) {
+          updateRuntimeState(extension.id, {
+            status: "error",
+            message: `缺少必需扩展：${missingRequirements.join("、")}`,
+          });
+          continue;
+        }
+        try {
+          for (const cssFile of extension.cssFiles) {
+            await appendStyle(extension, cssFile);
+            if (cancelled) return;
+          }
+          for (const jsFile of extension.jsFiles) {
+            await appendScript(extension, jsFile);
+            if (cancelled) return;
+          }
+          updateRuntimeState(extension.id, {
+            status: "active",
+            message: "酒馆 Web 兼容运行中",
+          });
+          await eventBus.emit("extension_loaded", extension.id);
+        } catch (error) {
+          if (cancelled) return;
+          updateRuntimeState(extension.id, {
+            status: "error",
+            message: error instanceof Error ? error.message : "扩展运行失败",
+          });
+        }
+      }
+      if (cancelled) return;
+      await eventBus.emit("app_ready");
+    })();
+
+    return () => {
+      cancelled = true;
+      enabledExtensions
+        .filter((extension) => extension.compatibility === "web")
+        .forEach((extension) => {
+          window.dispatchEvent(
+            new CustomEvent("renge-extension-unload", {
+              detail: { id: extension.id, packageName: extension.packageName },
+            }),
+          );
+          void eventBus.emit("extension_unloaded", extension.id);
+        });
+      runtimeNodes.forEach((node) => node.remove());
+    };
+  }, [appDataLoaded, extensions]);
 
   const getPromptTemplateWorldBooks = (character: CharacterCard | null) => {
     const globalBooks = worldBooksRef.current;
@@ -15427,15 +15849,19 @@ export function App() {
           </div>
           <div className="extension-manager-summary">
             <span>{extensions.length} 个已安装</span>
-            <span>{extensions.filter((extension) => extension.enabled).length} 个运行中</span>
+            <span>
+              {extensions.filter(
+                (extension) => extensionRuntimeStates[extension.id]?.status === "active",
+              ).length} 个运行中
+            </span>
           </div>
         </header>
 
         <section className="extension-install-panel" aria-labelledby="extension-install-title">
           <div>
-            <div className="eyebrow">Install from GitHub</div>
+            <div className="eyebrow">Install from Git</div>
             <h2 id="extension-install-title">安装酒馆扩展</h2>
-            <p>当前首个原生兼容扩展为 zonde306/ST-Prompt-Template。</p>
+            <p>粘贴公开 Git 仓库地址，Renge 会克隆仓库、读取 manifest.json 并安装扩展资源。</p>
           </div>
           <div className="extension-install-form">
             <label className="field">
@@ -15446,9 +15872,14 @@ export function App() {
                 placeholder={ST_PROMPT_TEMPLATE_SOURCE_URL}
               />
             </label>
-            <button type="button" className="small-action" onClick={installTavernExtension}>
+            <button
+              type="button"
+              className="small-action"
+              disabled={extensionStatus.status === "loading"}
+              onClick={() => void installTavernExtension()}
+            >
               <Download size={16} />
-              {promptTemplateExtension ? "重新安装兼容层" : "安装扩展"}
+              {extensionStatus.status === "loading" ? "正在安装..." : "从 Git 安装"}
             </button>
           </div>
         </section>
@@ -15476,35 +15907,49 @@ export function App() {
                     <p>{promptTemplateExtension.description}</p>
                   </div>
                 </div>
-                <label className="switch extension-main-switch" title="启用扩展">
-                  <input
-                    type="checkbox"
-                    checked={promptTemplateExtension.enabled}
-                    onChange={(event) =>
-                      updateInstalledExtension(promptTemplateExtension.id, {
-                        enabled: event.target.checked,
-                        statusMessage: event.target.checked
-                          ? "扩展已启用"
-                          : "扩展已停用",
-                      })
-                    }
-                  />
-                  <span />
-                </label>
+                <div className="extension-card-actions">
+                  <label className="switch extension-main-switch" title="启用或关闭扩展">
+                    <input
+                      type="checkbox"
+                      checked={promptTemplateExtension.enabled}
+                      onChange={(event) =>
+                        setInstalledExtensionEnabled(
+                          promptTemplateExtension,
+                          event.target.checked,
+                        )
+                      }
+                    />
+                    <span />
+                  </label>
+                  <button
+                    type="button"
+                    className="extension-delete-action"
+                    title="删除扩展"
+                    onClick={() => void deleteInstalledExtension(promptTemplateExtension)}
+                  >
+                    <Trash2 size={16} />
+                    删除
+                  </button>
+                </div>
               </header>
 
               <div className="extension-metadata">
                 <span>作者：{promptTemplateExtension.author}</span>
                 <span>许可证：{promptTemplateExtension.license}</span>
-                <span>{promptTemplateExtension.statusMessage}</span>
-                <a
-                  href={promptTemplateExtension.homePage}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  GitHub
-                  <ExternalLink size={14} />
-                </a>
+                <span>
+                  {extensionRuntimeStates[promptTemplateExtension.id]?.message ??
+                    promptTemplateExtension.statusMessage}
+                </span>
+                {promptTemplateExtension.homePage && (
+                  <a
+                    href={promptTemplateExtension.homePage}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    GitHub
+                    <ExternalLink size={14} />
+                  </a>
+                )}
               </div>
 
               <div className="extension-card-body">
@@ -15672,6 +16117,124 @@ export function App() {
                 </span>
               </div>
             </article>
+          )}
+          {extensions
+            .filter((extension) => extension.id !== ST_PROMPT_TEMPLATE_EXTENSION_ID)
+            .map((extension) => {
+              const runtimeState = extensionRuntimeStates[extension.id] ?? {
+                status: extension.enabled ? "loading" : "idle",
+                message: extension.enabled ? "等待加载" : "扩展已关闭",
+              };
+              return (
+                <article
+                  className={`extension-card generic ${
+                    runtimeState.status === "active" ? "enabled" : ""
+                  }`}
+                  key={extension.id}
+                >
+                  <header className="extension-card-header">
+                    <div className="extension-card-brand">
+                      <span className="extension-card-icon generic">
+                        <Puzzle size={25} />
+                      </span>
+                      <div>
+                        <div className="extension-title-row">
+                          <h2>{extension.displayName}</h2>
+                          <span className="extension-version">v{extension.version}</span>
+                          <span className="extension-compatibility web">酒馆 Web 兼容</span>
+                          <span className={`extension-runtime-badge ${runtimeState.status}`}>
+                            {runtimeState.status === "active"
+                              ? "运行中"
+                              : runtimeState.status === "loading"
+                                ? "加载中"
+                                : runtimeState.status === "error"
+                                  ? "运行错误"
+                                  : "已关闭"}
+                          </span>
+                        </div>
+                        <p>{extension.description}</p>
+                      </div>
+                    </div>
+                    <div className="extension-card-actions">
+                      <label className="switch extension-main-switch" title="启用或关闭扩展">
+                        <input
+                          type="checkbox"
+                          checked={extension.enabled}
+                          onChange={(event) =>
+                            setInstalledExtensionEnabled(extension, event.target.checked)
+                          }
+                        />
+                        <span />
+                      </label>
+                      <button
+                        type="button"
+                        className="extension-delete-action"
+                        title="删除扩展"
+                        onClick={() => void deleteInstalledExtension(extension)}
+                      >
+                        <Trash2 size={16} />
+                        删除
+                      </button>
+                    </div>
+                  </header>
+
+                  <div className="extension-metadata">
+                    <span>包：{extension.packageName}</span>
+                    <span>作者：{extension.author}</span>
+                    <span>加载顺序：{extension.loadingOrder}</span>
+                    <span className={runtimeState.status === "error" ? "error" : ""}>
+                      {runtimeState.message}
+                    </span>
+                    {extension.homePage && (
+                      <a href={extension.homePage} target="_blank" rel="noreferrer">
+                        Git 仓库
+                        <ExternalLink size={14} />
+                      </a>
+                    )}
+                  </div>
+
+                  <div className="extension-generic-body">
+                    <section className="extension-capabilities">
+                      <h3>兼容能力</h3>
+                      <div>
+                        {extension.capabilities.map((capability) => (
+                          <span key={capability}>
+                            <Check size={14} />
+                            {capability}
+                          </span>
+                        ))}
+                      </div>
+                    </section>
+                    <section className="extension-runtime-details">
+                      <h3>扩展资源</h3>
+                      <p>
+                        JavaScript：{extension.jsFiles.length} 个 · CSS：{extension.cssFiles.length} 个
+                      </p>
+                      {extension.requires.length > 0 && (
+                        <p>必需扩展：{extension.requires.join("、")}</p>
+                      )}
+                      {extension.optional.length > 0 && (
+                        <p>可选扩展：{extension.optional.join("、")}</p>
+                      )}
+                      <small>
+                        关闭或删除时会卸载脚本与样式节点，并广播 renge-extension-unload 事件。
+                      </small>
+                    </section>
+                  </div>
+
+                  <div className="extension-security-note">
+                    <Wrench size={17} />
+                    <span>通用扩展会执行仓库中的 JavaScript。只安装并启用你信任的 Git 仓库。</span>
+                  </div>
+                </article>
+              );
+            })}
+          {extensions.length === 0 && (
+            <div className="extension-empty-state">
+              <Puzzle size={28} />
+              <strong>还没有安装扩展</strong>
+              <span>在上方粘贴酒馆扩展 Git 仓库地址，然后点击“从 Git 安装”。</span>
+            </div>
           )}
         </section>
         {pcBrowserModal}
