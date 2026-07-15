@@ -3,6 +3,11 @@ import {
   normalizeRegexScript,
   type RegexScript,
 } from "./regexUtils";
+import {
+  extractPresetTavernScripts,
+  normalizeTavernScript,
+  type TavernScript,
+} from "./tavernScriptUtils";
 
 export type ChatPresetPromptRole = "system" | "user" | "assistant";
 
@@ -38,6 +43,8 @@ export type ChatPreset = {
   prompts: ChatPresetPrompt[];
   backupPrompts: ChatPresetPrompt[];
   regexScripts: RegexScript[];
+  tavernScripts: TavernScript[];
+  tavernVariables: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
 };
@@ -73,6 +80,34 @@ const markerIdentifiers = new Set([
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function cloneRecord(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  try {
+    return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+  } catch {
+    return { ...value };
+  }
+}
+
+function nestedRecord(root: Record<string, unknown>, path: string[]) {
+  let current: unknown = root;
+  for (const segment of path) {
+    if (!isRecord(current)) return null;
+    current = current[segment];
+  }
+  return isRecord(current) ? current : null;
+}
+
+function extractPresetTavernVariables(raw: Record<string, unknown>) {
+  const candidates = [
+    raw.tavernVariables,
+    nestedRecord(raw, ["extensions", "tavern_helper", "variables"]),
+    nestedRecord(raw, ["extensions", "tavernHelper", "variables"]),
+    nestedRecord(raw, ["extensions", "TavernHelper", "variables"]),
+  ];
+  return cloneRecord(candidates.find(isRecord));
 }
 
 function finiteNumber(value: unknown, fallback: number) {
@@ -122,6 +157,8 @@ export function createDefaultChatPreset(name = "默认预设"): ChatPreset {
     prompts: [],
     backupPrompts: [],
     regexScripts: [],
+    tavernScripts: [],
+    tavernVariables: {},
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -172,6 +209,12 @@ export function normalizeChatPreset(rawPreset: unknown, index = 0): ChatPreset {
   const regexScripts = Array.isArray(rawRegexScripts)
     ? rawRegexScripts.map((script, scriptIndex) => normalizeRegexScript(script, scriptIndex))
     : [];
+  const rawTavernScripts = raw.tavernScripts ?? raw.tavern_scripts;
+  const tavernScripts = Array.isArray(rawTavernScripts)
+    ? rawTavernScripts.map((script, scriptIndex) =>
+        normalizeTavernScript(script, scriptIndex, String(raw.sourceFileName ?? "")),
+      )
+    : extractPresetTavernScripts(raw, String(raw.sourceFileName ?? ""));
 
   return {
     id: typeof raw.id === "string" && raw.id ? raw.id : fallback.id,
@@ -204,6 +247,8 @@ export function normalizeChatPreset(rawPreset: unknown, index = 0): ChatPreset {
     prompts,
     backupPrompts,
     regexScripts,
+    tavernScripts,
+    tavernVariables: extractPresetTavernVariables(raw),
     createdAt:
       typeof raw.createdAt === "string" ? raw.createdAt : fallback.createdAt,
     updatedAt:
@@ -296,6 +341,7 @@ export function importSillyTavernPreset(rawPreset: unknown, fileName: string): C
   const fallback = createDefaultChatPreset(fileNameWithoutExtension(fileName));
   const timestamp = new Date().toISOString();
   const regexScripts = extractSillyTavernPresetRegexScripts(rawPreset, fileName);
+  const tavernScripts = extractPresetTavernScripts(rawPreset, fileName);
 
   return {
     ...fallback,
@@ -319,6 +365,8 @@ export function importSillyTavernPreset(rawPreset: unknown, fileName: string): C
     prompts: orderedPrompts,
     backupPrompts,
     regexScripts,
+    tavernScripts,
+    tavernVariables: extractPresetTavernVariables(rawPreset),
     createdAt: timestamp,
     updatedAt: timestamp,
   };

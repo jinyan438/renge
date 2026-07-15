@@ -1809,6 +1809,8 @@ type HtmlPreviewContext = {
   chatVariables: Record<string, unknown>;
   characterVariables: Record<string, unknown>;
   globalVariables: Record<string, unknown>;
+  presetVariables: Record<string, unknown>;
+  extensionVariables: Record<string, Record<string, unknown>>;
   userName: string;
   characterName: string;
   chatId: string;
@@ -1838,6 +1840,7 @@ const HTML_PREVIEW_COMMAND_MESSAGE = "renge-html-preview-command";
 const HTML_PREVIEW_COMMAND_RESULT_MESSAGE = "renge-html-preview-command-result";
 const HTML_PREVIEW_GENERATION_EVENT_MESSAGE = "renge-html-preview-generation-event";
 const HTML_PREVIEW_INTERACTION_MESSAGE = "renge-html-preview-interaction";
+const HTML_PREVIEW_VIEWPORT_MESSAGE = "renge-html-preview-viewport";
 const HYPNOOS_APPEND_OPERATION_MESSAGE = "HYPNOOS_APPEND_OPERATION";
 const HTML_PREVIEW_MAX_HEIGHT = 12000;
 const HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD = 512 * 1024;
@@ -1851,14 +1854,19 @@ type HeavyHtmlPreviewMountTask = {
 
 const heavyHtmlPreviewMountQueue: HeavyHtmlPreviewMountTask[] = [];
 let heavyHtmlPreviewMountActive = false;
-let activeHeavyHtmlPreviewId = "";
+const HTML_PREVIEW_HEAVY_ACTIVE_LIMIT = 3;
+const activeHeavyHtmlPreviewIds: string[] = [];
 const heavyHtmlPreviewListeners = new Map<string, (active: boolean) => void>();
 
 function activateHeavyHtmlPreview(previewId: string) {
-  if (activeHeavyHtmlPreviewId === previewId) return;
-  activeHeavyHtmlPreviewId = previewId;
+  const existingIndex = activeHeavyHtmlPreviewIds.indexOf(previewId);
+  if (existingIndex >= 0) activeHeavyHtmlPreviewIds.splice(existingIndex, 1);
+  activeHeavyHtmlPreviewIds.push(previewId);
+  while (activeHeavyHtmlPreviewIds.length > HTML_PREVIEW_HEAVY_ACTIVE_LIMIT) {
+    activeHeavyHtmlPreviewIds.shift();
+  }
   heavyHtmlPreviewListeners.forEach((listener, candidateId) => {
-    listener(candidateId === previewId);
+    listener(activeHeavyHtmlPreviewIds.includes(candidateId));
   });
 }
 
@@ -1867,10 +1875,11 @@ function subscribeHeavyHtmlPreview(
   listener: (active: boolean) => void,
 ) {
   heavyHtmlPreviewListeners.set(previewId, listener);
-  listener(activeHeavyHtmlPreviewId === previewId);
+  listener(activeHeavyHtmlPreviewIds.includes(previewId));
   return () => {
     heavyHtmlPreviewListeners.delete(previewId);
-    if (activeHeavyHtmlPreviewId === previewId) activeHeavyHtmlPreviewId = "";
+    const index = activeHeavyHtmlPreviewIds.indexOf(previewId);
+    if (index >= 0) activeHeavyHtmlPreviewIds.splice(index, 1);
   };
 }
 
@@ -1967,6 +1976,7 @@ function parseTavernSlashCommand(command: string): ParsedTavernSlashCommand | nu
 }
 const htmlPreviewStyle = [
   '<style data-renge-html-preview="true">',
+  ":root{--TH-viewport-height:100vh;--renge-parent-viewport-height:100vh;}",
   "html,body{overflow:hidden!important;}",
   "body{box-sizing:border-box;}",
   "</style>",
@@ -2130,6 +2140,9 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
   const interactionMessageTypeLiteral = serializeHtmlPreviewValue(
     HTML_PREVIEW_INTERACTION_MESSAGE,
   );
+  const viewportMessageTypeLiteral = serializeHtmlPreviewValue(
+    HTML_PREVIEW_VIEWPORT_MESSAGE,
+  );
   const contextLiteral = serializeHtmlPreviewValue(context);
 
   return [
@@ -2142,6 +2155,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     `const commandResultMessageType = ${commandResultMessageTypeLiteral};`,
     `const generationEventMessageType = ${generationEventMessageTypeLiteral};`,
     `const interactionMessageType = ${interactionMessageTypeLiteral};`,
+    `const viewportMessageType = ${viewportMessageTypeLiteral};`,
     `const snapshot = ${contextLiteral};`,
     "const clone = (value) => {",
     "  if (value == null) return value;",
@@ -2149,6 +2163,14 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  try { return JSON.parse(JSON.stringify(value)); } catch { return value; }",
     "};",
     "const isRecord = (value) => Boolean(value) && typeof value === \"object\" && !Array.isArray(value);",
+    "const mergeRecords = (base, overlay) => {",
+    "  const output = isRecord(base) ? clone(base) : {};",
+    "  if (!isRecord(overlay)) return output;",
+    "  Object.entries(overlay).forEach(([key, value]) => {",
+    "    output[key] = isRecord(output[key]) && isRecord(value) ? mergeRecords(output[key], value) : clone(value);",
+    "  });",
+    "  return output;",
+    "};",
     "const lodashCompat = window._ && (typeof window._ === \"object\" || typeof window._ === \"function\") ? window._ : {};",
     "if (typeof lodashCompat.get !== \"function\") {",
     "  lodashCompat.get = (source, path, fallback) => {",
@@ -2167,6 +2189,13 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "const bridgeEventHandlers = new Map();",
     "const pendingCommandRequests = new Map();",
     "let commandRequestSequence = 0;",
+    "const updateParentViewportHeight = (height) => {",
+    "  const parsed = Number(height);",
+    "  if (!Number.isFinite(parsed) || parsed <= 0) return;",
+    "  document.documentElement.style.setProperty(\"--TH-viewport-height\", `${Math.round(parsed)}px`);",
+    "  document.documentElement.style.setProperty(\"--renge-parent-viewport-height\", `${Math.round(parsed)}px`);",
+    "};",
+    "try { updateParentViewportHeight(window.parent.innerHeight); } catch {}",
     "const eventOn = (eventName, callback) => {",
     "  if (typeof callback !== \"function\") return callback;",
     "  const key = String(eventName);",
@@ -2196,6 +2225,10 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "const emitVariableUpdate = () => void eventEmit(String(window.Mvu?.events?.VARIABLE_UPDATE_ENDED || \"mag_variable_update_ended\"), clone(snapshot));",
     "window.addEventListener(\"message\", (event) => {",
     "  if (event.source !== parent || !isRecord(event.data)) return;",
+    "  if (event.data.type === viewportMessageType && event.data.id === previewId) {",
+    "    updateParentViewportHeight(event.data.height);",
+    "    return;",
+    "  }",
     "  if (event.data.type === commandResultMessageType && event.data.id === previewId) {",
     "    const pending = pendingCommandRequests.get(String(event.data.requestId));",
     "    if (!pending) return;",
@@ -2243,24 +2276,32 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "const normalizeVariableOption = (option) => {",
     "  if (isRecord(option)) return option;",
     "  if (typeof option === \"number\" || typeof option === \"string\") return { type: \"message\", message_id: option };",
-    "  return { type: \"message\", message_id: snapshot.currentMessageIndex };",
+    "  return { type: \"chat\" };",
     "};",
     "const resolveVariables = (option) => {",
     "  const normalized = normalizeVariableOption(option);",
-    "  const type = String(normalized.type || \"message\").toLowerCase();",
+    "  const type = String(normalized.type || \"chat\").toLowerCase();",
     "  if (type === \"global\") return snapshot.globalVariables;",
     "  if (type === \"chat\") return snapshot.chatVariables;",
     "  if (type === \"character\" || type === \"char\") return snapshot.characterVariables;",
+    "  if (type === \"preset\") return snapshot.presetVariables;",
+    "  if (type === \"extension\") return snapshot.extensionVariables?.[String(normalized.extension_id || \"\")] || {};",
     "  const index = normalizeMessageId(normalized.message_id, true);",
     "  return snapshot.messages[index]?.variables || {};",
     "};",
     "const assignVariables = (variables, option) => {",
     "  const normalized = normalizeVariableOption(option);",
-    "  const type = String(normalized.type || \"message\").toLowerCase();",
+    "  const type = String(normalized.type || \"chat\").toLowerCase();",
     "  const next = isRecord(variables) ? clone(variables) : {};",
     "  if (type === \"global\") snapshot.globalVariables = next;",
     "  else if (type === \"chat\") snapshot.chatVariables = next;",
     "  else if (type === \"character\" || type === \"char\") snapshot.characterVariables = next;",
+    "  else if (type === \"preset\") snapshot.presetVariables = next;",
+    "  else if (type === \"extension\") {",
+    "    snapshot.extensionVariables ||= {};",
+    "    const extensionId = String(normalized.extension_id || \"\");",
+    "    if (extensionId) snapshot.extensionVariables[extensionId] = next;",
+    "  }",
     "  else {",
     "    const index = normalizeMessageId(normalized.message_id, true);",
     "    if (snapshot.messages[index]) snapshot.messages[index].variables = next;",
@@ -2290,8 +2331,25 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "};",
     "const insertOrAssignVariables = async (variables, option) => {",
     "  const current = getVariables(option);",
-    "  return assignVariables(isRecord(variables) ? { ...current, ...clone(variables) } : current, option);",
+    "  return assignVariables(isRecord(variables) ? mergeRecords(current, variables) : current, option);",
     "};",
+    "const insertVariables = async (variables, option) => {",
+    "  const current = getVariables(option);",
+    "  return assignVariables(isRecord(variables) ? mergeRecords(variables, current) : current, option);",
+    "};",
+    "const deleteVariable = async (path, option) => {",
+    "  const variables = getVariables(option);",
+    "  const segments = String(path ?? \"\").replace(/\\[([^\\]]+)\\]/g, \".$1\").split(\".\").map((item) => item.trim().replace(/^['\\\"]|['\\\"]$/g, \"\")).filter(Boolean);",
+    "  const last = segments.pop();",
+    "  let target = variables;",
+    "  for (const segment of segments) { if (!isRecord(target?.[segment])) return { variables, delete_occurred: false }; target = target[segment]; }",
+    "  const deleted = Boolean(last && Object.prototype.hasOwnProperty.call(target, last));",
+    "  if (deleted) delete target[last];",
+    "  await assignVariables(variables, option);",
+    "  return { variables, delete_occurred: deleted };",
+    "};",
+    "const variableSchemas = new Map();",
+    "const registerVariableSchema = (schema, name = \"default\") => { variableSchemas.set(String(name), schema); return () => variableSchemas.delete(String(name)); };",
     "const formatMessage = (message, index, sillyTavern = false) => {",
     "  const variables = clone(message.variables || {});",
     "  const extra = clone(message.extra || {});",
@@ -2357,6 +2415,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "    {},",
     "    isRecord(snapshot.globalVariables) ? snapshot.globalVariables : {},",
     "    isRecord(snapshot.characterVariables) ? snapshot.characterVariables : {},",
+    "    isRecord(snapshot.presetVariables) ? snapshot.presetVariables : {},",
     "    isRecord(snapshot.chatVariables) ? snapshot.chatVariables : {},",
     "    ...messageVariables,",
     "  ));",
@@ -2407,7 +2466,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  saveChat: async () => true, getRequestHeaders: () => ({ \"Content-Type\": \"application/json\" }),",
     "});",
     "const api = {",
-    "  getVariables, setVariables: replaceVariables, replaceVariables, updateVariablesWith, insertOrAssignVariables,",
+    "  getVariables, setVariables: replaceVariables, replaceVariables, updateVariablesWith, insertOrAssignVariables, insertVariables, deleteVariable, registerVariableSchema,",
     "  getAllVariables, waitGlobalInitialized, errorCatched,",
     "  getInput, setInput, appendInput, triggerSlash, sendMessage, generate, generateRaw: generate,",
     "  stopAllGeneration, stopGenerationById: stopAllGeneration,",
@@ -3517,12 +3576,45 @@ function injectHtmlPreviewHead(documentContent: string, headInjection: string) {
   return `<head>${headInjection}</head>${documentContent}`;
 }
 
+function stabilizeHtmlPreviewViewportUnits(content: string) {
+  const convertViewportUnits = (value: string) =>
+    value.replace(
+      /(\d+(?:\.\d+)?)(?:dvh|svh|lvh|vh)\b/gi,
+      (match, rawValue: string) => {
+        const percentage = Number(rawValue);
+        if (!Number.isFinite(percentage)) return match;
+        if (percentage === 100) return "var(--TH-viewport-height)";
+        return `calc(var(--TH-viewport-height) * ${percentage / 100})`;
+      },
+    );
+
+  let stabilized = content.replace(
+    /(min-height\s*:\s*)([^;{}]*?\d+(?:\.\d+)?(?:dvh|svh|lvh|vh))(?=\s*[;}])/gi,
+    (_match, prefix: string, value: string) => `${prefix}${convertViewportUnits(value)}`,
+  );
+  stabilized = stabilized.replace(
+    /(\.style\.minHeight\s*=\s*(["']))([\s\S]*?)(\2)/gi,
+    (match, prefix: string, _quote: string, value: string, suffix: string) =>
+      /\d+(?:\.\d+)?(?:dvh|svh|lvh|vh)\b/i.test(value)
+        ? `${prefix}${convertViewportUnits(value)}${suffix}`
+        : match,
+  );
+  stabilized = stabilized.replace(
+    /(setProperty\s*\(\s*(["'])min-height\2\s*,\s*(["']))([\s\S]*?)(\3\s*\))/gi,
+    (match, prefix: string, _firstQuote: string, _secondQuote: string, value: string, suffix: string) =>
+      /\d+(?:\.\d+)?(?:dvh|svh|lvh|vh)\b/i.test(value)
+        ? `${prefix}${convertViewportUnits(value)}${suffix}`
+        : match,
+  );
+  return stabilized;
+}
+
 function buildHtmlPreviewDocument(
   content: string,
   previewId: string,
   context: HtmlPreviewContext,
 ) {
-  const trimmedContent = content.trim();
+  const trimmedContent = stabilizeHtmlPreviewViewportUnits(content.trim());
   const heavyContent = trimmedContent.length >= HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD;
   const headInjection = `${htmlPreviewStyle}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${buildHtmlPreviewVariablesScript(previewId, context)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
@@ -3685,9 +3777,32 @@ function ChatHtmlPreview({
     );
   }, [context, previewId]);
 
+  const sendViewportUpdate = useCallback(() => {
+    frameRef.current?.contentWindow?.postMessage(
+      {
+        type: HTML_PREVIEW_VIEWPORT_MESSAGE,
+        id: previewId,
+        height: window.visualViewport?.height ?? window.innerHeight,
+      },
+      "*",
+    );
+  }, [previewId]);
+
   useEffect(() => {
     sendContextUpdate();
   }, [sendContextUpdate]);
+
+  useEffect(() => {
+    const update = () => sendViewportUpdate();
+    window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
+    window.visualViewport?.addEventListener("resize", update);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
+      window.visualViewport?.removeEventListener("resize", update);
+    };
+  }, [sendViewportUpdate]);
 
   const registerFrame = useCallback(
     (frame: HTMLIFrameElement | null) => {
@@ -3702,8 +3817,9 @@ function ChatHtmlPreview({
     (event: SyntheticEvent<HTMLIFrameElement>) => {
       resizeHtmlPreviewFrame(event);
       window.requestAnimationFrame(sendContextUpdate);
+      window.requestAnimationFrame(sendViewportUpdate);
     },
-    [sendContextUpdate],
+    [sendContextUpdate, sendViewportUpdate],
   );
 
   return (
@@ -3730,7 +3846,7 @@ function ChatHtmlPreview({
         />
       ) : (
         <div className="chat-html-preview-placeholder" role="status">
-          <span>大型 HTML 一次只运行一个，避免会话卡死。</span>
+          <span>大型 HTML 已排队加载；最多同时保留 3 个运行实例。</span>
           <button type="button" onClick={() => requestHeavyMountRef.current()}>
             立即加载
           </button>
@@ -6964,6 +7080,11 @@ export function App() {
   >(async () => {
     throw new Error("独立前端 API 尚未初始化。");
   });
+  const executeTavernSlashCommandRef = useRef<
+    (command: string) => Promise<unknown> | unknown
+  >(() => {
+    throw new Error("酒馆斜杠命令接口尚未初始化。");
+  });
   const chatAttachmentInputRef = useRef<HTMLInputElement>(null);
   const chatAttachmentFilesRef = useRef<Map<string, File>>(new Map());
   const chatAttachmentMetadataRef = useRef<Map<string, ChatAttachment>>(new Map());
@@ -7109,6 +7230,7 @@ export function App() {
       }
       return writeChatInput(parsed.text, parsed.append, parsed.submit);
     };
+    executeTavernSlashCommandRef.current = executeSlashCommand;
 
     const respondToHtmlCommand = (
       frame: HTMLIFrameElement,
@@ -7325,6 +7447,53 @@ export function App() {
             setCharacterCards(nextCards);
             return;
           }
+          if (variableType === "preset") {
+            const presetId = activeChatPresetIdRef.current;
+            if (!presetId) return;
+            const currentPreset = chatPresetsRef.current.find(
+              (preset) => preset.id === presetId,
+            );
+            if (valuesEqual(currentPreset?.tavernVariables ?? {}, nextVariables)) return;
+            const nextPresets = chatPresetsRef.current.map((preset) =>
+              preset.id === presetId
+                ? {
+                    ...preset,
+                    tavernVariables: nextVariables,
+                    updatedAt: new Date().toISOString(),
+                  }
+                : preset,
+            );
+            chatPresetsRef.current = nextPresets;
+            setChatPresets(nextPresets);
+            return;
+          }
+          if (variableType === "extension") {
+            const extensionId = String(normalizedOption.extension_id ?? "").trim();
+            if (!extensionId) return;
+            const host = window as Window & {
+              extension_settings?: Record<string, unknown>;
+            };
+            const settings = isObjectRecord(host.extension_settings)
+              ? host.extension_settings
+              : {};
+            if (valuesEqual(settings[extensionId] ?? {}, nextVariables)) return;
+            settings[extensionId] = nextVariables;
+            host.extension_settings = settings;
+            try {
+              localStorage.setItem(EXTENSION_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+            } catch {}
+            htmlPreviewFrameRefs.current.forEach((candidateFrame, candidateId) => {
+              candidateFrame.contentWindow?.postMessage(
+                {
+                  type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
+                  id: candidateId,
+                  context: { extensionVariables: settings },
+                },
+                "*",
+              );
+            });
+            return;
+          }
 
           const messageIndex = normalizeMessageIndex(
             normalizedOption.message_id,
@@ -7410,7 +7579,12 @@ export function App() {
     }
 
     window.addEventListener("message", handleHtmlPreviewMessage);
-    return () => window.removeEventListener("message", handleHtmlPreviewMessage);
+    return () => {
+      window.removeEventListener("message", handleHtmlPreviewMessage);
+      executeTavernSlashCommandRef.current = () => {
+        throw new Error("酒馆斜杠命令接口尚未初始化。");
+      };
+    };
   }, []);
 
   useEffect(() => {
@@ -9204,9 +9378,10 @@ export function App() {
   const activeTavernScripts = useMemo(
     () => [
       ...tavernScripts,
+      ...(chatPresetEnabled ? activeChatPreset?.tavernScripts ?? [] : []),
       ...(activeSessionRoleplayCard?.tavernScripts ?? []),
     ],
-    [activeSessionRoleplayCard?.tavernScripts, tavernScripts],
+    [activeChatPreset?.tavernScripts, activeSessionRoleplayCard?.tavernScripts, chatPresetEnabled, tavernScripts],
   );
   const tavernRuntimeConfigurationKey = useMemo(
     () =>
@@ -10335,6 +10510,11 @@ export function App() {
       characterCardsRef.current = next;
       setCharacterCards(next);
     };
+    const updatePresets = (updater: (presets: ChatPreset[]) => ChatPreset[]) => {
+      const next = updater(chatPresetsRef.current);
+      chatPresetsRef.current = next;
+      setChatPresets(next);
+    };
 
     runtime = new TavernScriptRuntime(activeTavernScripts, {
       getMessages: () => chatMessagesRef.current as TavernRuntimeMessage[],
@@ -10398,9 +10578,61 @@ export function App() {
         tavernGlobalVariablesRef.current = next;
         setTavernGlobalVariables(next);
       },
+      getPresetVariables: () => {
+        if (!chatPresetEnabledRef.current) return {};
+        const preset = chatPresetsRef.current.find(
+          (candidate) => candidate.id === activeChatPresetIdRef.current,
+        );
+        return normalizeTavernVariables(preset?.tavernVariables);
+      },
+      setPresetVariables: (variables) => {
+        const presetId = activeChatPresetIdRef.current;
+        if (!chatPresetEnabledRef.current || !presetId) return;
+        updatePresets((presets) =>
+          presets.map((preset) =>
+            preset.id === presetId
+              ? {
+                  ...preset,
+                  tavernVariables: normalizeTavernVariables(variables),
+                  updatedAt: new Date().toISOString(),
+                }
+              : preset,
+          ),
+        );
+      },
+      getExtensionSettings: () => {
+        const host = window as Window & {
+          extension_settings?: Record<string, unknown>;
+        };
+        return normalizeTavernVariables(host.extension_settings);
+      },
+      setExtensionSettings: (settings) => {
+        const host = window as Window & {
+          extension_settings?: Record<string, unknown>;
+        };
+        const next = normalizeTavernVariables(settings);
+        host.extension_settings = next;
+        try {
+          localStorage.setItem(EXTENSION_SETTINGS_STORAGE_KEY, JSON.stringify(next));
+        } catch {}
+        htmlPreviewFrameRefs.current.forEach((frame, previewId) => {
+          frame.contentWindow?.postMessage(
+            {
+              type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
+              id: previewId,
+              context: { extensionVariables: next },
+            },
+            "*",
+          );
+        });
+      },
       getScriptData: (scriptId) => {
         const globalScript = tavernScriptsRef.current.find((script) => script.id === scriptId);
         if (globalScript) return normalizeTavernVariables(globalScript.data);
+        for (const preset of chatPresetsRef.current) {
+          const script = preset.tavernScripts.find((candidate) => candidate.id === scriptId);
+          if (script) return normalizeTavernVariables(script.data);
+        }
         for (const card of characterCardsRef.current) {
           const script = card.tavernScripts.find((candidate) => candidate.id === scriptId);
           if (script) return normalizeTavernVariables(script.data);
@@ -10415,6 +10647,28 @@ export function App() {
               script.id === scriptId
                 ? { ...script, data: normalizeTavernVariables(data), updatedAt: timestamp }
                 : script,
+            ),
+          );
+          return;
+        }
+        if (
+          chatPresetsRef.current.some((preset) =>
+            preset.tavernScripts.some((script) => script.id === scriptId),
+          )
+        ) {
+          updatePresets((presets) =>
+            presets.map((preset) =>
+              preset.tavernScripts.some((script) => script.id === scriptId)
+                ? {
+                    ...preset,
+                    tavernScripts: preset.tavernScripts.map((script) =>
+                      script.id === scriptId
+                        ? { ...script, data: normalizeTavernVariables(data), updatedAt: timestamp }
+                        : script,
+                    ),
+                    updatedAt: timestamp,
+                  }
+                : preset,
             ),
           );
           return;
@@ -10590,6 +10844,30 @@ export function App() {
       getUserName: () => userProfileRef.current.nickname.trim() || "用户",
       getChatId: () => activeChatSessionIdRef.current,
       getModelId: () => getEffectiveProviderModelId(chatProvider),
+      getInput: () => chatInputRef.current?.value ?? "",
+      setInput: (value) => {
+        setChatInput(value);
+        window.requestAnimationFrame(() => chatInputRef.current?.focus());
+        return value;
+      },
+      appendInput: (value) => {
+        const next = `${chatInputRef.current?.value ?? ""}${value}`;
+        setChatInput(next);
+        window.requestAnimationFrame(() => chatInputRef.current?.focus());
+        return next;
+      },
+      sendMessage: async (value) => await sendChatMessageRef.current(value ?? "", []),
+      triggerSlash: async (command) =>
+        await executeTavernSlashCommandRef.current(command),
+      generate: async (config) => await generateHtmlPreviewTextRef.current(config),
+      stopGeneration: () => {
+        const controller = activeChatAbortControllerRef.current;
+        if (controller && !controller.signal.aborted) {
+          controller.abort(createChatAbortError());
+          return true;
+        }
+        return false;
+      },
       onButtonsChange: (buttons) => {
         if (tavernScriptRuntimeRef.current === runtime) setTavernRuntimeButtons(buttons);
       },
@@ -13382,6 +13660,15 @@ export function App() {
         chatVariables: activeChatSession?.scriptVariables ?? {},
         characterVariables: activeSessionRoleplayCard?.tavernVariables ?? {},
         globalVariables: tavernGlobalVariables,
+        presetVariables: activeChatPreset?.tavernVariables ?? {},
+        extensionVariables: Object.fromEntries(
+          Object.entries(
+            (window as Window & { extension_settings?: Record<string, unknown> })
+              .extension_settings ?? {},
+          ).filter((entry): entry is [string, Record<string, unknown>] =>
+            isObjectRecord(entry[1]),
+          ),
+        ),
         userName: userProfile.nickname.trim() || "用户",
         characterName: activeSessionRoleplayCard?.name || "Assistant",
         chatId: activeChatSession?.id ?? activeChatSessionId,
@@ -16606,7 +16893,15 @@ export function App() {
                         <div className="extension-title-row">
                           <h2>{extension.displayName}</h2>
                           <span className="extension-version">v{extension.version}</span>
-                          <span className="extension-compatibility web">酒馆 Web 兼容</span>
+                          <span
+                            className={`extension-compatibility ${
+                              extension.compatibility === "web" ? "web" : ""
+                            }`}
+                          >
+                            {extension.compatibility === "native"
+                              ? "Renge 原生兼容"
+                              : "酒馆 Web 兼容"}
+                          </span>
                           <span className={`extension-runtime-badge ${runtimeState.status}`}>
                             {runtimeState.status === "active"
                               ? "运行中"

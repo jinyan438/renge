@@ -213,13 +213,30 @@ function collectScriptArrays(root: UnknownRecord, data: UnknownRecord) {
   return values;
 }
 
-export function extractCharacterTavernScripts(
+function flattenScriptValues(values: unknown[], parentEnabled = true): unknown[] {
+  return values.flatMap((value) => {
+    if (!isRecord(value)) return [];
+    const isFolder = value.type === "folder" || Array.isArray(value.scripts);
+    if (!isFolder || !Array.isArray(value.scripts)) return [value];
+    const folderEnabled = parentEnabled && booleanValue(value.enabled, true);
+    return flattenScriptValues(value.scripts, folderEnabled).map((script) =>
+      isRecord(script)
+        ? {
+            ...script,
+            enabled: folderEnabled && booleanValue(script.enabled, true),
+          }
+        : script,
+    );
+  });
+}
+
+function extractTavernHelperScripts(
   root: Record<string, unknown>,
   data: Record<string, unknown>,
   sourceFileName: string,
 ) {
   const seen = new Set<string>();
-  return collectScriptArrays(root, data)
+  return flattenScriptValues(collectScriptArrays(root, data))
     .map((script, index) =>
       normalizeTavernScript(script, index, sourceFileName, {
         preserveId: false,
@@ -233,6 +250,21 @@ export function extractCharacterTavernScripts(
       seen.add(identity);
       return true;
     });
+}
+
+export function extractCharacterTavernScripts(
+  root: Record<string, unknown>,
+  data: Record<string, unknown>,
+  sourceFileName: string,
+) {
+  return extractTavernHelperScripts(root, data, sourceFileName);
+}
+
+export function extractPresetTavernScripts(
+  root: Record<string, unknown>,
+  sourceFileName: string,
+) {
+  return extractTavernHelperScripts(root, root, sourceFileName);
 }
 
 export function extractCharacterTavernVariables(

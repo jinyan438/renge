@@ -1,6 +1,7 @@
 export const ST_PROMPT_TEMPLATE_EXTENSION_ID = "st-prompt-template";
 export const ST_PROMPT_TEMPLATE_SOURCE_URL =
   "https://github.com/zonde306/ST-Prompt-Template";
+export const TAVERN_HELPER_CORE_PACKAGE = "n0vi028/js-slash-runner";
 
 export type PromptTemplateExtensionSettings = {
   processGeneratedPrompts: boolean;
@@ -188,10 +189,45 @@ export function normalizeInstalledExtension(value: unknown): InstalledExtension 
     id.toLowerCase() === ST_PROMPT_TEMPLATE_EXTENSION_ID ||
     packageName.toLowerCase() === "zonde306/st-prompt-template" ||
     sourceUrl.toLowerCase().includes("zonde306/st-prompt-template");
+  const isTavernHelperCore =
+    packageName.toLowerCase() === TAVERN_HELPER_CORE_PACKAGE ||
+    sourceUrl.toLowerCase().includes(TAVERN_HELPER_CORE_PACKAGE);
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(id) || !packageName || !sourceUrl) return null;
 
   const defaults = isPromptTemplate
     ? createPromptTemplateExtension()
+    : isTavernHelperCore
+      ? {
+          id,
+          packageName,
+          displayName: "酒馆助手能力参考",
+          description:
+            "Renge 已原生整合所需的渲染、脚本与变量语义；原扩展核心不会加载，避免双运行时冲突。",
+          author: packageName.split("/")[0] || "N0VI028",
+          version: "4.8.18",
+          sourceUrl,
+          homePage: sourceUrl,
+          license: "AFPL-9.0",
+          enabled: true,
+          compatibility: "native" as const,
+          status: "installed" as const,
+          statusMessage: "使用 Renge 原生运行时；原扩展 JS/CSS 未加载",
+          capabilities: [
+            "多作用域变量兼容",
+            "角色 / 预设 / 全局脚本",
+            "消息 HTML iframe 渲染",
+            "输入框、斜杠命令与独立生成桥接",
+          ],
+          settings: { ...DEFAULT_PROMPT_TEMPLATE_SETTINGS },
+          loadingOrder: 100,
+          requires: [],
+          optional: [],
+          jsFiles: [],
+          cssFiles: [],
+          assetBaseUrl: "",
+          installedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }
     : {
         id,
         packageName,
@@ -229,10 +265,11 @@ export function normalizeInstalledExtension(value: unknown): InstalledExtension 
     homePage: normalizeWebUrl(value.homePage, sourceUrl),
     license: normalizeString(value.license, defaults.license),
     enabled: value.enabled !== false,
-    compatibility: isPromptTemplate ? "native" : "web",
+    compatibility: isPromptTemplate || isTavernHelperCore ? "native" : "web",
     status: value.status === "error" ? "error" : "installed",
-    statusMessage:
-      typeof value.statusMessage === "string" && value.statusMessage.trim()
+    statusMessage: isTavernHelperCore
+      ? defaults.statusMessage
+      : typeof value.statusMessage === "string" && value.statusMessage.trim()
         ? value.statusMessage
         : defaults.statusMessage,
     capabilities:
@@ -245,9 +282,9 @@ export function normalizeInstalledExtension(value: unknown): InstalledExtension 
       : defaults.loadingOrder,
     requires: normalizeStringList(value.requires),
     optional: normalizeStringList(value.optional),
-    jsFiles: normalizeAssetList(value.jsFiles),
-    cssFiles: normalizeAssetList(value.cssFiles),
-    assetBaseUrl: isPromptTemplate
+    jsFiles: isTavernHelperCore ? [] : normalizeAssetList(value.jsFiles),
+    cssFiles: isTavernHelperCore ? [] : normalizeAssetList(value.cssFiles),
+    assetBaseUrl: isPromptTemplate || isTavernHelperCore
       ? ""
       : `/scripts/extensions/third-party/${encodeURIComponent(id)}`,
     installedAt:
