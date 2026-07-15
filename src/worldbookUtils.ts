@@ -132,6 +132,9 @@ export function createWorldBookEntry(index = 0): WorldBookEntry {
 export function normalizeWorldBookEntry(rawValue: unknown, index = 0): WorldBookEntry {
   const rawEntry = isRecord(rawValue) ? rawValue : {};
   const extensions = getEntryExtensions(rawEntry);
+  const strategy = isRecord(rawEntry.strategy) ? rawEntry.strategy : {};
+  const structuredPosition = isRecord(rawEntry.position) ? rawEntry.position : {};
+  const strategyType = String(strategy.type ?? "").trim().toLowerCase();
   const fallback = createWorldBookEntry(index);
   const rawEnabled = firstDefined(rawEntry.enabled, rawEntry.disable === undefined ? undefined : !rawEntry.disable);
   return {
@@ -139,54 +142,124 @@ export function normalizeWorldBookEntry(rawValue: unknown, index = 0): WorldBook
     id: typeof rawEntry.id === "string" && rawEntry.id.trim() ? rawEntry.id : fallback.id,
     uid: String(firstDefined(rawEntry.uid, rawEntry.id, index) ?? index),
     comment: String(firstDefined(rawEntry.comment, rawEntry.name, rawEntry.memo, "") ?? ""),
-    keys: toStringArray(firstDefined(rawEntry.keys, rawEntry.key)),
+    keys: toStringArray(firstDefined(rawEntry.keys, rawEntry.key, strategy.keys)),
     secondaryKeys: toStringArray(
-      firstDefined(rawEntry.secondaryKeys, rawEntry.secondary_keys, rawEntry.keysecondary),
+      firstDefined(
+        rawEntry.secondaryKeys,
+        rawEntry.secondary_keys,
+        rawEntry.keysecondary,
+        strategy.keys_secondary,
+        strategy.secondaryKeys,
+      ),
     ),
     content: String(rawEntry.content ?? ""),
     enabled: toBoolean(rawEnabled, true),
-    constant: toBoolean(rawEntry.constant, false),
-    selective: toBoolean(rawEntry.selective, false),
+    constant: toBoolean(rawEntry.constant, strategyType === "constant"),
+    selective: toBoolean(rawEntry.selective, strategyType === "selective"),
     selectiveLogic: Math.max(
       0,
-      Math.round(toFiniteNumber(firstDefined(rawEntry.selectiveLogic, extensions.selectiveLogic), 0)),
+      Math.round(
+        toFiniteNumber(
+          firstDefined(
+            rawEntry.selectiveLogic,
+            rawEntry.selective_logic,
+            strategy.selective_logic,
+            extensions.selectiveLogic,
+          ),
+          0,
+        ),
+      ),
     ),
-    position: normalizePosition(firstDefined(rawEntry.position, extensions.position)),
-    depth: Math.max(0, Math.round(toFiniteNumber(firstDefined(rawEntry.depth, extensions.depth), 4))),
+    position: normalizePosition(
+      firstDefined(structuredPosition.type, rawEntry.position, extensions.position),
+    ),
+    depth: Math.max(
+      0,
+      Math.round(
+        toFiniteNumber(firstDefined(rawEntry.depth, structuredPosition.depth, extensions.depth), 4),
+      ),
+    ),
     scanDepth:
-      firstDefined(rawEntry.scanDepth, rawEntry.scan_depth, extensions.scan_depth) === undefined
+      firstDefined(
+        rawEntry.scanDepth,
+        rawEntry.scan_depth,
+        strategy.scan_depth,
+        extensions.scan_depth,
+      ) === undefined
         ? null
-        : firstDefined(rawEntry.scanDepth, rawEntry.scan_depth, extensions.scan_depth) === null
+        : firstDefined(
+              rawEntry.scanDepth,
+              rawEntry.scan_depth,
+              strategy.scan_depth,
+              extensions.scan_depth,
+            ) === null
           ? null
           : Math.max(
               1,
               Math.round(
                 toFiniteNumber(
-                  firstDefined(rawEntry.scanDepth, rawEntry.scan_depth, extensions.scan_depth),
+                  firstDefined(
+                    rawEntry.scanDepth,
+                    rawEntry.scan_depth,
+                    strategy.scan_depth,
+                    extensions.scan_depth,
+                  ),
                   DEFAULT_SCAN_DEPTH,
                 ),
               ),
             ),
     order: Math.round(
-      toFiniteNumber(firstDefined(rawEntry.order, rawEntry.insertion_order, rawEntry.priority), 100),
+      toFiniteNumber(
+        firstDefined(
+          rawEntry.order,
+          structuredPosition.order,
+          rawEntry.insertion_order,
+          rawEntry.priority,
+        ),
+        100,
+      ),
     ),
     probability: Math.min(
       100,
-      Math.max(0, toFiniteNumber(firstDefined(rawEntry.probability, extensions.probability), 100)),
+      Math.max(
+        0,
+        toFiniteNumber(
+          firstDefined(rawEntry.probability, strategy.probability, extensions.probability),
+          100,
+        ),
+      ),
     ),
     useProbability: toBoolean(
-      firstDefined(rawEntry.useProbability, extensions.useProbability),
+      firstDefined(
+        rawEntry.useProbability,
+        rawEntry.use_probability,
+        strategy.use_probability,
+        extensions.useProbability,
+      ),
       false,
     ),
     caseSensitive: toBoolean(
-      firstDefined(rawEntry.caseSensitive, rawEntry.case_sensitive, extensions.case_sensitive),
+      firstDefined(
+        rawEntry.caseSensitive,
+        rawEntry.case_sensitive,
+        strategy.case_sensitive,
+        extensions.case_sensitive,
+      ),
       false,
     ),
     matchWholeWords: toBoolean(
-      firstDefined(rawEntry.matchWholeWords, rawEntry.match_whole_words, extensions.match_whole_words),
+      firstDefined(
+        rawEntry.matchWholeWords,
+        rawEntry.match_whole_words,
+        strategy.match_whole_words,
+        extensions.match_whole_words,
+      ),
       false,
     ),
-    useRegex: toBoolean(firstDefined(rawEntry.useRegex, rawEntry.use_regex, extensions.use_regex), false),
+    useRegex: toBoolean(
+      firstDefined(rawEntry.useRegex, rawEntry.use_regex, strategy.use_regex, extensions.use_regex),
+      false,
+    ),
   };
 }
 
