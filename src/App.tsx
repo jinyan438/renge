@@ -9453,6 +9453,8 @@ export function App() {
       ? buildChatPresetRequestParameters(activeChatPreset)
       : null;
   const effectiveChatModelId = getEffectiveProviderModelId(chatProvider);
+  const effectiveChatModelIdRef = useRef(effectiveChatModelId);
+  effectiveChatModelIdRef.current = effectiveChatModelId;
   const multiAgentModelsReady =
     multiAgentPersonas.length >= 2 &&
     multiAgentPersonas.every((persona) => {
@@ -9723,6 +9725,9 @@ export function App() {
       saveSettingsDebounced?: () => void;
       saveChatDebounced?: () => void;
       getRequestHeaders?: () => Record<string, string>;
+      chatCompletionSettings?: Record<string, unknown>;
+      chat_completion_settings?: Record<string, unknown>;
+      oai_settings?: Record<string, unknown>;
       hooks?: ReturnType<typeof createTavernExtensionHooks>;
       world_names?: string[];
       worldNames?: string[];
@@ -9736,6 +9741,26 @@ export function App() {
     } catch (error) {
       console.warn("酒馆扩展基础库初始化失败", error);
     }
+
+    const existingSillyTavern = isObjectRecord(host.SillyTavern) ? host.SillyTavern : {};
+    const extensionChatCompletionSettings = isObjectRecord(host.chatCompletionSettings)
+      ? host.chatCompletionSettings
+      : isObjectRecord(host.chat_completion_settings)
+        ? host.chat_completion_settings
+        : isObjectRecord(existingSillyTavern.chatCompletionSettings)
+          ? existingSillyTavern.chatCompletionSettings
+          : {};
+    host.chatCompletionSettings = extensionChatCompletionSettings;
+    host.chat_completion_settings = extensionChatCompletionSettings;
+    host.oai_settings = extensionChatCompletionSettings;
+    const getExtensionChatCompletionModel = () =>
+      String(
+        extensionChatCompletionSettings.custom_model ??
+          extensionChatCompletionSettings.model ??
+          extensionChatCompletionSettings.openai_model ??
+          extensionChatCompletionSettings.model_openai ??
+          "",
+      ).trim() || effectiveChatModelIdRef.current;
 
     const eventBus = tavernExtensionEventBusRef.current;
     const hooks = tavernExtensionHooksRef.current;
@@ -9936,6 +9961,8 @@ export function App() {
         characters,
         groups: [],
         extensionSettings: host.extension_settings,
+        chatCompletionSettings: extensionChatCompletionSettings,
+        chat_completion_settings: extensionChatCompletionSettings,
         name1: userName,
         name2: characterName,
         max_response_length: 8192,
@@ -10008,6 +10035,7 @@ export function App() {
       eventOnce: eventBus.once,
       eventEmit: eventBus.emit,
       eventRemoveListener: eventBus.off,
+      getChatCompletionModel: getExtensionChatCompletionModel,
       addFilter: hooks.addFilter,
       removeFilter: hooks.removeFilter,
       applyFilters: hooks.applyFilters,
@@ -10021,6 +10049,9 @@ export function App() {
       version: "1.12.0-renge",
       getContext,
       getCurrentChatId: () => activeChatSessionIdRef.current,
+      getChatCompletionModel: getExtensionChatCompletionModel,
+      chatCompletionSettings: extensionChatCompletionSettings,
+      chat_completion_settings: extensionChatCompletionSettings,
       saveChat: () => getContext().saveChat(),
       eventSource: eventBus,
       event_types: eventTypes,
@@ -10094,6 +10125,9 @@ export function App() {
       saveSettingsDebounced: host.saveSettingsDebounced,
       saveChatDebounced: host.saveChatDebounced,
       getRequestHeaders: host.getRequestHeaders,
+      chatCompletionSettings: extensionChatCompletionSettings,
+      chat_completion_settings: extensionChatCompletionSettings,
+      oai_settings: extensionChatCompletionSettings,
       getWorldInfo,
       loadWorldInfo,
       world_info: host.world_info,
@@ -15200,11 +15234,31 @@ export function App() {
     }
 
     const requestApiBaseUrl = String(
-      customApi.apiurl ?? customApi.apiBaseUrl ?? chatProvider?.apiBaseUrl ?? "",
+      customApi.apiurl ??
+        customApi.apiBaseUrl ??
+        customApi.base_url ??
+        customApi.custom_url ??
+        customApi.reverse_proxy ??
+        customApi.endpoint ??
+        customApi.url ??
+        chatProvider?.apiBaseUrl ??
+        "",
     ).trim();
-    const requestApiKey = String(customApi.key ?? customApi.apiKey ?? chatProvider?.apiKey ?? "");
+    const requestApiKey = String(
+      customApi.key ??
+        customApi.apiKey ??
+        customApi.api_key ??
+        customApi.proxy_password ??
+        customApi.password ??
+        chatProvider?.apiKey ??
+        "",
+    );
     const requestModelId = String(
-      customApi.model ?? getEffectiveProviderModelId(chatProvider) ?? "",
+      customApi.model ??
+        customApi.modelId ??
+        customApi.model_id ??
+        getEffectiveProviderModelId(chatProvider) ??
+        "",
     ).trim();
     if (!requestApiBaseUrl || !requestModelId) {
       throw new Error("请先在设置中配置可用的供应商 API 地址和模型 ID。");
@@ -15403,6 +15457,25 @@ export function App() {
               generationAfterCommands: false,
             });
       throwIfChatAborted(abortSignal);
+      const requestedJsonSchema = isObjectRecord(normalizedConfig.json_schema)
+        ? normalizedConfig.json_schema
+        : isObjectRecord(customApi.json_schema)
+          ? customApi.json_schema
+          : null;
+      const requestedResponseFormat = isObjectRecord(normalizedConfig.response_format)
+        ? normalizedConfig.response_format
+        : isObjectRecord(customApi.response_format)
+          ? customApi.response_format
+          : requestedJsonSchema
+            ? {
+                type: "json_schema",
+                json_schema: {
+                  name: String(requestedJsonSchema.name ?? "response"),
+                  strict: requestedJsonSchema.strict !== false,
+                  schema: requestedJsonSchema.value ?? requestedJsonSchema.schema ?? {},
+                },
+              }
+            : undefined;
 
       const response = await fetch("/api/chat/completions", {
         method: "POST",
@@ -15412,6 +15485,14 @@ export function App() {
           apiBaseUrl: trimTrailingSlash(requestApiBaseUrl),
           apiKey: requestApiKey,
           sessionId: activeChatSessionId,
+          customIncludeBody:
+            customApi.custom_include_body ?? normalizedConfig.custom_include_body,
+          customExcludeBody:
+            customApi.custom_exclude_body ?? normalizedConfig.custom_exclude_body,
+          customIncludeHeaders:
+            customApi.custom_include_headers ??
+            customApi.headers ??
+            normalizedConfig.custom_include_headers,
           request: {
             model: requestModelId,
             messages: apiMessages,
@@ -15451,6 +15532,30 @@ export function App() {
               : {}),
             ...(Number.isFinite(Number(customApi.top_p))
               ? { top_p: Number(customApi.top_p) }
+              : {}),
+            ...(Number.isFinite(Number(customApi.top_k))
+              ? { top_k: Number(customApi.top_k) }
+              : {}),
+            ...(Number.isFinite(Number(customApi.min_p))
+              ? { min_p: Number(customApi.min_p) }
+              : {}),
+            ...(Number.isFinite(Number(customApi.top_a))
+              ? { top_a: Number(customApi.top_a) }
+              : {}),
+            ...(Number.isFinite(Number(customApi.repetition_penalty))
+              ? { repetition_penalty: Number(customApi.repetition_penalty) }
+              : {}),
+            ...(Number.isFinite(Number(customApi.seed))
+              ? { seed: Number(customApi.seed) }
+              : {}),
+            ...(Array.isArray(normalizedConfig.tools)
+              ? { tools: normalizedConfig.tools }
+              : {}),
+            ...(normalizedConfig.tool_choice !== undefined
+              ? { tool_choice: normalizedConfig.tool_choice }
+              : {}),
+            ...(requestedResponseFormat
+              ? { response_format: requestedResponseFormat }
               : {}),
             ...(hasCustomApi ? {} : buildProviderReasoningRequest(chatProvider)),
             stream: shouldStream,

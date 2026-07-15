@@ -2740,12 +2740,33 @@ export class TavernScriptRuntime {
       return true;
     };
     const stopGeneration = () => this.adapter.stopGeneration?.();
-    const chatCompletionSettings: Record<string, unknown> = {
+    const host = window as unknown as Record<string, unknown>;
+    const hostSillyTavern = isRecord(host.SillyTavern) ? host.SillyTavern : {};
+    const chatCompletionSettings: Record<string, unknown> = isRecord(host.chatCompletionSettings)
+      ? host.chatCompletionSettings
+      : isRecord(host.chat_completion_settings)
+        ? host.chat_completion_settings
+        : isRecord(hostSillyTavern.chatCompletionSettings)
+          ? hostSillyTavern.chatCompletionSettings
+          : {};
+    const chatCompletionDefaults: Record<string, unknown> = {
       function_calling: true,
       tool_calling: true,
       temperature: 1,
       max_tokens: 4096,
     };
+    Object.entries(chatCompletionDefaults).forEach(([key, value]) => {
+      if (chatCompletionSettings[key] === undefined) chatCompletionSettings[key] = value;
+    });
+    const getChatCompletionModel = () =>
+      String(
+        [
+          chatCompletionSettings.custom_model,
+          chatCompletionSettings.model,
+          chatCompletionSettings.openai_model,
+          chatCompletionSettings.model_openai,
+        ].find((value) => typeof value === "string" && value.trim()) ?? "",
+      ).trim() || (this.adapter.getModelId?.() ?? "");
     const getContext = () => ({
       chat: this.getSillyTavernChat(),
       characters: this.getSillyTavernCharacters(),
@@ -2832,7 +2853,7 @@ export class TavernScriptRuntime {
       updateChatMetadata,
       getCurrentChatId: () => this.adapter.getChatId(),
       getRequestHeaders: () => ({ "Content-Type": "application/json" }),
-      getChatCompletionModel: () => this.adapter.getModelId?.() ?? "",
+      getChatCompletionModel,
       getWorldbookNames,
       getWorldBooks: getLorebooks,
       getGlobalWorldbookNames,
@@ -2958,19 +2979,84 @@ export class TavernScriptRuntime {
       const normalizedConfig = isRecord(config)
         ? cloneValue(config)
         : { user_input: config };
+      const configuredApiUrl = [
+        chatCompletionSettings.custom_url,
+        chatCompletionSettings.reverse_proxy,
+        chatCompletionSettings.apiBaseUrl,
+        chatCompletionSettings.apiurl,
+      ].find((value) => typeof value === "string" && value.trim()) as string | undefined;
+      const configuredModel = [
+        chatCompletionSettings.custom_model,
+        chatCompletionSettings.model,
+        chatCompletionSettings.openai_model,
+        chatCompletionSettings.model_openai,
+      ].find((value) => typeof value === "string" && value.trim()) as string | undefined;
       if (
         !isRecord(normalizedConfig.custom_api) &&
-        typeof chatCompletionSettings.custom_url === "string" &&
-        chatCompletionSettings.custom_url.trim() &&
-        typeof chatCompletionSettings.custom_model === "string" &&
-        chatCompletionSettings.custom_model.trim()
+        configuredApiUrl &&
+        configuredModel
       ) {
         normalizedConfig.custom_api = {
-          apiurl: chatCompletionSettings.custom_url,
-          model: chatCompletionSettings.custom_model,
+          apiurl: configuredApiUrl,
+          key:
+            chatCompletionSettings.proxy_password ??
+            chatCompletionSettings.api_key ??
+            chatCompletionSettings.key,
+          model: configuredModel,
           max_tokens: chatCompletionSettings.max_tokens,
           temperature: chatCompletionSettings.temperature,
+          frequency_penalty: chatCompletionSettings.frequency_penalty,
+          presence_penalty: chatCompletionSettings.presence_penalty,
+          top_p: chatCompletionSettings.top_p,
+          top_k: chatCompletionSettings.top_k,
+          custom_include_body: chatCompletionSettings.custom_include_body,
+          custom_exclude_body: chatCompletionSettings.custom_exclude_body,
+          custom_include_headers: chatCompletionSettings.custom_include_headers,
         };
+      }
+      if (isRecord(normalizedConfig.custom_api)) {
+        const customApi = normalizedConfig.custom_api;
+        if (
+          configuredApiUrl &&
+          ![
+            customApi.apiurl,
+            customApi.apiBaseUrl,
+            customApi.base_url,
+            customApi.custom_url,
+            customApi.reverse_proxy,
+            customApi.endpoint,
+            customApi.url,
+          ].some((value) => typeof value === "string" && value.trim())
+        ) {
+          customApi.apiurl = configuredApiUrl;
+        }
+        if (
+          configuredModel &&
+          ![customApi.model, customApi.modelId, customApi.model_id].some(
+            (value) => typeof value === "string" && value.trim(),
+          )
+        ) {
+          customApi.model = configuredModel;
+        }
+        if (
+          ![customApi.key, customApi.apiKey, customApi.api_key, customApi.proxy_password].some(
+            (value) => typeof value === "string" && value,
+          )
+        ) {
+          customApi.key =
+            chatCompletionSettings.proxy_password ??
+            chatCompletionSettings.api_key ??
+            chatCompletionSettings.key;
+        }
+        [
+          "custom_include_body",
+          "custom_exclude_body",
+          "custom_include_headers",
+        ].forEach((key) => {
+          if (customApi[key] === undefined && chatCompletionSettings[key] !== undefined) {
+            customApi[key] = cloneValue(chatCompletionSettings[key]);
+          }
+        });
       }
       const promptInjections = Array.from(injectedPrompts.values());
       if (promptInjections.length > 0) {
@@ -3067,6 +3153,7 @@ export class TavernScriptRuntime {
       getButtonEvent: (name: unknown) => this.getButtonEventName(getScriptId(), String(name)),
       waitGlobalInitialized,
       getModelList,
+      getChatCompletionModel,
       getPresetNames,
       loadPreset,
       getTavernHelperVersion: async () => "3.5.0",
@@ -3075,6 +3162,9 @@ export class TavernScriptRuntime {
       saveChat,
       deleteLastMessage,
       updateChatMetadata,
+      chatCompletionSettings,
+      chat_completion_settings: chatCompletionSettings,
+      oai_settings: chatCompletionSettings,
       extension_settings: extensionSettings,
       saveSettingsDebounced,
       getInput,
