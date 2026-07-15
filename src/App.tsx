@@ -7123,7 +7123,9 @@ export function App() {
   const tavernExtensionHooksRef = useRef(createTavernExtensionHooks());
 
   const emitTavernEvent = (eventName: unknown, ...args: unknown[]) => {
-    void tavernScriptRuntimeRef.current?.emit(String(eventName), ...args);
+    const runtime = tavernScriptRuntimeRef.current;
+    runtime?.syncChat();
+    void runtime?.emit(String(eventName), ...args);
     void tavernExtensionEventBusRef.current.emit(eventName, ...args);
   };
 
@@ -10179,20 +10181,79 @@ export function App() {
     };
   }, [appDataLoaded, extensions]);
 
-  const applyTavernExtensionPromptFilters = async (messages: ChatApiMessage[]) => {
+  const applyTavernExtensionPromptFilters = async (
+    messages: ChatApiMessage[],
+    options: { generationAfterCommands?: boolean } = {},
+  ) => {
+    let preparedMessages = messages;
+    if (options.generationAfterCommands !== false) {
+      let lastUserIndex = -1;
+      for (let index = preparedMessages.length - 1; index >= 0; index -= 1) {
+        if (preparedMessages[index].role === "user") {
+          lastUserIndex = index;
+          break;
+        }
+      }
+      if (lastUserIndex >= 0) {
+        const originalPrompt = getChatApiMessageText(preparedMessages[lastUserIndex]);
+        const generationParams: Record<string, unknown> = {
+          prompt: originalPrompt,
+          messages: preparedMessages,
+          automatic_trigger: false,
+        };
+        await tavernScriptRuntimeRef.current?.emit(
+          TAVERN_EVENTS.GENERATION_AFTER_COMMANDS,
+          "normal",
+          generationParams,
+          false,
+        );
+        const updatedPrompt =
+          typeof generationParams.prompt === "string" ? generationParams.prompt : originalPrompt;
+        if (updatedPrompt !== originalPrompt) {
+          const currentMessage = preparedMessages[lastUserIndex];
+          const nextContent = Array.isArray(currentMessage.content)
+            ? (() => {
+                const parts = currentMessage.content.map((part) => ({ ...part }));
+                let textIndex = -1;
+                for (let index = parts.length - 1; index >= 0; index -= 1) {
+                  const part = parts[index];
+                  if (part.type === "text" && "text" in part && typeof part.text === "string") {
+                    textIndex = index;
+                    break;
+                  }
+                }
+                if (textIndex >= 0) parts[textIndex] = { ...parts[textIndex], text: updatedPrompt };
+                else parts.push({ type: "text", text: updatedPrompt });
+                return parts;
+              })()
+            : updatedPrompt;
+          preparedMessages = preparedMessages.map((message, index) =>
+            index === lastUserIndex ? { ...message, content: nextContent } : message,
+          );
+        }
+      }
+    }
     const filtered = await tavernExtensionHooksRef.current.applyFilters(
       TAVERN_EVENTS.CHAT_COMPLETION_PROMPT_READY,
-      messages,
+      preparedMessages,
     );
     const nextMessages = Array.isArray(filtered)
       ? (filtered as ChatApiMessage[])
-      : messages;
+      : preparedMessages;
     const eventData = { chat: nextMessages, prompt: [] as ChatApiMessage[] };
     await tavernExtensionEventBusRef.current.emit(
       TAVERN_EVENTS.CHAT_COMPLETION_PROMPT_READY,
       eventData,
     );
-    return Array.isArray(eventData.chat) ? eventData.chat : nextMessages;
+    const promptReadyMessages = Array.isArray(eventData.chat) ? eventData.chat : nextMessages;
+    const settingsEventData = { messages: promptReadyMessages };
+    await tavernScriptRuntimeRef.current?.emit(
+      TAVERN_EVENTS.CHAT_COMPLETION_SETTINGS_READY,
+      settingsEventData,
+    );
+    return Array.isArray(settingsEventData.messages)
+      ? settingsEventData.messages
+      : promptReadyMessages;
   };
 
   const getPromptTemplateWorldBooks = (character: CharacterCard | null) => {
@@ -10626,6 +10687,26 @@ export function App() {
           );
         });
       },
+      getChatMetadata: () => {
+        const session = chatSessionsRef.current.find(
+          (candidate) => candidate.id === activeChatSessionIdRef.current,
+        );
+        return normalizeTavernVariables(session?.tavernMetadata);
+      },
+      setChatMetadata: (metadata) => {
+        const sessionId = activeChatSessionIdRef.current;
+        updateSessions((sessions) =>
+          sessions.map((session) =>
+            session.id === sessionId
+              ? {
+                  ...session,
+                  tavernMetadata: normalizeTavernVariables(metadata),
+                  updatedAt: new Date().toISOString(),
+                }
+              : session,
+          ),
+        );
+      },
       getScriptData: (scriptId) => {
         const globalScript = tavernScriptsRef.current.find((script) => script.id === scriptId);
         if (globalScript) return normalizeTavernVariables(globalScript.data);
@@ -10868,6 +10949,7 @@ export function App() {
         }
         return false;
       },
+      isGenerating: () => Boolean(activeChatAbortControllerRef.current),
       onButtonsChange: (buttons) => {
         if (tavernScriptRuntimeRef.current === runtime) setTavernRuntimeButtons(buttons);
       },
@@ -14658,8 +14740,11 @@ export function App() {
     sourceFrame?: HTMLIFrameElement,
   ) => {
     const normalizedConfig = isObjectRecord(config) ? config : { user_input: config };
-    const rawPromptMessages = Array.isArray(normalizedConfig.prompt)
-      ? normalizedConfig.prompt
+    const rawPromptSource = Array.isArray(normalizedConfig.ordered_prompts)
+      ? normalizedConfig.ordered_prompts
+      : normalizedConfig.prompt;
+    const rawPromptMessages = Array.isArray(rawPromptSource)
+      ? rawPromptSource
           .map((value) => {
             if (!isObjectRecord(value)) return null;
             const role =
@@ -14820,7 +14905,9 @@ export function App() {
       const apiMessages =
         normalizedConfig.quiet === true
           ? preparedApiMessages
-          : await applyTavernExtensionPromptFilters(preparedApiMessages);
+          : await applyTavernExtensionPromptFilters(preparedApiMessages, {
+              generationAfterCommands: false,
+            });
       throwIfChatAborted(abortSignal);
 
       const response = await fetch("/api/chat/completions", {

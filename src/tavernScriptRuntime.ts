@@ -94,6 +94,8 @@ export type TavernScriptRuntimeAdapter = {
   setPresetVariables?(variables: Record<string, unknown>): void;
   getExtensionSettings?(): Record<string, unknown>;
   setExtensionSettings?(settings: Record<string, unknown>): void;
+  getChatMetadata?(): Record<string, unknown>;
+  setChatMetadata?(metadata: Record<string, unknown>): void;
   getScriptData(scriptId: string): Record<string, unknown>;
   setScriptData(scriptId: string, data: Record<string, unknown>): void;
   getCharacter(): TavernRuntimeCharacter | null;
@@ -111,6 +113,7 @@ export type TavernScriptRuntimeAdapter = {
   triggerSlash?(command: string): Promise<unknown> | unknown;
   generate?(config?: unknown): Promise<string>;
   stopGeneration?(): Promise<unknown> | unknown;
+  isGenerating?(): boolean;
   onButtonsChange?(buttons: TavernRuntimeButton[]): void;
   onLog?(log: TavernRuntimeLog): void;
   onStatus?(status: TavernRuntimeStatus): void;
@@ -170,7 +173,9 @@ const TAVERN_EVENTS = Object.freeze({
   OAI_PRESET_CHANGED_AFTER: "oai_preset_changed_after",
   PRESET_RENAMED_BEFORE: "preset_renamed_before",
   GENERATION_STARTED: "generation_started",
+  GENERATION_AFTER_COMMANDS: "generation_after_commands",
   GENERATION_ENDED: "generation_ended",
+  CHAT_COMPLETION_SETTINGS_READY: "chat_completion_settings_ready",
   CHAT_COMPLETION_PROMPT_READY: "chat_completion_prompt_ready",
   STREAM_TOKEN_RECEIVED: "stream_token_received",
   VARIABLE_CHANGED: "variable_changed",
@@ -241,6 +246,29 @@ function cloneValue<T>(value: T): T {
   } catch {
     return value;
   }
+}
+
+function valuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => valuesEqual(value, right[index]))
+    );
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key) =>
+        Object.prototype.hasOwnProperty.call(right, key) &&
+        valuesEqual(left[key], right[key]),
+    )
+  );
 }
 
 function mergeVariableRecords(
@@ -770,6 +798,7 @@ export class TavernScriptRuntime {
   private eventHandlerSequence = 0;
   private scriptButtons = new Map<string, TavernScriptButton[]>();
   private variableSchemas = new Map<string, unknown>();
+  private sillyTavernChatCache: Array<Record<string, unknown>> = [];
   private fontAwesomeCleanups: Array<() => void> = [];
   private localPlaceholderImageSources = new Map<string, string>();
 
@@ -785,10 +814,16 @@ export class TavernScriptRuntime {
     return this.ready && !this.destroyed;
   }
 
+  syncChat() {
+    if (this.destroyed) return;
+    this.refreshSillyTavernChatCache();
+  }
+
   async initialize() {
     if (this.destroyed) throw new Error("脚本运行时已销毁。");
     this.reportStatus("loading", "正在初始化酒馆脚本运行环境...");
     await this.createIframe();
+    this.refreshSillyTavernChatCache();
     const fontAwesomeSupports = [
       installLocalFontAwesomeShadowSupport(window, window.location.href),
     ];
@@ -917,6 +952,7 @@ export class TavernScriptRuntime {
     this.eventHandlers.clear();
     this.scriptButtons.clear();
     this.variableSchemas.clear();
+    this.sillyTavernChatCache.splice(0);
     this.adapter.onButtonsChange?.([]);
     const parentWindow = window as Window & { Mvu?: unknown };
     if (parentWindow.Mvu) delete parentWindow.Mvu;
@@ -1143,11 +1179,29 @@ export class TavernScriptRuntime {
       });
       return removed;
     };
+    const emitFromScript = (eventName: unknown, ...args: unknown[]) => {
+      const normalizedEventName = String(eventName);
+      if (
+        [
+          TAVERN_EVENTS.MESSAGE_UPDATED,
+          TAVERN_EVENTS.MESSAGE_EDITED,
+          TAVERN_EVENTS.MESSAGE_DELETED,
+          TAVERN_EVENTS.MESSAGE_SWIPED,
+          "MESSAGE_UPDATED",
+          "MESSAGE_EDITED",
+          "MESSAGE_DELETED",
+          "MESSAGE_SWIPED",
+        ].includes(normalizedEventName)
+      ) {
+        this.persistSillyTavernChatCache();
+      }
+      return this.emit(normalizedEventName, ...args);
+    };
     const eventSource = {
       on: eventOn,
       once: eventOnce,
-      emit: (eventName: string, ...args: unknown[]) => this.emit(eventName, ...args),
-      emitAndWait: (eventName: string, ...args: unknown[]) => this.emit(eventName, ...args),
+      emit: emitFromScript,
+      emitAndWait: emitFromScript,
       removeListener: eventRemoveListener,
       makeFirst: (eventName: string, callback: (...args: unknown[]) => unknown) => {
         registerEventHandler(eventName, callback, -1);
@@ -1302,12 +1356,18 @@ export class TavernScriptRuntime {
     const setChatMessages = async (updates: unknown) => {
       if (!Array.isArray(updates)) return false;
       const messages = this.adapter.getMessages().map((message) => cloneValue(message));
+      const reservedUpdateKeys = new Set([
+        "message_id", "mesid", "id", "name", "role", "is_user", "is_system",
+        "is_hidden", "message", "mes", "content", "data", "variables", "extra",
+        "swipe_id", "swipes", "swipes_data", "swipes_info",
+      ]);
       updates.forEach((update) => {
         if (!isRecord(update)) return;
         const index = normalizeMessageId(update.message_id, messages);
         const message = messages[index];
         if (!message) return;
-        if (typeof update.message === "string") message.content = update.message;
+        if (typeof update.mes === "string") message.content = update.mes;
+        else if (typeof update.message === "string") message.content = update.message;
         else if (typeof update.content === "string") message.content = update.content;
         const swipeIndex = Number.isInteger(Number(update.swipe_id))
           ? Math.max(0, Number(update.swipe_id))
@@ -1334,8 +1394,14 @@ export class TavernScriptRuntime {
         ) {
           message.extra = cloneValue(update.swipes_info[swipeIndex]);
         }
+        const nextExtra = isRecord(message.extra) ? cloneValue(message.extra) : {};
+        Object.entries(update).forEach(([key, value]) => {
+          if (!reservedUpdateKeys.has(key)) nextExtra[key] = cloneValue(value);
+        });
+        if (Object.keys(nextExtra).length > 0) message.extra = nextExtra;
       });
       this.adapter.setMessages(messages);
+      this.refreshSillyTavernChatCache();
       return true;
     };
 
@@ -1354,6 +1420,7 @@ export class TavernScriptRuntime {
       if (position < 0 || position >= messages.length) messages.push(...created);
       else messages.splice(position, 0, ...created);
       this.adapter.setMessages(messages);
+      this.refreshSillyTavernChatCache();
       return true;
     };
 
@@ -1363,6 +1430,7 @@ export class TavernScriptRuntime {
       this.adapter.setMessages(
         this.adapter.getMessages().filter((_, index) => !indexes.has(index)),
       );
+      this.refreshSillyTavernChatCache();
       return true;
     };
 
@@ -1632,6 +1700,7 @@ export class TavernScriptRuntime {
       setLorebookSettings: async () => true,
       setLorebookEntries,
       createLorebookEntry,
+      createLorebookEntries: createWorldbookEntries,
       deleteLorebookEntry,
       getCharWorldbookNames,
       getCharLorebooks,
@@ -1639,6 +1708,7 @@ export class TavernScriptRuntime {
       updateWorldbookWith,
       createWorldbookEntries,
       deleteWorldbookEntries,
+      deleteLorebookEntries: deleteWorldbookEntries,
       updateWorldbookEntry,
       getWorldbookEntry,
       getWorldbookEntryByKey,
@@ -1774,15 +1844,51 @@ export class TavernScriptRuntime {
         substitudeMacros(value),
       );
     };
+    const chatMetadata = cloneValue(this.adapter.getChatMetadata?.() ?? {});
+    const saveChat = async () => {
+      this.adapter.setChatMetadata?.(cloneValue(chatMetadata));
+      return this.persistSillyTavernChatCache();
+    };
+    const updateChatMetadata = async (patch: unknown, reset = false) => {
+      const next = reset
+        ? isRecord(patch) ? cloneValue(patch) : {}
+        : isRecord(patch) ? mergeVariableRecords(chatMetadata, patch) : cloneValue(chatMetadata);
+      Object.keys(chatMetadata).forEach((key) => delete chatMetadata[key]);
+      Object.assign(chatMetadata, next);
+      this.adapter.setChatMetadata?.(cloneValue(chatMetadata));
+      return cloneValue(chatMetadata);
+    };
+    const deleteLastMessage = async () => {
+      if (this.sillyTavernChatCache.length === 0) return false;
+      this.sillyTavernChatCache.pop();
+      this.persistSillyTavernChatCache();
+      await this.emit(TAVERN_EVENTS.MESSAGE_DELETED, this.sillyTavernChatCache.length);
+      return true;
+    };
+    const stopGeneration = () => this.adapter.stopGeneration?.();
     const getContext = () => ({
       chat: this.getSillyTavernChat(),
       characters: this.getSillyTavernCharacters(),
       characterId: getCharacter() ? "0" : undefined,
+      this_chid: getCharacter() ? 0 : undefined,
       name1: this.adapter.getUserName() || "User",
       name2: getCharacter()?.name || "Assistant",
       chatId: this.adapter.getChatId(),
       eventSource,
-      saveChat: async () => true,
+      eventTypes: TAVERN_EVENTS,
+      event_types: TAVERN_EVENTS,
+      chatMetadata,
+      chat_metadata: chatMetadata,
+      extensionSettings,
+      extension_settings: extensionSettings,
+      saveChat,
+      saveSettingsDebounced,
+      setChatMessages,
+      deleteLastMessage,
+      stopGeneration,
+      updateChatMetadata,
+      getWorldBooks: getLorebooks,
+      powerUserSettings: {},
       getRequestHeaders: () => ({ "Content-Type": "application/json" }),
     });
 
@@ -1826,11 +1932,23 @@ export class TavernScriptRuntime {
       },
       getContext,
       eventSource,
-      saveChat: async () => true,
+      eventTypes: TAVERN_EVENTS,
+      event_types: TAVERN_EVENTS,
+      chatMetadata,
+      chat_metadata: chatMetadata,
+      extensionSettings,
+      extension_settings: extensionSettings,
+      saveChat,
+      saveSettingsDebounced,
+      setChatMessages,
+      deleteLastMessage,
+      stopGeneration,
+      updateChatMetadata,
       getCurrentChatId: () => this.adapter.getChatId(),
       getRequestHeaders: () => ({ "Content-Type": "application/json" }),
       getChatCompletionModel: () => this.adapter.getModelId?.() ?? "",
       getWorldbookNames,
+      getWorldBooks: getLorebooks,
       getGlobalWorldbookNames,
       getWorldbook,
       getLorebooks,
@@ -1844,8 +1962,6 @@ export class TavernScriptRuntime {
       registerMacro: () => true,
       unregisterMacro: () => true,
       unregisterFunctionTool: () => true,
-      extensionSettings,
-      saveSettingsDebounced,
       callGenericPopup: async (
         _content: unknown,
         popupType: unknown,
@@ -1868,8 +1984,11 @@ export class TavernScriptRuntime {
       chat: { get: () => this.getSillyTavernChat(), configurable: true },
       characters: { get: () => this.getSillyTavernCharacters(), configurable: true },
       characterId: { get: () => (getCharacter() ? "0" : undefined), configurable: true },
+      this_chid: { get: () => (getCharacter() ? 0 : undefined), configurable: true },
       name1: { get: () => this.adapter.getUserName() || "User", configurable: true },
       name2: { get: () => getCharacter()?.name || "Assistant", configurable: true },
+      chatId: { get: () => this.adapter.getChatId(), configurable: true },
+      generating: { get: () => this.adapter.isGenerating?.() ?? false, configurable: true },
     });
 
     const waitGlobalInitialized = async (name = "Mvu", timeout = 30000) =>
@@ -1908,8 +2027,8 @@ export class TavernScriptRuntime {
       registerVariableSchema,
       eventOn,
       eventOnce,
-      eventEmit: (eventName: string, ...args: unknown[]) => this.emit(eventName, ...args),
-      eventEmitAndWait: (eventName: string, ...args: unknown[]) => this.emit(eventName, ...args),
+      eventEmit: emitFromScript,
+      eventEmitAndWait: emitFromScript,
       eventRemoveListener,
       eventMakeFirst: (eventName: string, callback: (...args: unknown[]) => unknown) =>
         registerEventHandler(eventName, callback, -1),
@@ -1931,10 +2050,12 @@ export class TavernScriptRuntime {
       setLorebookSettings: async () => true,
       setLorebookEntries,
       createLorebookEntry,
+      createLorebookEntries: createWorldbookEntries,
       deleteLorebookEntry,
       updateWorldbookWith,
       createWorldbookEntries,
       deleteWorldbookEntries,
+      deleteLorebookEntries: deleteWorldbookEntries,
       updateWorldbookEntry,
       getWorldbookEntry,
       getWorldbookEntryByKey,
@@ -1957,6 +2078,11 @@ export class TavernScriptRuntime {
       getTavernHelperVersion: async () => "3.5.0",
       getVersion: () => sillyTavern.versionInfo,
       getContext,
+      saveChat,
+      deleteLastMessage,
+      updateChatMetadata,
+      extension_settings: extensionSettings,
+      saveSettingsDebounced,
       getInput,
       setInput,
       appendInput,
@@ -1973,6 +2099,13 @@ export class TavernScriptRuntime {
       SillyTavern: sillyTavern,
     };
     Object.assign(win, api);
+    Object.defineProperties(win, {
+      chat: { get: () => this.getSillyTavernChat(), configurable: true },
+      characters: { get: () => this.getSillyTavernCharacters(), configurable: true },
+      this_chid: { get: () => (getCharacter() ? 0 : undefined), configurable: true },
+      name1: { get: () => this.adapter.getUserName() || "User", configurable: true },
+      name2: { get: () => getCharacter()?.name || "Assistant", configurable: true },
+    });
     const promptTemplateApi = (
       globalThis as typeof globalThis & { EjsTemplate?: Record<string, unknown> }
     ).EjsTemplate;
@@ -2105,7 +2238,9 @@ export class TavernScriptRuntime {
 
   private formatHelperMessage(message: TavernRuntimeMessage, index: number) {
     const character = this.adapter.getCharacter();
+    const extra = cloneValue(message.extra ?? {});
     return {
+      ...extra,
       message_id: index,
       mesid: index,
       id: index,
@@ -2121,7 +2256,7 @@ export class TavernScriptRuntime {
       mes: message.content,
       data: this.localizePlaceholderImages(cloneValue(message.variables ?? {})),
       variables: this.localizePlaceholderImages(cloneValue(message.variables ?? {})),
-      extra: cloneValue(message.extra ?? {}),
+      extra,
       swipe_id: 0,
       swipes: [message.content],
       swipes_data: [cloneValue(message.variables ?? {})],
@@ -2129,14 +2264,123 @@ export class TavernScriptRuntime {
     };
   }
 
-  private getSillyTavernChat() {
-    return this.adapter.getMessages().map((message, index) => {
+  private refreshSillyTavernChatCache() {
+    const formattedMessages = this.adapter.getMessages().map((message, index) => {
       const formatted = this.formatHelperMessage(message, index);
       return {
         ...formatted,
         variables: [this.localizePlaceholderImages(cloneValue(message.variables ?? {}))],
       };
     });
+    this.sillyTavernChatCache.splice(
+      0,
+      this.sillyTavernChatCache.length,
+      ...formattedMessages,
+    );
+    return this.sillyTavernChatCache;
+  }
+
+  private getSillyTavernChat() {
+    return this.sillyTavernChatCache;
+  }
+
+  private persistSillyTavernChatCache() {
+    const previousMessages = this.adapter.getMessages();
+    const reservedKeys = new Set([
+      "message_id",
+      "mesid",
+      "id",
+      "name",
+      "role",
+      "is_user",
+      "is_system",
+      "is_hidden",
+      "message",
+      "mes",
+      "content",
+      "data",
+      "variables",
+      "extra",
+      "swipe_id",
+      "swipes",
+      "swipes_data",
+      "swipes_info",
+    ]);
+    const nextMessages = this.sillyTavernChatCache.map((rawMessage, index) => {
+      const previous = previousMessages[index];
+      const contentCandidates = [
+        rawMessage.mes,
+        rawMessage.message,
+        rawMessage.content,
+        Array.isArray(rawMessage.swipes)
+          ? rawMessage.swipes[Number(rawMessage.swipe_id) || 0]
+          : undefined,
+      ].filter((value): value is string => typeof value === "string");
+      const content =
+        contentCandidates.find((value) => value !== previous?.content) ??
+        contentCandidates[0] ??
+        previous?.content ??
+        "";
+      const previousExtra = isRecord(previous?.extra) ? previous.extra : {};
+      const rawExtra = isRecord(rawMessage.extra) ? rawMessage.extra : {};
+      const extra: Record<string, unknown> = {};
+      Object.entries(rawMessage).forEach(([key, value]) => {
+        if (!reservedKeys.has(key)) extra[key] = cloneValue(value);
+      });
+      const customKeys = new Set([
+        ...Object.keys(previousExtra),
+        ...Object.keys(rawExtra),
+        ...Object.keys(extra),
+      ]);
+      customKeys.forEach((key) => {
+        const previousHas = Object.prototype.hasOwnProperty.call(previousExtra, key);
+        const nestedHas = Object.prototype.hasOwnProperty.call(rawExtra, key);
+        const topLevelHas = Object.prototype.hasOwnProperty.call(rawMessage, key);
+        const nestedChanged =
+          nestedHas !== previousHas ||
+          (nestedHas && previousHas && !valuesEqual(rawExtra[key], previousExtra[key]));
+        const topLevelChanged =
+          topLevelHas !== previousHas ||
+          (topLevelHas && previousHas && !valuesEqual(rawMessage[key], previousExtra[key]));
+
+        if (nestedChanged && !topLevelChanged) {
+          if (nestedHas) extra[key] = cloneValue(rawExtra[key]);
+          else delete extra[key];
+          return;
+        }
+        if (topLevelChanged) {
+          if (topLevelHas) extra[key] = cloneValue(rawMessage[key]);
+          else delete extra[key];
+          return;
+        }
+        if (previousHas) extra[key] = cloneValue(previousExtra[key]);
+        else delete extra[key];
+      });
+      const swipeIndex = Number(rawMessage.swipe_id) || 0;
+      const variableValue = Array.isArray(rawMessage.variables)
+        ? rawMessage.variables[swipeIndex]
+        : isRecord(rawMessage.variables)
+          ? rawMessage.variables
+          : isRecord(rawMessage.data)
+            ? rawMessage.data
+            : previous?.variables;
+      return {
+        id: previous?.id ?? crypto.randomUUID(),
+        role:
+          rawMessage.is_user === true || rawMessage.role === "user"
+            ? ("user" as const)
+            : ("assistant" as const),
+        content,
+        createdAt: previous?.createdAt ?? new Date().toISOString(),
+        ...(isRecord(variableValue)
+          ? { variables: this.restorePlaceholderImages(cloneValue(variableValue)) }
+          : {}),
+        ...(Object.keys(extra).length > 0 ? { extra } : {}),
+      };
+    });
+    this.adapter.setMessages(nextMessages);
+    this.refreshSillyTavernChatCache();
+    return true;
   }
 
   private getSillyTavernCharacters() {
@@ -2239,7 +2483,7 @@ export class TavernScriptRuntime {
       const timeoutId = usesModuleSyntax
         ? window.setTimeout(
             () => finish(new Error(`脚本「${script.name}」的模块加载超时。`)),
-            30000,
+            120000,
           )
         : undefined;
       const finish = (error?: unknown) => {
