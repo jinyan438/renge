@@ -3333,6 +3333,7 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "let rafId = 0;",
     "let heavyPostTimer = 0;",
     "let lastHeight = 0;",
+    "let lastExpandedDetailsHeight = 0;",
     "let lastMeasuredContentHeight = 0;",
     "let lastMeasuredViewportHeight = 0;",
     "let currentScale = 1;",
@@ -3468,6 +3469,16 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "  const nextScale = bounds.width > availableWidth ? Math.max(0.1, availableWidth / bounds.width) : 1;",
     "  setScale(nextScale);",
     "  const structuralTracksViewport = Math.abs(structuralHeight - viewportHeight) <= 2;",
+    "  if (expandedDetailsHeight > 0 || (structuralHeight > 0 && !structuralTracksViewport)) {",
+    "    const measuredStructuralHeight = Math.max(",
+    "      expandedDetailsHeight,",
+    "      structuralTracksViewport ? 0 : structuralHeight,",
+    "    );",
+    "    return {",
+    "      height: clampHeight((measuredStructuralHeight + verticalMargin) * nextScale + padding),",
+    "      hasIntrinsicElement: bounds.hasIntrinsicElement,",
+    "    };",
+    "  }",
     "  const contentHeight = Math.max(0, bounds.height);",
     "  const contentDelta = contentHeight - lastMeasuredContentHeight;",
     "  const viewportDelta = viewportHeight - lastMeasuredViewportHeight;",
@@ -3479,15 +3490,11 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "  lastMeasuredContentHeight = contentHeight;",
     "  lastMeasuredViewportHeight = viewportHeight;",
     "  const tracksViewport = Math.abs(contentHeight - viewportHeight) <= 2;",
-    "  const stableStructuralHeight = structuralTracksViewport ? 0 : structuralHeight;",
-    "  const stableBoundsHeight =",
-    "    !bounds.hasIntrinsicElement && (tracksViewport || tracksRecentViewport) ? 0 : contentHeight;",
-    "  const layoutHeight = Math.max(stableStructuralHeight, stableBoundsHeight, expandedDetailsHeight);",
-    "  if (!layoutHeight) {",
+    "  if (!contentHeight || (!bounds.hasIntrinsicElement && (tracksViewport || tracksRecentViewport))) {",
     "    return { height: clampHeight(defaultHeight), hasIntrinsicElement: bounds.hasIntrinsicElement };",
     "  }",
     "  return {",
-    "    height: clampHeight(layoutHeight * nextScale + verticalMargin + padding),",
+    "    height: clampHeight(contentHeight * nextScale + verticalMargin + padding),",
     "    hasIntrinsicElement: bounds.hasIntrinsicElement,",
     "  };",
     "};",
@@ -3495,10 +3502,13 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "  rafId = 0;",
     "  const measurement = measure();",
     "  const height = measurement.height;",
-    "  if (Math.abs(height - lastHeight) < 1) return;",
+    "  const expandedDetailsHeight = getExpandedDetailsHeight();",
+    "  const reportedExpandedHeight = expandedDetailsHeight > 0 ? clampHeight(expandedDetailsHeight * currentScale + padding) : 0;",
+    "  if (Math.abs(height - lastHeight) < 1 && Math.abs(reportedExpandedHeight - lastExpandedDetailsHeight) < 1) return;",
     "  lastHeight = height;",
+    "  lastExpandedDetailsHeight = reportedExpandedHeight;",
     "  try {",
-    '    parent.postMessage({ type: messageType, id: previewId, height, intrinsic: measurement.hasIntrinsicElement === true }, "*");',
+    '    parent.postMessage({ type: messageType, id: previewId, height, intrinsic: measurement.hasIntrinsicElement === true, expanded: reportedExpandedHeight > 0, expandedHeight: reportedExpandedHeight }, "*");',
     "  } catch {}",
     "};",
     "const schedulePost = () => {",
@@ -7350,6 +7360,8 @@ export function App() {
         id?: unknown;
         height?: unknown;
         intrinsic?: unknown;
+        expanded?: unknown;
+        expandedHeight?: unknown;
         operation?: unknown;
         option?: unknown;
         variables?: unknown;
@@ -7657,12 +7669,31 @@ export function App() {
       if (!Number.isFinite(nextHeight)) return;
 
       const frameWidth = frame.getBoundingClientRect().width || frame.clientWidth || 0;
+      const reportedExpandedHeight = Number(payload.expandedHeight);
+      const expandedHeightIsValid =
+        payload.expanded === true &&
+        Number.isFinite(reportedExpandedHeight) &&
+        reportedExpandedHeight > 0;
+      const expandedFallbackHeight =
+        payload.expanded === true && frameWidth > 0
+          ? Math.min(
+              900,
+              Math.max(frameWidth * 0.82, Math.min(frameWidth, 460) * 1.9),
+            )
+          : 0;
+      const expandedMinHeight = expandedHeightIsValid
+        ? Math.max(
+            reportedExpandedHeight,
+            reportedExpandedHeight < frameWidth * 0.72 ? expandedFallbackHeight : 0,
+          )
+        : expandedFallbackHeight;
       const intrinsicMinHeight =
         payload.intrinsic === true && frameWidth > 0
           ? Math.max(220, Math.min(960, Math.round(frameWidth * 0.72)))
           : 220;
       const clampedHeight = Math.max(
         intrinsicMinHeight,
+        expandedMinHeight,
         Math.min(Math.ceil(nextHeight), HTML_PREVIEW_MAX_HEIGHT),
       );
       frame.style.height = `${clampedHeight}px`;
