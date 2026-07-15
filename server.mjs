@@ -26,11 +26,140 @@ const mimeTypes = {
   ".jpeg": "image/jpeg",
   ".webp": "image/webp",
   ".gif": "image/gif",
+  ".avif": "image/avif",
   ".ico": "image/x-icon",
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".ogg": "audio/ogg",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
   ".woff": "font/woff",
   ".woff2": "font/woff2",
   ".ttf": "font/ttf",
 };
+
+const tavernCompatModulePaths = new Set([
+  "/script.js",
+  "/lib.js",
+  "/scripts/world-info.js",
+  "/scripts/st-context.js",
+  "/scripts/extensions.js",
+  "/scripts/extensions/regex/engine.js",
+  "/scripts/power-user.js",
+  "/scripts/utils.js",
+  "/scripts/group-chats.js",
+  "/scripts/openai.js",
+  "/scripts/tokenizers.js",
+  "/scripts/reasoning.js",
+  "/scripts/events.js",
+  "/scripts/popup.js",
+  "/scripts/slash-commands.js",
+  "/scripts/slash-commands/SlashCommand.js",
+  "/scripts/slash-commands/SlashCommandArgument.js",
+  "/scripts/slash-commands/SlashCommandParser.js",
+  "/api/st-context.js",
+  "/api/world-info.js",
+  "/api/extensions.js",
+  "/api/power-user.js",
+  "/api/utils.js",
+  "/api/group-chats.js",
+  "/api/openai.js",
+  "/api/tokenizers.js",
+  "/api/reasoning.js",
+  "/api/events.js",
+  "/api/popup.js",
+  "/api/slash-commands.js",
+  "/api/slash-commands/SlashCommand.js",
+  "/api/slash-commands/SlashCommandArgument.js",
+  "/api/slash-commands/SlashCommandParser.js",
+]);
+
+const tavernCompatModuleSource = `
+const compat = globalThis.__rengeTavernCompat ?? {};
+export const getContext = (...args) => compat.getContext?.(...args) ?? globalThis.SillyTavern?.getContext?.(...args);
+export const eventSource = globalThis.eventSource ?? compat.eventSource;
+export const event_types = globalThis.event_types ?? compat.event_types ?? {};
+export const extension_settings = globalThis.extension_settings ?? compat.extension_settings ?? {};
+export const saveSettingsDebounced = (...args) => globalThis.saveSettingsDebounced?.(...args);
+export const saveChatDebounced = (...args) => globalThis.saveChatDebounced?.(...args);
+export const getRequestHeaders = (...args) => globalThis.getRequestHeaders?.(...args) ?? { "Content-Type": "application/json" };
+export const getWorldInfo = (...args) => compat.getWorldInfo?.(...args);
+export let world_info_data = globalThis.world_info_data ?? compat.world_info_data ?? {};
+export const worldInfoData = world_info_data;
+export const world_info = globalThis.world_info ?? compat.world_info ?? { worldInfoData: world_info_data, world_info: world_info_data };
+export const worldInfo = world_info;
+export const world_names = globalThis.world_names ?? compat.world_names ?? [];
+export const loadWorldInfo = async (name) => {
+  const loaded = await compat.loadWorldInfo?.(name);
+  if (loaded && typeof loaded === "object") {
+    Object.keys(world_info_data).forEach((key) => delete world_info_data[key]);
+    Object.assign(world_info_data, loaded);
+  }
+  return loaded;
+};
+const createContextArray = (property) => new Proxy([], {
+  get: (_target, key) => {
+    const current = Array.isArray(getContext()?.[property]) ? getContext()[property] : [];
+    const value = Reflect.get(current, key, current);
+    return typeof value === "function" ? value.bind(current) : value;
+  },
+});
+export const chat = createContextArray("chat");
+export const characters = createContextArray("characters");
+export const groups = createContextArray("groups");
+export const this_chid = getContext()?.characterId;
+export const name1 = getContext()?.name1 ?? "User";
+export const name2 = getContext()?.name2 ?? "Assistant";
+export const power_user = globalThis.power_user ?? {};
+export const extension_prompt_types = globalThis.extension_prompt_types ?? {};
+export const extension_prompt_roles = globalThis.extension_prompt_roles ?? {};
+export const substituteParams = (value) => String(value ?? "")
+  .replaceAll("{{user}}", String(getContext()?.name1 ?? "User"))
+  .replaceAll("{{char}}", String(getContext()?.name2 ?? "Assistant"));
+export const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, Number(milliseconds) || 0));
+export const debounce = (callback, milliseconds = 0) => globalThis._?.debounce
+  ? globalThis._.debounce(callback, milliseconds)
+  : (...args) => setTimeout(() => callback(...args), milliseconds);
+export const uuidv4 = () => globalThis.crypto?.randomUUID?.() ?? String(Date.now());
+export const getThumbnailUrl = (_type, path) => path;
+export const getRegexedString = (value) => String(value ?? "");
+export const regex_placement = {};
+export const callPopup = async (content) => globalThis.confirm?.(String(content ?? ""));
+export const callGenericPopup = callPopup;
+export const POPUP_TYPE = { TEXT: "text", CONFIRM: "confirm", INPUT: "input", DISPLAY: "display" };
+export class Popup {
+  constructor(content = "", type = POPUP_TYPE.TEXT, options = {}) {
+    this.content = content;
+    this.type = type;
+    this.options = options;
+  }
+  async show() { return callPopup(this.content); }
+}
+export class SlashCommand {
+  constructor(properties = {}) { Object.assign(this, properties); }
+  static fromProps(properties = {}) { return new SlashCommand(properties); }
+}
+export class SlashCommandArgument {
+  constructor(properties = {}) { Object.assign(this, properties); }
+  static fromProps(properties = {}) { return new SlashCommandArgument(properties); }
+}
+export const ARGUMENT_TYPE = { STRING: "string", NUMBER: "number", BOOLEAN: "boolean", LIST: "list" };
+export const SlashCommandParser = {
+  addCommandObject: (command) => compat.registerSlashCommand?.(command) ?? command,
+};
+export const executeSlashCommandsWithOptions = (command) => compat.TavernHelper?.triggerSlash?.(command);
+export const getTokenCountAsync = async (value) => Math.ceil(String(value ?? "").length / 4);
+export default compat;
+`;
+
+function sendTavernCompatModule(response) {
+  response.writeHead(200, {
+    "Content-Type": "text/javascript;charset=utf-8",
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*",
+  });
+  response.end(tavernCompatModuleSource);
+}
 
 function sendJson(response, statusCode, payload) {
   if (response.headersSent) {
@@ -663,6 +792,50 @@ function getExtensionDirectory(dataFilePath, extensionId) {
   return directory;
 }
 
+async function serveInstalledExtensionFile(
+  response,
+  dataFilePath,
+  extensionId,
+  fileParts,
+) {
+  const extensionDirectory = getExtensionDirectory(dataFilePath, extensionId);
+  if (!extensionDirectory) {
+    sendJson(response, 400, { error: "非法扩展 ID" });
+    return;
+  }
+  if (!Array.isArray(fileParts) || fileParts.length === 0) {
+    sendJson(response, 404, { error: "扩展文件不存在" });
+    return;
+  }
+  const filePath = resolve(extensionDirectory, ...fileParts);
+  const rel = relative(extensionDirectory, filePath);
+  if (rel.startsWith("..") || isAbsolute(rel)) {
+    sendJson(response, 400, { error: "扩展文件路径越界" });
+    return;
+  }
+  try {
+    const realExtensionDirectory = await realpath(extensionDirectory);
+    const realFilePath = await realpath(filePath);
+    const realRel = relative(realExtensionDirectory, realFilePath);
+    if (realRel.startsWith("..") || isAbsolute(realRel)) {
+      sendJson(response, 400, { error: "扩展文件不能指向安装目录之外" });
+      return;
+    }
+    const fileInfo = await stat(realFilePath);
+    if (!fileInfo.isFile()) throw new Error("Not a file");
+    const content = await readFile(realFilePath);
+    const extension = extname(realFilePath).toLowerCase();
+    response.writeHead(200, {
+      "Content-Type": mimeTypes[extension] ?? "application/octet-stream",
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*",
+    });
+    response.end(content);
+  } catch {
+    sendJson(response, 404, { error: "扩展文件不存在" });
+  }
+}
+
 function normalizeExtensionGitUrl(value) {
   let sourceUrl = String(value ?? "").trim();
   if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(sourceUrl)) {
@@ -878,7 +1051,7 @@ async function installTavernExtensionFromGit(dataFilePath, sourceValue) {
       optional: normalizeManifestFileList(manifest.optional),
       jsFiles,
       cssFiles,
-      assetBaseUrl: `/api/extensions/${encodeURIComponent(id)}/files`,
+      assetBaseUrl: `/scripts/extensions/third-party/${encodeURIComponent(id)}`,
       installedAt: timestamp,
       updatedAt: timestamp,
     };
@@ -2029,6 +2202,27 @@ async function handleApi(request, response, pathname, dataFilePath) {
       return;
     }
 
+    if (pathname === "/api/settings/get" || pathname === "/api/settings/save") {
+      sendJson(response, 503, {
+        error: "Renge 扩展设置通过 SillyTavern.getContext().extensionSettings 保存",
+      });
+      return;
+    }
+
+    if (pathname === "/api/backends/chat-completions/generate") {
+      sendJson(response, 502, {
+        error: "invalid url: 请使用 SillyTavern.getContext().generateRaw",
+      });
+      return;
+    }
+
+    if (pathname === "/api/backends/chat-completions/status") {
+      sendJson(response, 503, {
+        error: "模型状态由当前 Renge 会话供应商管理",
+      });
+      return;
+    }
+
     if (pathname.startsWith("/api/pc/")) {
       await handlePcFiles(request, response, pathname);
       return;
@@ -2108,33 +2302,12 @@ async function handleApi(request, response, pathname, dataFilePath) {
 
       if (request.method === "GET" && operation === "files" && rawFileParts.length > 0) {
         const decodedParts = rawFileParts.map((part) => decodeURIComponent(part));
-        const filePath = resolve(extensionDirectory, ...decodedParts);
-        const rel = relative(extensionDirectory, filePath);
-        if (rel.startsWith("..") || isAbsolute(rel)) {
-          sendJson(response, 400, { error: "扩展文件路径越界" });
-          return;
-        }
-        try {
-          const realExtensionDirectory = await realpath(extensionDirectory);
-          const realFilePath = await realpath(filePath);
-          const realRel = relative(realExtensionDirectory, realFilePath);
-          if (realRel.startsWith("..") || isAbsolute(realRel)) {
-            sendJson(response, 400, { error: "扩展文件不能指向安装目录之外" });
-            return;
-          }
-          const fileInfo = await stat(realFilePath);
-          if (!fileInfo.isFile()) throw new Error("Not a file");
-          const content = await readFile(realFilePath);
-          const extension = extname(realFilePath).toLowerCase();
-          response.writeHead(200, {
-            "Content-Type": mimeTypes[extension] ?? "application/octet-stream",
-            "Cache-Control": "no-store",
-            "Access-Control-Allow-Origin": "*",
-          });
-          response.end(content);
-        } catch {
-          sendJson(response, 404, { error: "扩展文件不存在" });
-        }
+        await serveInstalledExtensionFile(
+          response,
+          dataFilePath,
+          extensionId,
+          decodedParts,
+        );
         return;
       }
 
@@ -2616,6 +2789,46 @@ export function startRengeServer(options = {}) {
   const dataFilePath = resolve(dataDir, appDataFileName);
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+
+    if (url.pathname === "/csrf-token") {
+      if (request.method !== "GET") {
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+      }
+      sendJson(response, 200, { token: "renge-local-extension" });
+      return;
+    }
+
+    if (tavernCompatModulePaths.has(url.pathname)) {
+      if (request.method !== "GET") {
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+      }
+      sendTavernCompatModule(response);
+      return;
+    }
+
+    if (url.pathname.startsWith("/scripts/extensions/third-party/")) {
+      if (request.method !== "GET") {
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+      }
+      try {
+        const rest = url.pathname.slice("/scripts/extensions/third-party/".length);
+        const [rawId, ...rawFileParts] = rest.split("/");
+        const extensionId = decodeURIComponent(rawId || "");
+        const decodedParts = rawFileParts.map((part) => decodeURIComponent(part));
+        await serveInstalledExtensionFile(response, dataFilePath, extensionId, decodedParts);
+      } catch {
+        sendJson(response, 400, { error: "非法扩展文件路径" });
+      }
+      return;
+    }
+
+    if (url.pathname.startsWith("/scripts/extensions/")) {
+      sendJson(response, 404, { error: "扩展资源不存在" });
+      return;
+    }
 
     if (url.pathname.startsWith("/api/")) {
       await handleApi(request, response, url.pathname, dataFilePath);

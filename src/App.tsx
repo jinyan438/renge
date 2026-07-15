@@ -132,6 +132,7 @@ import {
   type TavernScript,
 } from "./tavernScriptUtils";
 import {
+  getTavernFontAwesomeCss,
   TAVERN_EVENTS,
   TavernScriptRuntime,
   type TavernRuntimeButton,
@@ -304,6 +305,7 @@ type ChatSession = {
   roleplayCharacterCardId?: string;
   roleplayGreetingIndex?: number;
   scriptVariables: Record<string, unknown>;
+  tavernMetadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
 };
@@ -1453,6 +1455,7 @@ function createChatSession(
     heartbeat: createDefaultHeartbeatConfig(),
     memoryPersonaIds: [],
     scriptVariables: {},
+    tavernMetadata: {},
     ...(roleplay
       ? {
           roleplayCharacterCardId: roleplay.characterCardId,
@@ -1492,6 +1495,7 @@ function normalizeChatSession(rawSession: Partial<ChatSession>): ChatSession {
         )
       : [],
     scriptVariables: normalizeTavernVariables(rawSession.scriptVariables),
+    tavernMetadata: normalizeTavernVariables(rawSession.tavernMetadata),
     ...(typeof rawSession.roleplayCharacterCardId === "string" &&
     rawSession.roleplayCharacterCardId.trim()
       ? {
@@ -5171,13 +5175,44 @@ function createTavernExtensionEventBus() {
     for (const callback of callbacks) await callback(...args);
     return callbacks.length > 0;
   };
+  const clear = () => handlers.clear();
   return {
     on,
     once,
     off,
     removeListener: off,
     emit,
+    clear,
   };
+}
+
+function createTavernExtensionHooks() {
+  const filters = new Map<string, Set<(value: unknown, ...args: unknown[]) => unknown>>();
+  const addFilter = (filterName: unknown, callback: unknown) => {
+    if (typeof callback !== "function") return callback;
+    const name = String(filterName);
+    const callbacks = filters.get(name) ?? new Set();
+    callbacks.add(callback as (value: unknown, ...args: unknown[]) => unknown);
+    filters.set(name, callbacks);
+    return callback;
+  };
+  const removeFilter = (filterName: unknown, callback: unknown) => {
+    const callbacks = filters.get(String(filterName));
+    if (!callbacks || typeof callback !== "function") return false;
+    const removed = callbacks.delete(callback as (value: unknown, ...args: unknown[]) => unknown);
+    if (callbacks.size === 0) filters.delete(String(filterName));
+    return removed;
+  };
+  const applyFilters = async (filterName: unknown, value: unknown, ...args: unknown[]) => {
+    let current = value;
+    for (const callback of Array.from(filters.get(String(filterName)) ?? [])) {
+      const next = await callback(current, ...args);
+      if (next !== undefined) current = next;
+    }
+    return current;
+  };
+  const clear = () => filters.clear();
+  return { addFilter, removeFilter, applyFilters, clear };
 }
 
 function getExtensionAssetUrl(extension: InstalledExtension, filePath: string) {
@@ -6964,6 +6999,12 @@ export function App() {
   const tavernScriptsRef = useRef<TavernScript[]>(tavernScripts);
   const tavernGlobalVariablesRef = useRef<Record<string, unknown>>(tavernGlobalVariables);
   const tavernExtensionEventBusRef = useRef(createTavernExtensionEventBus());
+  const tavernExtensionHooksRef = useRef(createTavernExtensionHooks());
+
+  const emitTavernEvent = (eventName: unknown, ...args: unknown[]) => {
+    void tavernScriptRuntimeRef.current?.emit(String(eventName), ...args);
+    void tavernExtensionEventBusRef.current.emit(eventName, ...args);
+  };
 
   const commitChatMessages: Dispatch<SetStateAction<ChatMessage[]>> = (update) => {
     const nextMessages =
@@ -6979,6 +7020,11 @@ export function App() {
   useEffect(() => {
     activeChatSessionIdRef.current = activeChatSessionId;
   }, [activeChatSessionId]);
+
+  useEffect(() => {
+    if (!appDataLoaded || !activeChatSessionId) return;
+    emitTavernEvent(TAVERN_EVENTS.CHAT_CHANGED, activeChatSessionId);
+  }, [activeChatSessionId, appDataLoaded]);
 
   useEffect(() => {
     chatMessagesRef.current = chatMessages;
@@ -7040,9 +7086,9 @@ export function App() {
       window.setTimeout(() => {
         const index = chatMessagesRef.current.findIndex((candidate) => candidate.id === message.id);
         if (index < 0) return;
-        void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_RECEIVED, index);
-        void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_RENDERED, index);
-        void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.CHARACTER_MESSAGE_RENDERED, index);
+        emitTavernEvent(TAVERN_EVENTS.MESSAGE_RECEIVED, index);
+        emitTavernEvent(TAVERN_EVENTS.MESSAGE_RENDERED, index);
+        emitTavernEvent(TAVERN_EVENTS.CHARACTER_MESSAGE_RENDERED, index);
       }, 0);
       return { messageId: message.id };
     };
@@ -7396,7 +7442,7 @@ export function App() {
     const controller = new AbortController();
     activeChatAbortControllerRef.current = controller;
     setChatGenerationState("running");
-    void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.GENERATION_STARTED);
+    emitTavernEvent(TAVERN_EVENTS.GENERATION_STARTED);
     return controller;
   };
 
@@ -7404,7 +7450,7 @@ export function App() {
     if (activeChatAbortControllerRef.current !== controller) return;
     activeChatAbortControllerRef.current = null;
     setChatGenerationState("idle");
-    void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.GENERATION_ENDED);
+    emitTavernEvent(TAVERN_EVENTS.GENERATION_ENDED);
   };
 
   const stopChatGeneration = () => {
@@ -9361,6 +9407,13 @@ export function App() {
       event_types?: Record<string, string>;
       extension_settings?: Record<string, unknown>;
       saveSettingsDebounced?: () => void;
+      saveChatDebounced?: () => void;
+      getRequestHeaders?: () => Record<string, string>;
+      hooks?: ReturnType<typeof createTavernExtensionHooks>;
+      world_names?: string[];
+      worldNames?: string[];
+      world_info?: Record<string, unknown>;
+      world_info_data?: Record<string, unknown>;
       __rengeTavernCompat?: Record<string, unknown>;
     };
     try {
@@ -9371,7 +9424,71 @@ export function App() {
     }
 
     const eventBus = tavernExtensionEventBusRef.current;
+    const hooks = tavernExtensionHooksRef.current;
+    const fontAwesomeStyle = document.createElement("style");
+    fontAwesomeStyle.dataset.rengeExtensionCompat = "fontawesome";
+    fontAwesomeStyle.textContent = getTavernFontAwesomeCss(window.location.href);
+    document.head.appendChild(fontAwesomeStyle);
+
+    let compatibilityHost = document.getElementById("renge-tavern-extension-host");
+    const createdCompatibilityHost = !compatibilityHost;
+    if (!compatibilityHost) {
+      compatibilityHost = document.createElement("div");
+      compatibilityHost.id = "renge-tavern-extension-host";
+      compatibilityHost.setAttribute("aria-label", "酒馆扩展入口");
+      compatibilityHost.innerHTML =
+        '<div id="top-settings-holder"><div id="extensionsMenu"></div></div>';
+      document.body.appendChild(compatibilityHost);
+    }
+    const worldNames: string[] = [];
+    const getAvailableWorldBooks = () => {
+      const session = chatSessionsRef.current.find(
+        (item) => item.id === activeChatSessionIdRef.current,
+      );
+      const card = session?.roleplayCharacterCardId
+        ? characterCardsRef.current.find(
+            (item) => item.id === session.roleplayCharacterCardId,
+          )
+        : null;
+      const characterBook = card
+        ? resolveCharacterWorldBook(card, worldBooksRef.current)
+        : null;
+      return characterBook
+        ? [
+            characterBook,
+            ...worldBooksRef.current.filter(
+              (book) => book.id !== characterBook.id && book.name !== characterBook.name,
+            ),
+          ]
+        : worldBooksRef.current;
+    };
+    const toTavernWorldInfo = (book: WorldBook) => ({
+      name: book.name,
+      description: book.description,
+      entries: book.entries.map((entry) => ({
+        ...entry,
+        key: [...entry.keys],
+        keysecondary: [...entry.secondaryKeys],
+        disable: !entry.enabled,
+      })),
+    });
+    const getWorldInfo = async (name: unknown) => {
+      const targetName = String(name ?? "").trim();
+      const book = getAvailableWorldBooks().find(
+        (candidate) => candidate.name === targetName || candidate.id === targetName,
+      );
+      return book ? toTavernWorldInfo(book) : null;
+    };
+    const worldInfoData: Record<string, unknown> = {};
+    const loadWorldInfo = async (name: unknown) => {
+      const loaded = await getWorldInfo(name);
+      Object.keys(worldInfoData).forEach((key) => delete worldInfoData[key]);
+      if (loaded) Object.assign(worldInfoData, loaded);
+      return loaded;
+    };
     const getContext = () => {
+      const currentWorldNames = getAvailableWorldBooks().map((book) => book.name);
+      worldNames.splice(0, worldNames.length, ...currentWorldNames);
       const session = chatSessionsRef.current.find(
         (item) => item.id === activeChatSessionIdRef.current,
       );
@@ -9385,7 +9502,23 @@ export function App() {
       );
       const userName = userProfileRef.current.nickname.trim() || "User";
       const characterName = card?.name || persona?.name || "Assistant";
+      const activeCharacterIndex = card
+        ? characterCardsRef.current.findIndex((candidate) => candidate.id === card.id)
+        : -1;
+      const characters = characterCardsRef.current.map((candidate) => ({
+        name: candidate.name,
+        description: candidate.description,
+        personality: candidate.personality,
+        scenario: candidate.scenario,
+        avatar: candidate.avatarDataUrl,
+        data: candidate,
+      }));
+      const chatMetadata = session?.tavernMetadata ?? {};
+      if (session && typeof chatMetadata.file_name !== "string") {
+        chatMetadata.file_name = session.id;
+      }
       const messages = chatMessagesRef.current.map((message, index) => ({
+        ...(message.extra ?? {}),
         message_id: index,
         mesid: index,
         name: message.role === "user" ? userName : characterName,
@@ -9394,19 +9527,117 @@ export function App() {
         is_system: false,
         mes: message.content,
         message: message.content,
+        content: message.content,
         extra: message.extra ?? {},
+        swipe_id: 0,
+        swipes: [message.content],
         variables: [message.variables ?? {}],
       }));
+      const saveChat = async () => {
+        const reservedKeys = new Set([
+          "message_id",
+          "mesid",
+          "name",
+          "role",
+          "is_user",
+          "is_system",
+          "mes",
+          "message",
+          "content",
+          "extra",
+          "swipe_id",
+          "swipes",
+          "variables",
+        ]);
+        const nextMessages = chatMessagesRef.current.map((message, index) => {
+          const tavernMessage = messages[index];
+          if (!tavernMessage) return message;
+          const contentCandidates = [
+            tavernMessage.mes,
+            tavernMessage.message,
+            tavernMessage.content,
+            Array.isArray(tavernMessage.swipes)
+              ? tavernMessage.swipes[Number(tavernMessage.swipe_id) || 0]
+              : undefined,
+          ].filter((value): value is string => typeof value === "string");
+          const nextContent =
+            contentCandidates.find((value) => value !== message.content) ??
+            contentCandidates[0] ??
+            message.content;
+          const nextExtra = {
+            ...(message.extra ?? {}),
+            ...(isObjectRecord(tavernMessage.extra) ? tavernMessage.extra : {}),
+          };
+          Object.entries(tavernMessage).forEach(([key, value]) => {
+            if (!reservedKeys.has(key)) nextExtra[key] = value;
+          });
+          const variableValue = Array.isArray(tavernMessage.variables)
+            ? tavernMessage.variables[0]
+            : tavernMessage.variables;
+          return {
+            ...message,
+            content: nextContent,
+            role: tavernMessage.is_user
+              ? ("user" as const)
+              : tavernMessage.role === "user" || tavernMessage.role === "assistant"
+                ? tavernMessage.role
+                : message.role,
+            extra: nextExtra,
+            variables: isObjectRecord(variableValue)
+              ? normalizeTavernVariables(variableValue)
+              : message.variables,
+          };
+        });
+        commitChatMessages(nextMessages);
+        if (session) {
+          setChatSessions((current) =>
+            current.map((candidate) =>
+              candidate.id === session.id
+                ? {
+                    ...candidate,
+                    messages: nextMessages,
+                    tavernMetadata: normalizeTavernVariables(chatMetadata),
+                    updatedAt: new Date().toISOString(),
+                  }
+                : candidate,
+            ),
+          );
+        }
+        return true;
+      };
+      const generateRaw = (config?: unknown) => {
+        const generator = isObjectRecord(host.TavernHelper)
+          ? host.TavernHelper.generateRaw ?? host.TavernHelper.generate
+          : undefined;
+        if (typeof generator !== "function") {
+          return Promise.reject(new Error("Renge 会话生成接口尚未初始化。"));
+        }
+        return generator(config);
+      };
       return {
         chat: messages,
         chatId: session?.id ?? activeChatSessionIdRef.current,
-        characterId: card?.id,
+        chatMetadata,
+        characterId: activeCharacterIndex >= 0 ? activeCharacterIndex : undefined,
+        characters,
+        groups: [],
+        extensionSettings: host.extension_settings,
         name1: userName,
         name2: characterName,
+        max_response_length: 8192,
+        max_length: 8192,
+        amount_gen: 8192,
         eventSource: eventBus,
         event_types: host.event_types,
-        saveChat: async () => true,
-        getRequestHeaders: () => ({ "Content-Type": "application/json" }),
+        saveChat,
+        saveChatDebounced: () => host.saveChatDebounced?.(),
+        saveSettingsDebounced: () => host.saveSettingsDebounced?.(),
+        getRequestHeaders: () => host.getRequestHeaders?.() ?? { "Content-Type": "application/json" },
+        getWorldInfo,
+        loadWorldInfo,
+        generate: generateRaw,
+        generateRaw,
+        is_generate_in_progress: Boolean(activeChatAbortControllerRef.current),
       };
     };
     const getChatMessages = () => getContext().chat;
@@ -9426,30 +9657,46 @@ export function App() {
       };
     };
     const eventTypes = {
+      ...TAVERN_EVENTS,
       APP_READY: "app_ready",
-      CHAT_CHANGED: TAVERN_EVENTS.CHAT_CHANGED,
-      MESSAGE_SENT: TAVERN_EVENTS.MESSAGE_SENT,
-      MESSAGE_RECEIVED: TAVERN_EVENTS.MESSAGE_RECEIVED,
-      MESSAGE_RENDERED: TAVERN_EVENTS.MESSAGE_RENDERED,
-      MESSAGE_DELETED: TAVERN_EVENTS.MESSAGE_DELETED,
-      MESSAGE_EDITED: TAVERN_EVENTS.MESSAGE_EDITED,
-      GENERATION_STARTED: TAVERN_EVENTS.GENERATION_STARTED,
-      GENERATION_ENDED: TAVERN_EVENTS.GENERATION_ENDED,
       EXTENSION_LOADED: "extension_loaded",
       EXTENSION_UNLOADED: "extension_unloaded",
     };
     host.eventSource = eventBus;
     host.event_types = eventTypes;
+    host.hooks = hooks;
     const tavernHelper = isObjectRecord(host.TavernHelper) ? host.TavernHelper : {};
     Object.assign(tavernHelper, {
       getContext,
       getChatMessages,
       getVariables,
       getAllVariables: getVariables,
+      getInput: () => chatInputRef.current?.value ?? "",
+      setInput: (value: unknown) => {
+        const text = String(value ?? "");
+        setChatInput(text);
+        requestAnimationFrame(() => chatInputRef.current?.focus());
+        return text;
+      },
+      appendInput: (value: unknown) => {
+        const text = `${chatInputRef.current?.value ?? ""}${String(value ?? "")}`;
+        setChatInput(text);
+        requestAnimationFrame(() => chatInputRef.current?.focus());
+        return text;
+      },
+      sendMessage: (value?: unknown) =>
+        sendChatMessageRef.current(
+          value === undefined ? chatInputRef.current?.value ?? "" : String(value ?? ""),
+        ),
+      getCurrentMessageId: () => chatMessagesRef.current.length - 1,
+      getLastMessageId: () => chatMessagesRef.current.length - 1,
       eventOn: eventBus.on,
       eventOnce: eventBus.once,
       eventEmit: eventBus.emit,
       eventRemoveListener: eventBus.off,
+      addFilter: hooks.addFilter,
+      removeFilter: hooks.removeFilter,
+      applyFilters: hooks.applyFilters,
     });
     host.TavernHelper = tavernHelper;
     host.tavernHelper = tavernHelper;
@@ -9459,6 +9706,8 @@ export function App() {
       ...(isObjectRecord(host.SillyTavern) ? host.SillyTavern : {}),
       version: "1.12.0-renge",
       getContext,
+      getCurrentChatId: () => activeChatSessionIdRef.current,
+      saveChat: () => getContext().saveChat(),
       eventSource: eventBus,
       event_types: eventTypes,
     };
@@ -9478,6 +9727,49 @@ export function App() {
         );
       } catch {}
     };
+    let saveChatTimer: number | undefined;
+    host.saveChatDebounced = () => {
+      window.clearTimeout(saveChatTimer);
+      saveChatTimer = window.setTimeout(() => {
+        void getContext().saveChat();
+      }, 250);
+    };
+    host.getRequestHeaders = () => ({
+      "Content-Type": "application/json",
+      "X-CSRF-Token": "renge-local-extension",
+    });
+    worldNames.splice(0, worldNames.length, ...getAvailableWorldBooks().map((book) => book.name));
+    host.world_names = worldNames;
+    host.worldNames = worldNames;
+    host.world_info_data = worldInfoData;
+    host.world_info = {
+      worldInfoData,
+      world_info: worldInfoData,
+      loadWorldInfoData: loadWorldInfo,
+    };
+    const globalContextProperties = ["chat", "characters", "this_chid", "name1", "name2"] as const;
+    const previousContextDescriptors = new Map(
+      globalContextProperties.map((property) => [
+        property,
+        Object.getOwnPropertyDescriptor(host, property),
+      ]),
+    );
+    const contextPropertyGetters: Record<(typeof globalContextProperties)[number], () => unknown> = {
+      chat: () => getContext().chat,
+      characters: () => getContext().characters,
+      this_chid: () => getContext().characterId,
+      name1: () => getContext().name1,
+      name2: () => getContext().name2,
+    };
+    globalContextProperties.forEach((property) => {
+      const descriptor = Object.getOwnPropertyDescriptor(host, property);
+      if (descriptor && descriptor.configurable === false) return;
+      Object.defineProperty(host, property, {
+        configurable: true,
+        enumerable: true,
+        get: contextPropertyGetters[property],
+      });
+    });
     host.__rengeTavernCompat = {
       getContext,
       getChatMessages,
@@ -9486,12 +9778,62 @@ export function App() {
       event_types: eventTypes,
       extension_settings: host.extension_settings,
       saveSettingsDebounced: host.saveSettingsDebounced,
+      saveChatDebounced: host.saveChatDebounced,
+      getRequestHeaders: host.getRequestHeaders,
+      getWorldInfo,
+      loadWorldInfo,
+      world_info: host.world_info,
+      world_info_data: worldInfoData,
+      world_names: worldNames,
+      hooks,
       TavernHelper: tavernHelper,
       SillyTavern: host.SillyTavern,
       $: host.$,
       jQuery: host.jQuery,
       _: host._,
     };
+
+    const originalWindowFetch = window.fetch;
+    const originalSetTimeout = window.setTimeout;
+    const originalSetInterval = window.setInterval;
+    const trackedTimeouts = new Set<number>();
+    const trackedIntervals = new Set<number>();
+    const isExtensionCall = () =>
+      /\/(?:api\/extensions|scripts\/extensions\/third-party)\//.test(
+        String(new Error().stack ?? ""),
+      );
+    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      const timerId = originalSetTimeout(handler, timeout, ...args);
+      if (isExtensionCall()) trackedTimeouts.add(timerId);
+      return timerId;
+    }) as typeof window.setTimeout;
+    window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      const timerId = originalSetInterval(handler, timeout, ...args);
+      if (isExtensionCall()) trackedIntervals.add(timerId);
+      return timerId;
+    }) as typeof window.setInterval;
+
+    const eventTargetPrototype = window.EventTarget.prototype;
+    const originalAddEventListener = eventTargetPrototype.addEventListener;
+    const trackedEventListeners: Array<{
+      target: EventTarget;
+      type: string;
+      listener: EventListenerOrEventListenerObject;
+      options?: boolean | AddEventListenerOptions;
+    }> = [];
+    eventTargetPrototype.addEventListener = function (
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: boolean | AddEventListenerOptions,
+    ) {
+      if (listener && isExtensionCall()) {
+        trackedEventListeners.push({ target: this, type, listener, options });
+      }
+      return originalAddEventListener.call(this, type, listener, options);
+    };
+    const existingBodyChildren = new Set(Array.from(document.body.children));
+    const existingHeadChildren = new Set(Array.from(document.head.children));
+    const existingWindowGlobals = new Set(Object.getOwnPropertyNames(window));
 
     const runtimeNodes: Array<HTMLScriptElement | HTMLLinkElement> = [];
     let cancelled = false;
@@ -9522,6 +9864,28 @@ export function App() {
       if (cancelled) return;
       setExtensionRuntimeStates((current) => ({ ...current, [extensionId]: state }));
     };
+    const reportExtensionRuntimeError = (detail: unknown) => {
+      const errorText =
+        detail instanceof Error
+          ? `${detail.message}\n${detail.stack ?? ""}`
+          : String(detail ?? "");
+      const extension = enabledExtensions.find((candidate) =>
+        errorText.includes(candidate.assetBaseUrl),
+      );
+      if (!extension) return;
+      updateRuntimeState(extension.id, {
+        status: "error",
+        message: errorText.split("\n").find(Boolean)?.slice(0, 240) || "扩展运行失败",
+      });
+    };
+    const handleExtensionWindowError = (event: ErrorEvent) => {
+      reportExtensionRuntimeError(event.error ?? `${event.message}\n${event.filename}`);
+    };
+    const handleExtensionUnhandledRejection = (event: PromiseRejectionEvent) => {
+      reportExtensionRuntimeError(event.reason);
+    };
+    window.addEventListener("error", handleExtensionWindowError);
+    window.addEventListener("unhandledrejection", handleExtensionUnhandledRejection);
     const appendStyle = (extension: InstalledExtension, filePath: string) =>
       new Promise<void>((resolvePromise, rejectPromise) => {
         const link = document.createElement("link");
@@ -9574,6 +9938,10 @@ export function App() {
             message: "酒馆 Web 兼容运行中",
           });
           await eventBus.emit("extension_loaded", extension.id);
+          await eventBus.emit(
+            TAVERN_EVENTS.CHAT_CHANGED,
+            activeChatSessionIdRef.current,
+          );
         } catch (error) {
           if (cancelled) return;
           updateRuntimeState(extension.id, {
@@ -9598,9 +9966,59 @@ export function App() {
           );
           void eventBus.emit("extension_unloaded", extension.id);
         });
+      eventBus.clear();
+      hooks.clear();
       runtimeNodes.forEach((node) => node.remove());
+      trackedTimeouts.forEach((timerId) => window.clearTimeout(timerId));
+      trackedIntervals.forEach((timerId) => window.clearInterval(timerId));
+      trackedEventListeners.forEach(({ target, type, listener, options }) => {
+        target.removeEventListener(type, listener, options);
+      });
+      if (window.setTimeout !== originalSetTimeout) window.setTimeout = originalSetTimeout;
+      if (window.setInterval !== originalSetInterval) window.setInterval = originalSetInterval;
+      if (eventTargetPrototype.addEventListener !== originalAddEventListener) {
+        eventTargetPrototype.addEventListener = originalAddEventListener;
+      }
+      if (window.fetch !== originalWindowFetch) window.fetch = originalWindowFetch;
+      window.removeEventListener("error", handleExtensionWindowError);
+      window.removeEventListener("unhandledrejection", handleExtensionUnhandledRejection);
+      Array.from(document.body.children).forEach((node) => {
+        if (!existingBodyChildren.has(node)) node.remove();
+      });
+      Array.from(document.head.children).forEach((node) => {
+        if (!existingHeadChildren.has(node)) node.remove();
+      });
+      Object.getOwnPropertyNames(window).forEach((property) => {
+        if (existingWindowGlobals.has(property)) return;
+        const descriptor = Object.getOwnPropertyDescriptor(window, property);
+        if (descriptor?.configurable) delete (window as unknown as Record<string, unknown>)[property];
+      });
+      globalContextProperties.forEach((property) => {
+        const previous = previousContextDescriptors.get(property);
+        if (previous) Object.defineProperty(host, property, previous);
+        else delete (host as unknown as Record<string, unknown>)[property];
+      });
+      window.clearTimeout(saveChatTimer);
+      fontAwesomeStyle.remove();
+      if (createdCompatibilityHost) compatibilityHost?.remove();
     };
   }, [appDataLoaded, extensions]);
+
+  const applyTavernExtensionPromptFilters = async (messages: ChatApiMessage[]) => {
+    const filtered = await tavernExtensionHooksRef.current.applyFilters(
+      TAVERN_EVENTS.CHAT_COMPLETION_PROMPT_READY,
+      messages,
+    );
+    const nextMessages = Array.isArray(filtered)
+      ? (filtered as ChatApiMessage[])
+      : messages;
+    const eventData = { chat: nextMessages, prompt: [] as ChatApiMessage[] };
+    await tavernExtensionEventBusRef.current.emit(
+      TAVERN_EVENTS.CHAT_COMPLETION_PROMPT_READY,
+      eventData,
+    );
+    return Array.isArray(eventData.chat) ? eventData.chat : nextMessages;
+  };
 
   const getPromptTemplateWorldBooks = (character: CharacterCard | null) => {
     const globalBooks = worldBooksRef.current;
@@ -10233,9 +10651,9 @@ export function App() {
     window.setTimeout(() => {
       const index = chatMessagesRef.current.findIndex((message) => message.id === messageId);
       if (index < 0) return;
-      void tavernScriptRuntimeRef.current?.emit(eventName, index);
-      void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_RENDERED, index);
-      void tavernScriptRuntimeRef.current?.emit(
+      emitTavernEvent(eventName, index);
+      emitTavernEvent(TAVERN_EVENTS.MESSAGE_RENDERED, index);
+      emitTavernEvent(
         eventName === TAVERN_EVENTS.MESSAGE_SENT
           ? TAVERN_EVENTS.USER_MESSAGE_RENDERED
           : TAVERN_EVENTS.CHARACTER_MESSAGE_RENDERED,
@@ -10314,9 +10732,9 @@ export function App() {
           (message) => message.id === greetingMessageId,
         );
         if (messageIndex < 0) return;
-        void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_SWIPED, messageIndex);
-        void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_RENDERED, messageIndex);
-        void tavernScriptRuntimeRef.current?.emit(
+        emitTavernEvent(TAVERN_EVENTS.MESSAGE_SWIPED, messageIndex);
+        emitTavernEvent(TAVERN_EVENTS.MESSAGE_RENDERED, messageIndex);
+        emitTavernEvent(
           TAVERN_EVENTS.CHARACTER_MESSAGE_RENDERED,
           messageIndex,
         );
@@ -11041,8 +11459,8 @@ export function App() {
     setChatMessageMenu(null);
     setChatStatus({ status: "idle", message: "消息已删除。" });
     if (messageIndex >= 0) {
-      void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_DELETED, messageIndex);
-      void tavernScriptRuntimeRef.current?.emit(
+      emitTavernEvent(TAVERN_EVENTS.MESSAGE_DELETED, messageIndex);
+      emitTavernEvent(
         TAVERN_EVENTS.CHAT_CHANGED,
         activeChatSessionIdRef.current,
       );
@@ -13319,7 +13737,7 @@ export function App() {
       ]
         .filter(Boolean)
         .join("\n\n");
-      const apiMessages = await applyPromptTemplateToApiMessages(
+      const preparedApiMessages = await applyPromptTemplateToApiMessages(
         applyPromptRegexToApiMessages(
           composeChatApiMessages(
             systemPrompt,
@@ -13350,6 +13768,7 @@ export function App() {
         responderName,
         requestModelId,
       );
+      const apiMessages = await applyTavernExtensionPromptFilters(preparedApiMessages);
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);
@@ -13952,10 +14371,31 @@ export function App() {
     sourceFrame?: HTMLIFrameElement,
   ) => {
     const normalizedConfig = isObjectRecord(config) ? config : { user_input: config };
+    const rawPromptMessages = Array.isArray(normalizedConfig.prompt)
+      ? normalizedConfig.prompt
+          .map((value) => {
+            if (!isObjectRecord(value)) return null;
+            const role =
+              value.role === "system" || value.role === "assistant" || value.role === "user"
+                ? value.role
+                : "user";
+            const content = value.content ?? value.message ?? value.mes;
+            if (typeof content !== "string" && !Array.isArray(content)) return null;
+            return { ...value, role, content } as ChatApiMessage;
+          })
+          .filter((value): value is ChatApiMessage => Boolean(value))
+      : [];
+    const promptUserInput = [...rawPromptMessages]
+      .reverse()
+      .map((message) => getChatApiMessageText(message))
+      .find((value) => value.trim());
     const userInput = String(
-      normalizedConfig.user_input ?? normalizedConfig.prompt ?? chatInputRef.current?.value ?? "",
+      normalizedConfig.user_input ??
+        (rawPromptMessages.length > 0 ? promptUserInput : normalizedConfig.prompt) ??
+        chatInputRef.current?.value ??
+        "",
     );
-    if (!userInput.trim()) {
+    if (!userInput.trim() && rawPromptMessages.length === 0) {
       await sendChatMessageRef.current();
       return "";
     }
@@ -13969,6 +14409,12 @@ export function App() {
     }
 
     const disableExtras = normalizedConfig.disable_extras === true;
+    const shouldStream =
+      typeof normalizedConfig.should_stream === "boolean"
+        ? normalizedConfig.should_stream
+        : typeof normalizedConfig.stream === "boolean"
+          ? normalizedConfig.stream
+          : chatStreamEnabled;
     const onStream =
       typeof normalizedConfig.on_stream === "function"
         ? (normalizedConfig.on_stream as (delta: string, fullText: string) => unknown)
@@ -14059,28 +14505,35 @@ export function App() {
         .filter(Boolean)
         .join("\n\n");
       const promptTemplateCharacter = disableExtras ? null : responseCharacter;
-      const apiMessages = await applyPromptTemplateToApiMessages(
-        applyPromptRegexToApiMessages(
-          composeChatApiMessages(
-            systemPrompt,
-            [{ role: "user", content: userInput }],
-            !disableExtras && chatMode === "persona" ? chatPersona : undefined,
-            promptTemplateCharacter
-              ? {
-                  name: promptTemplateCharacter.name,
-                  description: roleplaySystemPrompt,
-                }
-              : disableExtras
-                ? { name: responseName, description: "" }
-                : undefined,
-          ),
-          responseName,
-        ),
-        rawSourceMessages,
-        promptTemplateCharacter,
-        responseName,
-        requestModelId,
-      );
+      const preparedApiMessages =
+        rawPromptMessages.length > 0
+          ? rawPromptMessages
+          : await applyPromptTemplateToApiMessages(
+              applyPromptRegexToApiMessages(
+                composeChatApiMessages(
+                  systemPrompt,
+                  [{ role: "user", content: userInput }],
+                  !disableExtras && chatMode === "persona" ? chatPersona : undefined,
+                  promptTemplateCharacter
+                    ? {
+                        name: promptTemplateCharacter.name,
+                        description: roleplaySystemPrompt,
+                      }
+                    : disableExtras
+                      ? { name: responseName, description: "" }
+                      : undefined,
+                ),
+                responseName,
+              ),
+              rawSourceMessages,
+              promptTemplateCharacter,
+              responseName,
+              requestModelId,
+            );
+      const apiMessages =
+        normalizedConfig.quiet === true
+          ? preparedApiMessages
+          : await applyTavernExtensionPromptFilters(preparedApiMessages);
       throwIfChatAborted(abortSignal);
 
       const response = await fetch("/api/chat/completions", {
@@ -14097,13 +14550,24 @@ export function App() {
             ...(activeChatPresetRequestParameters ?? {
               temperature: chatMode === "persona" ? 0.72 : 0.6,
             }),
+            ...(Number.isFinite(Number(normalizedConfig.max_tokens ?? normalizedConfig.length))
+              ? {
+                  max_tokens: Math.max(
+                    1,
+                    Math.floor(Number(normalizedConfig.max_tokens ?? normalizedConfig.length)),
+                  ),
+                }
+              : {}),
+            ...(Number.isFinite(Number(normalizedConfig.temperature))
+              ? { temperature: Number(normalizedConfig.temperature) }
+              : {}),
             ...buildProviderReasoningRequest(chatProvider),
-            stream: chatStreamEnabled,
+            stream: shouldStream,
           },
         }),
       });
 
-      if (chatStreamEnabled) {
+      if (shouldStream) {
         const streamResult = await readChatStream(
           response,
           (delta) => {
@@ -14368,7 +14832,7 @@ export function App() {
       const responseCharacter =
         chatMode === "roleplay" ? activeSessionRoleplayCard ?? null : null;
       const responseName = responseCharacter?.name ?? chatPersona.name;
-      const apiMessages = await applyPromptTemplateToApiMessages(
+      const preparedApiMessages = await applyPromptTemplateToApiMessages(
         applyPromptRegexToApiMessages(
           composeChatApiMessages(
             systemPrompt,
@@ -14399,6 +14863,7 @@ export function App() {
         responseName,
         requestModelId,
       );
+      const apiMessages = await applyTavernExtensionPromptFilters(preparedApiMessages);
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);
@@ -14946,9 +15411,9 @@ export function App() {
     setEditingChatMessage(null);
     setChatStatus({ status: "success", message: "AI 消息已保存。" });
     if (messageIndex >= 0) {
-      void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_EDITED, messageIndex);
-      void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_UPDATED, messageIndex);
-      void tavernScriptRuntimeRef.current?.emit(
+      emitTavernEvent(TAVERN_EVENTS.MESSAGE_EDITED, messageIndex);
+      emitTavernEvent(TAVERN_EVENTS.MESSAGE_UPDATED, messageIndex);
+      emitTavernEvent(
         TAVERN_EVENTS.CHAT_CHANGED,
         activeChatSessionIdRef.current,
       );
@@ -14971,9 +15436,9 @@ export function App() {
     setEditingChatMessage(null);
     setChatStatus({ status: "success", message: "用户消息已保存，后续对话未改变。" });
     if (messageIndex >= 0) {
-      void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_EDITED, messageIndex);
-      void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_UPDATED, messageIndex);
-      void tavernScriptRuntimeRef.current?.emit(
+      emitTavernEvent(TAVERN_EVENTS.MESSAGE_EDITED, messageIndex);
+      emitTavernEvent(TAVERN_EVENTS.MESSAGE_UPDATED, messageIndex);
+      emitTavernEvent(
         TAVERN_EVENTS.CHAT_CHANGED,
         activeChatSessionIdRef.current,
       );
@@ -15010,8 +15475,8 @@ export function App() {
     setChatSender(requestSender);
     commitChatMessages(nextMessages);
     setEditingChatMessage(null);
-    void tavernScriptRuntimeRef.current?.emit(TAVERN_EVENTS.MESSAGE_EDITED, messageIndex);
-    void tavernScriptRuntimeRef.current?.emit(
+    emitTavernEvent(TAVERN_EVENTS.MESSAGE_EDITED, messageIndex);
+    emitTavernEvent(
       TAVERN_EVENTS.CHAT_CHANGED,
       activeChatSessionIdRef.current,
     );
@@ -20168,7 +20633,7 @@ export function App() {
             </div>
           </header>
 
-          <div className="chat-thread" onScroll={() => setChatMessageMenu(null)}>
+          <div id="chat-messages" className="chat-thread" onScroll={() => setChatMessageMenu(null)}>
             {visibleChatMessages.length === 0 ? (
               <div
                 className={`chat-empty ${
@@ -20305,9 +20770,16 @@ export function App() {
                       chatMode === "roleplay" && activeSessionRoleplayCard
                         ? activeSessionRoleplayCard.avatarDataUrl
                         : assistantPersona?.avatarImage ?? "";
+                    const messageIndex = chatMessages.findIndex(
+                      (candidate) => candidate.id === message.id,
+                    );
 
                     return (
-                      <article className="chat-message assistant" key={item.id}>
+                      <article
+                        className="chat-message assistant mes"
+                        key={item.id}
+                        {...{ mesid: messageIndex }}
+                      >
                         {item.showTime && (
                           <time className="chat-message-time">
                             {new Date(message.createdAt).toLocaleTimeString("zh-CN", {
@@ -20374,9 +20846,16 @@ export function App() {
                     : chatMode === "roleplay" && activeSessionRoleplayCard
                       ? activeSessionRoleplayCard.avatarDataUrl
                       : assistantPersona?.avatarImage ?? "";
+                const messageIndex = chatMessages.findIndex(
+                  (candidate) => candidate.id === message.id,
+                );
 
                 return (
-                  <article className={`chat-message ${message.role}`} key={id}>
+                  <article
+                    className={`chat-message mes ${message.role}`}
+                    key={id}
+                    {...{ mesid: messageIndex }}
+                  >
                     {showTime && (
                       <time className="chat-message-time">
                         {new Date(message.createdAt).toLocaleTimeString("zh-CN", {
@@ -20478,7 +20957,9 @@ export function App() {
                             {segmentIndex === 0 &&
                               message.role === "assistant" &&
                               renderChatReasoning(message.reasoning, id)}
-                            {renderChatContent(segment, id, message.id)}
+                            <div className="mes_text">
+                              {renderChatContent(segment, id, message.id)}
+                            </div>
                             {segmentIndex === 0 &&
                               renderChatAttachments(message.attachments ?? [])}
                             {showGreetingSwitch && (

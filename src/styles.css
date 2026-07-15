@@ -7341,6 +7341,88 @@ input[type="range"] {
     var(--color-canvas);
 }
 
+#renge-tavern-extension-host {
+  position: fixed;
+  right: 18px;
+  bottom: 88px;
+  z-index: 9500;
+  display: flex;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+#renge-tavern-extension-host #top-settings-holder,
+#renge-tavern-extension-host #extensionsMenu {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none;
+}
+
+#renge-tavern-extension-host #extensionsMenu:empty {
+  display: none;
+}
+
+#renge-tavern-extension-host .extension_container {
+  pointer-events: auto;
+}
+
+#renge-tavern-extension-host .extension_container > .list-group-item,
+#renge-tavern-extension-host .extension_container[role="button"] {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 42px;
+  padding: 9px 13px;
+  color: var(--color-text);
+  background: color-mix(in srgb, var(--color-surface) 92%, transparent);
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.24);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  cursor: pointer;
+  user-select: none;
+}
+
+#renge-tavern-extension-host .extension_container > .list-group-item:hover,
+#renge-tavern-extension-host .extension_container[role="button"]:hover {
+  color: var(--color-brand);
+  border-color: color-mix(in srgb, var(--color-brand) 55%, var(--color-border));
+}
+
+#renge-tavern-extension-host .extensionsMenuExtensionButton,
+#renge-tavern-extension-host [role="button"] > .fa-solid,
+#renge-tavern-extension-host [role="button"] > .fa-regular {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  min-height: 20px;
+  font-size: 18px;
+}
+
+@media (max-width: 720px) {
+  #renge-tavern-extension-host {
+    right: 10px;
+    bottom: 82px;
+  }
+
+  #renge-tavern-extension-host .extension_container > .list-group-item,
+  #renge-tavern-extension-host .extension_container[role="button"] {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 10px;
+    border-radius: 50%;
+  }
+
+  #renge-tavern-extension-host .extension_container > .list-group-item > span,
+  #renge-tavern-extension-host .extension_container[role="button"] > span {
+    display: none;
+  }
+}
+
 .extension-manager-header {
   display: flex;
   min-height: 112px;

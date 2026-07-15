@@ -151,6 +151,7 @@ const TAVERN_EVENTS = Object.freeze({
   PRESET_RENAMED_BEFORE: "preset_renamed_before",
   GENERATION_STARTED: "generation_started",
   GENERATION_ENDED: "generation_ended",
+  CHAT_COMPLETION_PROMPT_READY: "chat_completion_prompt_ready",
   STREAM_TOKEN_RECEIVED: "stream_token_received",
   VARIABLE_CHANGED: "variable_changed",
   APP_READY: "app_ready",
@@ -559,6 +560,10 @@ function buildLocalFontAwesomeCss(baseUrl: string) {
     (css, [source, assetUrl]) => css.replaceAll(source, new URL(assetUrl, baseUrl).href),
     withoutTrueTypeFallbacks,
   );
+}
+
+export function getTavernFontAwesomeCss(baseUrl = window.location.href) {
+  return buildLocalFontAwesomeCss(baseUrl);
 }
 
 function installLocalFontAwesomeShadowSupport(
