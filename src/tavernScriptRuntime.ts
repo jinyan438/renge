@@ -1972,8 +1972,11 @@ export class TavernScriptRuntime {
       }
     };
     const nativeSetTimeout = win.setTimeout.bind(win);
+    const nativeClearTimeout = win.clearTimeout.bind(win);
     const nativeSetInterval = win.setInterval.bind(win);
     const nativeRequestAnimationFrame = win.requestAnimationFrame?.bind(win);
+    const nativeCancelAnimationFrame = win.cancelAnimationFrame?.bind(win);
+    const animationFrameFallbacks = new Map<number, number>();
     win.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
       const ownerScriptId = this.currentScriptId;
       return nativeSetTimeout(
@@ -1999,10 +2002,37 @@ export class TavernScriptRuntime {
     if (nativeRequestAnimationFrame) {
       win.requestAnimationFrame = ((callback: FrameRequestCallback) => {
         const ownerScriptId = this.currentScriptId;
-        return nativeRequestAnimationFrame((time) =>
-          runWithScriptContext(ownerScriptId, () => callback(time)),
-        );
+        let completed = false;
+        let fallbackTimer = 0;
+        const frameId = nativeRequestAnimationFrame((time) => {
+          if (completed) return;
+          completed = true;
+          if (fallbackTimer) nativeClearTimeout(fallbackTimer);
+          animationFrameFallbacks.delete(frameId);
+          runWithScriptContext(ownerScriptId, () => callback(time));
+        });
+        // Chromium suspends requestAnimationFrame in the hidden Tavern runtime
+        // iframe. Many SillyTavern extensions use it to refresh parent-mounted
+        // panels after a database or variable update, so provide a timer-backed
+        // frame when the native callback cannot run.
+        fallbackTimer = nativeSetTimeout(() => {
+          if (completed) return;
+          completed = true;
+          animationFrameFallbacks.delete(frameId);
+          nativeCancelAnimationFrame?.(frameId);
+          runWithScriptContext(ownerScriptId, () => callback(win.performance.now()));
+        }, 120);
+        animationFrameFallbacks.set(frameId, fallbackTimer);
+        return frameId;
       }) as typeof win.requestAnimationFrame;
+      if (nativeCancelAnimationFrame) {
+        win.cancelAnimationFrame = ((frameId: number) => {
+          const fallbackTimer = animationFrameFallbacks.get(frameId);
+          if (fallbackTimer) nativeClearTimeout(fallbackTimer);
+          animationFrameFallbacks.delete(frameId);
+          nativeCancelAnimationFrame(frameId);
+        }) as typeof win.cancelAnimationFrame;
+      }
     }
     const eventTargetPrototype = win.EventTarget?.prototype;
     if (eventTargetPrototype) {
