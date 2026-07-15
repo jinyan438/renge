@@ -290,6 +290,7 @@ function installParentSideEffectTracker(
   const sourcePrefix = `renge-tavern-parent-${runtimeToken}`;
   const existingWindowGlobals = new Set(Object.getOwnPropertyNames(hostWindow));
   const existingDocumentGlobals = new Set(Object.getOwnPropertyNames(hostDocument));
+  const protectedAppRoot = hostDocument.getElementById("root");
   const baselineNodes = new WeakSet<Node>([
     hostDocument,
     hostDocument.documentElement,
@@ -313,7 +314,59 @@ function installParentSideEffectTracker(
 
   const isTavernCall = () => {
     const stack = String(new Error().stack ?? "");
-    return stack.includes(sourcePrefix) || /renge-tavern-script-/i.test(stack);
+    if (stack.includes(sourcePrefix) || /renge-tavern-script-/i.test(stack)) return true;
+    // Static and dynamic imports retain their CDN URL instead of Renge's sourceURL.
+    // Treat cross-origin renderer stacks as Tavern-owned while same-origin React
+    // work remains outside this lifecycle tracker.
+    const externalUrls = Array.from(stack.matchAll(/https?:\/\/[^\s)]+/g), (match) => match[0]);
+    return externalUrls.some((value) => {
+      try {
+        return new URL(value).origin !== hostWindow.location.origin;
+      } catch {
+        return false;
+      }
+    });
+  };
+
+  const isProtectedTree = (node: Node | null) =>
+    // Third-party scripts may own siblings of #root, never #root itself or any
+    // React-managed descendant/ancestor whose removal would blank the whole app.
+    Boolean(
+      protectedAppRoot &&
+        node &&
+        (node === protectedAppRoot ||
+          protectedAppRoot.contains(node) ||
+          (node instanceof hostGlobal.Element && node.contains(protectedAppRoot))),
+    );
+
+  const isProtectedParent = (node: Node) =>
+    Boolean(protectedAppRoot && (node === protectedAppRoot || protectedAppRoot.contains(node)));
+
+  const hasOwnedAncestor = (node: Node | null) => {
+    let cursor = node;
+    while (cursor) {
+      if (ownedNodes.has(cursor)) return true;
+      cursor = cursor.parentNode;
+    }
+    return false;
+  };
+
+  const trackOwnedTree = (node: Node) => {
+    if (node instanceof hostGlobal.DocumentFragment) {
+      Array.from(node.childNodes).forEach(trackOwnedTree);
+      return;
+    }
+    if (
+      node.ownerDocument !== hostDocument ||
+      baselineNodes.has(node) ||
+      isProtectedTree(node)
+    ) {
+      return;
+    }
+    ownedNodes.add(node);
+    if (node instanceof hostGlobal.Element) {
+      node.setAttribute("data-renge-tavern-parent-owner", runtimeToken);
+    }
   };
 
   const eventTargetPrototype = hostGlobal.EventTarget.prototype;
@@ -343,10 +396,10 @@ function installParentSideEffectTracker(
     if (
       active &&
       isTavernCall() &&
-      node.ownerDocument === hostDocument &&
-      (!baselineNodes.has(node) || ownedNodes.has(node))
+      !isProtectedParent(this) &&
+      !hasOwnedAncestor(this)
     ) {
-      ownedNodes.add(node);
+      trackOwnedTree(node);
       const scriptNode = node as unknown as HTMLScriptElement;
       if (
         node instanceof hostGlobal.HTMLScriptElement &&
@@ -366,6 +419,141 @@ function installParentSideEffectTracker(
       nodePrototype.appendChild = originalAppendChild;
     }
   });
+
+  const originalInsertBefore = nodePrototype.insertBefore;
+  const trackedInsertBefore = function <T extends Node>(
+    this: Node,
+    node: T,
+    child: Node | null,
+  ): T {
+    if (
+      active &&
+      isTavernCall() &&
+      !isProtectedParent(this) &&
+      !hasOwnedAncestor(this)
+    ) {
+      trackOwnedTree(node);
+    }
+    return originalInsertBefore.call(this, node, child) as T;
+  };
+  nodePrototype.insertBefore = trackedInsertBefore;
+  restoreCallbacks.push(() => {
+    if (nodePrototype.insertBefore === trackedInsertBefore) {
+      nodePrototype.insertBefore = originalInsertBefore;
+    }
+  });
+
+  const originalRemoveChild = nodePrototype.removeChild;
+  const trackedRemoveChild = function <T extends Node>(this: Node, child: T): T {
+    if (active && isTavernCall() && isProtectedTree(child)) return child;
+    const removed = originalRemoveChild.call(this, child) as T;
+    ownedNodes.delete(child);
+    return removed;
+  };
+  nodePrototype.removeChild = trackedRemoveChild;
+  restoreCallbacks.push(() => {
+    if (nodePrototype.removeChild === trackedRemoveChild) {
+      nodePrototype.removeChild = originalRemoveChild;
+    }
+  });
+
+  const originalReplaceChild = nodePrototype.replaceChild;
+  const trackedReplaceChild = function <T extends Node>(
+    this: Node,
+    node: Node,
+    child: T,
+  ): T {
+    if (active && isTavernCall()) {
+      if (isProtectedTree(child)) return child;
+      if (!isProtectedParent(this) && !hasOwnedAncestor(this)) trackOwnedTree(node);
+    }
+    const replaced = originalReplaceChild.call(this, node, child) as T;
+    ownedNodes.delete(child);
+    return replaced;
+  };
+  nodePrototype.replaceChild = trackedReplaceChild;
+  restoreCallbacks.push(() => {
+    if (nodePrototype.replaceChild === trackedReplaceChild) {
+      nodePrototype.replaceChild = originalReplaceChild;
+    }
+  });
+
+  const elementPrototype = hostGlobal.Element.prototype;
+  const originalRemove = elementPrototype.remove;
+  const trackedRemove = function (this: Element) {
+    if (active && isTavernCall() && isProtectedTree(this)) return;
+    const result = originalRemove.call(this);
+    ownedNodes.delete(this);
+    return result;
+  };
+  elementPrototype.remove = trackedRemove;
+  restoreCallbacks.push(() => {
+    if (elementPrototype.remove === trackedRemove) elementPrototype.remove = originalRemove;
+  });
+
+  const originalReplaceWith = elementPrototype.replaceWith;
+  const trackedReplaceWith = function (this: Element, ...nodes: Array<Node | string>) {
+    if (active && isTavernCall()) {
+      if (isProtectedTree(this)) return;
+      if (
+        !isProtectedParent(this.parentNode ?? hostDocument) &&
+        !hasOwnedAncestor(this.parentNode)
+      ) {
+        nodes.forEach((node) => {
+          if (node instanceof hostGlobal.Node) trackOwnedTree(node);
+        });
+      }
+    }
+    const result = originalReplaceWith.call(this, ...nodes);
+    ownedNodes.delete(this);
+    return result;
+  };
+  elementPrototype.replaceWith = trackedReplaceWith;
+  restoreCallbacks.push(() => {
+    if (elementPrototype.replaceWith === trackedReplaceWith) {
+      elementPrototype.replaceWith = originalReplaceWith;
+    }
+  });
+
+  const originalReplaceChildren = elementPrototype.replaceChildren;
+  const trackedReplaceChildren = function (this: Element, ...nodes: Array<Node | string>) {
+    if (active && isTavernCall()) {
+      if (isProtectedTree(this)) return;
+      if (!hasOwnedAncestor(this)) {
+        nodes.forEach((node) => {
+          if (node instanceof hostGlobal.Node) trackOwnedTree(node);
+        });
+      }
+    }
+    return originalReplaceChildren.call(this, ...nodes);
+  };
+  elementPrototype.replaceChildren = trackedReplaceChildren;
+  restoreCallbacks.push(() => {
+    if (elementPrototype.replaceChildren === trackedReplaceChildren) {
+      elementPrototype.replaceChildren = originalReplaceChildren;
+    }
+  });
+
+  const protectDestructiveSetter = (prototype: object, property: string) => {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, property);
+    if (!descriptor?.set) return;
+    const originalSetter = descriptor.set;
+    const guardedSetter = function (this: Node, value: unknown) {
+      if (active && isTavernCall() && isProtectedTree(this)) return;
+      originalSetter.call(this, value);
+    };
+    Object.defineProperty(prototype, property, {
+      ...descriptor,
+      set: guardedSetter,
+    });
+    restoreCallbacks.push(() => {
+      const current = Object.getOwnPropertyDescriptor(prototype, property);
+      if (current?.set === guardedSetter) Object.defineProperty(prototype, property, descriptor);
+    });
+  };
+  protectDestructiveSetter(nodePrototype, "textContent");
+  protectDestructiveSetter(elementPrototype, "innerHTML");
+  protectDestructiveSetter(elementPrototype, "outerHTML");
 
   const originalSetTimeout = hostWindow.setTimeout;
   const originalClearTimeout = hostWindow.clearTimeout;
@@ -1304,6 +1492,8 @@ export class TavernScriptRuntime {
   private executedScriptIds = new Set<string>();
   private eventHandlers = new Map<string, RuntimeEventHandler[]>();
   private eventHandlerSequence = 0;
+  private chatChangeEmissionVersion = 0;
+  private chatChangeEmissionQueue: Promise<void> = Promise.resolve();
   private scriptButtons = new Map<string, TavernScriptButton[]>();
   private variableSchemas = new Map<string, unknown>();
   private sillyTavernChatCache: Array<Record<string, unknown>> = [];
@@ -1421,6 +1611,25 @@ export class TavernScriptRuntime {
   }
 
   async emit(eventName: string, ...args: unknown[]) {
+    if (eventName === TAVERN_EVENTS.CHAT_CHANGED) {
+      const version = ++this.chatChangeEmissionVersion;
+      const queued = this.chatChangeEmissionQueue
+        .catch(() => undefined)
+        .then(async () => {
+          if (this.destroyed || version !== this.chatChangeEmissionVersion) return [];
+          this.syncChat();
+          return await this.emitNow(eventName, ...args);
+        });
+      this.chatChangeEmissionQueue = queued.then(
+        () => undefined,
+        () => undefined,
+      );
+      return await queued;
+    }
+    return await this.emitNow(eventName, ...args);
+  }
+
+  private async emitNow(eventName: string, ...args: unknown[]) {
     if (this.destroyed) return [];
     if (
       eventName === TAVERN_EVENTS.MESSAGE_SENT ||
@@ -1471,6 +1680,7 @@ export class TavernScriptRuntime {
     if (this.destroyed) return;
     this.destroyed = true;
     this.ready = false;
+    this.chatChangeEmissionVersion += 1;
     this.eventHandlers.clear();
     this.scriptButtons.clear();
     this.variableSchemas.clear();

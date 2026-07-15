@@ -7145,11 +7145,6 @@ export function App() {
   }, [activeChatSessionId]);
 
   useEffect(() => {
-    if (!appDataLoaded || !activeChatSessionId) return;
-    emitTavernEvent(TAVERN_EVENTS.CHAT_CHANGED, activeChatSessionId);
-  }, [activeChatSessionId, appDataLoaded]);
-
-  useEffect(() => {
     chatMessagesRef.current = chatMessages;
     chatSessionsRef.current = chatSessions;
     characterCardsRef.current = characterCards;
@@ -7165,6 +7160,11 @@ export function App() {
     tavernScriptsRef.current = tavernScripts;
     tavernGlobalVariablesRef.current = tavernGlobalVariables;
   }, [activeChatPresetId, activePersonaId, activeWorldBookIds, characterCards, chatMessages, chatPresetEnabled, chatPresets, chatSessions, personas, regexScripts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+
+  useEffect(() => {
+    if (!appDataLoaded || !activeChatSessionId) return;
+    emitTavernEvent(TAVERN_EVENTS.CHAT_CHANGED, activeChatSessionId);
+  }, [activeChatSessionId, appDataLoaded]);
 
   useEffect(() => {
     const focusChatInput = () => {
