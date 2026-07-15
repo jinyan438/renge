@@ -3334,6 +3334,7 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "let heavyPostTimer = 0;",
     "let lastHeight = 0;",
     "let lastExpandedDetailsHeight = 0;",
+    "let lastExpandedDetailsState = false;",
     "let lastMeasuredContentHeight = 0;",
     "let lastMeasuredViewportHeight = 0;",
     "let currentScale = 1;",
@@ -3502,13 +3503,15 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "  rafId = 0;",
     "  const measurement = measure();",
     "  const height = measurement.height;",
+    '  const hasExpandedDetails = Boolean(document.querySelector("details[open]"));',
     "  const expandedDetailsHeight = getExpandedDetailsHeight();",
     "  const reportedExpandedHeight = expandedDetailsHeight > 0 ? clampHeight(expandedDetailsHeight * currentScale + padding) : 0;",
-    "  if (Math.abs(height - lastHeight) < 1 && Math.abs(reportedExpandedHeight - lastExpandedDetailsHeight) < 1) return;",
+    "  if (Math.abs(height - lastHeight) < 1 && Math.abs(reportedExpandedHeight - lastExpandedDetailsHeight) < 1 && hasExpandedDetails === lastExpandedDetailsState) return;",
     "  lastHeight = height;",
     "  lastExpandedDetailsHeight = reportedExpandedHeight;",
+    "  lastExpandedDetailsState = hasExpandedDetails;",
     "  try {",
-    '    parent.postMessage({ type: messageType, id: previewId, height, intrinsic: measurement.hasIntrinsicElement === true, expanded: reportedExpandedHeight > 0, expandedHeight: reportedExpandedHeight }, "*");',
+    '    parent.postMessage({ type: messageType, id: previewId, height, intrinsic: measurement.hasIntrinsicElement === true, expanded: hasExpandedDetails, expandedHeight: reportedExpandedHeight }, "*");',
     "  } catch {}",
     "};",
     "const schedulePost = () => {",
@@ -3717,6 +3720,8 @@ function ChatHtmlPreview({
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const requestHeavyMountRef = useRef<() => void>(() => {});
   const heavyContent = content.trim().length >= HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD;
+  const containsExpandedDetails =
+    /<details\b(?=[^>]*\bopen(?:\s|=|>))[^>]*>/i.test(content);
   const [renderReady, setRenderReady] = useState(false);
   const sourceDocumentRef = useRef<{
     content: string;
@@ -3906,6 +3911,7 @@ function ChatHtmlPreview({
           className="chat-html-frame"
           allow="autoplay; fullscreen; gamepad"
           allowFullScreen
+          data-expanded-layout={containsExpandedDetails ? "true" : "false"}
           data-message-id={messageId}
           loading="eager"
           onLoad={handleLoad}
@@ -3978,7 +3984,15 @@ function resizeHtmlPreviewFrame(event: SyntheticEvent<HTMLIFrameElement>) {
   const frame = event.currentTarget;
   const frameWidth = frame.getBoundingClientRect().width || frame.clientWidth || 0;
   if (frameWidth > 0) {
-    const measuringHeight = Math.max(420, Math.min(960, Math.round(frameWidth * 0.72)));
+    const expandedLayoutMinHeight =
+      frame.dataset.expandedLayout === "true"
+        ? Math.min(1200, Math.max(900, frameWidth * 0.9))
+        : 0;
+    const measuringHeight = Math.max(
+      420,
+      expandedLayoutMinHeight,
+      Math.min(960, Math.round(frameWidth * 0.72)),
+    );
     frame.style.height = `${measuringHeight}px`;
   }
   fitHtmlPreviewFrame(frame);
@@ -7669,17 +7683,18 @@ export function App() {
       if (!Number.isFinite(nextHeight)) return;
 
       const frameWidth = frame.getBoundingClientRect().width || frame.clientWidth || 0;
+      if (typeof payload.expanded === "boolean") {
+        frame.dataset.expandedLayout = String(payload.expanded);
+      }
+      const hasExpandedLayout = frame.dataset.expandedLayout === "true";
       const reportedExpandedHeight = Number(payload.expandedHeight);
       const expandedHeightIsValid =
-        payload.expanded === true &&
+        hasExpandedLayout &&
         Number.isFinite(reportedExpandedHeight) &&
         reportedExpandedHeight > 0;
       const expandedFallbackHeight =
-        payload.expanded === true && frameWidth > 0
-          ? Math.min(
-              900,
-              Math.max(frameWidth * 0.82, Math.min(frameWidth, 460) * 1.9),
-            )
+        hasExpandedLayout && frameWidth > 0
+          ? Math.min(1200, Math.max(900, frameWidth * 0.9))
           : 0;
       const expandedMinHeight = expandedHeightIsValid
         ? Math.max(
