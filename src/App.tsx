@@ -3674,6 +3674,7 @@ function buildHtmlPreviewDocument(
 type ChatHtmlPreviewProps = {
   content: string;
   context: HtmlPreviewContext;
+  mountReady: boolean;
   messageId: string;
   previewId: string;
   frameRegistry: { current: Map<string, HTMLIFrameElement> };
@@ -3682,6 +3683,7 @@ type ChatHtmlPreviewProps = {
 function ChatHtmlPreview({
   content,
   context,
+  mountReady,
   messageId,
   previewId,
   frameRegistry,
@@ -3690,7 +3692,7 @@ function ChatHtmlPreview({
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const requestHeavyMountRef = useRef<() => void>(() => {});
   const heavyContent = content.trim().length >= HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD;
-  const [renderReady, setRenderReady] = useState(!heavyContent);
+  const [renderReady, setRenderReady] = useState(false);
   const sourceDocumentRef = useRef<{
     content: string;
     previewId: string;
@@ -3698,6 +3700,7 @@ function ChatHtmlPreview({
   } | null>(null);
 
   if (
+    mountReady &&
     renderReady &&
     (!sourceDocumentRef.current ||
       sourceDocumentRef.current.content !== content ||
@@ -3711,9 +3714,23 @@ function ChatHtmlPreview({
   }
 
   useEffect(() => {
-    if (!heavyContent) {
-      setRenderReady(true);
+    if (!mountReady) {
+      setRenderReady(false);
+      sourceDocumentRef.current = null;
+      requestHeavyMountRef.current = () => {};
       return;
+    }
+
+    if (!heavyContent) {
+      let firstFrame = 0;
+      let secondFrame = 0;
+      firstFrame = window.requestAnimationFrame(() => {
+        secondFrame = window.requestAnimationFrame(() => setRenderReady(true));
+      });
+      return () => {
+        window.cancelAnimationFrame(firstFrame);
+        window.cancelAnimationFrame(secondFrame);
+      };
     }
 
     const container = containerRef.current;
@@ -3781,7 +3798,7 @@ function ChatHtmlPreview({
       cancelQueuedMount?.();
       unsubscribeHeavyPreview();
     };
-  }, [heavyContent, previewId]);
+  }, [heavyContent, mountReady, previewId]);
 
   const sendContextUpdate = useCallback(() => {
     const frameWindow = frameRef.current?.contentWindow;
@@ -3854,12 +3871,12 @@ function ChatHtmlPreview({
   return (
     <div
       className={`chat-html-preview ${heavyContent ? "heavy" : ""} ${
-        renderReady ? "" : "pending"
+        mountReady && renderReady ? "" : "pending"
       }`}
       data-preview-id={previewId}
       ref={containerRef}
     >
-      {renderReady && sourceDocumentRef.current ? (
+      {mountReady && renderReady && sourceDocumentRef.current ? (
         <iframe
           className="chat-html-frame"
           allow="autoplay; fullscreen; gamepad"
@@ -3876,10 +3893,18 @@ function ChatHtmlPreview({
         />
       ) : (
         <div className="chat-html-preview-placeholder" role="status">
-          <span>大型 HTML 已排队加载；最多同时保留 3 个运行实例。</span>
-          <button type="button" onClick={() => requestHeavyMountRef.current()}>
-            立即加载
-          </button>
+          <span>
+            {!mountReady
+              ? "正在同步角色卡会话与脚本环境…"
+              : heavyContent
+                ? "大型 HTML 已排队加载；最多同时保留 3 个运行实例。"
+                : "正在安全挂载角色卡 HTML…"}
+          </span>
+          {mountReady && heavyContent && (
+            <button type="button" onClick={() => requestHeavyMountRef.current()}>
+              立即加载
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -6933,6 +6958,17 @@ export function App() {
   });
   const [tavernRuntimeStatus, setTavernRuntimeStatus] =
     useState<TavernRuntimeStatus>({ state: "idle", message: "" });
+  const tavernRuntimeConfigurationKeyRef = useRef("");
+  const tavernRuntimeInitializationRef = useRef<{
+    configurationKey: string;
+    promise: Promise<void>;
+  }>({ configurationKey: "", promise: Promise.resolve() });
+  const tavernChatChangeTransitionRef = useRef<{
+    configurationKey: string;
+    sessionId: string;
+    promise: Promise<void>;
+  }>({ configurationKey: "", sessionId: "", promise: Promise.resolve() });
+  const [htmlPreviewReadyMountKey, setHtmlPreviewReadyMountKey] = useState("");
   const [tavernRuntimeButtons, setTavernRuntimeButtons] = useState<
     TavernRuntimeButton[]
   >([]);
@@ -7155,8 +7191,11 @@ export function App() {
   const emitTavernEvent = (eventName: unknown, ...args: unknown[]) => {
     const runtime = tavernScriptRuntimeRef.current;
     runtime?.syncChat();
-    void runtime?.emit(String(eventName), ...args);
-    void tavernExtensionEventBusRef.current.emit(eventName, ...args);
+    const tasks: Promise<unknown>[] = [
+      tavernExtensionEventBusRef.current.emit(eventName, ...args),
+    ];
+    if (runtime) tasks.push(runtime.emit(String(eventName), ...args));
+    return Promise.allSettled(tasks).then(() => undefined);
   };
 
   const commitChatMessages: Dispatch<SetStateAction<ChatMessage[]>> = (update) => {
@@ -7193,7 +7232,11 @@ export function App() {
 
   useEffect(() => {
     if (!appDataLoaded || !activeChatSessionId) return;
-    emitTavernEvent(TAVERN_EVENTS.CHAT_CHANGED, activeChatSessionId);
+    tavernChatChangeTransitionRef.current = {
+      configurationKey: tavernRuntimeConfigurationKeyRef.current,
+      sessionId: activeChatSessionId,
+      promise: emitTavernEvent(TAVERN_EVENTS.CHAT_CHANGED, activeChatSessionId),
+    };
   }, [activeChatSessionId, appDataLoaded]);
 
   useEffect(() => {
@@ -9431,6 +9474,11 @@ export function App() {
       ),
     [activeTavernScripts],
   );
+  const htmlPreviewDesiredMountKey = `${activeChatSessionId}:${getHtmlPreviewContentRevision(
+    tavernRuntimeConfigurationKey,
+  )}`;
+  const htmlPreviewSessionReady =
+    Boolean(activeChatSessionId) && htmlPreviewReadyMountKey === htmlPreviewDesiredMountKey;
   const promptTemplateExtension = useMemo(
     () =>
       extensions.find(
@@ -10579,9 +10627,15 @@ export function App() {
     if (!appDataLoaded || !activeChatSessionId) return;
     tavernScriptRuntimeRef.current?.destroy();
     tavernScriptRuntimeRef.current = null;
+    tavernRuntimeConfigurationKeyRef.current = "";
+    tavernRuntimeInitializationRef.current = {
+      configurationKey: "",
+      promise: Promise.resolve(),
+    };
     setTavernRuntimeButtons([]);
     if (activeTavernScripts.length === 0) {
-      setTavernRuntimeStatus({ state: "idle", message: "" });
+      const idleStatus: TavernRuntimeStatus = { state: "idle", message: "" };
+      setTavernRuntimeStatus(idleStatus);
       return;
     }
 
@@ -11049,7 +11103,8 @@ export function App() {
         setTavernRuntimeLogs((current) => [...current.slice(-119), log]);
       },
       onStatus: (status) => {
-        if (tavernScriptRuntimeRef.current === runtime) setTavernRuntimeStatus(status);
+        if (tavernScriptRuntimeRef.current !== runtime) return;
+        setTavernRuntimeStatus(status);
       },
       onNotice: (level, message, title) => {
         if (tavernScriptRuntimeRef.current !== runtime) return;
@@ -11073,17 +11128,39 @@ export function App() {
       },
     });
     tavernScriptRuntimeRef.current = runtime;
-    void runtime.initialize().catch((error) => {
+    tavernRuntimeConfigurationKeyRef.current = tavernRuntimeConfigurationKey;
+    const initializePromise = runtime.initialize();
+    tavernRuntimeInitializationRef.current = {
+      configurationKey: tavernRuntimeConfigurationKey,
+      promise: initializePromise.then(
+        () => undefined,
+        () => undefined,
+      ),
+    };
+    void initializePromise.catch((error) => {
       if (tavernScriptRuntimeRef.current !== runtime) return;
-      setTavernRuntimeStatus({
+      const errorStatus: TavernRuntimeStatus = {
         state: "error",
         message: error instanceof Error ? error.message : "酒馆脚本运行环境初始化失败。",
-      });
+      };
+      setTavernRuntimeStatus(errorStatus);
     });
 
     return () => {
       if (tavernScriptRuntimeRef.current === runtime) {
         tavernScriptRuntimeRef.current = null;
+      }
+      if (tavernRuntimeConfigurationKeyRef.current === tavernRuntimeConfigurationKey) {
+        tavernRuntimeConfigurationKeyRef.current = "";
+      }
+      if (
+        tavernRuntimeInitializationRef.current.configurationKey ===
+        tavernRuntimeConfigurationKey
+      ) {
+        tavernRuntimeInitializationRef.current = {
+          configurationKey: "",
+          promise: Promise.resolve(),
+        };
       }
       runtime.destroy();
     };
@@ -11094,6 +11171,82 @@ export function App() {
     appDataLoaded,
     promptTemplateEnabled,
     promptTemplateExtension?.updatedAt,
+    tavernRuntimeConfigurationKey,
+  ]);
+
+  useEffect(() => {
+    if (!appDataLoaded || !activeChatSessionId) return;
+
+    let cancelled = false;
+    const sessionId = activeChatSessionId;
+    const desiredMountKey = htmlPreviewDesiredMountKey;
+    const requiresRuntime = activeTavernScripts.length > 0;
+    const deadline = Date.now() + 20_000;
+    const delay = (milliseconds: number) =>
+      new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
+    const afterNextPaint = () =>
+      new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => resolve());
+        });
+      });
+
+    const prepareHtmlPreviewSession = async () => {
+      // Switching chats and rebuilding the Tavern runtime are committed after
+      // React has rendered the new message list. Do not create executable card
+      // iframes until that runtime belongs to this exact configuration.
+      while (!cancelled && Date.now() < deadline) {
+        const runtime = tavernScriptRuntimeRef.current;
+        const runtimeSettled = requiresRuntime
+          ? tavernRuntimeConfigurationKeyRef.current === tavernRuntimeConfigurationKey &&
+            Boolean(runtime) &&
+            tavernRuntimeInitializationRef.current.configurationKey ===
+              tavernRuntimeConfigurationKey
+          : !runtime && tavernRuntimeConfigurationKeyRef.current === "";
+        if (runtimeSettled) break;
+        await delay(50);
+      }
+      if (cancelled) return;
+
+      if (
+        requiresRuntime &&
+        tavernRuntimeInitializationRef.current.configurationKey ===
+          tavernRuntimeConfigurationKey
+      ) {
+        await Promise.race([
+          tavernRuntimeInitializationRef.current.promise,
+          delay(Math.max(0, deadline - Date.now())),
+        ]);
+      }
+      if (cancelled) return;
+
+      const chatTransition = tavernChatChangeTransitionRef.current;
+      if (
+        chatTransition.sessionId === sessionId &&
+        (!requiresRuntime ||
+          chatTransition.configurationKey === tavernRuntimeConfigurationKey)
+      ) {
+        await Promise.race([chatTransition.promise, delay(20_000)]);
+      }
+      if (cancelled) return;
+
+      // Give React, extension hooks and resize observers a fully painted chat
+      // before executing the character frontend. This is the programmatic
+      // equivalent of the formerly required off -> enter -> on workaround.
+      await delay(80);
+      await afterNextPaint();
+      if (cancelled || activeChatSessionIdRef.current !== sessionId) return;
+      setHtmlPreviewReadyMountKey(desiredMountKey);
+    };
+
+    void prepareHtmlPreviewSession();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeChatSessionId,
+    appDataLoaded,
+    htmlPreviewDesiredMountKey,
     tavernRuntimeConfigurationKey,
   ]);
 
@@ -13866,6 +14019,7 @@ export function App() {
                   context={getHtmlPreviewContext()}
                   frameRegistry={htmlPreviewFrameRefs}
                   key={previewId}
+                  mountReady={htmlPreviewSessionReady}
                   messageId={sourceMessageId}
                   previewId={previewId}
                 />
@@ -13887,6 +14041,7 @@ export function App() {
                 context={getHtmlPreviewContext()}
                 frameRegistry={htmlPreviewFrameRefs}
                 key={previewId}
+                mountReady={htmlPreviewSessionReady}
                 messageId={sourceMessageId}
                 previewId={previewId}
               />
