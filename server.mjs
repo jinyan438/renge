@@ -7,6 +7,7 @@ import { homedir, networkInterfaces, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
+import { parse as parseYaml } from "yaml";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const distDir = resolve(__dirname, "dist");
@@ -83,6 +84,18 @@ export const extension_settings = globalThis.extension_settings ?? compat.extens
 export const saveSettingsDebounced = (...args) => globalThis.saveSettingsDebounced?.(...args);
 export const saveChatDebounced = (...args) => globalThis.saveChatDebounced?.(...args);
 export const getRequestHeaders = (...args) => globalThis.getRequestHeaders?.(...args) ?? { "Content-Type": "application/json" };
+export const oai_settings = globalThis.chatCompletionSettings
+  ?? globalThis.chat_completion_settings
+  ?? globalThis.SillyTavern?.chatCompletionSettings
+  ?? {};
+export const chatCompletionSettings = oai_settings;
+export const chat_completion_settings = oai_settings;
+export const getChatCompletionModel = (...args) => globalThis.SillyTavern?.getChatCompletionModel?.(...args)
+  ?? oai_settings.custom_model
+  ?? oai_settings.model
+  ?? oai_settings.openai_model
+  ?? oai_settings.model_openai
+  ?? "";
 export const getWorldInfo = (...args) => compat.getWorldInfo?.(...args);
 export let world_info_data = globalThis.world_info_data ?? compat.world_info_data ?? {};
 export const worldInfoData = world_info_data;
@@ -1720,6 +1733,230 @@ function getProviderTarget(body) {
   return { apiBaseUrl, apiKey };
 }
 
+const unsafeObjectKeys = new Set(["__proto__", "constructor", "prototype"]);
+const forbiddenProxyHeaders = new Set([
+  "connection",
+  "content-length",
+  "host",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+const openAiRequestKeys = new Set([
+  "audio",
+  "frequency_penalty",
+  "logit_bias",
+  "logprobs",
+  "max_completion_tokens",
+  "max_tokens",
+  "messages",
+  "metadata",
+  "min_p",
+  "modalities",
+  "model",
+  "n",
+  "parallel_tool_calls",
+  "prediction",
+  "presence_penalty",
+  "reasoning",
+  "reasoning_effort",
+  "repetition_penalty",
+  "response_format",
+  "seed",
+  "service_tier",
+  "stop",
+  "store",
+  "stream",
+  "stream_options",
+  "temperature",
+  "tool_choice",
+  "tools",
+  "top_a",
+  "top_k",
+  "top_logprobs",
+  "top_p",
+  "user",
+  "verbosity",
+  "web_search_options",
+]);
+
+function isObjectRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function toSafeJsonValue(value) {
+  if (Array.isArray(value)) return value.map(toSafeJsonValue);
+  if (!isObjectRecord(value)) return value;
+  const output = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (unsafeObjectKeys.has(key)) continue;
+    output[key] = toSafeJsonValue(item);
+  }
+  return output;
+}
+
+function mergeRequestObjects(base, overlay) {
+  const output = toSafeJsonValue(isObjectRecord(base) ? base : {});
+  if (!isObjectRecord(overlay)) return output;
+  for (const [key, value] of Object.entries(overlay)) {
+    if (unsafeObjectKeys.has(key)) continue;
+    output[key] = isObjectRecord(output[key]) && isObjectRecord(value)
+      ? mergeRequestObjects(output[key], value)
+      : toSafeJsonValue(value);
+  }
+  return output;
+}
+
+function parseTavernObject(value, label) {
+  if (value == null || value === "") return {};
+  if (isObjectRecord(value)) return toSafeJsonValue(value);
+  if (Array.isArray(value)) {
+    return value
+      .filter(isObjectRecord)
+      .reduce((result, item) => mergeRequestObjects(result, item), {});
+  }
+  if (typeof value !== "string" || !value.trim()) return {};
+  let parsed;
+  try {
+    parsed = parseYaml(value);
+  } catch (error) {
+    throw new Error(`${label}不是合法 YAML：${compactError(error)}`);
+  }
+  if (isObjectRecord(parsed)) return toSafeJsonValue(parsed);
+  if (Array.isArray(parsed)) {
+    return parsed
+      .filter(isObjectRecord)
+      .reduce((result, item) => mergeRequestObjects(result, item), {});
+  }
+  throw new Error(`${label}必须是 YAML object`);
+}
+
+function parseTavernExcludedPaths(value) {
+  if (value == null || value === "") return [];
+  if (Array.isArray(value)) return value.map(String).map((item) => item.trim()).filter(Boolean);
+  if (isObjectRecord(value)) return Object.keys(value).filter((key) => Boolean(value[key]));
+  const text = String(value).trim();
+  if (!text) return [];
+  try {
+    const parsed = parseYaml(text);
+    if (Array.isArray(parsed)) {
+      return parsed.map(String).map((item) => item.trim()).filter(Boolean);
+    }
+    if (isObjectRecord(parsed)) return Object.keys(parsed).filter((key) => Boolean(parsed[key]));
+  } catch {}
+  return text.split(/[,\n]/).map((item) => item.trim()).filter(Boolean);
+}
+
+function deleteRequestPath(target, path) {
+  const segments = String(path)
+    .replace(/\[(?:"([^"]+)"|'([^']+)'|(\d+))\]/g, ".$1$2$3")
+    .split(".")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  if (segments.length === 0 || segments.some((segment) => unsafeObjectKeys.has(segment))) return;
+  let parent = target;
+  for (const segment of segments.slice(0, -1)) {
+    if (!isObjectRecord(parent) && !Array.isArray(parent)) return;
+    parent = parent[segment];
+  }
+  if (isObjectRecord(parent) || Array.isArray(parent)) delete parent[segments.at(-1)];
+}
+
+function parseTavernProxyHeaders(value) {
+  const parsed = parseTavernObject(value, "附加请求头");
+  const headers = {};
+  for (const [name, rawValue] of Object.entries(parsed)) {
+    const normalizedName = name.trim();
+    if (!normalizedName || forbiddenProxyHeaders.has(normalizedName.toLowerCase())) continue;
+    if (!["string", "number", "boolean"].includes(typeof rawValue)) continue;
+    headers[normalizedName] = String(rawValue);
+  }
+  return headers;
+}
+
+function normalizeCompatibleApiBaseUrl(value) {
+  const normalized = String(value ?? "").trim().replace(/\/+$/, "");
+  if (!normalized) return "";
+  let parsed;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    throw new Error("第三方供应商 API 地址无效");
+  }
+  if (!/^https?:$/.test(parsed.protocol)) {
+    throw new Error("第三方供应商 API 地址只支持 HTTP 或 HTTPS");
+  }
+  return normalized.replace(/\/(?:chat\/completions|models)$/i, "");
+}
+
+function getTavernProviderTarget(body) {
+  const apiBaseUrl = normalizeCompatibleApiBaseUrl(
+    body.reverse_proxy ?? body.custom_url ?? body.apiBaseUrl ?? body.apiurl,
+  );
+  if (!apiBaseUrl) {
+    throw new Error("第三方插件没有提供可接管的供应商 API 地址");
+  }
+  const apiKey = String(
+    body.proxy_password ?? body.apiKey ?? body.api_key ?? body.key ?? "",
+  );
+  return { apiBaseUrl, apiKey };
+}
+
+function buildTavernChatCompletionRequest(body) {
+  const source = isObjectRecord(body.request) ? body.request : body;
+  let requestBody = {};
+  for (const key of openAiRequestKeys) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+    const value = source[key];
+    if (value === undefined || value === "unset") continue;
+    requestBody[key] = toSafeJsonValue(value);
+  }
+  if (!requestBody.response_format && isObjectRecord(source.json_schema)) {
+    requestBody.response_format = {
+      type: "json_schema",
+      json_schema: {
+        name: String(source.json_schema.name ?? "response"),
+        strict: source.json_schema.strict !== false,
+        schema: toSafeJsonValue(source.json_schema.value ?? source.json_schema.schema ?? {}),
+      },
+    };
+  }
+  return applyTavernRequestOverrides(requestBody, body, source);
+}
+
+function applyTavernRequestOverrides(requestBody, body, source = requestBody) {
+  let prepared = mergeRequestObjects({}, requestBody);
+  prepared = mergeRequestObjects(
+    prepared,
+    parseTavernObject(
+      body.customIncludeBody ?? body.custom_include_body ?? source.custom_include_body,
+      "附加主体参数",
+    ),
+  );
+  for (const path of parseTavernExcludedPaths(
+    body.customExcludeBody ?? body.custom_exclude_body ?? source.custom_exclude_body,
+  )) {
+    deleteRequestPath(prepared, path);
+  }
+  return prepared;
+}
+
+function getTavernProxyHeaders(body) {
+  const source = isObjectRecord(body.request) ? body.request : body;
+  return parseTavernProxyHeaders(
+    body.customIncludeHeaders ?? body.custom_include_headers ?? source.custom_include_headers,
+  );
+}
+
+function getCompatibleApiEndpoint(apiBaseUrl, endpoint) {
+  const suffix = String(endpoint).replace(/^\/+/, "");
+  return `${String(apiBaseUrl).replace(/\/+$/, "")}/${suffix}`;
+}
+
 function modelSupportsSmallerImageSize(model) {
   const modelId = String(model ?? "").toLowerCase();
   return (
@@ -1773,7 +2010,7 @@ function shouldRetryImageGenerationWithSmallerSize(upstream, imageRequestBody, r
   return /timeout/i.test(message);
 }
 
-async function proxyJson({ url, apiKey, method = "GET", body, timeoutMs }) {
+async function proxyJson({ url, apiKey, method = "GET", body, timeoutMs, headers = {} }) {
   const ac = new AbortController();
   const timer = timeoutMs ? setTimeout(() => ac.abort(new Error(`upstream timeout after ${timeoutMs}ms`)), timeoutMs) : null;
   let upstreamResponse;
@@ -1784,6 +2021,7 @@ async function proxyJson({ url, apiKey, method = "GET", body, timeoutMs }) {
         Accept: "application/json",
         ...(body ? { "Content-Type": "application/json" } : {}),
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        ...headers,
       },
       body: body ? JSON.stringify(body) : undefined,
       signal: ac.signal,
@@ -2069,7 +2307,7 @@ function getNextModelsUrl(payload, currentUrl, collectedCount) {
   return "";
 }
 
-async function listProviderModels({ apiBaseUrl, apiKey }) {
+async function listProviderModels({ apiBaseUrl, apiKey, headers = {} }) {
   const maxPages = 30;
   const maxModels = 10000;
   const seenUrls = new Set();
@@ -2084,7 +2322,7 @@ async function listProviderModels({ apiBaseUrl, apiKey }) {
     if (seenUrls.has(nextUrl)) break;
     seenUrls.add(nextUrl);
 
-    const upstream = await proxyJson({ url: nextUrl, apiKey });
+    const upstream = await proxyJson({ url: nextUrl, apiKey, headers });
     lastPayload = upstream.payload;
     lastStatus = upstream.status;
     if (!upstream.ok) return upstream;
@@ -2131,7 +2369,7 @@ async function listProviderModels({ apiBaseUrl, apiKey }) {
   };
 }
 
-async function proxyStream({ url, apiKey, body, response }) {
+async function proxyStream({ url, apiKey, body, response, headers = {} }) {
   const ac = new AbortController();
   const abortUpstream = () => {
     if (!ac.signal.aborted) ac.abort(new Error("client aborted"));
@@ -2146,6 +2384,7 @@ async function proxyStream({ url, apiKey, body, response }) {
         Accept: "text/event-stream",
         "Content-Type": "application/json",
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        ...headers,
       },
       body: JSON.stringify(body),
       signal: ac.signal,
@@ -2209,17 +2448,45 @@ async function handleApi(request, response, pathname, dataFilePath) {
       return;
     }
 
-    if (pathname === "/api/backends/chat-completions/generate") {
-      sendJson(response, 502, {
-        error: "invalid url: 请使用 SillyTavern.getContext().generateRaw",
-      });
+    if (pathname === "/api/backends/chat-completions/status") {
+      if (request.method !== "POST") {
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+      }
+      const body = await readJsonBody(request);
+      const { apiBaseUrl, apiKey } = getTavernProviderTarget(body);
+      const headers = getTavernProxyHeaders(body);
+      const upstream = await listProviderModels({ apiBaseUrl, apiKey, headers });
+      sendJson(response, upstream.ok ? 200 : upstream.status, upstream.payload);
       return;
     }
 
-    if (pathname === "/api/backends/chat-completions/status") {
-      sendJson(response, 503, {
-        error: "模型状态由当前 Renge 会话供应商管理",
+    if (pathname === "/api/backends/chat-completions/generate") {
+      if (request.method !== "POST") {
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+      }
+      const body = await readJsonBody(request);
+      const { apiBaseUrl, apiKey } = getTavernProviderTarget(body);
+      const headers = getTavernProxyHeaders(body);
+      const requestBody = buildTavernChatCompletionRequest(body);
+      if (!requestBody.model || !Array.isArray(requestBody.messages)) {
+        sendJson(response, 400, { error: "第三方生成请求缺少 model 或 messages" });
+        return;
+      }
+      const url = getCompatibleApiEndpoint(apiBaseUrl, "chat/completions");
+      if (requestBody.stream === true) {
+        await proxyStream({ url, apiKey, body: requestBody, response, headers });
+        return;
+      }
+      const upstream = await proxyJson({
+        url,
+        apiKey,
+        method: "POST",
+        body: requestBody,
+        headers,
       });
+      sendJson(response, upstream.ok ? 200 : upstream.status, upstream.payload);
       return;
     }
 
@@ -2385,22 +2652,24 @@ async function handleApi(request, response, pathname, dataFilePath) {
     }
 
     const { apiBaseUrl, apiKey } = getProviderTarget(body);
+    const providerHeaders = getTavernProxyHeaders(body);
 
     if (pathname === "/api/providers/models") {
       const upstream = await listProviderModels({
         apiBaseUrl,
         apiKey,
+        headers: providerHeaders,
       });
       sendJson(response, upstream.ok ? 200 : upstream.status, upstream.payload);
       return;
     }
 
     if (pathname === "/api/chat/completions") {
-      const requestBody = body.request;
-      if (!requestBody || typeof requestBody !== "object") {
+      if (!isObjectRecord(body.request)) {
         sendJson(response, 400, { error: "缺少 request" });
         return;
       }
+      const requestBody = applyTavernRequestOverrides(body.request, body);
 
       // 检查是否是图片生成模型
       const model = String(requestBody.model ?? "").toLowerCase();
@@ -2718,12 +2987,13 @@ async function handleApi(request, response, pathname, dataFilePath) {
         }
         return;
       }
-if (requestBody.stream === true) {
+      if (requestBody.stream === true) {
         await proxyStream({
           url: `${apiBaseUrl}/chat/completions`,
           apiKey,
           body: requestBody,
           response,
+          headers: providerHeaders,
         });
         return;
       }
@@ -2733,6 +3003,7 @@ if (requestBody.stream === true) {
         apiKey,
         method: "POST",
         body: requestBody,
+        headers: providerHeaders,
       });
       sendJson(response, upstream.ok ? 200 : upstream.status, upstream.payload);
       return;
