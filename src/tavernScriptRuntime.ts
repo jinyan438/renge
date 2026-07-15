@@ -527,6 +527,209 @@ function installParentSideEffectTracker(
   };
 }
 
+type TavernJQuery = ((selector?: unknown, context?: unknown) => unknown) & {
+  fn?: Record<string, unknown>;
+};
+
+function isJQuery(value: unknown): value is TavernJQuery {
+  return (
+    typeof value === "function" &&
+    isRecord((value as TavernJQuery).fn) &&
+    typeof (value as TavernJQuery).fn?.jquery === "string"
+  );
+}
+
+function installParentJQueryBridge(
+  runtimeWindow: RuntimeWindow,
+  hostWindow: Window,
+) {
+  // SillyTavern scripts normally run in the visible host document. Keep the
+  // runtime jQuery instance, but make its default selectors and created nodes
+  // use Renge's visible document whenever a script explicitly targets parent.
+  const host = hostWindow as unknown as Record<string, unknown>;
+  if (isJQuery(host.jQuery)) return () => undefined;
+  const runtimeJQuery = runtimeWindow.jQuery;
+  if (!isJQuery(runtimeJQuery)) return () => undefined;
+
+  const runtimeDocument = runtimeWindow.document;
+  const hostDocument = hostWindow.document;
+  const mapRuntimeTarget = (value: unknown) => {
+    if (value === runtimeWindow) return hostWindow;
+    if (value === runtimeDocument) return hostDocument;
+    if (value === runtimeDocument.documentElement) return hostDocument.documentElement;
+    if (value === runtimeDocument.head) return hostDocument.head;
+    if (value === runtimeDocument.body) return hostDocument.body;
+    return value;
+  };
+  const bridge = function (selector?: unknown, context?: unknown) {
+    const mappedSelector = mapRuntimeTarget(selector);
+    const mappedContext = mapRuntimeTarget(context);
+    if (typeof mappedSelector === "function" && mappedContext === undefined) {
+      const runReadyCallback = () => mappedSelector.call(hostDocument, bridge);
+      if (hostDocument.readyState === "loading") {
+        hostDocument.addEventListener("DOMContentLoaded", runReadyCallback, { once: true });
+      } else {
+        hostWindow.queueMicrotask(runReadyCallback);
+      }
+      return runtimeJQuery(hostDocument);
+    }
+    return runtimeJQuery(
+      mappedSelector,
+      mappedContext === undefined && typeof mappedSelector === "string"
+        ? hostDocument
+        : mappedContext,
+    );
+  } as TavernJQuery;
+  Object.setPrototypeOf(bridge, runtimeJQuery);
+
+  const previousDescriptors = new Map<string, PropertyDescriptor | undefined>();
+  ["jQuery", "$"].forEach((name) => {
+    const descriptor = Object.getOwnPropertyDescriptor(hostWindow, name);
+    if (descriptor?.configurable === false && descriptor.writable === false) return;
+    previousDescriptors.set(name, descriptor);
+    try {
+      Object.defineProperty(hostWindow, name, {
+        configurable: true,
+        enumerable: descriptor?.enumerable ?? true,
+        writable: true,
+        value: bridge,
+      });
+    } catch {
+      try {
+        host[name] = bridge;
+      } catch {}
+    }
+  });
+
+  return () => {
+    Array.from(previousDescriptors.entries()).reverse().forEach(([name, descriptor]) => {
+      try {
+        if (descriptor) Object.defineProperty(hostWindow, name, descriptor);
+        else delete host[name];
+      } catch {}
+    });
+    previousDescriptors.clear();
+  };
+}
+
+function installRuntimeStyleBridge(
+  runtimeWindow: RuntimeWindow,
+  hostWindow: Window & typeof globalThis,
+) {
+  // A loader can inject CSS before it discovers that its UI belongs in parent.
+  // Mirror runtime styles continuously so a later parent-mounted UI never loses
+  // its stylesheet, external icon font, or subsequent live style updates.
+  const runtimeDocument = runtimeWindow.document;
+  const hostDocument = hostWindow.document;
+  const mirrors = new Map<HTMLStyleElement | HTMLLinkElement, HTMLStyleElement | HTMLLinkElement>();
+  let active = true;
+  let syncQueued = false;
+
+  const getSources = () =>
+    Array.from(
+      runtimeDocument.querySelectorAll<HTMLStyleElement | HTMLLinkElement>(
+        'style, link[rel~="stylesheet"]',
+      ),
+    ).filter(
+      (element) =>
+        element.dataset.rengeFontawesome !== "true" &&
+        element.dataset.rengeFontawesomeStyle !== "true",
+    );
+
+  const findHostConflict = (
+    source: HTMLStyleElement | HTMLLinkElement,
+    mirror?: HTMLStyleElement | HTMLLinkElement,
+  ) => {
+    if (!source.id) return null;
+    return Array.from(hostDocument.querySelectorAll<HTMLElement>("[id]")).find(
+      (element) => element.id === source.id && element !== mirror,
+    ) ?? null;
+  };
+
+  const copyAttributes = (
+    source: HTMLStyleElement | HTMLLinkElement,
+    mirror: HTMLStyleElement | HTMLLinkElement,
+  ) => {
+    const sourceNames = new Set(Array.from(source.attributes, (attribute) => attribute.name));
+    Array.from(mirror.attributes).forEach((attribute) => {
+      if (attribute.name === "data-renge-tavern-style-mirror") return;
+      if (!sourceNames.has(attribute.name)) mirror.removeAttribute(attribute.name);
+    });
+    Array.from(source.attributes).forEach((attribute) => {
+      if (mirror.getAttribute(attribute.name) !== attribute.value) {
+        mirror.setAttribute(attribute.name, attribute.value);
+      }
+    });
+    mirror.dataset.rengeTavernStyleMirror = "true";
+    if (
+      source instanceof runtimeWindow.HTMLLinkElement &&
+      mirror instanceof hostWindow.HTMLLinkElement
+    ) {
+      if (mirror.href !== source.href) mirror.href = source.href;
+      mirror.disabled = source.disabled;
+    }
+    if (
+      source instanceof runtimeWindow.HTMLStyleElement &&
+      mirror instanceof hostWindow.HTMLStyleElement
+    ) {
+      if (mirror.textContent !== source.textContent) mirror.textContent = source.textContent;
+      mirror.disabled = source.disabled;
+    }
+  };
+
+  const sync = () => {
+    if (!active) return;
+    const sources = new Set(getSources());
+    Array.from(mirrors.entries()).forEach(([source, mirror]) => {
+      if (sources.has(source) && !findHostConflict(source, mirror)) return;
+      mirror.remove();
+      mirrors.delete(source);
+    });
+    sources.forEach((source) => {
+      const existingMirror = mirrors.get(source);
+      if (findHostConflict(source, existingMirror)) return;
+      const mirror = existingMirror ?? (
+        source instanceof runtimeWindow.HTMLStyleElement
+          ? hostDocument.createElement("style")
+          : hostDocument.createElement("link")
+      );
+      copyAttributes(source, mirror);
+      if (!existingMirror) {
+        mirrors.set(source, mirror);
+        hostDocument.head.appendChild(mirror);
+      }
+    });
+  };
+
+  const scheduleSync = () => {
+    if (!active || syncQueued) return;
+    syncQueued = true;
+    runtimeWindow.queueMicrotask(() => {
+      syncQueued = false;
+      sync();
+    });
+  };
+  const runtimeObserver = new runtimeWindow.MutationObserver(scheduleSync);
+  runtimeObserver.observe(runtimeDocument.documentElement, {
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  const hostObserver = new hostWindow.MutationObserver(scheduleSync);
+  hostObserver.observe(hostDocument.head, { childList: true, subtree: true });
+  sync();
+
+  return () => {
+    if (!active) return;
+    active = false;
+    runtimeObserver.disconnect();
+    hostObserver.disconnect();
+    mirrors.forEach((mirror) => mirror.remove());
+    mirrors.clear();
+  };
+}
+
 function installParentTavernApiBridge(
   hostWindow: Window,
   api: Record<string, unknown>,
@@ -1107,6 +1310,8 @@ export class TavernScriptRuntime {
   private syncChatMetadata: (() => void) | null = null;
   private parentSideEffectCleanup: (() => void) | null = null;
   private parentApiBridgeCleanup: (() => void) | null = null;
+  private parentJQueryCleanup: (() => void) | null = null;
+  private runtimeStyleBridgeCleanup: (() => void) | null = null;
   private fontAwesomeCleanups: Array<() => void> = [];
   private localPlaceholderImageSources = new Map<string, string>();
 
@@ -1149,6 +1354,10 @@ export class TavernScriptRuntime {
     await Promise.all(fontAwesomeSupports.map((support) => support.ready));
     this.installCompatibilityApi();
     await this.loadDependencies();
+    if (this.runtimeWindow) {
+      this.parentJQueryCleanup = installParentJQueryBridge(this.runtimeWindow, window);
+      this.runtimeStyleBridgeCleanup = installRuntimeStyleBridge(this.runtimeWindow, window);
+    }
     this.publishButtons();
 
     const startupScripts = this.scripts
@@ -1270,10 +1479,14 @@ export class TavernScriptRuntime {
     this.adapter.onButtonsChange?.([]);
     const parentWindow = window as Window & { Mvu?: unknown };
     if (parentWindow.Mvu) delete parentWindow.Mvu;
+    this.runtimeStyleBridgeCleanup?.();
+    this.runtimeStyleBridgeCleanup = null;
     this.parentSideEffectCleanup?.();
     this.parentSideEffectCleanup = null;
     this.parentApiBridgeCleanup?.();
     this.parentApiBridgeCleanup = null;
+    this.parentJQueryCleanup?.();
+    this.parentJQueryCleanup = null;
     this.iframe?.remove();
     this.fontAwesomeCleanups
       .splice(0)
