@@ -4,6 +4,7 @@ import fontAwesomeBrandsUrl from "@fortawesome/fontawesome-free/webfonts/fa-bran
 import fontAwesomeRegularUrl from "@fortawesome/fontawesome-free/webfonts/fa-regular-400.woff2?url";
 import fontAwesomeSolidUrl from "@fortawesome/fontawesome-free/webfonts/fa-solid-900.woff2?url";
 import fontAwesomeV4CompatibilityUrl from "@fortawesome/fontawesome-free/webfonts/fa-v4compatibility.woff2?url";
+import { usesTavernModuleSyntax } from "./tavernScriptModuleUtils";
 
 export type TavernRuntimeMessage = {
   id: string;
@@ -1516,6 +1517,7 @@ export class TavernScriptRuntime {
     };
     const eventSource = {
       on: eventOn,
+      off: eventRemoveListener,
       once: eventOnce,
       emit: emitFromScript,
       emitAndWait: emitFromScript,
@@ -2535,6 +2537,7 @@ export class TavernScriptRuntime {
       eventOnce,
       eventEmit: emitFromScript,
       eventEmitAndWait: emitFromScript,
+      eventOff: eventRemoveListener,
       eventRemoveListener,
       eventMakeFirst: (eventName: string, callback: (...args: unknown[]) => unknown) =>
         registerEventHandler(eventName, callback, -1),
@@ -2993,8 +2996,7 @@ export class TavernScriptRuntime {
   private appendExecutableScript(script: TavernScript) {
     const document = this.runtimeWindow?.document;
     if (!document) return Promise.reject(new Error("酒馆脚本文档不存在。"));
-    const usesModuleSyntax =
-      /(^|\n)\s*(?:import\s+(?:[\s\S]*?\s+from\s+)?["']|export\s+)/m.test(script.content);
+    const usesModuleSyntax = usesTavernModuleSyntax(script.content);
     return new Promise<void>((resolve, reject) => {
       const element = document.createElement("script");
       if (usesModuleSyntax) element.type = "module";
