@@ -207,6 +207,12 @@ const VUE_SOURCES = [
   "https://unpkg.com/vue@3.5.13/dist/vue.global.prod.js",
 ];
 
+const VUE_ESM_BUNDLER_FEATURE_FLAGS = Object.freeze({
+  __VUE_OPTIONS_API__: true,
+  __VUE_PROD_DEVTOOLS__: false,
+  __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: false,
+});
+
 const ZOD_SOURCES = [
   "https://testingcf.jsdelivr.net/npm/zod@4.1.5/+esm",
   "https://cdn.jsdelivr.net/npm/zod@4.1.5/+esm",
@@ -219,6 +225,18 @@ const YAML_SOURCES = [
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function installVueEsmBundlerFeatureFlags(targetWindow: RuntimeWindow) {
+  Object.entries(VUE_ESM_BUNDLER_FEATURE_FLAGS).forEach(([name, value]) => {
+    if (name in targetWindow) return;
+    Object.defineProperty(targetWindow, name, {
+      value,
+      configurable: true,
+      enumerable: false,
+      writable: true,
+    });
+  });
 }
 
 function buildZodGlobal(zodModule: Record<string, unknown>) {
@@ -1746,6 +1764,11 @@ export class TavernScriptRuntime {
     this.iframe = iframe;
     this.runtimeWindow = iframe.contentWindow as RuntimeWindow | null;
     if (!this.runtimeWindow) throw new Error("无法访问酒馆脚本 iframe。 ");
+    // CDN packages such as pinia/+esm and Vue's esm-bundler runtime expect
+    // bundlers to replace these compile-time identifiers. Tavern scripts load
+    // them directly in the browser, so expose the standard feature flags in
+    // the iframe realm before any dependency or user module is evaluated.
+    installVueEsmBundlerFeatureFlags(this.runtimeWindow);
     this.runtimeWindow.addEventListener("error", (event: ErrorEvent) => {
       this.writeRuntimeLog("error", event.message || "脚本运行时发生错误。");
     });
