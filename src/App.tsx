@@ -10856,6 +10856,55 @@ export function App() {
         activeWorldBookIdsRef.current = nextActiveIds;
         setActiveWorldBookIds(nextActiveIds);
       },
+      deleteWorldBook: (identifier) => {
+        const session = chatSessionsRef.current.find(
+          (candidate) => candidate.id === activeChatSessionIdRef.current,
+        );
+        const card = characterCardsRef.current.find(
+          (candidate) => candidate.id === session?.roleplayCharacterCardId,
+        );
+        if (
+          card?.characterBook &&
+          (card.characterBook.id === identifier || card.characterBook.name === identifier)
+        ) {
+          updateCards((cards) =>
+            cards.map((candidate) =>
+              candidate.id === card.id
+                ? {
+                    ...candidate,
+                    characterBook: null,
+                    updatedAt: new Date().toISOString(),
+                  }
+                : candidate,
+            ),
+          );
+          return;
+        }
+        const removedIds = new Set(
+          worldBooksRef.current
+            .filter((book) => book.id === identifier || book.name === identifier)
+            .map((book) => book.id),
+        );
+        if (removedIds.size === 0) return;
+        const nextWorldBooks = worldBooksRef.current.filter(
+          (book) => !removedIds.has(book.id),
+        );
+        worldBooksRef.current = nextWorldBooks;
+        setWorldBooks(nextWorldBooks);
+        const nextActiveIds = activeWorldBookIdsRef.current.filter(
+          (bookId) => !removedIds.has(bookId),
+        );
+        activeWorldBookIdsRef.current = nextActiveIds;
+        setActiveWorldBookIds(nextActiveIds);
+      },
+      setActiveWorldBookNames: (names) => {
+        const activeNames = new Set(names);
+        const nextActiveIds = worldBooksRef.current
+          .filter((book) => activeNames.has(book.name))
+          .map((book) => book.id);
+        activeWorldBookIdsRef.current = nextActiveIds;
+        setActiveWorldBookIds(nextActiveIds);
+      },
       getRegexes: () => {
         const session = chatSessionsRef.current.find(
           (candidate) => candidate.id === activeChatSessionIdRef.current,
@@ -10925,6 +10974,18 @@ export function App() {
       getUserName: () => userProfileRef.current.nickname.trim() || "用户",
       getChatId: () => activeChatSessionIdRef.current,
       getModelId: () => getEffectiveProviderModelId(chatProvider),
+      getPresetNames: () => chatPresetsRef.current.map((preset) => preset.name),
+      loadPreset: (name) => {
+        const preset = chatPresetsRef.current.find(
+          (candidate) => candidate.name.trim() === name.trim(),
+        );
+        if (!preset) return false;
+        activeChatPresetIdRef.current = preset.id;
+        chatPresetEnabledRef.current = true;
+        setActiveChatPresetId(preset.id);
+        setChatPresetEnabled(true);
+        return true;
+      },
       getInput: () => chatInputRef.current?.value ?? "",
       setInput: (value) => {
         setChatInput(value);
@@ -10997,7 +11058,9 @@ export function App() {
       runtime.destroy();
     };
   }, [
-    activeChatSessionId,
+    // A chat change is delivered through CHAT_CHANGED; rebuilding here would reload
+    // every multi-megabyte Tavern script. Rebuild only when availability/config changes.
+    Boolean(activeChatSessionId),
     appDataLoaded,
     promptTemplateEnabled,
     promptTemplateExtension?.updatedAt,
@@ -14740,23 +14803,27 @@ export function App() {
     sourceFrame?: HTMLIFrameElement,
   ) => {
     const normalizedConfig = isObjectRecord(config) ? config : { user_input: config };
+    const customApi = isObjectRecord(normalizedConfig.custom_api)
+      ? normalizedConfig.custom_api
+      : {};
+    const hasCustomApi = Object.keys(customApi).length > 0;
     const rawPromptSource = Array.isArray(normalizedConfig.ordered_prompts)
       ? normalizedConfig.ordered_prompts
       : normalizedConfig.prompt;
-    const rawPromptMessages = Array.isArray(rawPromptSource)
-      ? rawPromptSource
-          .map((value) => {
-            if (!isObjectRecord(value)) return null;
-            const role =
-              value.role === "system" || value.role === "assistant" || value.role === "user"
-                ? value.role
-                : "user";
-            const content = value.content ?? value.message ?? value.mes;
-            if (typeof content !== "string" && !Array.isArray(content)) return null;
-            return { ...value, role, content } as ChatApiMessage;
-          })
-          .filter((value): value is ChatApiMessage => Boolean(value))
-      : [];
+    const rawPromptOrder = Array.isArray(rawPromptSource) ? rawPromptSource : [];
+    const normalizeOrderedPromptMessage = (value: unknown): ChatApiMessage | null => {
+      if (!isObjectRecord(value)) return null;
+      const role =
+        value.role === "system" || value.role === "assistant" || value.role === "user"
+          ? value.role
+          : "user";
+      const content = value.content ?? value.message ?? value.mes;
+      if (typeof content !== "string" && !Array.isArray(content)) return null;
+      return { ...value, role, content } as ChatApiMessage;
+    };
+    const rawPromptMessages = rawPromptOrder
+      .map(normalizeOrderedPromptMessage)
+      .filter((value): value is ChatApiMessage => Boolean(value));
     const promptUserInput = [...rawPromptMessages]
       .reverse()
       .map((message) => getChatApiMessageText(message))
@@ -14775,8 +14842,14 @@ export function App() {
       throw new Error("已有生成任务正在运行，请等待完成或先停止当前生成。");
     }
 
-    const requestModelId = getEffectiveProviderModelId(chatProvider);
-    if (!chatProvider?.apiBaseUrl || !requestModelId) {
+    const requestApiBaseUrl = String(
+      customApi.apiurl ?? customApi.apiBaseUrl ?? chatProvider?.apiBaseUrl ?? "",
+    ).trim();
+    const requestApiKey = String(customApi.key ?? customApi.apiKey ?? chatProvider?.apiKey ?? "");
+    const requestModelId = String(
+      customApi.model ?? getEffectiveProviderModelId(chatProvider) ?? "",
+    ).trim();
+    if (!requestApiBaseUrl || !requestModelId) {
       throw new Error("请先在设置中配置可用的供应商 API 地址和模型 ID。");
     }
 
@@ -14876,10 +14949,62 @@ export function App() {
       ]
         .filter(Boolean)
         .join("\n\n");
+      const worldInfoPrompt = [worldBookSystemPrompt, characterWorldBookSystemPrompt]
+        .filter(Boolean)
+        .join("\n\n");
+      const maxChatHistory = Number.isFinite(Number(normalizedConfig.max_chat_history))
+        ? Math.max(0, Math.floor(Number(normalizedConfig.max_chat_history)))
+        : chatMessagesRef.current.length;
+      const chatHistoryMessages = chatMessagesRef.current
+        .slice(Math.max(0, chatMessagesRef.current.length - maxChatHistory))
+        .map((message): ChatApiMessage => ({
+          role: message.role,
+          content: message.content,
+        }));
+      let worldInfoInserted = false;
+      const orderedPromptMessages = rawPromptOrder.flatMap((value): ChatApiMessage[] => {
+        const explicitMessage = normalizeOrderedPromptMessage(value);
+        if (explicitMessage) return [explicitMessage];
+        const marker = String(value ?? "").trim().toLowerCase();
+        if (!marker) return [];
+        if (marker === "user_input") return [{ role: "user", content: userInput }];
+        if (marker === "chat_history") return chatHistoryMessages;
+        if (marker === "persona_description") {
+          return userProfileSystemPrompt
+            ? [{ role: "system", content: userProfileSystemPrompt }]
+            : [];
+        }
+        if (marker === "char_description") {
+          return responseCharacter?.description
+            ? [{ role: "system", content: responseCharacter.description }]
+            : [];
+        }
+        if (marker === "char_personality") {
+          return responseCharacter?.personality
+            ? [{ role: "system", content: responseCharacter.personality }]
+            : [];
+        }
+        if (marker === "scenario") {
+          return responseCharacter?.scenario
+            ? [{ role: "system", content: responseCharacter.scenario }]
+            : [];
+        }
+        if (marker === "dialogue_examples") {
+          return responseCharacter?.messageExample
+            ? [{ role: "system", content: responseCharacter.messageExample }]
+            : [];
+        }
+        if (marker === "world_info_before" || marker === "world_info_after") {
+          if (worldInfoInserted || !worldInfoPrompt) return [];
+          worldInfoInserted = true;
+          return [{ role: "system", content: worldInfoPrompt }];
+        }
+        return [];
+      });
       const promptTemplateCharacter = disableExtras ? null : responseCharacter;
       const preparedApiMessages =
-        rawPromptMessages.length > 0
-          ? rawPromptMessages
+        orderedPromptMessages.length > 0
+          ? orderedPromptMessages
           : await applyPromptTemplateToApiMessages(
               applyPromptRegexToApiMessages(
                 composeChatApiMessages(
@@ -14915,27 +15040,50 @@ export function App() {
         headers: { "Content-Type": "application/json" },
         signal: abortSignal,
         body: JSON.stringify({
-          apiBaseUrl: trimTrailingSlash(chatProvider.apiBaseUrl),
-          apiKey: chatProvider.apiKey,
+          apiBaseUrl: trimTrailingSlash(requestApiBaseUrl),
+          apiKey: requestApiKey,
           sessionId: activeChatSessionId,
           request: {
             model: requestModelId,
             messages: apiMessages,
-            ...(activeChatPresetRequestParameters ?? {
-              temperature: chatMode === "persona" ? 0.72 : 0.6,
-            }),
-            ...(Number.isFinite(Number(normalizedConfig.max_tokens ?? normalizedConfig.length))
+            ...(hasCustomApi
+              ? {}
+              : activeChatPresetRequestParameters ?? {
+                  temperature: chatMode === "persona" ? 0.72 : 0.6,
+                }),
+            ...(Number.isFinite(
+              Number(
+                normalizedConfig.max_tokens ??
+                  normalizedConfig.length ??
+                  customApi.max_tokens,
+              ),
+            )
               ? {
                   max_tokens: Math.max(
                     1,
-                    Math.floor(Number(normalizedConfig.max_tokens ?? normalizedConfig.length)),
+                    Math.floor(
+                      Number(
+                        normalizedConfig.max_tokens ??
+                          normalizedConfig.length ??
+                          customApi.max_tokens,
+                      ),
+                    ),
                   ),
                 }
               : {}),
-            ...(Number.isFinite(Number(normalizedConfig.temperature))
-              ? { temperature: Number(normalizedConfig.temperature) }
+            ...(Number.isFinite(Number(normalizedConfig.temperature ?? customApi.temperature))
+              ? { temperature: Number(normalizedConfig.temperature ?? customApi.temperature) }
               : {}),
-            ...buildProviderReasoningRequest(chatProvider),
+            ...(Number.isFinite(Number(customApi.frequency_penalty))
+              ? { frequency_penalty: Number(customApi.frequency_penalty) }
+              : {}),
+            ...(Number.isFinite(Number(customApi.presence_penalty))
+              ? { presence_penalty: Number(customApi.presence_penalty) }
+              : {}),
+            ...(Number.isFinite(Number(customApi.top_p))
+              ? { top_p: Number(customApi.top_p) }
+              : {}),
+            ...(hasCustomApi ? {} : buildProviderReasoningRequest(chatProvider)),
             stream: shouldStream,
           },
         }),

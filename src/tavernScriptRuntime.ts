@@ -101,11 +101,15 @@ export type TavernScriptRuntimeAdapter = {
   getCharacter(): TavernRuntimeCharacter | null;
   getWorldBooks(): TavernRuntimeWorldBook[];
   setWorldBook(worldBook: TavernRuntimeWorldBook): void;
+  deleteWorldBook?(identifier: string): void;
+  setActiveWorldBookNames?(names: string[]): void;
   getRegexes(): Array<Record<string, unknown>>;
   setRegexes(regexes: Array<Record<string, unknown>>): void;
   getUserName(): string;
   getChatId(): string;
   getModelId?(): string;
+  getPresetNames?(): string[];
+  loadPreset?(name: string): boolean;
   getInput?(): string;
   setInput?(value: string): unknown;
   appendInput?(value: string): unknown;
@@ -269,6 +273,306 @@ function valuesEqual(left: unknown, right: unknown): boolean {
         valuesEqual(left[key], right[key]),
     )
   );
+}
+
+// Tavern scripts often inject full modules into `parent.document`. Removing the
+// sandbox iframe alone leaves their observers, timers and document listeners alive,
+// so every runtime rebuild would stack another copy. Attribute parent-side work by
+// sourceURL and tear it down as one lifecycle unit.
+function installParentSideEffectTracker(
+  hostWindow: Window,
+  getCurrentScriptId: () => string,
+) {
+  const hostGlobal = hostWindow as Window & typeof globalThis;
+  const hostDocument = hostWindow.document;
+  const runtimeToken = crypto.randomUUID();
+  const sourcePrefix = `renge-tavern-parent-${runtimeToken}`;
+  const existingWindowGlobals = new Set(Object.getOwnPropertyNames(hostWindow));
+  const existingDocumentGlobals = new Set(Object.getOwnPropertyNames(hostDocument));
+  const baselineNodes = new WeakSet<Node>([
+    hostDocument,
+    hostDocument.documentElement,
+    hostDocument.head,
+    hostDocument.body,
+    ...Array.from(hostDocument.querySelectorAll("*")),
+  ]);
+  const ownedNodes = new Set<Node>();
+  const trackedTimeouts = new Set<number>();
+  const trackedIntervals = new Set<number>();
+  const trackedAnimationFrames = new Set<number>();
+  const trackedObservers = new Set<{ disconnect(): void }>();
+  const trackedEventListeners: Array<{
+    target: EventTarget;
+    type: string;
+    listener: EventListenerOrEventListenerObject;
+    options?: boolean | AddEventListenerOptions;
+  }> = [];
+  const restoreCallbacks: Array<() => void> = [];
+  let active = true;
+
+  const isTavernCall = () => {
+    const stack = String(new Error().stack ?? "");
+    return stack.includes(sourcePrefix) || /renge-tavern-script-/i.test(stack);
+  };
+
+  const eventTargetPrototype = hostGlobal.EventTarget.prototype;
+  const originalAddEventListener = eventTargetPrototype.addEventListener;
+  const originalRemoveEventListener = eventTargetPrototype.removeEventListener;
+  const trackedAddEventListener = function (
+    this: EventTarget,
+    type: string,
+    listener: EventListenerOrEventListenerObject | null,
+    options?: boolean | AddEventListenerOptions,
+  ) {
+    if (active && listener && isTavernCall()) {
+      trackedEventListeners.push({ target: this, type, listener, options });
+    }
+    return originalAddEventListener.call(this, type, listener, options);
+  };
+  eventTargetPrototype.addEventListener = trackedAddEventListener;
+  restoreCallbacks.push(() => {
+    if (eventTargetPrototype.addEventListener === trackedAddEventListener) {
+      eventTargetPrototype.addEventListener = originalAddEventListener;
+    }
+  });
+
+  const nodePrototype = hostGlobal.Node.prototype;
+  const originalAppendChild = nodePrototype.appendChild;
+  const trackedAppendChild = function <T extends Node>(this: Node, node: T): T {
+    if (
+      active &&
+      isTavernCall() &&
+      node.ownerDocument === hostDocument &&
+      (!baselineNodes.has(node) || ownedNodes.has(node))
+    ) {
+      ownedNodes.add(node);
+      const scriptNode = node as unknown as HTMLScriptElement;
+      if (
+        node instanceof hostGlobal.HTMLScriptElement &&
+        !scriptNode.src &&
+        !String(scriptNode.textContent ?? "").includes(sourcePrefix)
+      ) {
+        const scriptId = encodeURIComponent(getCurrentScriptId() || "runtime");
+        scriptNode.textContent = `${scriptNode.textContent ?? ""}\n//# sourceURL=${sourcePrefix}-${scriptId}.mjs`;
+        scriptNode.dataset.rengeTavernParentScript = runtimeToken;
+      }
+    }
+    return originalAppendChild.call(this, node) as T;
+  };
+  nodePrototype.appendChild = trackedAppendChild;
+  restoreCallbacks.push(() => {
+    if (nodePrototype.appendChild === trackedAppendChild) {
+      nodePrototype.appendChild = originalAppendChild;
+    }
+  });
+
+  const originalSetTimeout = hostWindow.setTimeout;
+  const originalClearTimeout = hostWindow.clearTimeout;
+  const originalSetInterval = hostWindow.setInterval;
+  const originalClearInterval = hostWindow.clearInterval;
+  const trackedSetTimeout = ((
+    handler: TimerHandler,
+    timeout?: number,
+    ...args: unknown[]
+  ) => {
+    if (!active || !isTavernCall() || typeof handler !== "function") {
+      return originalSetTimeout(handler, timeout, ...args);
+    }
+    let timerId = 0;
+    timerId = originalSetTimeout(
+      (...callbackArgs: unknown[]) => {
+        trackedTimeouts.delete(timerId);
+        return handler(...callbackArgs);
+      },
+      timeout,
+      ...args,
+    );
+    trackedTimeouts.add(timerId);
+    return timerId;
+  }) as typeof hostWindow.setTimeout;
+  const trackedClearTimeout = ((timerId?: number) => {
+    if (typeof timerId === "number") {
+      trackedTimeouts.delete(timerId);
+      trackedIntervals.delete(timerId);
+    }
+    return originalClearTimeout(timerId);
+  }) as typeof hostWindow.clearTimeout;
+  const trackedSetInterval = ((
+    handler: TimerHandler,
+    timeout?: number,
+    ...args: unknown[]
+  ) => {
+    const timerId = originalSetInterval(handler, timeout, ...args);
+    if (active && isTavernCall()) trackedIntervals.add(timerId);
+    return timerId;
+  }) as typeof hostWindow.setInterval;
+  const trackedClearInterval = ((timerId?: number) => {
+    if (typeof timerId === "number") {
+      trackedIntervals.delete(timerId);
+      trackedTimeouts.delete(timerId);
+    }
+    return originalClearInterval(timerId);
+  }) as typeof hostWindow.clearInterval;
+  hostWindow.setTimeout = trackedSetTimeout;
+  hostWindow.clearTimeout = trackedClearTimeout;
+  hostWindow.setInterval = trackedSetInterval;
+  hostWindow.clearInterval = trackedClearInterval;
+  restoreCallbacks.push(() => {
+    if (hostWindow.setTimeout === trackedSetTimeout) hostWindow.setTimeout = originalSetTimeout;
+    if (hostWindow.clearTimeout === trackedClearTimeout) {
+      hostWindow.clearTimeout = originalClearTimeout;
+    }
+    if (hostWindow.setInterval === trackedSetInterval) hostWindow.setInterval = originalSetInterval;
+    if (hostWindow.clearInterval === trackedClearInterval) {
+      hostWindow.clearInterval = originalClearInterval;
+    }
+  });
+
+  const originalRequestAnimationFrame = hostWindow.requestAnimationFrame;
+  const originalCancelAnimationFrame = hostWindow.cancelAnimationFrame;
+  if (typeof originalRequestAnimationFrame === "function") {
+    const trackedRequestAnimationFrame = ((callback: FrameRequestCallback) => {
+      if (!active || !isTavernCall()) return originalRequestAnimationFrame(callback);
+      let frameId = 0;
+      frameId = originalRequestAnimationFrame((timestamp) => {
+        trackedAnimationFrames.delete(frameId);
+        callback(timestamp);
+      });
+      trackedAnimationFrames.add(frameId);
+      return frameId;
+    }) as typeof hostWindow.requestAnimationFrame;
+    const trackedCancelAnimationFrame = ((frameId: number) => {
+      trackedAnimationFrames.delete(frameId);
+      return originalCancelAnimationFrame(frameId);
+    }) as typeof hostWindow.cancelAnimationFrame;
+    hostWindow.requestAnimationFrame = trackedRequestAnimationFrame;
+    hostWindow.cancelAnimationFrame = trackedCancelAnimationFrame;
+    restoreCallbacks.push(() => {
+      if (hostWindow.requestAnimationFrame === trackedRequestAnimationFrame) {
+        hostWindow.requestAnimationFrame = originalRequestAnimationFrame;
+      }
+      if (hostWindow.cancelAnimationFrame === trackedCancelAnimationFrame) {
+        hostWindow.cancelAnimationFrame = originalCancelAnimationFrame;
+      }
+    });
+  }
+
+  const hostRecord = hostWindow as unknown as Record<string, unknown>;
+  ["MutationObserver", "ResizeObserver", "IntersectionObserver"].forEach((name) => {
+    const OriginalObserver = hostRecord[name];
+    if (typeof OriginalObserver !== "function") return;
+    const previousDescriptor = Object.getOwnPropertyDescriptor(hostWindow, name);
+    const TrackedObserver = function (this: unknown, ...args: unknown[]) {
+      const observer = Reflect.construct(OriginalObserver, args) as { disconnect(): void };
+      if (active && isTavernCall()) trackedObservers.add(observer);
+      return observer;
+    };
+    Object.setPrototypeOf(TrackedObserver, OriginalObserver);
+    TrackedObserver.prototype = OriginalObserver.prototype;
+    try {
+      Object.defineProperty(hostWindow, name, {
+        configurable: true,
+        enumerable: previousDescriptor?.enumerable ?? false,
+        writable: true,
+        value: TrackedObserver,
+      });
+      restoreCallbacks.push(() => {
+        if (hostRecord[name] !== TrackedObserver) return;
+        if (previousDescriptor) Object.defineProperty(hostWindow, name, previousDescriptor);
+        else delete hostRecord[name];
+      });
+    } catch {
+      // Some embedded browsers expose observer constructors as non-configurable globals.
+    }
+  });
+
+  return () => {
+    if (!active) return;
+    active = false;
+    restoreCallbacks.splice(0).reverse().forEach((restore) => restore());
+    trackedObservers.forEach((observer) => {
+      try {
+        observer.disconnect();
+      } catch {}
+    });
+    trackedTimeouts.forEach((timerId) => originalClearTimeout(timerId));
+    trackedIntervals.forEach((timerId) => originalClearInterval(timerId));
+    trackedAnimationFrames.forEach((frameId) => originalCancelAnimationFrame(frameId));
+    trackedEventListeners.forEach(({ target, type, listener, options }) => {
+      try {
+        originalRemoveEventListener.call(target, type, listener, options);
+      } catch {}
+    });
+    Array.from(ownedNodes).reverse().forEach((node) => {
+      if (!baselineNodes.has(node) && node.isConnected) node.parentNode?.removeChild(node);
+    });
+    Object.getOwnPropertyNames(hostWindow).forEach((property) => {
+      if (existingWindowGlobals.has(property)) return;
+      const descriptor = Object.getOwnPropertyDescriptor(hostWindow, property);
+      if (descriptor?.configurable) delete hostRecord[property];
+    });
+    const documentRecord = hostDocument as unknown as Record<string, unknown>;
+    Object.getOwnPropertyNames(hostDocument).forEach((property) => {
+      if (existingDocumentGlobals.has(property)) return;
+      const descriptor = Object.getOwnPropertyDescriptor(hostDocument, property);
+      if (descriptor?.configurable) delete documentRecord[property];
+    });
+    ownedNodes.clear();
+    trackedObservers.clear();
+    trackedTimeouts.clear();
+    trackedIntervals.clear();
+    trackedAnimationFrames.clear();
+    trackedEventListeners.splice(0);
+  };
+}
+
+function installParentTavernApiBridge(
+  hostWindow: Window,
+  api: Record<string, unknown>,
+  sillyTavern: Record<string, unknown>,
+  eventSource: Record<string, unknown>,
+  toastr: Record<string, unknown>,
+) {
+  const host = hostWindow as unknown as Record<string, unknown>;
+  const values: Record<string, unknown> = {
+    ...api,
+    TavernHelper: api,
+    tavernHelper: api,
+    tavernHelperAPI: api,
+    th: api,
+    SillyTavern: sillyTavern,
+    eventSource,
+    event_types: TAVERN_EVENTS,
+    tavern_events: TAVERN_EVENTS,
+    toastr,
+  };
+  const previousDescriptors = new Map<string, PropertyDescriptor | undefined>();
+  Object.entries(values).forEach(([name, value]) => {
+    const descriptor = Object.getOwnPropertyDescriptor(hostWindow, name);
+    if (descriptor?.configurable === false && descriptor.writable === false) return;
+    previousDescriptors.set(name, descriptor);
+    try {
+      Object.defineProperty(hostWindow, name, {
+        configurable: true,
+        enumerable: descriptor?.enumerable ?? true,
+        writable: true,
+        value,
+      });
+    } catch {
+      try {
+        host[name] = value;
+      } catch {}
+    }
+  });
+  return () => {
+    Array.from(previousDescriptors.entries()).reverse().forEach(([name, descriptor]) => {
+      try {
+        if (descriptor) Object.defineProperty(hostWindow, name, descriptor);
+        else delete host[name];
+      } catch {}
+    });
+    previousDescriptors.clear();
+  };
 }
 
 function mergeVariableRecords(
@@ -799,6 +1103,9 @@ export class TavernScriptRuntime {
   private scriptButtons = new Map<string, TavernScriptButton[]>();
   private variableSchemas = new Map<string, unknown>();
   private sillyTavernChatCache: Array<Record<string, unknown>> = [];
+  private syncChatMetadata: (() => void) | null = null;
+  private parentSideEffectCleanup: (() => void) | null = null;
+  private parentApiBridgeCleanup: (() => void) | null = null;
   private fontAwesomeCleanups: Array<() => void> = [];
   private localPlaceholderImageSources = new Map<string, string>();
 
@@ -817,12 +1124,17 @@ export class TavernScriptRuntime {
   syncChat() {
     if (this.destroyed) return;
     this.refreshSillyTavernChatCache();
+    this.syncChatMetadata?.();
   }
 
   async initialize() {
     if (this.destroyed) throw new Error("脚本运行时已销毁。");
     this.reportStatus("loading", "正在初始化酒馆脚本运行环境...");
     await this.createIframe();
+    this.parentSideEffectCleanup = installParentSideEffectTracker(
+      window,
+      () => this.currentScriptId || this.lastScriptId,
+    );
     this.refreshSillyTavernChatCache();
     const fontAwesomeSupports = [
       installLocalFontAwesomeShadowSupport(window, window.location.href),
@@ -953,9 +1265,14 @@ export class TavernScriptRuntime {
     this.scriptButtons.clear();
     this.variableSchemas.clear();
     this.sillyTavernChatCache.splice(0);
+    this.syncChatMetadata = null;
     this.adapter.onButtonsChange?.([]);
     const parentWindow = window as Window & { Mvu?: unknown };
     if (parentWindow.Mvu) delete parentWindow.Mvu;
+    this.parentSideEffectCleanup?.();
+    this.parentSideEffectCleanup = null;
+    this.parentApiBridgeCleanup?.();
+    this.parentApiBridgeCleanup = null;
     this.iframe?.remove();
     this.fontAwesomeCleanups
       .splice(0)
@@ -1530,7 +1847,8 @@ export class TavernScriptRuntime {
     };
     const getWorldbookNames = () =>
       Array.from(new Set(getWorldBooks().map((book) => book.name)));
-    const getGlobalWorldbookNames = () => getGlobalWorldBooks().map((book) => book.name);
+    const getGlobalWorldbookNames = () =>
+      getGlobalWorldBooks().filter((book) => book.active).map((book) => book.name);
     const getWorldbook = (name: unknown) =>
       cloneValue(findWorldBook(name)?.entries.map(formatTavernWorldBookEntry) ?? []);
     const getLorebooks = () =>
@@ -1580,6 +1898,74 @@ export class TavernScriptRuntime {
       if (!book || !Array.isArray(entries)) return false;
       persistWorldBookEntries(book, entries);
       return true;
+    };
+    const createOrReplaceWorldbook = async (name: unknown, entries: unknown) => {
+      const normalizedName = String(name ?? "").trim();
+      if (!normalizedName || !Array.isArray(entries)) return false;
+      const existingBook = findWorldBook(normalizedName);
+      if (existingBook) {
+        persistWorldBookEntries(existingBook, entries);
+        return normalizedName;
+      }
+      const timestamp = new Date().toISOString();
+      const createdBook: TavernRuntimeWorldBook = {
+        id: `worldbook-${crypto.randomUUID()}`,
+        name: normalizedName,
+        description: "",
+        entries: entries.map((entry, index) => normalizeTavernWorldBookEntry(entry, index)),
+        scope: "global",
+        active: false,
+        sourceFormat: "sillytavern",
+        sourceFileName: "",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      this.adapter.setWorldBook(createdBook);
+      return normalizedName;
+    };
+    const replaceWorldbook = async (name: unknown, entries: unknown) => {
+      const book = findWorldBook(name);
+      if (!book || !Array.isArray(entries)) return false;
+      persistWorldBookEntries(book, entries);
+      return true;
+    };
+    const deleteWorldbook = async (name: unknown) => {
+      const book = findWorldBook(name);
+      if (!book || !this.adapter.deleteWorldBook) return false;
+      this.adapter.deleteWorldBook(book.id || book.name);
+      return true;
+    };
+    const rebindGlobalWorldbooks = async (names: unknown) => {
+      if (!Array.isArray(names) || !this.adapter.setActiveWorldBookNames) return false;
+      const availableNames = new Set(getGlobalWorldBooks().map((book) => book.name));
+      const nextNames = Array.from(
+        new Set(
+          names
+            .map(String)
+            .map((name) => name.trim())
+            .filter((name) => availableNames.has(name)),
+        ),
+      );
+      this.adapter.setActiveWorldBookNames(nextNames);
+      return true;
+    };
+    const getOrCreateChatWorldbook = async () => {
+      const characterBook = getCharacterWorldBook();
+      if (characterBook) return characterBook.name;
+      const metadata = this.adapter.getChatMetadata?.() ?? {};
+      const storedName = String(metadata.rengeChatWorldbookName ?? "").trim();
+      if (storedName && findWorldBook(storedName)) return storedName;
+      const activeBook = getGlobalWorldBooks().find((book) => book.active);
+      if (activeBook) return activeBook.name;
+      const chatId = this.adapter.getChatId();
+      const generatedName = `会话世界书-${chatId}`;
+      await createOrReplaceWorldbook(generatedName, []);
+      await rebindGlobalWorldbooks([...getGlobalWorldbookNames(), generatedName]);
+      this.adapter.setChatMetadata?.({
+        ...metadata,
+        rengeChatWorldbookName: generatedName,
+      });
+      return generatedName;
     };
     const updateWorldbookWith = async (name: unknown, updater: unknown) => {
       const book = findWorldBook(name);
@@ -1698,6 +2084,11 @@ export class TavernScriptRuntime {
       getLorebookEntries,
       getLorebookSettings,
       setLorebookSettings: async () => true,
+      createOrReplaceWorldbook,
+      replaceWorldbook,
+      deleteWorldbook,
+      rebindGlobalWorldbooks,
+      getOrCreateChatWorldbook,
       setLorebookEntries,
       createLorebookEntry,
       createLorebookEntries: createWorldbookEntries,
@@ -1845,6 +2236,11 @@ export class TavernScriptRuntime {
       );
     };
     const chatMetadata = cloneValue(this.adapter.getChatMetadata?.() ?? {});
+    this.syncChatMetadata = () => {
+      const latestMetadata = cloneValue(this.adapter.getChatMetadata?.() ?? {});
+      Object.keys(chatMetadata).forEach((key) => delete chatMetadata[key]);
+      Object.assign(chatMetadata, latestMetadata);
+    };
     const saveChat = async () => {
       this.adapter.setChatMetadata?.(cloneValue(chatMetadata));
       return this.persistSillyTavernChatCache();
@@ -1866,6 +2262,12 @@ export class TavernScriptRuntime {
       return true;
     };
     const stopGeneration = () => this.adapter.stopGeneration?.();
+    const chatCompletionSettings: Record<string, unknown> = {
+      function_calling: true,
+      tool_calling: true,
+      temperature: 1,
+      max_tokens: 4096,
+    };
     const getContext = () => ({
       chat: this.getSillyTavernChat(),
       characters: this.getSillyTavernCharacters(),
@@ -1888,6 +2290,12 @@ export class TavernScriptRuntime {
       stopGeneration,
       updateChatMetadata,
       getWorldBooks: getLorebooks,
+      createOrReplaceWorldbook,
+      replaceWorldbook,
+      deleteWorldbook,
+      rebindGlobalWorldbooks,
+      getOrCreateChatWorldbook,
+      chatCompletionSettings,
       powerUserSettings: {},
       getRequestHeaders: () => ({ "Content-Type": "application/json" }),
     });
@@ -1951,6 +2359,11 @@ export class TavernScriptRuntime {
       getWorldBooks: getLorebooks,
       getGlobalWorldbookNames,
       getWorldbook,
+      createOrReplaceWorldbook,
+      replaceWorldbook,
+      deleteWorldbook,
+      rebindGlobalWorldbooks,
+      getOrCreateChatWorldbook,
       getLorebooks,
       getLorebookEntries,
       getLorebookSettings,
@@ -1973,12 +2386,7 @@ export class TavernScriptRuntime {
         isToolCallingSupported: () => true,
         getTools: () => [],
       },
-      chatCompletionSettings: {
-        function_calling: true,
-        tool_calling: true,
-        temperature: 1,
-        max_tokens: 4096,
-      },
+      chatCompletionSettings,
     };
     Object.defineProperties(sillyTavern, {
       chat: { get: () => this.getSillyTavernChat(), configurable: true },
@@ -1993,6 +2401,69 @@ export class TavernScriptRuntime {
 
     const waitGlobalInitialized = async (name = "Mvu", timeout = 30000) =>
       await this.waitForGlobal(String(name), Number(timeout) || 30000);
+    const injectedPrompts = new Map<
+      string,
+      { prompt: Record<string, unknown>; once: boolean }
+    >();
+    const injectPrompts = (prompts: unknown, options: unknown = {}) => {
+      if (!Array.isArray(prompts)) return [];
+      const once = !isRecord(options) || options.once !== false;
+      const ids: string[] = [];
+      prompts.forEach((value, index) => {
+        if (!isRecord(value)) return;
+        const content = value.content ?? value.message ?? value.mes;
+        if (typeof content !== "string" || !content.trim()) return;
+        const id = String(value.id ?? `injected-prompt-${crypto.randomUUID()}-${index}`);
+        const role =
+          value.role === "assistant" || value.role === "user" ? value.role : "system";
+        injectedPrompts.set(id, {
+          prompt: { ...cloneValue(value), id, role, content },
+          once,
+        });
+        ids.push(id);
+      });
+      return ids;
+    };
+    const getModelList = async (config: unknown = {}) => {
+      const normalized = isRecord(config) ? config : {};
+      const apiBaseUrl = String(normalized.apiurl ?? normalized.apiBaseUrl ?? "")
+        .trim()
+        .replace(/\/+$/, "");
+      if (!apiBaseUrl) {
+        const modelId = this.adapter.getModelId?.() ?? "";
+        return modelId ? [modelId] : [];
+      }
+      const response = await fetch("/api/providers/models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiBaseUrl,
+          apiKey: String(normalized.key ?? normalized.apiKey ?? ""),
+        }),
+      });
+      const payload = await response.json().catch(() => ({})) as {
+        data?: Array<{ id?: string }>;
+        models?: Array<string | { id?: string; name?: string }>;
+        error?: unknown;
+      };
+      if (!response.ok) {
+        throw new Error(
+          typeof payload.error === "string"
+            ? payload.error
+            : `模型列表请求失败：HTTP ${response.status}`,
+        );
+      }
+      return Array.from(
+        new Set([
+          ...(payload.data ?? []).map((model) => model.id),
+          ...(payload.models ?? []).map((model) =>
+            typeof model === "string" ? model : model.id ?? model.name,
+          ),
+        ].filter((model): model is string => Boolean(model))),
+      );
+    };
+    const getPresetNames = () => this.adapter.getPresetNames?.() ?? [];
+    const loadPreset = (name: unknown) => this.adapter.loadPreset?.(String(name ?? "")) ?? false;
     const getInput = () => this.adapter.getInput?.() ?? "";
     const setInput = (value: unknown) => this.adapter.setInput?.(String(value ?? ""));
     const appendInput = (value: unknown) => this.adapter.appendInput?.(String(value ?? ""));
@@ -2006,7 +2477,42 @@ export class TavernScriptRuntime {
     };
     const generate = async (config?: unknown) => {
       if (!this.adapter.generate) throw new Error("Renge 独立生成接口尚未初始化。");
-      return await this.adapter.generate(config);
+      const normalizedConfig = isRecord(config)
+        ? cloneValue(config)
+        : { user_input: config };
+      if (
+        !isRecord(normalizedConfig.custom_api) &&
+        typeof chatCompletionSettings.custom_url === "string" &&
+        chatCompletionSettings.custom_url.trim() &&
+        typeof chatCompletionSettings.custom_model === "string" &&
+        chatCompletionSettings.custom_model.trim()
+      ) {
+        normalizedConfig.custom_api = {
+          apiurl: chatCompletionSettings.custom_url,
+          model: chatCompletionSettings.custom_model,
+          max_tokens: chatCompletionSettings.max_tokens,
+          temperature: chatCompletionSettings.temperature,
+        };
+      }
+      const promptInjections = Array.from(injectedPrompts.values());
+      if (promptInjections.length > 0) {
+        const orderedPrompts = Array.isArray(normalizedConfig.ordered_prompts)
+          ? normalizedConfig.ordered_prompts
+          : Array.isArray(normalizedConfig.prompt)
+            ? normalizedConfig.prompt
+            : ["user_input"];
+        normalizedConfig.ordered_prompts = [
+          ...promptInjections.map((injection) => cloneValue(injection.prompt)),
+          ...orderedPrompts,
+        ];
+      }
+      try {
+        return await this.adapter.generate(normalizedConfig);
+      } finally {
+        Array.from(injectedPrompts.entries()).forEach(([id, injection]) => {
+          if (injection.once) injectedPrompts.delete(id);
+        });
+      }
     };
     const stopAllGeneration = async () => await this.adapter.stopGeneration?.();
     const api = {
@@ -2041,6 +2547,11 @@ export class TavernScriptRuntime {
       getWorldbookNames,
       getGlobalWorldbookNames,
       getWorldbook,
+      createOrReplaceWorldbook,
+      replaceWorldbook,
+      deleteWorldbook,
+      rebindGlobalWorldbooks,
+      getOrCreateChatWorldbook,
       getLorebooks,
       getCharLorebooks,
       getCharWorldbookNames,
@@ -2069,12 +2580,16 @@ export class TavernScriptRuntime {
       updateTavernRegexesWith,
       deleteTavernRegex,
       substitudeMacros,
+      injectPrompts,
       getScriptId,
       getScriptButtons,
       replaceScriptButtons,
       appendInexistentScriptButtons,
       getButtonEvent: (name: unknown) => this.getButtonEventName(getScriptId(), String(name)),
       waitGlobalInitialized,
+      getModelList,
+      getPresetNames,
+      loadPreset,
       getTavernHelperVersion: async () => "3.5.0",
       getVersion: () => sillyTavern.versionInfo,
       getContext,
@@ -2136,12 +2651,21 @@ export class TavernScriptRuntime {
       setPath(variables, String(path), value);
       return await replaceVariables(variables);
     };
-    win.getPresetNames = () => [];
-    win.getPreset = () => null;
+    win.getPresetNames = getPresetNames;
+    win.getPreset = (name: unknown) =>
+      getPresetNames().find((presetName) => presetName === String(name ?? "")) ?? null;
     win.formatAsDisplayedMessage = (message: unknown) =>
       isRecord(message) ? String(message.message ?? message.content ?? "") : String(message ?? "");
     win.retrieveDisplayedMessage = (messageId: unknown) =>
       getChatMessages(messageId)[0] ?? null;
+    this.parentApiBridgeCleanup?.();
+    this.parentApiBridgeCleanup = installParentTavernApiBridge(
+      window,
+      api,
+      sillyTavern,
+      eventSource as unknown as Record<string, unknown>,
+      toastr,
+    );
   }
 
   private resolveVariables(option: unknown, scriptId: string) {
