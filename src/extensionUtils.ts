@@ -30,6 +30,12 @@ export type InstalledExtension = {
   statusMessage: string;
   capabilities: string[];
   settings: PromptTemplateExtensionSettings;
+  loadingOrder: number;
+  requires: string[];
+  optional: string[];
+  jsFiles: string[];
+  cssFiles: string[];
+  assetBaseUrl: string;
   installedAt: string;
   updatedAt: string;
 };
@@ -126,9 +132,50 @@ export function createPromptTemplateExtension(
     statusMessage: "已安装 Renge 原生兼容层",
     capabilities: [...ST_PROMPT_TEMPLATE_CAPABILITIES],
     settings: { ...DEFAULT_PROMPT_TEMPLATE_SETTINGS },
+    loadingOrder: 1,
+    requires: [],
+    optional: [],
+    jsFiles: [],
+    cssFiles: [],
+    assetBaseUrl: "",
     installedAt,
     updatedAt: installedAt,
   };
+}
+
+function normalizeString(value: unknown, fallback = "") {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function normalizeStringList(value: unknown) {
+  return Array.isArray(value)
+    ? value.map((item) => String(item).trim()).filter(Boolean)
+    : typeof value === "string" && value.trim()
+      ? [value.trim()]
+      : [];
+}
+
+function normalizeAssetList(value: unknown) {
+  return normalizeStringList(value)
+    .map((item) => item.replace(/\\/g, "/").replace(/^\.\//, ""))
+    .filter(
+      (item) =>
+        Boolean(item) &&
+        !item.startsWith("/") &&
+        !item.split("/").some((segment) => segment === ".."),
+    );
+}
+
+function normalizeWebUrl(value: unknown, fallback = "") {
+  for (const candidate of [value, fallback]) {
+    try {
+      const parsed = new URL(String(candidate ?? "").trim());
+      if (parsed.protocol === "https:" || parsed.protocol === "http:") return parsed.href;
+    } catch {
+      // Try the fallback below.
+    }
+  }
+  return "";
 }
 
 export function normalizeInstalledExtension(value: unknown): InstalledExtension | null {
@@ -141,18 +188,68 @@ export function normalizeInstalledExtension(value: unknown): InstalledExtension 
     id.toLowerCase() === ST_PROMPT_TEMPLATE_EXTENSION_ID ||
     packageName.toLowerCase() === "zonde306/st-prompt-template" ||
     sourceUrl.toLowerCase().includes("zonde306/st-prompt-template");
-  if (!isPromptTemplate) return null;
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id) || !packageName || !sourceUrl) return null;
 
-  const defaults = createPromptTemplateExtension();
+  const defaults = isPromptTemplate
+    ? createPromptTemplateExtension()
+    : {
+        id,
+        packageName,
+        displayName: packageName.split("/").at(-1) || packageName,
+        description: "通过 Git 仓库安装的酒馆 Web 扩展。",
+        author: packageName.split("/")[0] || "未知作者",
+        version: "0.0.0",
+        sourceUrl,
+        homePage: sourceUrl,
+        license: "未声明",
+        enabled: true,
+        compatibility: "web" as const,
+        status: "installed" as const,
+        statusMessage: "已安装酒馆 Web 兼容扩展",
+        capabilities: ["酒馆 manifest 加载", "JavaScript / CSS 资源", "Renge 酒馆 API 兼容层"],
+        settings: { ...DEFAULT_PROMPT_TEMPLATE_SETTINGS },
+        loadingOrder: 100,
+        requires: [],
+        optional: [],
+        jsFiles: [],
+        cssFiles: [],
+        assetBaseUrl: "",
+        installedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
   return {
     ...defaults,
+    id,
+    packageName,
+    displayName: normalizeString(value.displayName, defaults.displayName),
+    description: normalizeString(value.description, defaults.description),
+    author: normalizeString(value.author, defaults.author),
+    version: normalizeString(value.version, defaults.version),
+    sourceUrl,
+    homePage: normalizeWebUrl(value.homePage, sourceUrl),
+    license: normalizeString(value.license, defaults.license),
     enabled: value.enabled !== false,
+    compatibility: isPromptTemplate ? "native" : "web",
     status: value.status === "error" ? "error" : "installed",
     statusMessage:
       typeof value.statusMessage === "string" && value.statusMessage.trim()
         ? value.statusMessage
         : defaults.statusMessage,
+    capabilities:
+      normalizeStringList(value.capabilities).length > 0
+        ? normalizeStringList(value.capabilities)
+        : defaults.capabilities,
     settings: normalizePromptTemplateSettings(value.settings),
+    loadingOrder: Number.isFinite(Number(value.loadingOrder))
+      ? Number(value.loadingOrder)
+      : defaults.loadingOrder,
+    requires: normalizeStringList(value.requires),
+    optional: normalizeStringList(value.optional),
+    jsFiles: normalizeAssetList(value.jsFiles),
+    cssFiles: normalizeAssetList(value.cssFiles),
+    assetBaseUrl: isPromptTemplate
+      ? ""
+      : `/api/extensions/${encodeURIComponent(id)}/files`,
     installedAt:
       typeof value.installedAt === "string" ? value.installedAt : defaults.installedAt,
     updatedAt:
@@ -166,46 +263,19 @@ export function normalizeInstalledExtensions(value: unknown): InstalledExtension
         .map(normalizeInstalledExtension)
         .filter((extension): extension is InstalledExtension => Boolean(extension))
     : [];
-  if (!normalized.some((extension) => extension.id === ST_PROMPT_TEMPLATE_EXTENSION_ID)) {
-    normalized.push(createPromptTemplateExtension());
-  }
-  return normalized;
+  return normalized.filter(
+    (extension, index) =>
+      normalized.findIndex((candidate) => candidate.id === extension.id) === index,
+  );
 }
 
 export function loadInstalledExtensions(storageKey: string): InstalledExtension[] {
   try {
     const stored = localStorage.getItem(storageKey);
-    return normalizeInstalledExtensions(stored ? JSON.parse(stored) : []);
+    return stored === null
+      ? [createPromptTemplateExtension()]
+      : normalizeInstalledExtensions(JSON.parse(stored));
   } catch {
     return [createPromptTemplateExtension()];
   }
-}
-
-export function installKnownTavernExtension(
-  sourceUrl: string,
-  existing: InstalledExtension[],
-): InstalledExtension[] {
-  const normalizedUrl = sourceUrl.trim().replace(/\/+$/, "").toLowerCase();
-  const supportedUrl = ST_PROMPT_TEMPLATE_SOURCE_URL.toLowerCase();
-  if (
-    normalizedUrl !== supportedUrl &&
-    normalizedUrl !== `${supportedUrl}.git` &&
-    normalizedUrl !== "zonde306/st-prompt-template"
-  ) {
-    throw new Error("当前版本首先支持 zonde306/ST-Prompt-Template；其他酒馆扩展将在后续兼容。");
-  }
-
-  const timestamp = new Date().toISOString();
-  const installed = createPromptTemplateExtension(timestamp);
-  const previous = existing.find(
-    (extension) => extension.id === ST_PROMPT_TEMPLATE_EXTENSION_ID,
-  );
-  if (previous) {
-    installed.installedAt = previous.installedAt;
-    installed.settings = normalizePromptTemplateSettings(previous.settings);
-  }
-  return [
-    ...existing.filter((extension) => extension.id !== ST_PROMPT_TEMPLATE_EXTENSION_ID),
-    installed,
-  ];
 }

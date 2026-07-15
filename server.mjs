@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { createReadStream, createWriteStream } from "node:fs";
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { homedir, networkInterfaces, tmpdir } from "node:os";
@@ -17,6 +17,7 @@ const mcpClientCache = new Map();
 const mimeTypes = {
   ".html": "text/html;charset=utf-8",
   ".js": "text/javascript;charset=utf-8",
+  ".mjs": "text/javascript;charset=utf-8",
   ".css": "text/css;charset=utf-8",
   ".json": "application/json;charset=utf-8",
   ".svg": "image/svg+xml",
@@ -24,7 +25,11 @@ const mimeTypes = {
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
   ".webp": "image/webp",
+  ".gif": "image/gif",
   ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
 };
 
 function sendJson(response, statusCode, payload) {
@@ -36,7 +41,7 @@ function sendJson(response, statusCode, payload) {
     "Content-Type": "application/json;charset=utf-8",
     "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,POST,PUT,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type,Accept",
   });
   response.end(JSON.stringify(payload));
@@ -45,7 +50,7 @@ function sendJson(response, statusCode, payload) {
 function sendOptions(response) {
   response.writeHead(204, {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,POST,PUT,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type,Accept",
     "Access-Control-Max-Age": "86400",
   });
@@ -642,6 +647,244 @@ async function writeAppData(dataFilePath, payload) {
 
 function getSkillsDir(dataFilePath) {
   return join(dirname(dataFilePath), "skills");
+}
+
+function getExtensionsRoot(dataFilePath) {
+  return join(dirname(dataFilePath), "extensions");
+}
+
+function getExtensionDirectory(dataFilePath, extensionId) {
+  const id = String(extensionId ?? "").trim();
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) return null;
+  const root = resolve(getExtensionsRoot(dataFilePath));
+  const directory = resolve(root, id);
+  const rel = relative(root, directory);
+  if (rel.startsWith("..") || isAbsolute(rel)) return null;
+  return directory;
+}
+
+function normalizeExtensionGitUrl(value) {
+  let sourceUrl = String(value ?? "").trim();
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(sourceUrl)) {
+    sourceUrl = `https://github.com/${sourceUrl.replace(/\.git$/i, "")}`;
+  }
+  let parsed;
+  try {
+    parsed = new URL(sourceUrl);
+  } catch {
+    throw new Error("扩展地址不是有效的 Git 仓库网址。");
+  }
+  if (!["https:", "http:", "git:"].includes(parsed.protocol)) {
+    throw new Error("扩展安装仅支持 HTTPS、HTTP 或 git:// 仓库地址。");
+  }
+  parsed.hash = "";
+  parsed.search = "";
+  const pathname = parsed.pathname.replace(/\/+$/, "").replace(/\.git$/i, "");
+  const parts = pathname.split("/").filter(Boolean);
+  if (parts.length < 2) throw new Error("Git 仓库地址缺少所有者或仓库名。");
+  const repository = parts.at(-1);
+  const owner = parts.at(-2);
+  const packageName = `${owner}/${repository}`;
+  return {
+    cloneUrl: `${parsed.origin === "null" ? `${parsed.protocol}//${parsed.host}` : parsed.origin}${pathname}`,
+    sourceUrl: `${parsed.protocol}//${parsed.host}${pathname}`,
+    packageName,
+    owner,
+    repository,
+  };
+}
+
+function normalizeExtensionHomePage(value, fallback) {
+  for (const candidate of [value, fallback]) {
+    try {
+      const parsed = new URL(String(candidate ?? "").trim());
+      if (["https:", "http:"].includes(parsed.protocol)) return parsed.href;
+    } catch {
+      // Try the fallback below.
+    }
+  }
+  return "";
+}
+
+async function runExtensionGitClone(sourceUrl, targetPath) {
+  await new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(
+      "git",
+      ["clone", "--depth", "1", "--single-branch", sourceUrl, targetPath],
+      {
+        windowsHide: true,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      },
+    );
+    let output = "";
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      if (error) rejectPromise(error);
+      else resolvePromise();
+    };
+    const appendOutput = (chunk) => {
+      output = `${output}${chunk.toString("utf8")}`.slice(-8000);
+    };
+    child.stdout.on("data", appendOutput);
+    child.stderr.on("data", appendOutput);
+    child.on("error", (error) => finish(new Error(`无法启动 git：${error.message}`)));
+    child.on("close", (code) => {
+      if (code === 0) finish();
+      else finish(new Error(output.trim() || `git clone 失败：退出码 ${code}`));
+    });
+    const timeoutId = setTimeout(() => {
+      child.kill();
+      finish(new Error("git clone 超时，请检查网络或仓库地址。"));
+    }, 120000);
+  });
+}
+
+async function readJsonFileIfPresent(path) {
+  try {
+    return JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function findTavernExtensionManifest(repositoryRoot) {
+  const direct = await readJsonFileIfPresent(join(repositoryRoot, "manifest.json"));
+  if (direct) return { root: repositoryRoot, manifest: direct };
+  const entries = await readdir(repositoryRoot, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory() || [".git", "node_modules"].includes(entry.name)) continue;
+    const nestedRoot = join(repositoryRoot, entry.name);
+    const nested = await readJsonFileIfPresent(join(nestedRoot, "manifest.json"));
+    if (nested) return { root: nestedRoot, manifest: nested };
+  }
+  throw new Error("仓库中没有找到酒馆扩展 manifest.json。");
+}
+
+function normalizeManifestFileList(value) {
+  return (Array.isArray(value) ? value : [value])
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean);
+}
+
+async function validateExtensionAssets(extensionRoot, values, label) {
+  const result = [];
+  const realExtensionRoot = await realpath(extensionRoot);
+  for (const rawPath of normalizeManifestFileList(values)) {
+    const normalizedPath = rawPath.replace(/\\/g, "/").replace(/^\.\//, "");
+    const filePath = resolve(extensionRoot, normalizedPath);
+    const rel = relative(extensionRoot, filePath);
+    if (!normalizedPath || rel.startsWith("..") || isAbsolute(rel)) {
+      throw new Error(`${label} 入口路径越界：${rawPath}`);
+    }
+    const realFilePath = await realpath(filePath).catch(() => null);
+    const realRel = realFilePath ? relative(realExtensionRoot, realFilePath) : "..";
+    if (!realFilePath || realRel.startsWith("..") || isAbsolute(realRel)) {
+      throw new Error(`${label} 入口不能指向扩展目录之外：${rawPath}`);
+    }
+    const fileInfo = await stat(realFilePath).catch(() => null);
+    if (!fileInfo?.isFile()) throw new Error(`${label} 入口文件不存在：${rawPath}`);
+    result.push(rel.replace(/\\/g, "/"));
+  }
+  return result;
+}
+
+async function installTavernExtensionFromGit(dataFilePath, sourceValue) {
+  const source = normalizeExtensionGitUrl(sourceValue);
+  const stagingRoot = await mkdtemp(join(tmpdir(), "renge-extension-"));
+  const repositoryRoot = join(stagingRoot, "repository");
+  try {
+    await runExtensionGitClone(source.cloneUrl, repositoryRoot);
+    const found = await findTavernExtensionManifest(repositoryRoot);
+    const manifest = found.manifest && typeof found.manifest === "object" ? found.manifest : {};
+    const jsFiles = await validateExtensionAssets(found.root, manifest.js, "JavaScript");
+    const cssFiles = await validateExtensionAssets(found.root, manifest.css, "CSS");
+    if (jsFiles.length === 0 && cssFiles.length === 0) {
+      throw new Error("manifest.json 没有声明可加载的 js 或 css 文件。");
+    }
+    const packageJson = (await readJsonFileIfPresent(join(repositoryRoot, "package.json"))) ?? {};
+    const knownPromptTemplate = source.packageName.toLowerCase() === "zonde306/st-prompt-template";
+    const id = knownPromptTemplate
+      ? "st-prompt-template"
+      : `${sanitizePathName(source.repository, "extension").toLowerCase()}-${shortHash(source.sourceUrl)}`
+          .replace(/[^a-z0-9_-]+/g, "-")
+          .slice(0, 128);
+    const targetDirectory = getExtensionDirectory(dataFilePath, id);
+    if (!targetDirectory) throw new Error("无法生成安全的扩展安装目录。");
+    await mkdir(getExtensionsRoot(dataFilePath), { recursive: true });
+    await rm(targetDirectory, { recursive: true, force: true });
+    await cp(found.root, targetDirectory, {
+      recursive: true,
+      force: false,
+      filter: (sourcePath) => {
+        const normalized = sourcePath.replace(/\\/g, "/");
+        return !/(^|\/)(\.git|node_modules)(\/|$)/.test(normalized);
+      },
+    });
+    const timestamp = new Date().toISOString();
+    const displayName = String(manifest.display_name ?? packageJson.displayName ?? source.repository).trim();
+    const description = String(
+      manifest.description ?? packageJson.description ?? "通过 Git 仓库安装的酒馆扩展。",
+    ).trim();
+    const authorValue = manifest.author ?? packageJson.author ?? source.owner;
+    const author =
+      authorValue && typeof authorValue === "object"
+        ? String(authorValue.name ?? source.owner)
+        : String(authorValue ?? source.owner);
+    const licenseValue = packageJson.license;
+    const license =
+      licenseValue && typeof licenseValue === "object"
+        ? String(licenseValue.type ?? "未声明")
+        : String(licenseValue ?? "未声明");
+    return {
+      id,
+      packageName: source.packageName,
+      displayName: displayName || source.repository,
+      description,
+      author,
+      version: String(manifest.version ?? packageJson.version ?? "0.0.0"),
+      sourceUrl: source.sourceUrl,
+      homePage: normalizeExtensionHomePage(
+        manifest.homePage ?? packageJson.homepage,
+        source.sourceUrl,
+      ),
+      license,
+      enabled: true,
+      compatibility: knownPromptTemplate ? "native" : "web",
+      status: "installed",
+      statusMessage: knownPromptTemplate
+        ? "已安装 Renge 原生兼容层"
+        : "已安装酒馆 Web 兼容扩展",
+      capabilities: knownPromptTemplate
+        ? [
+            "EJS 提示词模板",
+            "全局 / 会话 / 消息变量",
+            "角色卡与世界书上下文",
+            "生成前与回复后处理",
+          ]
+        : ["酒馆 manifest 加载", "JavaScript / CSS 资源", "Renge 酒馆 API 兼容层"],
+      settings: {},
+      loadingOrder: Number.isFinite(Number(manifest.loading_order))
+        ? Number(manifest.loading_order)
+        : 100,
+      requires: normalizeManifestFileList(manifest.requires),
+      optional: normalizeManifestFileList(manifest.optional),
+      jsFiles,
+      cssFiles,
+      assetBaseUrl: `/api/extensions/${encodeURIComponent(id)}/files`,
+      installedAt: timestamp,
+      updatedAt: timestamp,
+    };
+  } finally {
+    await rm(stagingRoot, { recursive: true, force: true });
+  }
 }
 
 function getSessionImagesRoot(dataFilePath) {
@@ -1832,6 +2075,69 @@ async function handleApi(request, response, pathname, dataFilePath) {
         }
         return;
       }
+      sendJson(response, 405, { error: "Method not allowed" });
+      return;
+    }
+
+    if (pathname === "/api/extensions/install") {
+      if (request.method !== "POST") {
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+      }
+      const body = await readJsonBody(request);
+      const extension = await installTavernExtensionFromGit(dataFilePath, body.sourceUrl);
+      sendJson(response, 200, { extension });
+      return;
+    }
+
+    if (pathname.startsWith("/api/extensions/")) {
+      const rest = pathname.slice("/api/extensions/".length);
+      const [rawId, operation, ...rawFileParts] = rest.split("/");
+      const extensionId = decodeURIComponent(rawId || "");
+      const extensionDirectory = getExtensionDirectory(dataFilePath, extensionId);
+      if (!extensionDirectory) {
+        sendJson(response, 400, { error: "非法扩展 ID" });
+        return;
+      }
+
+      if (request.method === "DELETE" && !operation) {
+        await rm(extensionDirectory, { recursive: true, force: true });
+        sendJson(response, 200, { ok: true, id: extensionId });
+        return;
+      }
+
+      if (request.method === "GET" && operation === "files" && rawFileParts.length > 0) {
+        const decodedParts = rawFileParts.map((part) => decodeURIComponent(part));
+        const filePath = resolve(extensionDirectory, ...decodedParts);
+        const rel = relative(extensionDirectory, filePath);
+        if (rel.startsWith("..") || isAbsolute(rel)) {
+          sendJson(response, 400, { error: "扩展文件路径越界" });
+          return;
+        }
+        try {
+          const realExtensionDirectory = await realpath(extensionDirectory);
+          const realFilePath = await realpath(filePath);
+          const realRel = relative(realExtensionDirectory, realFilePath);
+          if (realRel.startsWith("..") || isAbsolute(realRel)) {
+            sendJson(response, 400, { error: "扩展文件不能指向安装目录之外" });
+            return;
+          }
+          const fileInfo = await stat(realFilePath);
+          if (!fileInfo.isFile()) throw new Error("Not a file");
+          const content = await readFile(realFilePath);
+          const extension = extname(realFilePath).toLowerCase();
+          response.writeHead(200, {
+            "Content-Type": mimeTypes[extension] ?? "application/octet-stream",
+            "Cache-Control": "no-store",
+            "Access-Control-Allow-Origin": "*",
+          });
+          response.end(content);
+        } catch {
+          sendJson(response, 404, { error: "扩展文件不存在" });
+        }
+        return;
+      }
+
       sendJson(response, 405, { error: "Method not allowed" });
       return;
     }
