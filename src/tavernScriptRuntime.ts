@@ -90,6 +90,10 @@ export type TavernScriptRuntimeAdapter = {
   setCharacterVariables(variables: Record<string, unknown>): void;
   getGlobalVariables(): Record<string, unknown>;
   setGlobalVariables(variables: Record<string, unknown>): void;
+  getPresetVariables?(): Record<string, unknown>;
+  setPresetVariables?(variables: Record<string, unknown>): void;
+  getExtensionSettings?(): Record<string, unknown>;
+  setExtensionSettings?(settings: Record<string, unknown>): void;
   getScriptData(scriptId: string): Record<string, unknown>;
   setScriptData(scriptId: string, data: Record<string, unknown>): void;
   getCharacter(): TavernRuntimeCharacter | null;
@@ -100,6 +104,13 @@ export type TavernScriptRuntimeAdapter = {
   getUserName(): string;
   getChatId(): string;
   getModelId?(): string;
+  getInput?(): string;
+  setInput?(value: string): unknown;
+  appendInput?(value: string): unknown;
+  sendMessage?(value?: string): Promise<unknown> | unknown;
+  triggerSlash?(command: string): Promise<unknown> | unknown;
+  generate?(config?: unknown): Promise<string>;
+  stopGeneration?(): Promise<unknown> | unknown;
   onButtonsChange?(buttons: TavernRuntimeButton[]): void;
   onLog?(log: TavernRuntimeLog): void;
   onStatus?(status: TavernRuntimeStatus): void;
@@ -124,6 +135,15 @@ type RuntimeWindow = Window &
 type VariableOption = {
   type?: string;
   message_id?: number | string;
+  script_id?: string;
+  extension_id?: string;
+};
+
+type RuntimeEventHandler = {
+  callback: (...args: unknown[]) => unknown;
+  scriptId: string;
+  priority: -1 | 0 | 1;
+  sequence: number;
 };
 
 const TAVERN_EVENTS = Object.freeze({
@@ -156,6 +176,8 @@ const TAVERN_EVENTS = Object.freeze({
   VARIABLE_CHANGED: "variable_changed",
   APP_READY: "app_ready",
 });
+
+const TAVERN_EXTENSION_SETTINGS_VARIABLE_KEY = "__sillytavern_extension_settings__";
 
 const JQUERY_SOURCES = [
   "https://testingcf.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js",
@@ -219,6 +241,21 @@ function cloneValue<T>(value: T): T {
   } catch {
     return value;
   }
+}
+
+function mergeVariableRecords(
+  base: Record<string, unknown>,
+  overlay: Record<string, unknown>,
+) {
+  const result = cloneValue(base);
+  Object.entries(overlay).forEach(([key, value]) => {
+    const current = result[key];
+    result[key] =
+      isRecord(current) && isRecord(value)
+        ? mergeVariableRecords(current, value)
+        : cloneValue(value);
+  });
+  return result;
 }
 
 function buildLocalTavernPlaceholderImage(value: string) {
@@ -729,8 +766,10 @@ export class TavernScriptRuntime {
   private destroyed = false;
   private ready = false;
   private executedScriptIds = new Set<string>();
-  private eventHandlers = new Map<string, Set<(...args: unknown[]) => unknown>>();
+  private eventHandlers = new Map<string, RuntimeEventHandler[]>();
+  private eventHandlerSequence = 0;
   private scriptButtons = new Map<string, TavernScriptButton[]>();
+  private variableSchemas = new Map<string, unknown>();
   private fontAwesomeCleanups: Array<() => void> = [];
   private localPlaceholderImageSources = new Map<string, string>();
 
@@ -840,13 +879,19 @@ export class TavernScriptRuntime {
         await this.executeScript(script.id);
       }
     }
-    const handlers = Array.from(this.eventHandlers.get(eventName) ?? []);
+    const handlers = [...(this.eventHandlers.get(eventName) ?? [])].sort(
+      (left, right) => left.priority - right.priority || left.sequence - right.sequence,
+    );
     const results: unknown[] = [];
     for (const handler of handlers) {
+      const previousScriptId = this.currentScriptId;
+      this.currentScriptId = handler.scriptId || previousScriptId;
       try {
-        results.push(await handler(...args));
+        results.push(await handler.callback(...args));
       } catch (error) {
         this.writeRuntimeLog("error", `事件 ${eventName} 处理失败：${toErrorMessage(error)}`);
+      } finally {
+        this.currentScriptId = previousScriptId;
       }
     }
     return results;
@@ -871,6 +916,7 @@ export class TavernScriptRuntime {
     this.ready = false;
     this.eventHandlers.clear();
     this.scriptButtons.clear();
+    this.variableSchemas.clear();
     this.adapter.onButtonsChange?.([]);
     const parentWindow = window as Window & { Mvu?: unknown };
     if (parentWindow.Mvu) delete parentWindow.Mvu;
@@ -1045,19 +1091,36 @@ export class TavernScriptRuntime {
       return nativeFetch(input, init);
     }) as typeof fetch;
 
-    const eventOn = (eventName: unknown, callback: unknown) => {
+    const registerEventHandler = (
+      eventName: unknown,
+      callback: unknown,
+      priority: RuntimeEventHandler["priority"] = 0,
+    ) => {
       if (typeof callback !== "function") return callback;
       const key = String(eventName);
-      const callbacks = this.eventHandlers.get(key) ?? new Set();
-      callbacks.add(callback as (...args: unknown[]) => unknown);
+      const callbacks = this.eventHandlers.get(key) ?? [];
+      const typedCallback = callback as (...args: unknown[]) => unknown;
+      if (!callbacks.some((handler) => handler.callback === typedCallback)) {
+        callbacks.push({
+          callback: typedCallback,
+          scriptId: this.currentScriptId || this.lastScriptId,
+          priority,
+          sequence: this.eventHandlerSequence++,
+        });
+      }
       this.eventHandlers.set(key, callbacks);
       return callback;
     };
+    const eventOn = (eventName: unknown, callback: unknown) =>
+      registerEventHandler(eventName, callback, 0);
     const eventRemoveListener = (eventName: unknown, callback: unknown) => {
       const callbacks = this.eventHandlers.get(String(eventName));
       if (!callbacks) return false;
-      if (typeof callback === "function") callbacks.delete(callback as (...args: unknown[]) => unknown);
-      if (callbacks.size === 0) this.eventHandlers.delete(String(eventName));
+      if (typeof callback === "function") {
+        const index = callbacks.findIndex((handler) => handler.callback === callback);
+        if (index >= 0) callbacks.splice(index, 1);
+      }
+      if (callbacks.length === 0) this.eventHandlers.delete(String(eventName));
       return true;
     };
     const eventOnce = (eventName: unknown, callback: unknown) => {
@@ -1069,25 +1132,120 @@ export class TavernScriptRuntime {
       eventOn(eventName, once);
       return once;
     };
+    const eventClearListener = (callback: unknown) => {
+      if (typeof callback !== "function") return false;
+      let removed = false;
+      this.eventHandlers.forEach((handlers, eventName) => {
+        const remaining = handlers.filter((handler) => handler.callback !== callback);
+        removed ||= remaining.length !== handlers.length;
+        if (remaining.length > 0) this.eventHandlers.set(eventName, remaining);
+        else this.eventHandlers.delete(eventName);
+      });
+      return removed;
+    };
     const eventSource = {
       on: eventOn,
       once: eventOnce,
       emit: (eventName: string, ...args: unknown[]) => this.emit(eventName, ...args),
+      emitAndWait: (eventName: string, ...args: unknown[]) => this.emit(eventName, ...args),
       removeListener: eventRemoveListener,
       makeFirst: (eventName: string, callback: (...args: unknown[]) => unknown) => {
-        eventOn(eventName, callback);
+        registerEventHandler(eventName, callback, -1);
         return { stop: () => eventRemoveListener(eventName, callback) };
       },
       makeLast: (eventName: string, callback: (...args: unknown[]) => unknown) => {
-        eventOn(eventName, callback);
+        registerEventHandler(eventName, callback, 1);
         return { stop: () => eventRemoveListener(eventName, callback) };
       },
+      clearEvent: (eventName: unknown) => this.eventHandlers.delete(String(eventName)),
+      clearListener: eventClearListener,
+      clearAll: () => this.eventHandlers.clear(),
     };
 
     const getScriptId = () =>
       this.currentScriptId || this.lastScriptId || this.scripts[0]?.id || "renge-script";
     const getScript = () =>
       this.scripts.find((script) => script.id === getScriptId()) ?? this.scripts[0];
+    const runWithScriptContext = <T>(scriptId: string, callback: () => T) => {
+      const previousScriptId = this.currentScriptId;
+      this.currentScriptId = scriptId || previousScriptId;
+      try {
+        return callback();
+      } finally {
+        this.currentScriptId = previousScriptId;
+      }
+    };
+    const nativeSetTimeout = win.setTimeout.bind(win);
+    const nativeSetInterval = win.setInterval.bind(win);
+    const nativeRequestAnimationFrame = win.requestAnimationFrame?.bind(win);
+    win.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      const ownerScriptId = this.currentScriptId;
+      return nativeSetTimeout(
+        typeof handler === "function" && ownerScriptId
+          ? (...callbackArgs: unknown[]) =>
+              runWithScriptContext(ownerScriptId, () => handler(...callbackArgs))
+          : handler,
+        timeout,
+        ...args,
+      );
+    }) as typeof win.setTimeout;
+    win.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      const ownerScriptId = this.currentScriptId;
+      return nativeSetInterval(
+        typeof handler === "function" && ownerScriptId
+          ? (...callbackArgs: unknown[]) =>
+              runWithScriptContext(ownerScriptId, () => handler(...callbackArgs))
+          : handler,
+        timeout,
+        ...args,
+      );
+    }) as typeof win.setInterval;
+    if (nativeRequestAnimationFrame) {
+      win.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+        const ownerScriptId = this.currentScriptId;
+        return nativeRequestAnimationFrame((time) =>
+          runWithScriptContext(ownerScriptId, () => callback(time)),
+        );
+      }) as typeof win.requestAnimationFrame;
+    }
+    const eventTargetPrototype = win.EventTarget?.prototype;
+    if (eventTargetPrototype) {
+      const nativeAddEventListener = eventTargetPrototype.addEventListener;
+      const nativeRemoveEventListener = eventTargetPrototype.removeEventListener;
+      const listenerWrappers = new WeakMap<object, EventListenerOrEventListenerObject>();
+      eventTargetPrototype.addEventListener = function (
+        type: string,
+        listener: EventListenerOrEventListenerObject | null,
+        options?: boolean | AddEventListenerOptions,
+      ) {
+        const ownerScriptId = getScriptId();
+        if (!listener || !ownerScriptId) {
+          return nativeAddEventListener.call(this, type, listener, options);
+        }
+        const listenerKey = listener as object;
+        let wrapped = listenerWrappers.get(listenerKey);
+        if (!wrapped) {
+          wrapped = typeof listener === "function"
+            ? function (this: EventTarget, event: Event) {
+                return runWithScriptContext(ownerScriptId, () => listener.call(this, event));
+              }
+            : {
+                handleEvent: (event: Event) =>
+                  runWithScriptContext(ownerScriptId, () => listener.handleEvent(event)),
+              };
+          listenerWrappers.set(listenerKey, wrapped);
+        }
+        return nativeAddEventListener.call(this, type, wrapped, options);
+      };
+      eventTargetPrototype.removeEventListener = function (
+        type: string,
+        listener: EventListenerOrEventListenerObject | null,
+        options?: boolean | EventListenerOptions,
+      ) {
+        const wrapped = listener ? listenerWrappers.get(listener as object) ?? listener : listener;
+        return nativeRemoveEventListener.call(this, type, wrapped, options);
+      };
+    }
     const getScriptButtons = () => cloneValue(this.scriptButtons.get(getScriptId()) ?? []);
     const replaceScriptButtons = (buttons: unknown) => {
       if (!Array.isArray(buttons)) return;
@@ -1208,14 +1366,36 @@ export class TavernScriptRuntime {
       return true;
     };
 
+    const resolveVariableScriptId = (option?: unknown) =>
+      isRecord(option) && typeof option.script_id === "string" && option.script_id.trim()
+        ? option.script_id.trim()
+        : getScriptId();
     const getVariables = (option?: unknown) => {
-      const resolved = this.resolveVariables(option, getScriptId());
+      const resolved = this.resolveVariables(option, resolveVariableScriptId(option));
       return this.localizePlaceholderImages(cloneValue(resolved));
+    };
+    const getAllVariables = () =>
+      this.localizePlaceholderImages(
+        mergeVariableRecords(
+          mergeVariableRecords(
+            mergeVariableRecords(
+              cloneValue(this.adapter.getGlobalVariables()),
+              cloneValue(this.adapter.getCharacterVariables()),
+            ),
+            cloneValue(this.adapter.getScriptData(getScriptId())),
+          ),
+          cloneValue(this.adapter.getChatVariables()),
+        ),
+      );
+    const publishVariableChange = async (variables: Record<string, unknown>, option?: unknown) => {
+      await this.emit(TAVERN_EVENTS.VARIABLE_CHANGED, cloneValue(variables), cloneValue(option));
+      await this.emit("mag_variable_update_ended", cloneValue(variables), cloneValue(option));
+      return variables;
     };
     const replaceVariables = async (variables: unknown, option?: unknown) => {
       const next = isRecord(variables) ? cloneValue(variables) : {};
-      this.saveVariables(option, getScriptId(), next);
-      return next;
+      this.saveVariables(option, resolveVariableScriptId(option), next);
+      return await publishVariableChange(next, option);
     };
     const updateVariablesWith = async (updater: unknown, option?: unknown) => {
       const current = getVariables(option);
@@ -1226,21 +1406,36 @@ export class TavernScriptRuntime {
       } else if (isRecord(updater)) {
         next = { ...current, ...cloneValue(updater) };
       }
-      this.saveVariables(option, getScriptId(), next);
-      await this.emit("variables_updated", next, option);
-      return next;
+      this.saveVariables(option, resolveVariableScriptId(option), next);
+      await this.emit("variables_updated", cloneValue(next), cloneValue(option));
+      return await publishVariableChange(next, option);
     };
     const insertOrAssignVariables = async (variables: unknown, option?: unknown) => {
       const current = getVariables(option);
-      const next = isRecord(variables) ? { ...current, ...cloneValue(variables) } : current;
-      this.saveVariables(option, getScriptId(), next);
-      return next;
+      const next = isRecord(variables)
+        ? mergeVariableRecords(current, cloneValue(variables))
+        : current;
+      this.saveVariables(option, resolveVariableScriptId(option), next);
+      return await publishVariableChange(next, option);
+    };
+    const insertVariables = async (variables: unknown, option?: unknown) => {
+      const current = getVariables(option);
+      const next = isRecord(variables)
+        ? mergeVariableRecords(cloneValue(variables), current)
+        : current;
+      this.saveVariables(option, resolveVariableScriptId(option), next);
+      return await publishVariableChange(next, option);
     };
     const deleteVariable = async (path: unknown, option?: unknown) => {
       const current = getVariables(option);
       const deleted = deletePath(current, String(path));
-      this.saveVariables(option, getScriptId(), current);
-      return deleted;
+      this.saveVariables(option, resolveVariableScriptId(option), current);
+      await publishVariableChange(current, option);
+      return { variables: current, delete_occurred: deleted };
+    };
+    const registerVariableSchema = (schema: unknown, name = getScriptId()) => {
+      this.variableSchemas.set(String(name || getScriptId()), schema);
+      return () => this.variableSchemas.delete(String(name || getScriptId()));
     };
 
     const getCharacter = () => this.localizePlaceholderImages(this.adapter.getCharacter());
@@ -1603,18 +1798,21 @@ export class TavernScriptRuntime {
       clear: () => undefined,
     };
 
-    const extensionSettingsVariableKey = "__sillytavern_extension_settings__";
-    const storedExtensionSettings = getPath(
+    const storedExtensionSettings = this.adapter.getExtensionSettings?.() ?? getPath(
       this.adapter.getGlobalVariables(),
-      extensionSettingsVariableKey,
+      TAVERN_EXTENSION_SETTINGS_VARIABLE_KEY,
       {},
     );
     const extensionSettings = isRecord(storedExtensionSettings)
       ? cloneValue(storedExtensionSettings)
       : {};
     const saveSettingsDebounced = () => {
+      if (this.adapter.setExtensionSettings) {
+        this.adapter.setExtensionSettings(cloneValue(extensionSettings));
+        return;
+      }
       const variables = cloneValue(this.adapter.getGlobalVariables());
-      variables[extensionSettingsVariableKey] = cloneValue(extensionSettings);
+      variables[TAVERN_EXTENSION_SETTINGS_VARIABLE_KEY] = cloneValue(extensionSettings);
       this.adapter.setGlobalVariables(variables);
     };
 
@@ -1676,9 +1874,22 @@ export class TavernScriptRuntime {
 
     const waitGlobalInitialized = async (name = "Mvu", timeout = 30000) =>
       await this.waitForGlobal(String(name), Number(timeout) || 30000);
-    const unsupportedGenerate = async () => {
-      throw new Error("当前酒馆脚本运行环境尚未启用脚本内独立模型请求。");
+    const getInput = () => this.adapter.getInput?.() ?? "";
+    const setInput = (value: unknown) => this.adapter.setInput?.(String(value ?? ""));
+    const appendInput = (value: unknown) => this.adapter.appendInput?.(String(value ?? ""));
+    const sendMessage = async (value: unknown = getInput()) => {
+      if (!this.adapter.sendMessage) throw new Error("Renge 会话发送接口尚未初始化。");
+      return await this.adapter.sendMessage(String(value ?? ""));
     };
+    const triggerSlash = async (command: unknown) => {
+      if (!this.adapter.triggerSlash) throw new Error("Renge 斜杠命令接口尚未初始化。");
+      return await this.adapter.triggerSlash(String(command ?? ""));
+    };
+    const generate = async (config?: unknown) => {
+      if (!this.adapter.generate) throw new Error("Renge 独立生成接口尚未初始化。");
+      return await this.adapter.generate(config);
+    };
+    const stopAllGeneration = async () => await this.adapter.stopGeneration?.();
     const api = {
       getChatMessages,
       setChatMessages,
@@ -1687,15 +1898,26 @@ export class TavernScriptRuntime {
       getLastMessageId: () => this.adapter.getMessages().length - 1,
       getCurrentMessageId: () => this.adapter.getMessages().length - 1,
       getVariables,
+      getAllVariables,
       setVariables: replaceVariables,
       replaceVariables,
       updateVariablesWith,
       insertOrAssignVariables,
+      insertVariables,
       deleteVariable,
+      registerVariableSchema,
       eventOn,
       eventOnce,
       eventEmit: (eventName: string, ...args: unknown[]) => this.emit(eventName, ...args),
+      eventEmitAndWait: (eventName: string, ...args: unknown[]) => this.emit(eventName, ...args),
       eventRemoveListener,
+      eventMakeFirst: (eventName: string, callback: (...args: unknown[]) => unknown) =>
+        registerEventHandler(eventName, callback, -1),
+      eventMakeLast: (eventName: string, callback: (...args: unknown[]) => unknown) =>
+        registerEventHandler(eventName, callback, 1),
+      eventClearEvent: (eventName: unknown) => this.eventHandlers.delete(String(eventName)),
+      eventClearListener,
+      eventClearAll: () => this.eventHandlers.clear(),
       getCharData: () => this.getSillyTavernCharacters()[0]?.data ?? null,
       getWorldbookNames,
       getGlobalWorldbookNames,
@@ -1735,8 +1957,16 @@ export class TavernScriptRuntime {
       getTavernHelperVersion: async () => "3.5.0",
       getVersion: () => sillyTavern.versionInfo,
       getContext,
-      generate: unsupportedGenerate,
-      generateRaw: unsupportedGenerate,
+      getInput,
+      setInput,
+      appendInput,
+      sendMessage,
+      triggerSlash,
+      triggerSlashWithResult: triggerSlash,
+      generate,
+      generateRaw: generate,
+      stopAllGeneration,
+      stopGenerationById: stopAllGeneration,
       toastr,
       tavern_events: TAVERN_EVENTS,
       eventSource,
@@ -1787,12 +2017,24 @@ export class TavernScriptRuntime {
       ? option
       : typeof option === "number" || typeof option === "string"
         ? { type: "message", message_id: option }
-        : { type: "message", message_id: "latest" };
-    const type = String(normalized.type ?? "message").toLowerCase();
+        : { type: "chat" };
+    const type = String(normalized.type ?? "chat").toLowerCase();
     if (type === "global") return this.adapter.getGlobalVariables();
     if (type === "chat") return this.adapter.getChatVariables();
     if (type === "character" || type === "char") {
       return this.adapter.getCharacterVariables();
+    }
+    if (type === "preset") return this.adapter.getPresetVariables?.() ?? {};
+    if (type === "extension") {
+      const extensionId = String(normalized.extension_id ?? "").trim();
+      const extensionSettings = this.adapter.getExtensionSettings?.() ?? getPath(
+        this.adapter.getGlobalVariables(),
+        TAVERN_EXTENSION_SETTINGS_VARIABLE_KEY,
+        {},
+      );
+      return extensionId && isRecord(extensionSettings) && isRecord(extensionSettings[extensionId])
+        ? extensionSettings[extensionId]
+        : {};
     }
     if (type === "script" || type === "local") return this.adapter.getScriptData(scriptId);
     const index = normalizeMessageId(normalized.message_id, messages);
@@ -1810,8 +2052,8 @@ export class TavernScriptRuntime {
       ? option
       : typeof option === "number" || typeof option === "string"
         ? { type: "message", message_id: option }
-        : { type: "message", message_id: "latest" };
-    const type = String(normalized.type ?? "message").toLowerCase();
+        : { type: "chat" };
+    const type = String(normalized.type ?? "chat").toLowerCase();
     if (type === "global") {
       this.adapter.setGlobalVariables(next);
       return;
@@ -1822,6 +2064,31 @@ export class TavernScriptRuntime {
     }
     if (type === "character" || type === "char") {
       this.adapter.setCharacterVariables(next);
+      return;
+    }
+    if (type === "preset") {
+      this.adapter.setPresetVariables?.(next);
+      return;
+    }
+    if (type === "extension") {
+      const extensionId = String(normalized.extension_id ?? "").trim();
+      if (!extensionId) return;
+      if (this.adapter.getExtensionSettings && this.adapter.setExtensionSettings) {
+        const extensionSettings = cloneValue(this.adapter.getExtensionSettings());
+        extensionSettings[extensionId] = next;
+        this.adapter.setExtensionSettings(extensionSettings);
+        return;
+      }
+      const globalVariables = cloneValue(this.adapter.getGlobalVariables());
+      const storedSettings = getPath(
+        globalVariables,
+        TAVERN_EXTENSION_SETTINGS_VARIABLE_KEY,
+        {},
+      );
+      const extensionSettings = isRecord(storedSettings) ? cloneValue(storedSettings) : {};
+      extensionSettings[extensionId] = next;
+      globalVariables[TAVERN_EXTENSION_SETTINGS_VARIABLE_KEY] = extensionSettings;
+      this.adapter.setGlobalVariables(globalVariables);
       return;
     }
     if (type === "script" || type === "local") {
