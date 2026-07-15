@@ -7745,15 +7745,20 @@ export function App() {
     const controller = new AbortController();
     activeChatAbortControllerRef.current = controller;
     setChatGenerationState("running");
-    emitTavernEvent(TAVERN_EVENTS.GENERATION_STARTED);
     return controller;
   };
 
-  const finishChatGeneration = (controller: AbortController) => {
+  const finishChatGeneration = async (
+    controller: AbortController,
+    messageId?: string,
+  ) => {
     if (activeChatAbortControllerRef.current !== controller) return;
     activeChatAbortControllerRef.current = null;
     setChatGenerationState("idle");
-    emitTavernEvent(TAVERN_EVENTS.GENERATION_ENDED);
+    const messageIndex = messageId
+      ? chatMessagesRef.current.findIndex((message) => message.id === messageId)
+      : chatMessagesRef.current.length - 1;
+    await emitTavernEvent(TAVERN_EVENTS.GENERATION_ENDED, messageIndex);
   };
 
   const stopChatGeneration = () => {
@@ -11304,22 +11309,93 @@ export function App() {
     tavernRuntimeConfigurationKey,
   ]);
 
+  const emitTavernMessageEventNow = async (
+    eventName: typeof TAVERN_EVENTS.MESSAGE_SENT | typeof TAVERN_EVENTS.MESSAGE_RECEIVED,
+    messageId: string,
+  ) => {
+    let index = chatMessagesRef.current.findIndex((message) => message.id === messageId);
+    if (index < 0) return -1;
+    await emitTavernEvent(eventName, index);
+    index = chatMessagesRef.current.findIndex((message) => message.id === messageId);
+    if (index < 0) return -1;
+    await emitTavernEvent(TAVERN_EVENTS.MESSAGE_RENDERED, index);
+    await emitTavernEvent(
+      eventName === TAVERN_EVENTS.MESSAGE_SENT
+        ? TAVERN_EVENTS.USER_MESSAGE_RENDERED
+        : TAVERN_EVENTS.CHARACTER_MESSAGE_RENDERED,
+      index,
+    );
+    return index;
+  };
+
   const emitTavernMessageEvent = (
     eventName: typeof TAVERN_EVENTS.MESSAGE_SENT | typeof TAVERN_EVENTS.MESSAGE_RECEIVED,
     messageId: string,
   ) => {
     window.setTimeout(() => {
-      const index = chatMessagesRef.current.findIndex((message) => message.id === messageId);
-      if (index < 0) return;
-      emitTavernEvent(eventName, index);
-      emitTavernEvent(TAVERN_EVENTS.MESSAGE_RENDERED, index);
-      emitTavernEvent(
-        eventName === TAVERN_EVENTS.MESSAGE_SENT
-          ? TAVERN_EVENTS.USER_MESSAGE_RENDERED
-          : TAVERN_EVENTS.CHARACTER_MESSAGE_RENDERED,
-        index,
-      );
+      void emitTavernMessageEventNow(eventName, messageId);
     }, 0);
+  };
+
+  const runTavernPreSendHooks = async (
+    userMessage: ChatMessage,
+    originalContent: string,
+  ) => {
+    await emitTavernMessageEventNow(TAVERN_EVENTS.MESSAGE_SENT, userMessage.id);
+
+    const messageAfterSent = chatMessagesRef.current.find(
+      (message) => message.id === userMessage.id,
+    );
+    if (!messageAfterSent) throw createChatAbortError();
+    const contentAfterMessageSent = messageAfterSent.content;
+    const generationParams: Record<string, unknown> = {
+      prompt: contentAfterMessageSent,
+      user_input: contentAfterMessageSent,
+      automatic_trigger: false,
+      quiet_prompt: "",
+      should_stream: chatStreamEnabled,
+    };
+    // SillyTavern exposes this mutable event before the provider request. DB,
+    // dice and prompt-planning scripts edit params and/or the newly appended
+    // user message here, so the host must await every handler before taking
+    // the request snapshot.
+    await emitTavernEvent(
+      TAVERN_EVENTS.GENERATION_AFTER_COMMANDS,
+      "normal",
+      generationParams,
+      false,
+    );
+
+    const scriptedUserMessage = chatMessagesRef.current.find(
+      (message) => message.id === userMessage.id,
+    );
+    if (!scriptedUserMessage) throw createChatAbortError();
+    const promptCandidate =
+      typeof generationParams.prompt === "string" ? generationParams.prompt : "";
+    const userInputCandidate =
+      typeof generationParams.user_input === "string" ? generationParams.user_input : "";
+    const effectiveContent =
+      (promptCandidate !== contentAfterMessageSent && promptCandidate.trim()
+        ? promptCandidate
+        : userInputCandidate !== contentAfterMessageSent && userInputCandidate.trim()
+          ? userInputCandidate
+          : scriptedUserMessage.content) ||
+      contentAfterMessageSent ||
+      originalContent;
+    if (scriptedUserMessage.content !== effectiveContent) {
+      commitChatMessages((current) =>
+        current.map((message) =>
+          message.id === userMessage.id
+            ? { ...message, content: effectiveContent }
+            : message,
+        ),
+      );
+    }
+    return {
+      messages: chatMessagesRef.current,
+      content: effectiveContent,
+      generationParams,
+    };
   };
 
   const triggerTavernScriptButton = async (button: TavernRuntimeButton) => {
@@ -14200,6 +14276,7 @@ export function App() {
       multiAgentRounds?: number;
       multiAgentAutoStopEnabled?: boolean;
       multiAgentStopCondition?: string;
+      generationAfterCommands?: boolean;
     } = {},
   ) => {
     const responseMode =
@@ -14233,6 +14310,24 @@ export function App() {
     let streamingAssistantInserted = false;
 
     try {
+      const generationPrompt =
+        [...nextMessages].reverse().find((message) => message.role === "user")?.content ?? "";
+      const generationType = options.exposeHeartbeatTools
+        ? "quiet"
+        : options.multiAgentIndex !== undefined
+          ? "normal"
+          : "regenerate";
+      await emitTavernEvent(
+        TAVERN_EVENTS.GENERATION_STARTED,
+        generationType,
+        {
+          prompt: generationPrompt,
+          user_input: generationPrompt,
+          automatic_trigger: options.exposeHeartbeatTools === true,
+          quiet_prompt: options.exposeHeartbeatTools ? generationPrompt : "",
+        },
+        false,
+      );
       setChatStatus({ status: "loading", message: options.statusMessage ?? "正在重新生成回复..." });
       const requestMcpTools =
         enabledMcpServers.length > 0 ? await refreshMcpTools({ silent: true }) : [];
@@ -14441,7 +14536,9 @@ export function App() {
         responderName,
         requestModelId,
       );
-      const apiMessages = await applyTavernExtensionPromptFilters(preparedApiMessages);
+      const apiMessages = await applyTavernExtensionPromptFilters(preparedApiMessages, {
+        generationAfterCommands: options.generationAfterCommands,
+      });
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);
@@ -14829,7 +14926,10 @@ export function App() {
         });
       }
       setChatStatus({ status: "success", message: options.successMessage ?? "回复已重新生成。" });
-      emitTavernMessageEvent(TAVERN_EVENTS.MESSAGE_RECEIVED, finalAssistantMessage.id);
+      await emitTavernMessageEventNow(
+        TAVERN_EVENTS.MESSAGE_RECEIVED,
+        finalAssistantMessage.id,
+      );
       return finalAssistantMessage;
     } catch (error) {
       if (isChatAbortError(error)) {
@@ -14861,7 +14961,7 @@ export function App() {
       });
       return null;
     } finally {
-      finishChatGeneration(abortController);
+      await finishChatGeneration(abortController, assistantMessageId);
     }
   };
 
@@ -14952,6 +15052,7 @@ export function App() {
             multiAgentRounds,
             multiAgentAutoStopEnabled,
             multiAgentStopCondition,
+            generationAfterCommands: false,
             exposeHeartbeatTools:
               completedBefore === totalReplies - 1 &&
               shouldExposeHeartbeatTools(triggerContent),
@@ -15011,11 +15112,26 @@ export function App() {
 
     chatMessagesRef.current = accumulatedMessages;
     setChatMessages(accumulatedMessages);
-    emitTavernMessageEvent(TAVERN_EVENTS.MESSAGE_SENT, userMessage.id);
     setChatInput("");
     setChatAttachments([]);
-    activeUserRequestTextRef.current = content;
-    await runMultiAgentResponses(accumulatedMessages, currentChatSender, content);
+    try {
+      setChatStatus({ status: "loading", message: "正在运行发送前酒馆脚本..." });
+      const prepared = await runTavernPreSendHooks(userMessage, content);
+      accumulatedMessages = prepared.messages;
+      activeUserRequestTextRef.current = prepared.content;
+      await runMultiAgentResponses(
+        accumulatedMessages,
+        currentChatSender,
+        prepared.content,
+      );
+    } catch (error) {
+      if (isChatAbortError(error)) {
+        setChatStatus({ status: "success", message: "已停止输出。" });
+        return;
+      }
+      const message = error instanceof Error ? error.message : "发送前酒馆脚本执行失败。";
+      setChatStatus({ status: "error", message });
+    }
   };
 
   const emitHtmlPreviewGenerationEvent = (
@@ -15124,6 +15240,18 @@ export function App() {
 
     emitHtmlPreviewGenerationEvent("generation_started", [], sourceFrame);
     try {
+      await emitTavernEvent(
+        TAVERN_EVENTS.GENERATION_STARTED,
+        normalizedConfig.quiet === true ? "quiet" : "generate",
+        {
+          prompt: userInput,
+          user_input: userInput,
+          automatic_trigger: true,
+          quiet_prompt: normalizedConfig.quiet === true ? userInput : "",
+          should_stream: shouldStream,
+        },
+        false,
+      );
       setChatStatus({ status: "loading", message: "独立前端正在调用当前会话 API..." });
       const selectedSystemPrompt = selectedSystemPrompts
         .map((promptProfile) => promptProfile.content.trim())
@@ -15392,7 +15520,7 @@ export function App() {
       throw error;
     } finally {
       emitHtmlPreviewGenerationEvent("generation_ended", [generatedText], sourceFrame);
-      finishChatGeneration(abortController);
+      await finishChatGeneration(abortController);
     }
   };
   generateHtmlPreviewTextRef.current = generateHtmlPreviewText;
@@ -15417,8 +15545,6 @@ export function App() {
       });
       return;
     }
-    activeUserRequestTextRef.current = content;
-
     const requestModelId = getEffectiveProviderModelId(chatProvider);
     const isImageGenerationRequest = isImageGenerationModelId(requestModelId);
     if (!chatProvider?.apiBaseUrl || !requestModelId) {
@@ -15437,19 +15563,39 @@ export function App() {
       sender: currentChatSender,
       ...(attachmentsToSend.length > 0 ? { attachments: attachmentsToSend } : {}),
     };
-    const nextMessages = [...chatMessagesRef.current, userMessage];
+    const initialMessages = [...chatMessagesRef.current, userMessage];
 
-    chatMessagesRef.current = nextMessages;
-    setChatMessages(nextMessages);
-    emitTavernMessageEvent(TAVERN_EVENTS.MESSAGE_SENT, userMessage.id);
+    chatMessagesRef.current = initialMessages;
+    setChatMessages(initialMessages);
     setChatInput("");
     setChatAttachments([]);
-    const abortController = beginChatGeneration();
-    const abortSignal = abortController.signal;
+    let abortController: AbortController | null = null;
+    let abortSignal: AbortSignal | undefined;
     let assistantMessageId = "";
     let streamingAssistantInserted = false;
+    let nextMessages = initialMessages;
+    let effectiveContent = content;
 
     try {
+      setChatStatus({ status: "loading", message: "正在运行发送前酒馆脚本..." });
+      const prepared = await runTavernPreSendHooks(userMessage, content);
+      effectiveContent = prepared.content;
+      nextMessages = prepared.messages;
+      activeUserRequestTextRef.current = effectiveContent;
+
+      abortController = beginChatGeneration();
+      abortSignal = abortController.signal;
+      await emitTavernEvent(
+        TAVERN_EVENTS.GENERATION_STARTED,
+        "normal",
+        {
+          ...prepared.generationParams,
+          prompt: effectiveContent,
+          user_input: effectiveContent,
+        },
+        false,
+      );
+      throwIfChatAborted(abortSignal);
       setChatStatus({ status: "loading", message: "正在生成回复..." });
       const requestMcpTools =
         enabledMcpServers.length > 0 ? await refreshMcpTools({ silent: true }) : [];
@@ -15469,7 +15615,7 @@ export function App() {
         const imageRecognitionContext = await describeImageAttachmentsWithMcp(
           imageRecognitionMcpTool,
           attachmentsToSend,
-          content,
+          effectiveContent,
         );
         throwIfChatAborted(abortSignal);
         if (imageRecognitionContext) {
@@ -15483,7 +15629,7 @@ export function App() {
           );
         }
       }
-      const exposeHeartbeatTools = shouldExposeHeartbeatTools(content);
+      const exposeHeartbeatTools = shouldExposeHeartbeatTools(effectiveContent);
       const availableChatTools = isImageGenerationRequest
         ? []
         : getAvailableChatToolDefinitions(
@@ -15626,7 +15772,9 @@ export function App() {
         responseName,
         requestModelId,
       );
-      const apiMessages = await applyTavernExtensionPromptFilters(preparedApiMessages);
+      const apiMessages = await applyTavernExtensionPromptFilters(preparedApiMessages, {
+        generationAfterCommands: false,
+      });
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);
@@ -15998,7 +16146,10 @@ export function App() {
         });
       }
       setChatStatus({ status: "success", message: "回复已生成。" });
-      emitTavernMessageEvent(TAVERN_EVENTS.MESSAGE_RECEIVED, assistantMessageId);
+      await emitTavernMessageEventNow(
+        TAVERN_EVENTS.MESSAGE_RECEIVED,
+        assistantMessageId,
+      );
     } catch (error) {
       if (isChatAbortError(error)) {
         if (streamingAssistantInserted && assistantMessageId) {
@@ -16027,7 +16178,9 @@ export function App() {
         message: "调用失败。请检查本地服务、供应商地址、密钥、模型 ID 或上游限流状态。",
       });
     } finally {
-      finishChatGeneration(abortController);
+      if (abortController) {
+        await finishChatGeneration(abortController, assistantMessageId);
+      }
     }
   };
   sendChatMessageRef.current = sendChatMessage;
