@@ -1843,6 +1843,7 @@ const HTML_PREVIEW_INTERACTION_MESSAGE = "renge-html-preview-interaction";
 const HTML_PREVIEW_VIEWPORT_MESSAGE = "renge-html-preview-viewport";
 const HYPNOOS_APPEND_OPERATION_MESSAGE = "HYPNOOS_APPEND_OPERATION";
 const HTML_PREVIEW_MAX_HEIGHT = 12000;
+const HTML_PREVIEW_EXPANDED_MIN_HEIGHT = 1200;
 const HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD = 512 * 1024;
 const HTML_PREVIEW_HEAVY_MOUNT_GAP = 900;
 const HTML_PREVIEW_HEAVY_AUTO_LOAD_DELAY = 5000;
@@ -3919,6 +3920,11 @@ function ChatHtmlPreview({
           referrerPolicy="no-referrer"
           sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-scripts"
           srcDoc={sourceDocumentRef.current.value}
+          style={
+            containsExpandedDetails
+              ? { minHeight: `${HTML_PREVIEW_EXPANDED_MIN_HEIGHT}px` }
+              : undefined
+          }
           tabIndex={0}
           title="HTML 预览"
         />
@@ -3986,7 +3992,7 @@ function resizeHtmlPreviewFrame(event: SyntheticEvent<HTMLIFrameElement>) {
   if (frameWidth > 0) {
     const expandedLayoutMinHeight =
       frame.dataset.expandedLayout === "true"
-        ? Math.min(1200, Math.max(900, frameWidth * 0.9))
+        ? Math.max(HTML_PREVIEW_EXPANDED_MIN_HEIGHT, frameWidth * 0.9)
         : 0;
     const measuringHeight = Math.max(
       420,
@@ -7687,6 +7693,9 @@ export function App() {
         frame.dataset.expandedLayout = String(payload.expanded);
       }
       const hasExpandedLayout = frame.dataset.expandedLayout === "true";
+      frame.style.minHeight = hasExpandedLayout
+        ? `${HTML_PREVIEW_EXPANDED_MIN_HEIGHT}px`
+        : "220px";
       const reportedExpandedHeight = Number(payload.expandedHeight);
       const expandedHeightIsValid =
         hasExpandedLayout &&
@@ -7694,7 +7703,7 @@ export function App() {
         reportedExpandedHeight > 0;
       const expandedFallbackHeight =
         hasExpandedLayout && frameWidth > 0
-          ? Math.min(1200, Math.max(900, frameWidth * 0.9))
+          ? Math.max(HTML_PREVIEW_EXPANDED_MIN_HEIGHT, frameWidth * 0.9)
           : 0;
       const expandedMinHeight = expandedHeightIsValid
         ? Math.max(
