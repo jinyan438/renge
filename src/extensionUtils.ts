@@ -249,7 +249,7 @@ export function normalizeInstalledExtension(value: unknown): InstalledExtension 
     cssFiles: normalizeAssetList(value.cssFiles),
     assetBaseUrl: isPromptTemplate
       ? ""
-      : `/api/extensions/${encodeURIComponent(id)}/files`,
+      : `/scripts/extensions/third-party/${encodeURIComponent(id)}`,
     installedAt:
       typeof value.installedAt === "string" ? value.installedAt : defaults.installedAt,
     updatedAt:
