@@ -3609,12 +3609,31 @@ function stabilizeHtmlPreviewViewportUnits(content: string) {
   return stabilized;
 }
 
+function isolateHtmlPreviewParentReferences(content: string) {
+  // SillyTavern character frontends commonly read APIs from `parent`/`top`.
+  // Renge installs the same compatibility APIs inside the preview itself, so
+  // keep those calls working locally while preventing card code from reaching
+  // or rewriting the React host document. `postMessage` remains pointed at the
+  // real parent because it is the only supported cross-frame transport.
+  return content
+    .replace(
+      /\b(?:window\s*\.\s*)?(?:parent|top)\s*(?:\?\.|\.)\s*(?!postMessage\b)([A-Za-z_$][\w$]*)/g,
+      "window.$1",
+    )
+    .replace(
+      /\b(?:window\s*\.\s*)?(?:parent|top)\s*(?:\?\.)?\s*\[\s*(["'])(?!postMessage\1)([^"']+)\1\s*\]/g,
+      "window[$1$2$1]",
+    );
+}
+
 function buildHtmlPreviewDocument(
   content: string,
   previewId: string,
   context: HtmlPreviewContext,
 ) {
-  const trimmedContent = stabilizeHtmlPreviewViewportUnits(content.trim());
+  const trimmedContent = isolateHtmlPreviewParentReferences(
+    stabilizeHtmlPreviewViewportUnits(content.trim()),
+  );
   const heavyContent = trimmedContent.length >= HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD;
   const headInjection = `${htmlPreviewStyle}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${buildHtmlPreviewVariablesScript(previewId, context)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
@@ -3806,9 +3825,19 @@ function ChatHtmlPreview({
 
   const registerFrame = useCallback(
     (frame: HTMLIFrameElement | null) => {
+      const previousFrame = frameRef.current;
+      if (
+        previousFrame &&
+        previousFrame !== frame &&
+        frameRegistry.current.get(previewId) === previousFrame
+      ) {
+        frameRegistry.current.delete(previewId);
+      }
       frameRef.current = frame;
       if (frame) frameRegistry.current.set(previewId, frame);
-      else frameRegistry.current.delete(previewId);
+      else if (frameRegistry.current.get(previewId) === previousFrame) {
+        frameRegistry.current.delete(previewId);
+      }
     },
     [frameRegistry, previewId],
   );
@@ -3840,6 +3869,7 @@ function ChatHtmlPreview({
           onLoad={handleLoad}
           ref={registerFrame}
           referrerPolicy="no-referrer"
+          sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-scripts"
           srcDoc={sourceDocumentRef.current.value}
           tabIndex={0}
           title="HTML 预览"
@@ -13788,6 +13818,8 @@ export function App() {
 
     const parts = parseChatContentParts(content);
     let htmlPreviewContext: HtmlPreviewContext | null = null;
+    const htmlPreviewSessionId =
+      (activeChatSession?.id ?? activeChatSessionId) || "no-session";
     const getHtmlPreviewContext = () => {
       if (htmlPreviewContext) return htmlPreviewContext;
       const currentMessageIndex = chatMessages.findIndex(
@@ -13827,7 +13859,7 @@ export function App() {
         {parts.map((part, partIndex) => {
           if (part.type === "text") {
             if (chatHtmlRenderEnabled && looksLikeStandaloneRenderableHtml(part.content)) {
-              const previewId = `${messageId}-html-text-${partIndex}-${getHtmlPreviewContentRevision(part.content)}`;
+              const previewId = `${htmlPreviewSessionId}-${messageId}-html-text-${partIndex}-${getHtmlPreviewContentRevision(part.content)}`;
               return (
                 <ChatHtmlPreview
                   content={part.content}
@@ -13848,7 +13880,7 @@ export function App() {
           }
 
           if (chatHtmlRenderEnabled && shouldRenderHtmlCodePart(part)) {
-            const previewId = `${messageId}-html-${partIndex}-${getHtmlPreviewContentRevision(part.content)}`;
+            const previewId = `${htmlPreviewSessionId}-${messageId}-html-${partIndex}-${getHtmlPreviewContentRevision(part.content)}`;
             return (
               <ChatHtmlPreview
                 content={part.content}
