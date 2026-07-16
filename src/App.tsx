@@ -539,6 +539,8 @@ type PcFileEntry = {
 
 type RengeDesktopApi = {
   isElectron: boolean;
+  loadDesktopProjectPositions?(): Promise<unknown>;
+  saveDesktopProjectPositions?(positions: unknown): Promise<{ ok: boolean }>;
   selectWorkspace(): Promise<ElectronWorkspaceHandle | null>;
   selectSkillFolder?(): Promise<{ path: string; name: string } | null>;
   restoreWorkspace(options: { path: string }): Promise<ElectronWorkspaceHandle>;

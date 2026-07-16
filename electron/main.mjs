@@ -13,6 +13,8 @@ let mainWindow = null;
 let serverController = null;
 let workspaceRoot = null;
 let electronRuntimeCacheDir = null;
+let desktopProjectPositionsWriteQueue = Promise.resolve();
+const desktopProjectPositionsFilename = "desktop-project-positions.json";
 const highRiskGitCommands = new Set([
   "checkout",
   "clean",
@@ -31,6 +33,32 @@ function getPersistentDataDir() {
   if (process.env.RENGE_DATA_DIR) return resolve(process.env.RENGE_DATA_DIR);
   if (process.env.APPDATA) return join(process.env.APPDATA, "Renge Agent Lab");
   return join(app.getPath("home"), ".renge-agent-lab");
+}
+
+function getDesktopProjectPositionsPath() {
+  return join(getPersistentDataDir(), desktopProjectPositionsFilename);
+}
+
+async function loadDesktopProjectPositions() {
+  try {
+    return JSON.parse(await readFile(getDesktopProjectPositionsPath(), "utf8"));
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function saveDesktopProjectPositions(positions) {
+  if (!positions || typeof positions !== "object" || Array.isArray(positions)) {
+    throw new Error("桌面图标位置格式无效");
+  }
+  const serialized = JSON.stringify(positions);
+  if (Buffer.byteLength(serialized, "utf8") > 64 * 1024) {
+    throw new Error("桌面图标位置数据过大");
+  }
+  await mkdir(getPersistentDataDir(), { recursive: true });
+  await writeFile(getDesktopProjectPositionsPath(), serialized, "utf8");
+  return { ok: true };
 }
 
 function getElectronCacheRootDir() {
@@ -549,6 +577,15 @@ async function runPackageScript({ script, args = [] }) {
 }
 
 function registerIpcHandlers() {
+  ipcMain.handle("desktop-layout:load", async () => loadDesktopProjectPositions());
+
+  ipcMain.handle("desktop-layout:save", async (_event, positions = {}) => {
+    desktopProjectPositionsWriteQueue = desktopProjectPositionsWriteQueue
+      .catch(() => undefined)
+      .then(() => saveDesktopProjectPositions(positions));
+    return desktopProjectPositionsWriteQueue;
+  });
+
   ipcMain.handle("workspace:select", async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ["openDirectory", "createDirectory"],
