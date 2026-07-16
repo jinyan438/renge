@@ -1998,6 +1998,7 @@ const HTML_PREVIEW_COMMAND_RESULT_MESSAGE = "renge-html-preview-command-result";
 const HTML_PREVIEW_GENERATION_EVENT_MESSAGE = "renge-html-preview-generation-event";
 const HTML_PREVIEW_INTERACTION_MESSAGE = "renge-html-preview-interaction";
 const HTML_PREVIEW_VIEWPORT_MESSAGE = "renge-html-preview-viewport";
+const HTML_PREVIEW_REMEASURE_MESSAGE = "renge-html-preview-remeasure";
 const HYPNOOS_APPEND_OPERATION_MESSAGE = "HYPNOOS_APPEND_OPERATION";
 const HTML_PREVIEW_MAX_HEIGHT = 12000;
 const HTML_PREVIEW_EXPANDED_MIN_HEIGHT = 1200;
@@ -3505,12 +3506,14 @@ function getHtmlPreviewContentRevision(content: string) {
 function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
   const previewIdLiteral = JSON.stringify(previewId);
   const messageTypeLiteral = JSON.stringify(HTML_PREVIEW_RESIZE_MESSAGE);
+  const remeasureMessageTypeLiteral = JSON.stringify(HTML_PREVIEW_REMEASURE_MESSAGE);
 
   return [
     '<script data-renge-html-preview="true">',
     "(() => {",
     `const previewId = ${previewIdLiteral};`,
     `const messageType = ${messageTypeLiteral};`,
+    `const remeasureMessageType = ${remeasureMessageTypeLiteral};`,
     `const maxHeight = ${HTML_PREVIEW_MAX_HEIGHT};`,
     `const heavyContent = ${heavyContent ? "true" : "false"};`,
     "const defaultHeight = 420;",
@@ -3661,6 +3664,7 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "    const measuredStructuralHeight = Math.max(",
     "      expandedDetailsHeight,",
     "      structuralTracksViewport ? 0 : structuralHeight,",
+    "      Math.max(0, bounds.height),",
     "    );",
     "    return {",
     "      height: clampHeight((measuredStructuralHeight + verticalMargin) * nextScale + padding),",
@@ -3725,7 +3729,28 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "    requestPostFrame();",
     "  }, 160);",
     "};",
-    'window.addEventListener("load", () => { naturalLayoutDirty = true; schedulePost(); });',
+    "const observedLayoutAssets = new WeakSet();",
+    "const invalidateLayout = () => { naturalLayoutDirty = true; schedulePost(); };",
+    "const watchLayoutAssets = () => {",
+    '  document.querySelectorAll("img,video,audio").forEach((asset) => {',
+    "    if (observedLayoutAssets.has(asset)) return;",
+    "    observedLayoutAssets.add(asset);",
+    '    ["load", "error", "loadedmetadata"].forEach((eventName) => {',
+    "      asset.addEventListener(eventName, invalidateLayout, { once: true });",
+    "    });",
+    "    if ((asset instanceof HTMLImageElement && asset.complete) ||",
+    "        (asset instanceof HTMLMediaElement && asset.readyState >= 1)) {",
+    "      queueMicrotask(invalidateLayout);",
+    "    }",
+    "  });",
+    "};",
+    'window.addEventListener("message", (event) => {',
+    "  const payload = event.data;",
+    "  if (!payload || payload.type !== remeasureMessageType || payload.id !== previewId) return;",
+    "  watchLayoutAssets();",
+    "  invalidateLayout();",
+    "});",
+    'window.addEventListener("load", () => { watchLayoutAssets(); invalidateLayout(); });',
     'window.addEventListener("resize", schedulePost);',
     'window.addEventListener("orientationchange", schedulePost);',
     "try {",
@@ -3741,7 +3766,10 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "try {",
     "  const mutationObserver = new MutationObserver((mutations) => {",
     "    const hasMeaningfulMutation = mutations.some((mutation) => !(mutation.type === \"attributes\" && mutation.attributeName === \"style\" && mutation.target === document.body));",
-    "    if (hasMeaningfulMutation) naturalLayoutDirty = true;",
+    "    if (hasMeaningfulMutation) {",
+    "      watchLayoutAssets();",
+    "      naturalLayoutDirty = true;",
+    "    }",
     "    schedulePost();",
     "  });",
     "  mutationObserver.observe(document.documentElement, heavyContent",
@@ -3755,7 +3783,13 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "  }, { once: true });",
     "} catch {}",
     'document.addEventListener("toggle", () => { naturalLayoutDirty = true; schedulePost(); }, true);',
-    "document.addEventListener(\"DOMContentLoaded\", () => { naturalLayoutDirty = true; schedulePost(); }, { once: true });",
+    'document.addEventListener("DOMContentLoaded", () => { watchLayoutAssets(); invalidateLayout(); }, { once: true });',
+    "try {",
+    "  document.fonts?.ready.then(invalidateLayout, () => undefined);",
+    '  document.fonts?.addEventListener("loadingdone", invalidateLayout);',
+    '  document.fonts?.addEventListener("loadingerror", invalidateLayout);',
+    "} catch {}",
+    "watchLayoutAssets();",
     "schedulePost();",
     "(heavyContent ? [240, 1000, 3000, 6000, 12000, 24000] : [80, 240, 600, 1200, 2400, 4000, 8000, 12000, 20000, 30000]).forEach((delay) => setTimeout(() => { naturalLayoutDirty = true; schedulePost(); }, delay));",
     "if (!heavyContent) {",
@@ -4019,9 +4053,20 @@ function ChatHtmlPreview({
     );
   }, [previewId]);
 
+  const requestLayoutMeasurement = useCallback(() => {
+    frameRef.current?.contentWindow?.postMessage(
+      {
+        type: HTML_PREVIEW_REMEASURE_MESSAGE,
+        id: previewId,
+      },
+      "*",
+    );
+  }, [previewId]);
+
   useEffect(() => {
     sendContextUpdate();
-  }, [sendContextUpdate]);
+    requestLayoutMeasurement();
+  }, [requestLayoutMeasurement, sendContextUpdate]);
 
   useEffect(() => {
     const update = () => sendViewportUpdate();
@@ -4057,10 +4102,22 @@ function ChatHtmlPreview({
   const handleLoad = useCallback(
     (event: SyntheticEvent<HTMLIFrameElement>) => {
       resizeHtmlPreviewFrame(event);
-      window.requestAnimationFrame(sendContextUpdate);
-      window.requestAnimationFrame(sendViewportUpdate);
+      const loadedFrame = event.currentTarget;
+      const remeasureLoadedFrame = () => {
+        if (frameRef.current !== loadedFrame) return;
+        requestLayoutMeasurement();
+      };
+      window.requestAnimationFrame(() => {
+        if (frameRef.current !== loadedFrame) return;
+        sendContextUpdate();
+        sendViewportUpdate();
+        requestLayoutMeasurement();
+      });
+      [80, 240, 600, 1200, 2400].forEach((delay) => {
+        window.setTimeout(remeasureLoadedFrame, delay);
+      });
     },
-    [sendContextUpdate, sendViewportUpdate],
+    [requestLayoutMeasurement, sendContextUpdate, sendViewportUpdate],
   );
 
   return (
