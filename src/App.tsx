@@ -22828,6 +22828,104 @@ export function App() {
           </div>
         </header>
 
+        <div className="kind-tabs studio-kind-tabs">
+          <button
+            type="button"
+            className={selectedTypeId === "all" ? "selected" : ""}
+            onClick={() => setSelectedTypeId("all")}
+          >
+            全部
+          </button>
+          {activeTypes.map((type) => (
+            <span
+              className={`kind-tab ${selectedTypeId === type.id ? "selected" : ""} ${
+                draggedTypeId === type.id ? "dragging" : ""
+              } ${
+                dragOverType?.typeId === type.id
+                  ? `drag-over ${dragOverType.placement}`
+                  : ""
+              }`}
+              key={type.id}
+              onDragOver={(event) => {
+                if (!draggedTypeId) return;
+                event.preventDefault();
+                setDragOverType({
+                  typeId: type.id,
+                  placement: getHorizontalDropPlacement(event),
+                });
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                if (draggedTypeId && dragOverType) {
+                  reorderEntryType(
+                    draggedTypeId,
+                    dragOverType.typeId,
+                    dragOverType.placement,
+                  );
+                }
+                setDraggedTypeId(null);
+                setDragOverType(null);
+              }}
+            >
+              <button
+                type="button"
+                className="type-drag-handle"
+                draggable
+                title="拖动类型排序"
+                onDragStart={(event) => {
+                  event.stopPropagation();
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("text/plain", type.id);
+                  setDraggedTypeId(type.id);
+                }}
+                onDragEnd={() => {
+                  setDraggedTypeId(null);
+                  setDragOverType(null);
+                }}
+              >
+                <GripHorizontal size={13} />
+              </button>
+              <button
+                type="button"
+                className="kind-tab-main"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setSelectedTypeId(type.id);
+                }}
+              >
+                {type.name}
+              </button>
+              <select
+                className="influence-select"
+                value={type.influence}
+                title={`${type.name} 影响等级`}
+                onChange={(event) =>
+                  updateEntryType(type.id, { influence: event.target.value as InfluenceLevel })
+                }
+              >
+                {influenceLevels.map((level) => (
+                  <option key={level} value={level}>
+                    {level}
+                  </option>
+                ))}
+              </select>
+              {activeTypes.length > 1 && (
+                <button
+                  type="button"
+                  className="kind-tab-remove"
+                  title={`删除类型 ${type.name}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    deleteEntryType(type.id);
+                  }}
+                >
+                  <X size={13} />
+                </button>
+              )}
+            </span>
+          ))}
+        </div>
+
         <div className="content-grid">
           <section className="editor-column">
             <div className="section-block">
@@ -22901,104 +22999,6 @@ export function App() {
                   <Plus size={16} />
                   添加类型
                 </button>
-              </div>
-
-              <div className="kind-tabs">
-                <button
-                  type="button"
-                  className={selectedTypeId === "all" ? "selected" : ""}
-                  onClick={() => setSelectedTypeId("all")}
-                >
-                  全部
-                </button>
-                {activeTypes.map((type) => (
-                  <span
-                    className={`kind-tab ${selectedTypeId === type.id ? "selected" : ""} ${
-                      draggedTypeId === type.id ? "dragging" : ""
-                    } ${
-                      dragOverType?.typeId === type.id
-                        ? `drag-over ${dragOverType.placement}`
-                        : ""
-                    }`}
-                    key={type.id}
-                    onDragOver={(event) => {
-                      if (!draggedTypeId) return;
-                      event.preventDefault();
-                      setDragOverType({
-                        typeId: type.id,
-                        placement: getHorizontalDropPlacement(event),
-                      });
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      if (draggedTypeId && dragOverType) {
-                        reorderEntryType(
-                          draggedTypeId,
-                          dragOverType.typeId,
-                          dragOverType.placement,
-                        );
-                      }
-                      setDraggedTypeId(null);
-                      setDragOverType(null);
-                    }}
-                  >
-                    <button
-                      type="button"
-                      className="type-drag-handle"
-                      draggable
-                      title="拖动类型排序"
-                      onDragStart={(event) => {
-                        event.stopPropagation();
-                        event.dataTransfer.effectAllowed = "move";
-                        event.dataTransfer.setData("text/plain", type.id);
-                        setDraggedTypeId(type.id);
-                      }}
-                      onDragEnd={() => {
-                        setDraggedTypeId(null);
-                        setDragOverType(null);
-                      }}
-                    >
-                      <GripHorizontal size={13} />
-                    </button>
-                    <button
-                      type="button"
-                      className="kind-tab-main"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setSelectedTypeId(type.id);
-                      }}
-                    >
-                      {type.name}
-                    </button>
-                    <select
-                      className="influence-select"
-                      value={type.influence}
-                      title={`${type.name} 影响等级`}
-                      onChange={(event) =>
-                        updateEntryType(type.id, { influence: event.target.value as InfluenceLevel })
-                      }
-                    >
-                      {influenceLevels.map((level) => (
-                        <option key={level} value={level}>
-                          {level}
-                        </option>
-                      ))}
-                    </select>
-                    {activeTypes.length > 1 && (
-                      <button
-                        type="button"
-                        className="kind-tab-remove"
-                        title={`删除类型 ${type.name}`}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          deleteEntryType(type.id);
-                        }}
-                      >
-                        <X size={13} />
-                      </button>
-                    )}
-                  </span>
-                ))}
               </div>
 
               <div className="entry-list">
