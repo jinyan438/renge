@@ -562,6 +562,48 @@
   padding: 18px;
 }
 
+.character-translation-prompt-enable {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 12px 14px;
+  border: 1px solid #d9dee8;
+  border-radius: 8px;
+  color: var(--color-text);
+  background: #f8fafc;
+  cursor: pointer;
+}
+
+.character-translation-prompt-enable > div {
+  display: grid;
+  gap: 3px;
+}
+
+.character-translation-prompt-enable strong {
+  font-size: 13px;
+}
+
+.character-translation-prompt-enable span {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.character-translation-prompt-enable input {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--color-brand);
+}
+
+.character-translation-prompt-enable.active {
+  border-color: #a9dec2;
+  color: var(--color-brand-strong);
+  background: var(--color-brand-soft);
+}
+
 .character-translation-prompt-content textarea {
   min-height: 220px;
   resize: vertical;

@@ -611,6 +611,8 @@ const TAVERN_GLOBAL_VARIABLES_STORAGE_KEY = "renge_tavern_global_variables";
 const CHARACTER_CARDS_STORAGE_KEY = "renge_character_cards";
 const ACTIVE_CHARACTER_CARD_STORAGE_KEY = "renge_active_character_card";
 const CHARACTER_TRANSLATION_PROMPT_STORAGE_KEY = "renge_character_translation_prompt";
+const CHARACTER_TRANSLATION_PROMPT_ENABLED_STORAGE_KEY =
+  "renge_character_translation_prompt_enabled";
 const USER_PROFILE_STORAGE_KEY = "renge_user_profile";
 const CHAT_SENDER_STORAGE_KEY = "renge_chat_sender";
 const CHAT_MULTI_BUBBLE_STORAGE_KEY = "renge_chat_multi_bubble_enabled";
@@ -7037,7 +7039,12 @@ export function App() {
   }>({ status: "idle", message: "" });
   const [characterTranslationAdditionalPrompt, setCharacterTranslationAdditionalPrompt] =
     useState(() => localStorage.getItem(CHARACTER_TRANSLATION_PROMPT_STORAGE_KEY) ?? "");
+  const [characterTranslationPromptEnabled, setCharacterTranslationPromptEnabled] = useState(
+    () => localStorage.getItem(CHARACTER_TRANSLATION_PROMPT_ENABLED_STORAGE_KEY) !== "false",
+  );
   const [characterTranslationPromptDraft, setCharacterTranslationPromptDraft] = useState("");
+  const [characterTranslationPromptEnabledDraft, setCharacterTranslationPromptEnabledDraft] =
+    useState(true);
   const [characterTranslationPromptDialogOpen, setCharacterTranslationPromptDialogOpen] =
     useState(false);
   const [characterTranslationPreview, setCharacterTranslationPreview] = useState<{
@@ -8240,7 +8247,11 @@ export function App() {
       CHARACTER_TRANSLATION_PROMPT_STORAGE_KEY,
       characterTranslationAdditionalPrompt,
     );
-  }, [characterTranslationAdditionalPrompt]);
+    localStorage.setItem(
+      CHARACTER_TRANSLATION_PROMPT_ENABLED_STORAGE_KEY,
+      String(characterTranslationPromptEnabled),
+    );
+  }, [characterTranslationAdditionalPrompt, characterTranslationPromptEnabled]);
 
   useEffect(() => {
     if (!appDataLoaded) return;
@@ -9317,10 +9328,12 @@ export function App() {
   };
   const openCharacterTranslationPromptDialog = () => {
     setCharacterTranslationPromptDraft(characterTranslationAdditionalPrompt);
+    setCharacterTranslationPromptEnabledDraft(characterTranslationPromptEnabled);
     setCharacterTranslationPromptDialogOpen(true);
   };
   const saveCharacterTranslationPrompt = () => {
     setCharacterTranslationAdditionalPrompt(characterTranslationPromptDraft);
+    setCharacterTranslationPromptEnabled(characterTranslationPromptEnabledDraft);
     setCharacterTranslationPromptDialogOpen(false);
   };
   const translateCharacterCard = async (card: CharacterCard) => {
@@ -9361,7 +9374,9 @@ export function App() {
                 {
                   role: "system",
                   content: buildCharacterTranslationSystemPrompt(
-                    characterTranslationAdditionalPrompt,
+                    characterTranslationPromptEnabled
+                      ? characterTranslationAdditionalPrompt
+                      : "",
                   ),
                 },
                 { role: "user", content: JSON.stringify(source) },
@@ -17896,11 +17911,16 @@ export function App() {
                   <button
                     type="button"
                     className={`character-translation-prompt-button ${
-                      characterTranslationAdditionalPrompt.trim() ? "active" : ""
+                      characterTranslationPromptEnabled &&
+                      characterTranslationAdditionalPrompt.trim()
+                        ? "active"
+                        : ""
                     }`}
                     title={
                       characterTranslationAdditionalPrompt.trim()
-                        ? "编辑追加翻译提示词（已保存）"
+                        ? characterTranslationPromptEnabled
+                          ? "编辑追加翻译提示词（已启用）"
+                          : "编辑追加翻译提示词（已停用）"
                         : "设置追加翻译提示词"
                     }
                     onClick={openCharacterTranslationPromptDialog}
@@ -17962,12 +17982,18 @@ export function App() {
                   <button
                     type="button"
                     className={`ghost-action character-translation-prompt-button ${
-                      characterTranslationAdditionalPrompt.trim() ? "active" : ""
+                      characterTranslationPromptEnabled &&
+                      characterTranslationAdditionalPrompt.trim()
+                        ? "active"
+                        : ""
                     }`}
                     onClick={openCharacterTranslationPromptDialog}
                   >
                     <SlidersHorizontal size={15} />
                     追加提示词
+                    {characterTranslationAdditionalPrompt.trim() &&
+                      !characterTranslationPromptEnabled &&
+                      "（已停用）"}
                   </button>
                   <button
                     type="button"
@@ -18455,6 +18481,25 @@ export function App() {
                 </button>
               </header>
               <div className="character-translation-prompt-content">
+                <label
+                  className={`character-translation-prompt-enable ${
+                    characterTranslationPromptEnabledDraft ? "active" : ""
+                  }`}
+                >
+                  <div>
+                    <strong>启用追加翻译提示词</strong>
+                    <span>
+                      关闭后保留已填写内容，但翻译角色卡时不会将其发送给模型。
+                    </span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={characterTranslationPromptEnabledDraft}
+                    onChange={(event) =>
+                      setCharacterTranslationPromptEnabledDraft(event.target.checked)
+                    }
+                  />
+                </label>
                 <label className="field">
                   <span>提示词内容（可选）</span>
                   <textarea
@@ -18470,7 +18515,9 @@ export function App() {
                 </label>
                 <div className="character-translation-prompt-notice">
                   <Save size={16} />
-                  <span>只有点击“保存”才会更新本机持久化内容，取消不会覆盖此前设置。</span>
+                  <span>
+                    只有点击“保存”才会更新提示词和启用状态，取消不会覆盖此前设置。
+                  </span>
                 </div>
               </div>
               <footer className="character-editor-footer">
