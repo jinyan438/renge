@@ -193,6 +193,66 @@ type TypeDragTarget = {
 
 type AppView = "home" | "studio" | "characters" | "extensions" | "settings" | "chat";
 type SettingsTab = "providers" | "prompts" | "presets" | "worldbooks" | "regexes" | "scripts" | "user" | "personalization" | "mcp" | "skills" | "device";
+const SETTINGS_TAB_META: Record<
+  SettingsTab,
+  { title: string; eyebrow: string; description: string }
+> = {
+  providers: {
+    title: "供应商渠道",
+    eyebrow: "MODEL CONNECTIONS",
+    description: "连接模型服务、管理凭据，并为会话选择默认模型。",
+  },
+  prompts: {
+    title: "提示词",
+    eyebrow: "SYSTEM PROMPTS",
+    description: "维护可复用的系统指令，让不同会话保持稳定的表达与边界。",
+  },
+  presets: {
+    title: "预设",
+    eyebrow: "CHAT PRESETS",
+    description: "组织采样参数、提示词顺序和 SillyTavern 兼容预设。",
+  },
+  worldbooks: {
+    title: "世界书",
+    eyebrow: "WORLD BOOKS",
+    description: "管理按关键词激活的背景知识，为对话补充持续一致的世界设定。",
+  },
+  regexes: {
+    title: "正则后处理",
+    eyebrow: "REGEX PIPELINE",
+    description: "按顺序处理模型输出的显示文本，同时保留原始会话内容。",
+  },
+  scripts: {
+    title: "酒馆脚本",
+    eyebrow: "TAVERN SCRIPTS",
+    description: "管理全局与角色脚本、交互按钮、变量和事件运行日志。",
+  },
+  user: {
+    title: "用户资料",
+    eyebrow: "USER PROFILE",
+    description: "设置你的头像、称呼和简介，为角色扮演提供稳定的用户身份。",
+  },
+  personalization: {
+    title: "个性化",
+    eyebrow: "APPEARANCE",
+    description: "调整聊天文本风格与颜色，让阅读体验更符合你的偏好。",
+  },
+  mcp: {
+    title: "MCP 服务器",
+    eyebrow: "TOOL CONNECTIONS",
+    description: "连接外部工具服务器，并控制哪些能力可以提供给当前会话。",
+  },
+  skills: {
+    title: "Skills",
+    eyebrow: "AGENT SKILLS",
+    description: "导入可复用技能说明，让智能体根据任务自动匹配工作流。",
+  },
+  device: {
+    title: "手机端",
+    eyebrow: "DEVICE & STORAGE",
+    description: "管理移动设备工作区、ROOT 权限与本地文件访问能力。",
+  },
+};
 type ProviderPullState = "idle" | "loading" | "success" | "error";
 type ChatGenerationState = "idle" | "running" | "stopping";
 type ExtensionRuntimeState = {
@@ -18430,17 +18490,46 @@ export function App() {
 
   if (view === "settings") {
     return (
-      <main className={`settings-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""}`}>
-        <button
-          type="button"
-          className="mobile-sidebar-toggle"
-          title="打开菜单"
-          aria-label="打开菜单"
-          onClick={openMobileSidebar}
-        >
-          <Menu size={19} />
-        </button>
-        <aside className="settings-nav">
+      <main
+        className={`settings-shell settings-desktop ${mobileSidebarOpen ? "mobile-sidebar-open" : ""}`}
+      >
+        <div className="settings-desktop-background" aria-hidden="true" />
+        <div className="settings-desktop-shade" aria-hidden="true" />
+        <section className="settings-window-shell" aria-label="Renge 系统设置">
+          <header className="settings-window-bar">
+            <div className="settings-window-lights">
+              <button
+                type="button"
+                className="settings-window-light close"
+                title="关闭设置并返回主页"
+                aria-label="关闭设置并返回主页"
+                onClick={() => {
+                  setView("home");
+                  closeMobileSidebar();
+                }}
+              />
+              <span className="settings-window-light minimize" aria-hidden="true" />
+              <span className="settings-window-light maximize" aria-hidden="true" />
+            </div>
+            <span className="settings-window-caption">Renge Agent Lab — 设置</span>
+            <div className="settings-window-status" title={chatModelLabel}>
+              <span className={chatModelReady ? "ready" : "attention"} />
+              <strong>{activePersona.name}</strong>
+              <small>{chatModelLabel}</small>
+            </div>
+          </header>
+
+          <div className="settings-window-body">
+            <button
+              type="button"
+              className="mobile-sidebar-toggle"
+              title="打开菜单"
+              aria-label="打开菜单"
+              onClick={openMobileSidebar}
+            >
+              <Menu size={19} />
+            </button>
+            <aside className="settings-nav">
           <button
             type="button"
             className="settings-back"
@@ -18450,12 +18539,18 @@ export function App() {
             }}
           >
             <ArrowLeft size={16} />
-            主页
+            返回桌面
           </button>
           <div className="settings-title">
-            <Settings2 size={18} />
-            <strong>设置</strong>
+            <span className="settings-title-icon">
+              <Settings2 size={20} />
+            </span>
+            <span className="settings-title-copy">
+              <strong>系统设置</strong>
+              <small>Renge Preferences</small>
+            </span>
           </div>
+          <div className="settings-nav-label">AI 与内容</div>
           <button
             type="button"
             className={`settings-tab ${settingsTab === "providers" ? "active" : ""}`}
@@ -18522,6 +18617,7 @@ export function App() {
             <Play size={16} />
             酒馆脚本
           </button>
+          <div className="settings-nav-label">个人</div>
           <button
             type="button"
             className={`settings-tab ${settingsTab === "user" ? "active" : ""}`}
@@ -18544,6 +18640,7 @@ export function App() {
             <Palette size={16} />
             个性化
           </button>
+          <div className="settings-nav-label">连接与设备</div>
           <button
             type="button"
             className={`settings-tab ${settingsTab === "mcp" ? "active" : ""}`}
@@ -18577,42 +18674,21 @@ export function App() {
             <Wrench size={16} />
             手机端
           </button>
-        </aside>
-        <button
-          type="button"
-          className="mobile-sidebar-backdrop"
-          title="关闭菜单"
-          aria-label="关闭菜单"
-          onClick={closeMobileSidebar}
-        />
+            </aside>
+            <button
+              type="button"
+              className="mobile-sidebar-backdrop"
+              title="关闭菜单"
+              aria-label="关闭菜单"
+              onClick={closeMobileSidebar}
+            />
 
-        <section className="settings-content">
+            <section className="settings-content">
           <header className="topbar">
-            <div>
-              <div className="eyebrow">系统设置</div>
-              <h1>
-                {settingsTab === "providers"
-                  ? "供应商渠道"
-                  : settingsTab === "prompts"
-                    ? "提示词"
-                    : settingsTab === "presets"
-                      ? "预设"
-                      : settingsTab === "worldbooks"
-                        ? "世界书"
-                        : settingsTab === "regexes"
-                          ? "正则后处理"
-                          : settingsTab === "scripts"
-                            ? "酒馆脚本"
-                            : settingsTab === "user"
-                              ? "用户资料"
-                              : settingsTab === "personalization"
-                                ? "个性化"
-                                : settingsTab === "mcp"
-                                  ? "MCP 服务器"
-                                  : settingsTab === "skills"
-                                    ? "Skills"
-                                    : "手机端"}
-              </h1>
+            <div className="settings-heading-copy">
+              <div className="eyebrow">{SETTINGS_TAB_META[settingsTab].eyebrow}</div>
+              <h1>{SETTINGS_TAB_META[settingsTab].title}</h1>
+              <p>{SETTINGS_TAB_META[settingsTab].description}</p>
             </div>
             {settingsTab === "providers" && (
               <div className="topbar-actions">
@@ -21226,6 +21302,8 @@ export function App() {
               </div>
             </section>
           )}
+            </section>
+          </div>
         </section>
         {avatarCropModal}
         {pcBrowserModal}
