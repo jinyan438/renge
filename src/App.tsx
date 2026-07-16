@@ -19190,7 +19190,7 @@ export function App() {
                 <div className="section-heading compact">
                   <div>
                     <h2>System Prompt</h2>
-                    <p>左侧勾选的多个提示词会按顺序组合，在 Codex Chat 发送时生效。</p>
+                    <p>左侧勾选的多个提示词会按顺序组合，在 Agent Chat 发送时生效。</p>
                   </div>
                   <button
                     type="button"
@@ -19220,7 +19220,7 @@ export function App() {
                     <textarea
                       className="system-prompt-textarea"
                       value={activeSystemPrompt.content}
-                      placeholder="输入会注入到 Codex Chat 的 System Prompt"
+                      placeholder="输入会注入到 Agent Chat 的 System Prompt"
                       onChange={(event) =>
                         updateSystemPrompt(activeSystemPrompt.id, {
                           content: event.target.value,

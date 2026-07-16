@@ -1011,7 +1011,7 @@ export function DesktopHome({
     () => [
       {
         id: "chat",
-        title: "Codex Chat",
+        title: "Agent Chat",
         kicker: "CONVERSATION",
         description: "使用当前模型直接对话，或带着人格与角色设定进入一段新的会话。",
         actionLabel: "开始对话",
