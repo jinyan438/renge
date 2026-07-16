@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu } from "electron";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { execFile } from "node:child_process";
@@ -736,6 +736,8 @@ async function createMainWindow() {
     dataDir: getPersistentDataDir(),
   });
 
+  Menu.setApplicationMenu(null);
+
   mainWindow = new BrowserWindow({
     width: 1360,
     height: 900,
@@ -743,6 +745,7 @@ async function createMainWindow() {
     minHeight: 720,
     title: "Renge Agent Lab",
     backgroundColor: "#f5f7fa",
+    autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -750,6 +753,8 @@ async function createMainWindow() {
       sandbox: false,
     },
   });
+
+  mainWindow.removeMenu();
 
   await mainWindow.loadURL(serverController.url);
 }
