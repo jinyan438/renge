@@ -4163,53 +4163,354 @@ summary:focus-visible {
   padding-bottom: 48px;
 }
 
-.roleplay-greeting-switch {
+.roleplay-greeting-controls {
   position: absolute;
   right: 8px;
   bottom: 8px;
   z-index: 5;
   display: inline-flex;
-  min-width: 48px;
   height: 28px;
   align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 0 8px;
   border: 1px solid rgba(100, 116, 139, 0.28);
   border-radius: 999px;
-  color: #536074;
   background: rgba(241, 245, 249, 0.9);
   box-shadow: 0 3px 10px rgba(15, 23, 42, 0.08);
-  font-size: 11px;
-  font-weight: 800;
-  line-height: 1;
-  cursor: pointer;
+  overflow: hidden;
   opacity: 0.68;
   transition:
     opacity 0.18s ease,
-    color 0.18s ease,
     border-color 0.18s ease,
     background 0.18s ease,
     transform 0.18s ease;
 }
 
-.roleplay-greeting-switch:hover:not(:disabled),
-.roleplay-greeting-switch:focus-visible {
+.roleplay-greeting-controls:hover,
+.roleplay-greeting-controls:focus-within {
   border-color: rgba(7, 193, 96, 0.4);
-  color: var(--color-brand-strong);
   background: rgba(230, 248, 239, 0.96);
   opacity: 1;
   transform: translateY(-1px);
 }
 
-.roleplay-greeting-switch:focus-visible {
+.roleplay-greeting-controls:focus-within {
   outline: 2px solid rgba(7, 193, 96, 0.24);
   outline-offset: 2px;
 }
 
-.roleplay-greeting-switch:disabled {
+.roleplay-greeting-controls button {
+  display: inline-grid;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  place-items: center;
+  color: #536074;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    color 0.16s ease,
+    background 0.16s ease;
+}
+
+.roleplay-greeting-controls button:hover:not(:disabled),
+.roleplay-greeting-controls button:focus-visible {
+  color: var(--color-brand-strong);
+  background: rgba(7, 193, 96, 0.1);
+  outline: 0;
+}
+
+.roleplay-greeting-next {
+  width: 30px;
+  border-right: 1px solid rgba(100, 116, 139, 0.2) !important;
+}
+
+.roleplay-greeting-next svg {
+  transition: transform 0.2s ease;
+}
+
+.roleplay-greeting-next:hover:not(:disabled) svg {
+  transform: rotate(35deg);
+}
+
+.roleplay-greeting-count {
+  min-width: 43px;
+  padding: 0 8px !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.roleplay-greeting-controls button:disabled {
   cursor: not-allowed;
   opacity: 0.38;
+}
+
+.roleplay-greeting-selector-backdrop {
+  padding: clamp(12px, 3vw, 32px);
+  background: rgba(15, 23, 42, 0.46);
+  backdrop-filter: blur(10px) saturate(0.9);
+}
+
+.roleplay-greeting-selector-modal {
+  display: grid;
+  width: min(780px, 100%);
+  height: min(720px, calc(100dvh - 36px));
+  min-height: 0;
+  overflow: hidden;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  border: 1px solid rgba(203, 213, 225, 0.9);
+  border-radius: 20px;
+  background: rgba(248, 250, 252, 0.98);
+  box-shadow:
+    0 32px 90px rgba(15, 23, 42, 0.3),
+    0 1px 0 rgba(255, 255, 255, 0.9) inset;
+}
+
+.roleplay-greeting-selector-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid rgba(203, 213, 225, 0.75);
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.roleplay-greeting-selector-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+}
+
+.roleplay-greeting-selector-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(7, 193, 96, 0.2);
+  border-radius: 12px;
+  place-items: center;
+  color: var(--color-brand-strong);
+  background: rgba(230, 248, 239, 0.96);
+}
+
+.roleplay-greeting-selector-heading h2,
+.roleplay-greeting-selector-heading p {
+  margin: 0;
+}
+
+.roleplay-greeting-selector-heading h2 {
+  color: #1f2937;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.roleplay-greeting-selector-heading p {
+  margin-top: 3px;
+  overflow: hidden;
+  color: #7b8493;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.roleplay-greeting-selector-close {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  place-items: center;
+  color: #667085;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    color 0.16s ease,
+    border-color 0.16s ease,
+    background 0.16s ease;
+}
+
+.roleplay-greeting-selector-close:hover,
+.roleplay-greeting-selector-close:focus-visible {
+  border-color: #d8dee8;
+  color: #273142;
+  background: #f1f4f8;
+  outline: 0;
+}
+
+.roleplay-greeting-selector-list {
+  display: grid;
+  min-height: 0;
+  overflow: auto;
+  align-content: start;
+  gap: 10px;
+  padding: 14px;
+  overscroll-behavior: contain;
+}
+
+.roleplay-greeting-option {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: 38px minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 14px;
+  border: 1px solid #dfe5ec;
+  border-radius: 14px;
+  color: #273142;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 5px 16px rgba(15, 23, 42, 0.045);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 0.16s ease,
+    border-color 0.16s ease,
+    background 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.roleplay-greeting-option:hover:not(:disabled),
+.roleplay-greeting-option:focus-visible {
+  border-color: rgba(7, 193, 96, 0.42);
+  background: #ffffff;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.075);
+  outline: 0;
+  transform: translateY(-1px);
+}
+
+.roleplay-greeting-option.current {
+  border-color: rgba(7, 193, 96, 0.48);
+  background: linear-gradient(135deg, #f4fcf8 0%, #ecf9f2 100%);
+  box-shadow: 0 8px 22px rgba(7, 193, 96, 0.09);
+}
+
+.roleplay-greeting-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.roleplay-greeting-option-index {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  border: 1px solid #d9e0e9;
+  border-radius: 11px;
+  place-items: center;
+  color: #6b7585;
+  background: #f5f7fa;
+  font-size: 12px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+.roleplay-greeting-option.current .roleplay-greeting-option-index {
+  border-color: rgba(7, 193, 96, 0.28);
+  color: var(--color-brand-strong);
+  background: rgba(230, 248, 239, 0.96);
+}
+
+.roleplay-greeting-option-content {
+  display: block;
+  min-width: 0;
+}
+
+.roleplay-greeting-option-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.roleplay-greeting-option-title strong {
+  color: #253044;
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.roleplay-greeting-option-title small {
+  flex: 0 0 auto;
+  color: #98a1af;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.roleplay-greeting-option-preview {
+  display: -webkit-box;
+  margin-top: 5px;
+  overflow: hidden;
+  color: #697386;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.roleplay-greeting-option-status {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  place-items: center;
+  color: #ffffff;
+  background: transparent;
+}
+
+.roleplay-greeting-option.current .roleplay-greeting-option-status {
+  background: var(--color-brand);
+  box-shadow: 0 3px 10px rgba(7, 193, 96, 0.2);
+}
+
+.roleplay-greeting-selector-footer {
+  padding: 11px 18px 12px;
+  border-top: 1px solid rgba(203, 213, 225, 0.72);
+  color: #7a8493;
+  background: rgba(255, 255, 255, 0.78);
+  font-size: 11px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+@media (max-width: 720px) {
+  .roleplay-greeting-selector-backdrop {
+    padding: 10px;
+  }
+
+  .roleplay-greeting-selector-modal {
+    height: calc(100dvh - 20px);
+    border-radius: 16px;
+  }
+
+  .roleplay-greeting-selector-header {
+    padding: 13px 14px;
+  }
+
+  .roleplay-greeting-selector-list {
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .roleplay-greeting-option {
+    grid-template-columns: 34px minmax(0, 1fr) 22px;
+    gap: 9px;
+    padding: 11px;
+  }
+
+  .roleplay-greeting-option-index {
+    width: 32px;
+    height: 32px;
+  }
+
+  .roleplay-greeting-option-title {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+  }
 }
 
 .chat-message.user .chat-bubble {
