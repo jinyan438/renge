@@ -116,6 +116,14 @@ const PROJECT_SNAP_THRESHOLD = 14;
 const PROJECT_SNAP_RELEASE_THRESHOLD = 22;
 const PROJECT_SNAP_NEARBY_DISTANCE = 280;
 const PROJECT_POSITIONS_STORAGE_KEY = "renge.desktop.projectPositions.v1";
+const PROJECT_IDS: readonly ProjectId[] = [
+  "chat",
+  "studio",
+  "characters",
+  "extensions",
+  "settings",
+  "recent",
+];
 
 function isStoredProjectPosition(value: unknown): value is ProjectPosition {
   if (!value || typeof value !== "object") return false;
@@ -130,42 +138,118 @@ function isStoredProjectPosition(value: unknown): value is ProjectPosition {
   );
 }
 
-function loadProjectPosition(projectId: ProjectId, layout: ProjectPositionLayout) {
-  if (typeof window === "undefined") return null;
+function normalizeStoredProjectPositions(value: unknown): StoredProjectPositions {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const source = value as StoredProjectPositions;
+  const normalized: StoredProjectPositions = {};
+  for (const layout of ["desktop", "compact"] as const) {
+    const layoutSource = source[layout];
+    if (!layoutSource || typeof layoutSource !== "object") continue;
+    const layoutPositions: Partial<Record<ProjectId, ProjectPosition>> = {};
+    for (const projectId of PROJECT_IDS) {
+      const position = layoutSource[projectId];
+      if (isStoredProjectPosition(position)) layoutPositions[projectId] = position;
+    }
+    if (Object.keys(layoutPositions).length > 0) normalized[layout] = layoutPositions;
+  }
+  return normalized;
+}
+
+function hasStoredProjectPositions(positions: StoredProjectPositions) {
+  return ["desktop", "compact"].some((layout) =>
+    Object.keys(positions[layout as ProjectPositionLayout] ?? {}).length > 0,
+  );
+}
+
+function loadProjectPositionsFromLocalStorage() {
+  if (typeof window === "undefined") return {};
   try {
     const rawValue = localStorage.getItem(PROJECT_POSITIONS_STORAGE_KEY);
-    if (!rawValue) return null;
-    const stored = JSON.parse(rawValue) as StoredProjectPositions;
-    const position = stored?.[layout]?.[projectId];
-    return isStoredProjectPosition(position) ? position : null;
+    return rawValue ? normalizeStoredProjectPositions(JSON.parse(rawValue) as unknown) : {};
   } catch {
-    return null;
+    return {};
   }
 }
 
-function saveProjectPosition(
-  projectId: ProjectId,
-  layout: ProjectPositionLayout,
-  position: ProjectPosition,
-) {
-  if (typeof window === "undefined" || !isStoredProjectPosition(position)) return;
+function saveProjectPositionsToLocalStorage(positions: StoredProjectPositions) {
+  if (typeof window === "undefined") return;
   try {
-    const rawValue = localStorage.getItem(PROJECT_POSITIONS_STORAGE_KEY);
-    const parsed = rawValue ? (JSON.parse(rawValue) as unknown) : null;
-    const stored = parsed && typeof parsed === "object" ? (parsed as StoredProjectPositions) : {};
-    const layoutPositions =
-      stored[layout] && typeof stored[layout] === "object" ? stored[layout] : {};
-    const next: StoredProjectPositions = {
-      ...stored,
-      [layout]: {
-        ...layoutPositions,
-        [projectId]: position,
-      },
-    };
-    localStorage.setItem(PROJECT_POSITIONS_STORAGE_KEY, JSON.stringify(next));
+    localStorage.setItem(PROJECT_POSITIONS_STORAGE_KEY, JSON.stringify(positions));
   } catch {
     // Storage may be unavailable in privacy-restricted browser contexts.
   }
+}
+
+function usePersistentProjectPositions() {
+  const desktopStoreAvailable =
+    typeof window !== "undefined" &&
+    Boolean(
+      window.rengeDesktop?.isElectron &&
+        window.rengeDesktop.loadDesktopProjectPositions &&
+        window.rengeDesktop.saveDesktopProjectPositions,
+    );
+  const [positions, setPositions] = useState<StoredProjectPositions>(() =>
+    loadProjectPositionsFromLocalStorage(),
+  );
+  const positionsRef = useRef(positions);
+  const [positionsReady, setPositionsReady] = useState(() => !desktopStoreAvailable);
+
+  useEffect(() => {
+    const desktopApi = window.rengeDesktop;
+    if (!desktopApi?.loadDesktopProjectPositions) {
+      setPositionsReady(true);
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const loaded = normalizeStoredProjectPositions(
+          await desktopApi.loadDesktopProjectPositions?.(),
+        );
+        if (cancelled) return;
+        if (hasStoredProjectPositions(loaded)) {
+          positionsRef.current = loaded;
+          setPositions(loaded);
+          saveProjectPositionsToLocalStorage(loaded);
+        } else if (
+          hasStoredProjectPositions(positionsRef.current) &&
+          desktopApi.saveDesktopProjectPositions
+        ) {
+          await desktopApi.saveDesktopProjectPositions(positionsRef.current);
+        }
+      } catch {
+        // The browser-local copy remains available as a fallback.
+      } finally {
+        if (!cancelled) setPositionsReady(true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const updateProjectPosition = useCallback(
+    (projectId: ProjectId, layout: ProjectPositionLayout, position: ProjectPosition) => {
+      if (!isStoredProjectPosition(position)) return;
+      const next: StoredProjectPositions = {
+        ...positionsRef.current,
+        [layout]: {
+          ...(positionsRef.current[layout] ?? {}),
+          [projectId]: position,
+        },
+      };
+      positionsRef.current = next;
+      setPositions(next);
+      saveProjectPositionsToLocalStorage(next);
+      const saveToDesktop = window.rengeDesktop?.saveDesktopProjectPositions;
+      if (saveToDesktop) void saveToDesktop(next).catch(() => undefined);
+    },
+    [],
+  );
+
+  return { positions, positionsReady, updateProjectPosition };
 }
 
 function useCompactViewport() {
@@ -367,6 +451,9 @@ function useDraggable({
           containerWidth: containerRect.width,
           containerHeight: containerRect.height,
         });
+        offsetRef.current = { x: 0, y: 0 };
+        pendingOffsetRef.current = { x: 0, y: 0 };
+        node.style.transform = "translate3d(0,0,0)";
       }
     }
   }, [onDragComplete]);
@@ -416,31 +503,31 @@ function ProjectCard({
   project,
   compact,
   compactPosition,
+  savedPosition,
+  onPositionChange,
   onOpen,
   reducedMotion,
 }: {
   project: ProjectSpec;
   compact: boolean;
   compactPosition: { x: number; y: number };
+  savedPosition: ProjectPosition | null;
+  onPositionChange: (position: ProjectPosition) => void;
   onOpen: () => void;
   reducedMotion: boolean;
 }) {
   const [hovered, setHovered] = useState(false);
   const positionLayout: ProjectPositionLayout = compact ? "compact" : "desktop";
-  const storedPosition = useMemo(
-    () => loadProjectPosition(project.id, positionLayout),
-    [positionLayout, project.id],
-  );
-  const anchorX = storedPosition?.x ?? (compact ? compactPosition.x : project.anchorX);
-  const anchorY = storedPosition?.y ?? (compact ? compactPosition.y : project.anchorY);
+  const anchorX = savedPosition?.x ?? (compact ? compactPosition.x : project.anchorX);
+  const anchorY = savedPosition?.y ?? (compact ? compactPosition.y : project.anchorY);
   const persistPosition = useCallback(
     ({ offset, containerWidth, containerHeight }: DragCompletion) => {
-      saveProjectPosition(project.id, positionLayout, {
+      onPositionChange({
         x: anchorX + (offset.x / containerWidth) * 100,
         y: anchorY + (offset.y / containerHeight) * 100,
       });
     },
-    [anchorX, anchorY, positionLayout, project.id],
+    [anchorX, anchorY, onPositionChange],
   );
   const drag = useDraggable({ resetKey: positionLayout, onDragComplete: persistPosition });
 
@@ -910,6 +997,8 @@ export function DesktopHome({
   const [overlay, setOverlay] = useState<OverlayId | null>(null);
   const compact = useCompactViewport();
   const reducedMotion = useReducedMotion();
+  const { positions, positionsReady, updateProjectPosition } = usePersistentProjectPositions();
+  const positionLayout: ProjectPositionLayout = compact ? "compact" : "desktop";
 
   useEffect(() => {
     document.body.classList.add("desktop-home-active");
@@ -1136,16 +1225,21 @@ export function DesktopHome({
         </div>
       </header>
 
-      {projects.map((project, index) => (
-        <ProjectCard
-          key={project.id}
-          project={project}
-          compact={compact}
-          compactPosition={compactPositions[index]}
-          onOpen={() => setOverlay(project.id)}
-          reducedMotion={reducedMotion}
-        />
-      ))}
+      {positionsReady &&
+        projects.map((project, index) => (
+          <ProjectCard
+            key={project.id}
+            project={project}
+            compact={compact}
+            compactPosition={compactPositions[index]}
+            savedPosition={positions[positionLayout]?.[project.id] ?? null}
+            onPositionChange={(position) =>
+              updateProjectPosition(project.id, positionLayout, position)
+            }
+            onOpen={() => setOverlay(project.id)}
+            reducedMotion={reducedMotion}
+          />
+        ))}
 
       {!compact && (
         <div
