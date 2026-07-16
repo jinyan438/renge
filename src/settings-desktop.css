@@ -200,7 +200,6 @@ button.settings-window-light.close:hover {
   scrollbar-width: thin;
 }
 
-.settings-desktop .settings-back,
 .settings-desktop .settings-tab {
   display: inline-flex;
   width: 100%;
@@ -222,14 +221,6 @@ button.settings-window-light.close:hover {
     border-color 0.15s ease;
 }
 
-.settings-desktop .settings-back {
-  width: auto;
-  margin: 0 2px 7px;
-  align-self: flex-start;
-  color: #6d6d73;
-}
-
-.settings-desktop .settings-back:hover,
 .settings-desktop .settings-tab:hover {
   color: #202024;
   background: rgba(255, 255, 255, 0.66);

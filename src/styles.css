@@ -1650,7 +1650,6 @@ summary:focus-visible {
   background: var(--color-sidebar);
 }
 
-.settings-back,
 .settings-tab {
   display: inline-flex;
   align-items: center;
@@ -1665,7 +1664,6 @@ summary:focus-visible {
   background: transparent;
 }
 
-.settings-back:hover,
 .settings-tab:hover {
   color: #ffffff;
   background: rgba(255, 255, 255, 0.09);
@@ -5573,29 +5571,6 @@ summary:focus-visible {
   line-height: 1.55;
 }
 
-.module-nav {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-}
-
-.module-nav button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-height: 32px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
-  color: #d9e3f2;
-  font-weight: 600;
-  background: rgba(255, 255, 255, 0.07);
-}
-
-.module-nav button:hover {
-  background: rgba(255, 255, 255, 0.12);
-}
-
 .workspace {
   min-width: 0;
   padding: 18px;
@@ -6646,9 +6621,7 @@ input[type="range"] {
     font-size: 11px;
   }
 
-  .settings-back,
   .settings-tab,
-  .module-nav button,
   .primary-action,
   .persona-item,
   .local-workspace-button,
