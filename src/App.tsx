@@ -7441,6 +7441,7 @@ export function App() {
     () => localStorage.getItem(ACTIVE_CHARACTER_CARD_STORAGE_KEY) ?? "",
   );
   const [editingCharacterCardId, setEditingCharacterCardId] = useState("");
+  const [characterCoverPreviewId, setCharacterCoverPreviewId] = useState("");
   const [characterEditorTab, setCharacterEditorTab] = useState<
     "basic" | "advanced" | "greetings" | "worldbook" | "regex" | "scripts"
   >("basic");
@@ -8776,6 +8777,17 @@ export function App() {
   }, [chatMessageMenu]);
 
   useEffect(() => {
+    if (!characterCoverPreviewId) return;
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setCharacterCoverPreviewId("");
+    };
+
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [characterCoverPreviewId]);
+
+  useEffect(() => {
     if (!appDataLoaded) return;
     if (activeChatSessionId || chatSessions.length === 0) return;
 
@@ -8823,6 +8835,10 @@ export function App() {
   const editingCharacterCard = useMemo(
     () => characterCards.find((card) => card.id === editingCharacterCardId),
     [characterCards, editingCharacterCardId],
+  );
+  const previewedCharacterCover = useMemo(
+    () => characterCards.find((card) => card.id === characterCoverPreviewId),
+    [characterCards, characterCoverPreviewId],
   );
   const filteredCharacterCards = useMemo(() => {
     const query = characterSearch.trim().toLocaleLowerCase();
@@ -9727,6 +9743,7 @@ export function App() {
     setCharacterCards(remaining);
     if (activeCharacterCardId === card.id) setActiveCharacterCardId(remaining[0]?.id ?? "");
     if (editingCharacterCardId === card.id) setEditingCharacterCardId("");
+    if (characterCoverPreviewId === card.id) setCharacterCoverPreviewId("");
   };
   const replaceCharacterAvatar = async (file?: File) => {
     if (!file || !editingCharacterCard) return;
@@ -18239,7 +18256,7 @@ export function App() {
                     type="button"
                     title="查看原始封面"
                     disabled={!card.avatarDataUrl}
-                    onClick={() => window.open(card.avatarDataUrl, "_blank", "noopener,noreferrer")}
+                    onClick={() => setCharacterCoverPreviewId(card.id)}
                   >
                     <Eye size={15} />
                   </button>
@@ -18261,6 +18278,50 @@ export function App() {
         {characterTranslationState.status !== "idle" && (
           <div className={`provider-status character-manager-status ${characterTranslationState.status}`}>
             {characterTranslationState.message}
+          </div>
+        )}
+
+        {previewedCharacterCover?.avatarDataUrl && (
+          <div
+            className="modal-backdrop character-cover-preview-backdrop"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="character-cover-preview-title"
+            onPointerDown={(event) => {
+              if (event.target === event.currentTarget) setCharacterCoverPreviewId("");
+            }}
+          >
+            <section className="character-cover-preview-modal">
+              <header className="character-cover-preview-header">
+                <div>
+                  <strong id="character-cover-preview-title">
+                    {previewedCharacterCover.name || "未命名角色"}
+                  </strong>
+                  <span>
+                    {previewedCharacterCover.sourceFileName || "角色卡原始封面"}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="icon-button flat"
+                  title="关闭原始封面"
+                  aria-label="关闭原始封面"
+                  onClick={() => setCharacterCoverPreviewId("")}
+                >
+                  <X size={19} />
+                </button>
+              </header>
+              <div className="character-cover-preview-stage">
+                <img
+                  src={previewedCharacterCover.avatarDataUrl}
+                  alt={`${previewedCharacterCover.name || "角色"}的原始封面`}
+                  draggable={false}
+                />
+              </div>
+              <footer className="character-cover-preview-footer">
+                完整原图预览 · 未进行裁切或拉伸
+              </footer>
+            </section>
           </div>
         )}
 
