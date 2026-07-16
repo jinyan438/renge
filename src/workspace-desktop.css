@@ -333,22 +333,6 @@ button.portfolio-window-light.close:hover {
   scrollbar-width: thin;
 }
 
-.portfolio-window-body .module-nav button {
-  min-height: 34px;
-  border-color: #d7d7dd;
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.7);
-  color: #55555b;
-  font-size: 11px;
-  font-weight: 500;
-}
-
-.portfolio-window-body .module-nav button:hover {
-  border-color: #c6c6cd;
-  background: #ffffff;
-  color: #1f1f23;
-}
-
 .portfolio-window-body .brand-mark {
   border-color: rgba(255, 255, 255, 0.5);
   border-radius: 12px;

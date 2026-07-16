@@ -17,7 +17,6 @@ import {
   FolderOpen,
   GripHorizontal,
   GripVertical,
-  Home,
   KeyRound,
   ListPlus,
   Languages,
@@ -17324,10 +17323,6 @@ export function App() {
       >
         <header className="extension-manager-header">
           <div>
-            <button type="button" className="ghost-action" onClick={() => setView("home")}>
-              <ArrowLeft size={16} />
-              主页
-            </button>
             <div>
               <div className="eyebrow">SillyTavern Extensions</div>
               <h1>扩展管理器</h1>
@@ -17747,10 +17742,6 @@ export function App() {
       >
         <header className="character-manager-header">
           <div>
-            <button type="button" className="ghost-action" onClick={() => setView("home")}>
-              <ArrowLeft size={16} />
-              主页
-            </button>
             <div>
               <div className="eyebrow">SillyTavern Character Cards</div>
               <h1>角色卡管理器</h1>
@@ -18602,17 +18593,6 @@ export function App() {
               <Menu size={19} />
             </button>
             <aside className="settings-nav">
-          <button
-            type="button"
-            className="settings-back"
-            onClick={() => {
-              setView("home");
-              closeMobileSidebar();
-            }}
-          >
-            <ArrowLeft size={16} />
-            返回桌面
-          </button>
           <div className="settings-title">
             <span className="settings-title-icon">
               <img className="settings-title-image" src={settingsModuleIcon} alt="" />
@@ -21415,30 +21395,6 @@ export function App() {
           <Menu size={19} />
         </button>
         <aside className="chat-sidebar">
-          <div className="module-nav">
-            <button
-              type="button"
-              onClick={() => {
-                setView("home");
-                closeMobileSidebar();
-              }}
-            >
-              <Home size={16} />
-              主页
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setSettingsTab("providers");
-                setView("settings");
-                closeMobileSidebar();
-              }}
-            >
-              <Settings2 size={16} />
-              设置
-            </button>
-          </div>
-
           <div className="chat-control-panel">
             <div className="chat-mode-toggle">
               <button
@@ -22702,30 +22658,6 @@ export function App() {
         <Menu size={19} />
       </button>
       <aside className="sidebar">
-        <div className="module-nav">
-          <button
-            type="button"
-            onClick={() => {
-              setView("home");
-              closeMobileSidebar();
-            }}
-          >
-            <Home size={16} />
-            主页
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setSettingsTab("providers");
-              setView("settings");
-              closeMobileSidebar();
-            }}
-          >
-            <Settings2 size={16} />
-            设置
-          </button>
-        </div>
-
         <button
           className="primary-action"
           type="button"
