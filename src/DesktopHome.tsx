@@ -855,7 +855,7 @@ export function DesktopHome({
           left: "50%",
           zIndex: 1,
           width: "100%",
-          height: compact ? "40%" : "47.375%",
+          height: compact ? "13.333%" : "15.792%",
           pointerEvents: "none",
           transform: "translate3d(-50%,0,0)",
           WebkitBackdropFilter: compact ? "blur(6px)" : "blur(10px)",
@@ -959,7 +959,7 @@ export function DesktopHome({
         aria-label="快捷启动栏"
         style={{
           position: "absolute",
-          bottom: compact ? 18 : 64,
+          bottom: compact ? 2 : 24,
           left: "50%",
           zIndex: 4,
           display: "flex",
