@@ -729,6 +729,12 @@ const DEFAULT_CHAT_PERSONALIZATION: ChatPersonalizationSettings = {
   wallpaperMaskOpacity: 70,
   bubbleOpacity: 100,
 };
+const CHAT_ASSISTANT_BUBBLE_OPACITY_STYLE: CSSProperties = {
+  backgroundColor: "rgba(255, 255, 255, var(--chat-bubble-opacity, 1))",
+};
+const CHAT_USER_BUBBLE_OPACITY_STYLE: CSSProperties = {
+  backgroundColor: "rgba(149, 236, 105, var(--chat-bubble-opacity, 1))",
+};
 const VOLCENGINE_CODING_PLAN_NAME = "火山方舟 Coding Plan";
 const VOLCENGINE_CODING_PLAN_API_BASE_URL = "https://ark.cn-beijing.volces.com/api/coding/v3";
 const VOLCENGINE_CODING_PLAN_MODEL_ID = "ark-code-latest";
@@ -9895,20 +9901,25 @@ export function App() {
       ({
         "--chat-quote-color": chatPersonalization.quoteStyleColor,
         "--chat-italic-color": chatPersonalization.italicStyleColor,
-        "--chat-wallpaper-image": activeSessionRoleplayCard?.avatarDataUrl
-          ? `url("${activeSessionRoleplayCard.avatarDataUrl}")`
-          : "none",
         "--chat-wallpaper-mask-opacity":
           chatPersonalization.wallpaperMaskOpacity / 100,
         "--chat-bubble-opacity": chatPersonalization.bubbleOpacity / 100,
       }) as CSSProperties,
     [
-      activeSessionRoleplayCard?.avatarDataUrl,
       chatPersonalization.bubbleOpacity,
       chatPersonalization.italicStyleColor,
       chatPersonalization.quoteStyleColor,
       chatPersonalization.wallpaperMaskOpacity,
     ],
+  );
+  const chatWallpaperImageStyle = useMemo(
+    () =>
+      ({
+        backgroundImage: activeSessionRoleplayCard?.avatarDataUrl
+          ? `url("${activeSessionRoleplayCard.avatarDataUrl}")`
+          : "none",
+      }) as CSSProperties,
+    [activeSessionRoleplayCard?.avatarDataUrl],
   );
   const activeRoleplayGreetings = useMemo(
     () =>
@@ -21953,6 +21964,12 @@ export function App() {
             activeSessionRoleplayCard?.avatarDataUrl ? "has-character-wallpaper" : ""
           }`}
         >
+          {activeSessionRoleplayCard?.avatarDataUrl && (
+            <div className="chat-character-wallpaper" aria-hidden="true">
+              <div className="chat-character-wallpaper-image" style={chatWallpaperImageStyle} />
+              <div className="chat-character-wallpaper-mask" />
+            </div>
+          )}
           <header className="chat-header">
             <div>
               <h1>
@@ -22362,6 +22379,13 @@ export function App() {
                         className={`chat-bubble ${isEditingMessage ? "editing" : ""} ${
                           showGreetingSwitch ? "roleplay-greeting-bubble" : ""
                         }`}
+                        style={
+                          isEditingMessage
+                            ? undefined
+                            : message.role === "user"
+                              ? CHAT_USER_BUBBLE_OPACITY_STYLE
+                              : CHAT_ASSISTANT_BUBBLE_OPACITY_STYLE
+                        }
                         onContextMenu={(event) =>
                           handleChatBubbleContextMenu(message.id, event)
                         }

@@ -591,17 +591,8 @@ button.portfolio-window-light.close:hover {
     #f7f7fa;
 }
 
-.portfolio-window-body .chat-workspace.has-character-wallpaper {
-  background-color: rgba(250, 250, 252, 0.97);
-  background-image:
-    linear-gradient(
-      rgba(250, 250, 252, var(--chat-wallpaper-mask-opacity, 0.7)),
-      rgba(250, 250, 252, var(--chat-wallpaper-mask-opacity, 0.7))
-    ),
-    var(--chat-wallpaper-image);
-  background-position: center;
-  background-repeat: no-repeat;
-  background-size: cover;
+.portfolio-window-body .chat-character-wallpaper-mask {
+  background: rgba(250, 250, 252, var(--chat-wallpaper-mask-opacity, 0.7));
 }
 
 .portfolio-window-body .chat-workspace.has-character-wallpaper .chat-thread {

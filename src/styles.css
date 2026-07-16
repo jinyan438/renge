@@ -3433,6 +3433,8 @@ summary:focus-visible {
 }
 
 .chat-workspace {
+  position: relative;
+  isolation: isolate;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-width: 0;
@@ -3442,17 +3444,38 @@ summary:focus-visible {
   background: var(--color-canvas);
 }
 
-.chat-workspace.has-character-wallpaper {
-  background-color: var(--color-canvas);
-  background-image:
-    linear-gradient(
-      rgba(244, 244, 247, var(--chat-wallpaper-mask-opacity, 0.7)),
-      rgba(244, 244, 247, var(--chat-wallpaper-mask-opacity, 0.7))
-    ),
-    var(--chat-wallpaper-image);
+.chat-character-wallpaper {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  contain: paint;
+}
+
+.chat-character-wallpaper-image,
+.chat-character-wallpaper-mask {
+  position: absolute;
+  inset: 0;
+}
+
+.chat-character-wallpaper-image {
   background-position: center;
   background-repeat: no-repeat;
   background-size: cover;
+  transform: translateZ(0);
+}
+
+.chat-character-wallpaper-mask {
+  background: rgba(244, 244, 247, var(--chat-wallpaper-mask-opacity, 0.7));
+}
+
+.chat-workspace > .chat-header,
+.chat-workspace > .chat-thread,
+.chat-workspace > .chat-tavern-script-buttons,
+.chat-workspace > .chat-composer {
+  position: relative;
+  z-index: 1;
 }
 
 .chat-header {
