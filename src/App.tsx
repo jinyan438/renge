@@ -162,7 +162,6 @@ import {
   type PromptTemplateRuntimeOptions,
   type PromptTemplateStoredMessage,
 } from "./promptTemplateExtension";
-import { DesktopHome } from "./DesktopHome";
 import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryType } from "./types";
 
 const AVATAR_OUTPUT_SIZE = 512;
@@ -17162,33 +17161,210 @@ export function App() {
 
   if (view === "home") {
     return (
-      <DesktopHome
-        activePersonaName={activePersona.name}
-        chatModelLabel={chatModelLabel}
-        chatModelReady={chatModelReady}
-        personaCount={personas.length}
-        characterCount={characterCards.length}
-        extensionCount={extensions.length}
-        enabledExtensionCount={extensions.filter((extension) => extension.enabled).length}
-        sessionCount={chatSessions.length}
-        recentSessions={recentChatSessions.map((session) => ({
-          id: session.id,
-          title: session.title,
-          workspaceName: session.workspaceName,
-          messageCount: session.messages.length,
-          updatedAt: session.updatedAt,
-        }))}
-        onNavigate={(destination) => {
-          if (destination === "settings") setSettingsTab("providers");
-          setView(destination);
-        }}
-        onOpenRecentSession={(sessionId) => {
-          void openChatSession(sessionId);
-          setView("chat");
-        }}
-      >
+      <main className="home-shell">
+        <header className="home-topbar">
+          <div className="brand home-brand">
+            <div className="brand-mark">
+              <Boxes size={22} />
+            </div>
+            <div>
+              <strong>Renge Agent Lab</strong>
+              <span>人格与智能体工作台</span>
+            </div>
+          </div>
+          <nav className="home-nav" aria-label="主要导航">
+            <button type="button" title="人格工作室" onClick={() => setView("studio")}>
+              <Bot size={16} />
+              人格工作室
+            </button>
+            <button type="button" title="角色卡管理器" onClick={() => setView("characters")}>
+              <BookOpen size={16} />
+              角色卡
+            </button>
+            <button type="button" title="扩展管理器" onClick={() => setView("extensions")}>
+              <Puzzle size={16} />
+              扩展
+            </button>
+            <button type="button" title="对话" onClick={() => setView("chat")}>
+              <MessageSquare size={16} />
+              对话
+            </button>
+            <button
+              type="button"
+              title="设置"
+              onClick={() => {
+                setSettingsTab("providers");
+                setView("settings");
+              }}
+            >
+              <Settings2 size={16} />
+              设置
+            </button>
+          </nav>
+        </header>
+
+        <section className="home-main">
+          <div className="home-heading">
+            <div>
+              <div className="eyebrow">工作台</div>
+              <h1>Agent 工作台</h1>
+            </div>
+            <div className="home-status-strip" aria-label="当前工作状态">
+              <span>
+                <UserRound size={15} />
+                {activePersona.name}
+              </span>
+              <span className={chatModelReady ? "ready" : "attention"}>
+                <Server size={15} />
+                {chatModelLabel}
+              </span>
+              <span>
+                <MessageSquare size={15} />
+                {chatSessions.length} 个会话
+              </span>
+            </div>
+          </div>
+
+          <div className="module-grid">
+            <article className="module-card">
+              <div className="module-icon">
+                <Bot size={24} />
+              </div>
+              <div className="module-card-copy">
+                <h2>人格工作室</h2>
+                <p>编辑人格档案、长期记忆、行为边界与类型化条目。</p>
+              </div>
+              <div className="module-meta">
+                <span>{personas.length} 个人格</span>
+                <span>{getEntryCount(activePersona)} 个当前条目</span>
+              </div>
+              <button type="button" className="home-primary-action" onClick={() => setView("studio")}>
+                <Pencil size={16} />
+                打开工作室
+              </button>
+            </article>
+
+            <article className="module-card character-module-card">
+              <div className="module-icon">
+                <BookOpen size={24} />
+              </div>
+              <div className="module-card-copy">
+                <h2>角色卡管理器</h2>
+                <p>导入、编辑、翻译和导出酒馆 PNG / JSON 角色卡。</p>
+              </div>
+              <div className="module-meta">
+                <span>{characterCards.length} 张角色卡</span>
+                <span>
+                  {characterCards.filter((card) => card.characterBook).length} 本内置世界书 · {characterCards.reduce((total, card) => total + card.regexScripts.length, 0)} 条私有正则 · {characterCards.reduce((total, card) => total + card.tavernScripts.length, 0)} 个内置脚本
+                </span>
+              </div>
+              <button
+                type="button"
+                className="home-primary-action"
+                onClick={() => setView("characters")}
+              >
+                <BookOpen size={16} />
+                打开管理器
+              </button>
+            </article>
+
+            <article className="module-card extension-module-card">
+              <div className="module-icon">
+                <Puzzle size={24} />
+              </div>
+              <div className="module-card-copy">
+                <h2>扩展管理器</h2>
+                <p>安装和运行酒馆扩展兼容层，为会话增加模板、变量和提示词处理能力。</p>
+              </div>
+              <div className="module-meta">
+                <span>{extensions.length} 个已安装扩展</span>
+                <span>{extensions.filter((extension) => extension.enabled).length} 个已启用</span>
+              </div>
+              <button
+                type="button"
+                className="home-primary-action"
+                onClick={() => setView("extensions")}
+              >
+                <Puzzle size={16} />
+                管理扩展
+              </button>
+            </article>
+
+            <article className="module-card">
+              <div className="module-icon">
+                <MessageSquare size={24} />
+              </div>
+              <div className="module-card-copy">
+                <h2>Codex Chat</h2>
+                <p>使用当前模型直接对话，或带着人格设定进入会话。</p>
+              </div>
+              <div className="module-meta">
+                <span>
+                  {chatMode === "persona"
+                    ? "人格 Agent"
+                    : chatMode === "multi"
+                      ? `${multiAgentPersonas.length} Agent 轮流`
+                      : chatMode === "roleplay"
+                        ? activeRoleplayCard
+                          ? `角色扮演 · ${activeRoleplayCard.name}`
+                          : "角色扮演"
+                      : "AI 直连"}
+                </span>
+                <span>{chatModelLabel}</span>
+              </div>
+              <button type="button" className="home-primary-action" onClick={() => setView("chat")}>
+                <MessageSquare size={16} />
+                开始对话
+              </button>
+            </article>
+          </div>
+
+          <section className="home-recent" aria-labelledby="recent-chat-title">
+            <div className="home-section-heading">
+              <div>
+                <div className="eyebrow">继续处理</div>
+                <h2 id="recent-chat-title">最近会话</h2>
+              </div>
+              <button type="button" onClick={() => setView("chat")}>
+                <MessageSquare size={15} />
+                查看全部
+              </button>
+            </div>
+            <div className="home-recent-list">
+              {recentChatSessions.map((session) => (
+                <button
+                  type="button"
+                  className="home-recent-item"
+                  key={session.id}
+                  onClick={() => {
+                    void openChatSession(session.id);
+                    setView("chat");
+                  }}
+                >
+                  <span className="home-recent-icon">
+                    <MessageSquare size={17} />
+                  </span>
+                  <span className="home-recent-copy">
+                    <strong>{session.title}</strong>
+                    <span>
+                      {session.workspaceName} · {session.messages.length} 条消息
+                    </span>
+                  </span>
+                  <time dateTime={session.updatedAt}>
+                    {new Date(session.updatedAt).toLocaleString("zh-CN", {
+                      month: "numeric",
+                      day: "numeric",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </time>
+                </button>
+              ))}
+            </div>
+          </section>
+        </section>
         {pcBrowserModal}
-      </DesktopHome>
+      </main>
     );
   }
 
