@@ -2847,6 +2847,85 @@ summary:focus-visible {
   line-height: 1.6;
 }
 
+.personalization-visual-heading {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid #dfe4ec;
+}
+
+.personalization-visual-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.personalization-opacity-card {
+  align-content: start;
+}
+
+.personalization-opacity-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.personalization-opacity-heading h3,
+.personalization-opacity-heading p {
+  margin: 0;
+}
+
+.personalization-opacity-heading h3 {
+  color: #172033;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.personalization-opacity-heading p {
+  margin-top: 5px;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.personalization-opacity-heading output {
+  min-width: 52px;
+  padding: 5px 8px;
+  border: 1px solid #a8ebcb;
+  border-radius: 999px;
+  color: #05703a;
+  background: #e6f8ef;
+  font-size: 12px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.personalization-range-field {
+  display: grid;
+  gap: 8px;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.personalization-range-field input[type="range"] {
+  width: 100%;
+  margin: 2px 0;
+}
+
+.personalization-range-field small {
+  color: #7b8494;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.55;
+}
+
+@media (max-width: 720px) {
+  .personalization-visual-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .root-access-details {
   grid-column: 1 / -1;
   max-width: 100%;
@@ -3363,6 +3442,19 @@ summary:focus-visible {
   background: var(--color-canvas);
 }
 
+.chat-workspace.has-character-wallpaper {
+  background-color: var(--color-canvas);
+  background-image:
+    linear-gradient(
+      rgba(244, 244, 247, var(--chat-wallpaper-mask-opacity, 0.7)),
+      rgba(244, 244, 247, var(--chat-wallpaper-mask-opacity, 0.7))
+    ),
+    var(--chat-wallpaper-image);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
 .chat-header {
   display: flex;
   align-items: center;
@@ -3836,7 +3928,7 @@ summary:focus-visible {
   border: 1px solid #dfe4ec;
   border-radius: 8px;
   color: #172033;
-  background: #ffffff;
+  background: rgba(255, 255, 255, var(--chat-bubble-opacity, 1));
   box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
   overflow: hidden;
   overflow-wrap: anywhere;
@@ -3953,7 +4045,7 @@ summary:focus-visible {
 .chat-message.user .chat-bubble {
   color: #0f172a;
   border-color: #95ec69;
-  background: #95ec69;
+  background: rgba(149, 236, 105, var(--chat-bubble-opacity, 1));
 }
 
 .chat-bubble.editing,

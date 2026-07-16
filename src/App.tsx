@@ -244,7 +244,7 @@ const SETTINGS_TAB_META: Record<
   personalization: {
     title: "个性化",
     eyebrow: "APPEARANCE",
-    description: "调整聊天文本风格与颜色，让阅读体验更符合你的偏好。",
+    description: "调整聊天文本、角色卡背景和消息气泡，让阅读体验更符合你的偏好。",
   },
   mcp: {
     title: "MCP 服务器",
@@ -400,6 +400,8 @@ type ChatPersonalizationSettings = {
   quoteStyleColor: string;
   italicStyleEnabled: boolean;
   italicStyleColor: string;
+  wallpaperMaskOpacity: number;
+  bubbleOpacity: number;
 };
 
 type PcConnectionData = {
@@ -724,6 +726,8 @@ const DEFAULT_CHAT_PERSONALIZATION: ChatPersonalizationSettings = {
   quoteStyleColor: "#E18A24",
   italicStyleEnabled: false,
   italicStyleColor: "#808080",
+  wallpaperMaskOpacity: 70,
+  bubbleOpacity: 100,
 };
 const VOLCENGINE_CODING_PLAN_NAME = "火山方舟 Coding Plan";
 const VOLCENGINE_CODING_PLAN_API_BASE_URL = "https://ark.cn-beijing.volces.com/api/coding/v3";
@@ -1342,6 +1346,12 @@ function normalizePersonalizationColor(value: unknown, fallback: string) {
     : fallback;
 }
 
+function normalizePersonalizationOpacity(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? clamp(Math.round(value), 0, 100)
+    : fallback;
+}
+
 function normalizeChatPersonalization(
   rawSettings?: Partial<ChatPersonalizationSettings> | null,
 ): ChatPersonalizationSettings {
@@ -1361,6 +1371,14 @@ function normalizeChatPersonalization(
     italicStyleColor: normalizePersonalizationColor(
       rawSettings?.italicStyleColor,
       DEFAULT_CHAT_PERSONALIZATION.italicStyleColor,
+    ),
+    wallpaperMaskOpacity: normalizePersonalizationOpacity(
+      rawSettings?.wallpaperMaskOpacity,
+      DEFAULT_CHAT_PERSONALIZATION.wallpaperMaskOpacity,
+    ),
+    bubbleOpacity: normalizePersonalizationOpacity(
+      rawSettings?.bubbleOpacity,
+      DEFAULT_CHAT_PERSONALIZATION.bubbleOpacity,
     ),
   };
 }
@@ -6988,6 +7006,74 @@ function getHorizontalDropPlacement(event: DragEvent<HTMLElement>): DragPlacemen
   return event.clientX < rect.left + rect.width / 2 ? "before" : "after";
 }
 
+type PersonalizationOpacityCardProps = {
+  title: string;
+  description: string;
+  label: string;
+  hint: string;
+  value: number;
+  previewVariable: "--chat-wallpaper-mask-opacity" | "--chat-bubble-opacity";
+  onCommit: (value: number) => void;
+};
+
+function PersonalizationOpacityCard({
+  title,
+  description,
+  label,
+  hint,
+  value,
+  previewVariable,
+  onCommit,
+}: PersonalizationOpacityCardProps) {
+  const [draftValue, setDraftValue] = useState(value);
+
+  useEffect(() => setDraftValue(value), [value]);
+
+  const readValue = (input: HTMLInputElement) =>
+    clamp(Number(input.value) || 0, 0, 100);
+
+  const previewValue = (nextValue: number) => {
+    setDraftValue(nextValue);
+    document.querySelectorAll<HTMLElement>(".chat-shell").forEach((chatShell) => {
+      chatShell.style.setProperty(previewVariable, String(nextValue / 100));
+    });
+  };
+
+  const commitValue = (input: HTMLInputElement) => {
+    const nextValue = readValue(input);
+    previewValue(nextValue);
+    if (nextValue !== value) onCommit(nextValue);
+  };
+
+  return (
+    <article className="personalization-style-card personalization-opacity-card">
+      <div className="personalization-opacity-heading">
+        <div>
+          <h3>{title}</h3>
+          <p>{description}</p>
+        </div>
+        <output>{draftValue}%</output>
+      </div>
+      <label className="personalization-range-field">
+        <span>{label}</span>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={5}
+          value={draftValue}
+          onChange={(event) => previewValue(readValue(event.currentTarget))}
+          onPointerUp={(event) => commitValue(event.currentTarget)}
+          onPointerCancel={(event) => commitValue(event.currentTarget)}
+          onKeyUp={(event) => commitValue(event.currentTarget)}
+          onBlur={(event) => commitValue(event.currentTarget)}
+        />
+        <small>{hint}</small>
+      </label>
+    </article>
+  );
+}
+
 type PortfolioDesktopWindowProps = {
   title: string;
   bodyClassName: string;
@@ -9803,6 +9889,26 @@ export function App() {
   const activeSessionRoleplayCard = useMemo(
     () => scopedRoleplayCard,
     [scopedRoleplayCard],
+  );
+  const chatVisualStyle = useMemo(
+    () =>
+      ({
+        "--chat-quote-color": chatPersonalization.quoteStyleColor,
+        "--chat-italic-color": chatPersonalization.italicStyleColor,
+        "--chat-wallpaper-image": activeSessionRoleplayCard?.avatarDataUrl
+          ? `url("${activeSessionRoleplayCard.avatarDataUrl}")`
+          : "none",
+        "--chat-wallpaper-mask-opacity":
+          chatPersonalization.wallpaperMaskOpacity / 100,
+        "--chat-bubble-opacity": chatPersonalization.bubbleOpacity / 100,
+      }) as CSSProperties,
+    [
+      activeSessionRoleplayCard?.avatarDataUrl,
+      chatPersonalization.bubbleOpacity,
+      chatPersonalization.italicStyleColor,
+      chatPersonalization.quoteStyleColor,
+      chatPersonalization.wallpaperMaskOpacity,
+    ],
   );
   const activeRoleplayGreetings = useMemo(
     () =>
@@ -21079,6 +21185,45 @@ export function App() {
                   </div>
                 </article>
               </div>
+
+              <div className="section-heading compact personalization-visual-heading">
+                <div>
+                  <h2>角色卡视觉效果</h2>
+                  <p>角色卡会话自动使用当前角色封面作为聊天背景，并可调节蒙版和气泡透明度。</p>
+                </div>
+              </div>
+
+              <div className="personalization-visual-list">
+                <PersonalizationOpacityCard
+                  title="角色卡壁纸设置"
+                  description="调整覆盖在角色封面背景上的浅色蒙版。"
+                  label="壁纸蒙版不透明度"
+                  hint="数值越低，角色封面越清晰；数值越高，消息内容越易读。"
+                  value={chatPersonalization.wallpaperMaskOpacity}
+                  previewVariable="--chat-wallpaper-mask-opacity"
+                  onCommit={(wallpaperMaskOpacity) =>
+                    setChatPersonalization((current) => ({
+                      ...current,
+                      wallpaperMaskOpacity,
+                    }))
+                  }
+                />
+
+                <PersonalizationOpacityCard
+                  title="消息气泡设置"
+                  description="调整用户消息和 AI 消息气泡的背景不透明度。"
+                  label="消息气泡不透明度"
+                  hint="降低数值可让角色封面透过气泡显示；0% 为完全透明。"
+                  value={chatPersonalization.bubbleOpacity}
+                  previewVariable="--chat-bubble-opacity"
+                  onCommit={(bubbleOpacity) =>
+                    setChatPersonalization((current) => ({
+                      ...current,
+                      bubbleOpacity,
+                    }))
+                  }
+                />
+              </div>
             </section>
           )}
 
@@ -21560,12 +21705,7 @@ export function App() {
         bodyClassName={`chat-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""} ${
           chatPersonalization.quoteStyleEnabled ? "quote-style-enabled" : ""
         } ${chatPersonalization.italicStyleEnabled ? "italic-style-enabled" : ""}`}
-        bodyStyle={
-          {
-            "--chat-quote-color": chatPersonalization.quoteStyleColor,
-            "--chat-italic-color": chatPersonalization.italicStyleColor,
-          } as CSSProperties
-        }
+        bodyStyle={chatVisualStyle}
         statusPrimary={activePersona.name}
         statusSecondary={chatModelLabel}
         statusReady={chatModelReady}
@@ -21808,7 +21948,11 @@ export function App() {
           onClick={closeMobileSidebar}
         />
 
-        <section className="chat-workspace">
+        <section
+          className={`chat-workspace ${
+            activeSessionRoleplayCard?.avatarDataUrl ? "has-character-wallpaper" : ""
+          }`}
+        >
           <header className="chat-header">
             <div>
               <h1>
