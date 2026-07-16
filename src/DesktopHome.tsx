@@ -18,6 +18,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import characterCardsModuleIcon from "./assets/module-icons/character-cards.png";
 import chatModuleIcon from "./assets/module-icons/chat.png";
 import extensionsModuleIcon from "./assets/module-icons/extensions.png";
@@ -65,6 +66,8 @@ type DesktopHomeProps = {
   enabledExtensionCount: number;
   sessionCount: number;
   recentSessions: HomeRecentSession[];
+  overlayZIndex: number;
+  onOverlayActivate: () => void;
   onNavigate: (destination: HomeDestination) => void;
   onOpenRecentSession: (sessionId: string) => void;
   children?: ReactNode;
@@ -738,11 +741,15 @@ function DockIcon({
 function WindowShell({
   title,
   wide = false,
+  zIndex,
+  onActivate,
   onClose,
   children,
 }: {
   title: string;
   wide?: boolean;
+  zIndex: number;
+  onActivate: () => void;
   onClose: () => void;
   children: ReactNode;
 }) {
@@ -830,13 +837,13 @@ function WindowShell({
     if (dragLayerRef.current) dragLayerRef.current.style.willChange = "auto";
   };
 
-  return (
+  return createPortal(
     <div
       role="presentation"
       style={{
         position: "fixed",
         inset: 0,
-        zIndex: 50,
+        zIndex,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -855,6 +862,7 @@ function WindowShell({
           role="dialog"
           aria-modal="true"
           aria-label={title}
+          onPointerDownCapture={onActivate}
           style={{
             position: "relative",
             display: "flex",
@@ -958,7 +966,8 @@ function WindowShell({
           </div>
         </section>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -1017,6 +1026,8 @@ export function DesktopHome({
   enabledExtensionCount,
   sessionCount,
   recentSessions,
+  overlayZIndex,
+  onOverlayActivate,
   onNavigate,
   onOpenRecentSession,
   children,
@@ -1033,6 +1044,13 @@ export function DesktopHome({
   }, []);
 
   const closeOverlay = useCallback(() => setOverlay(null), []);
+  const openOverlay = useCallback(
+    (nextOverlay: OverlayId) => {
+      setOverlay(nextOverlay);
+      onOverlayActivate();
+    },
+    [onOverlayActivate],
+  );
 
   const projects = useMemo<ProjectSpec[]>(
     () => [
@@ -1263,7 +1281,7 @@ export function DesktopHome({
             onPositionChange={(position) =>
               updateProjectPosition(project.id, positionLayout, position)
             }
-            onOpen={() => setOverlay(project.id)}
+            onOpen={() => openOverlay(project.id)}
             reducedMotion={reducedMotion}
           />
         ))}
@@ -1312,14 +1330,14 @@ export function DesktopHome({
           image={ABOUT_ICON}
           compact={compact}
           reducedMotion={reducedMotion}
-          onClick={() => setOverlay("about")}
+          onClick={() => openOverlay("about")}
         />
         <DockIcon
           label="最近会话"
           image={NOTES_ICON}
           compact={compact}
           reducedMotion={reducedMotion}
-          onClick={() => setOverlay("recent")}
+          onClick={() => openOverlay("recent")}
         />
         <div
           aria-hidden="true"
@@ -1354,7 +1372,12 @@ export function DesktopHome({
       </nav>
 
       {activeProject && activeProject.id !== "recent" && (
-        <WindowShell title={activeProject.title} onClose={closeOverlay}>
+        <WindowShell
+          title={activeProject.title}
+          zIndex={overlayZIndex}
+          onActivate={onOverlayActivate}
+          onClose={closeOverlay}
+        >
           <div
             style={{
               display: "grid",
@@ -1428,7 +1451,13 @@ export function DesktopHome({
       )}
 
       {overlay === "recent" && (
-        <WindowShell title="最近会话" wide onClose={closeOverlay}>
+        <WindowShell
+          title="最近会话"
+          wide
+          zIndex={overlayZIndex}
+          onActivate={onOverlayActivate}
+          onClose={closeOverlay}
+        >
           <div>
             <h2 style={panelHeadingStyle}>继续上一次对话</h2>
             <p style={{ ...panelCopyStyle, marginTop: 7 }}>选择一个会话，立即回到对应的工作区。</p>
@@ -1536,7 +1565,12 @@ export function DesktopHome({
       )}
 
       {overlay === "about" && (
-        <WindowShell title="关于 Renge" onClose={closeOverlay}>
+        <WindowShell
+          title="关于 Renge"
+          zIndex={overlayZIndex}
+          onActivate={onOverlayActivate}
+          onClose={closeOverlay}
+        >
           <div
             style={{
               display: "grid",
