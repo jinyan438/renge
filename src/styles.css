@@ -1,3 +1,11 @@
+@font-face {
+  font-family: "LXGW WenKai Screen";
+  src: url("./assets/fonts/lxgw-wenkai-screen.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   color: #172033;
   background: #f5f7fa;
@@ -1255,6 +1263,21 @@
   box-sizing: border-box;
 }
 
+.window-resize-handle {
+  position: absolute;
+  z-index: 200;
+  display: block;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+@media (max-width: 820px) {
+  .window-resize-handle {
+    display: none;
+  }
+}
+
 html,
 body,
 #root {
@@ -1650,7 +1673,6 @@ summary:focus-visible {
   background: var(--color-sidebar);
 }
 
-.settings-back,
 .settings-tab {
   display: inline-flex;
   align-items: center;
@@ -1665,7 +1687,6 @@ summary:focus-visible {
   background: transparent;
 }
 
-.settings-back:hover,
 .settings-tab:hover {
   color: #ffffff;
   background: rgba(255, 255, 255, 0.09);
@@ -2778,6 +2799,61 @@ summary:focus-visible {
   line-height: 1.6;
 }
 
+.personalization-font-card {
+  align-content: start;
+}
+
+.personalization-font-heading h3,
+.personalization-font-heading p,
+.personalization-font-preview p {
+  margin: 0;
+}
+
+.personalization-font-heading h3 {
+  color: #172033;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.personalization-font-heading p {
+  margin-top: 5px;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.personalization-font-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.personalization-font-preview {
+  display: grid;
+  gap: 7px;
+  min-height: 104px;
+  padding: 13px 14px;
+  align-content: center;
+  border: 1px dashed #cfd6e2;
+  border-radius: 9px;
+  color: #172033;
+  background: #f8fafc;
+  font-family: var(--chat-message-font-family, inherit);
+}
+
+.personalization-font-preview > span,
+.personalization-font-preview > small {
+  color: #7b8494;
+  font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.personalization-font-preview p {
+  font-size: var(--chat-message-font-size, 16px);
+  line-height: 1.65;
+}
+
 .personalization-style-heading {
   display: flex;
   flex-wrap: wrap;
@@ -2832,6 +2908,86 @@ summary:focus-visible {
   background: #f8fafc;
   font-size: 14px;
   line-height: 1.6;
+}
+
+.personalization-visual-heading {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid #dfe4ec;
+}
+
+.personalization-visual-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.personalization-opacity-card {
+  align-content: start;
+}
+
+.personalization-opacity-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.personalization-opacity-heading h3,
+.personalization-opacity-heading p {
+  margin: 0;
+}
+
+.personalization-opacity-heading h3 {
+  color: #172033;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.personalization-opacity-heading p {
+  margin-top: 5px;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.personalization-opacity-heading output {
+  min-width: 52px;
+  padding: 5px 8px;
+  border: 1px solid #a8ebcb;
+  border-radius: 999px;
+  color: #05703a;
+  background: #e6f8ef;
+  font-size: 12px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.personalization-range-field {
+  display: grid;
+  gap: 8px;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.personalization-range-field input[type="range"] {
+  width: 100%;
+  margin: 2px 0;
+}
+
+.personalization-range-field small {
+  color: #7b8494;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.55;
+}
+
+@media (max-width: 720px) {
+  .personalization-font-grid,
+  .personalization-visual-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .root-access-details {
@@ -3341,6 +3497,8 @@ summary:focus-visible {
 }
 
 .chat-workspace {
+  position: relative;
+  isolation: isolate;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-width: 0;
@@ -3348,6 +3506,40 @@ summary:focus-visible {
   min-height: 0;
   overflow: hidden;
   background: var(--color-canvas);
+}
+
+.chat-character-wallpaper {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  contain: paint;
+}
+
+.chat-character-wallpaper-image,
+.chat-character-wallpaper-mask {
+  position: absolute;
+  inset: 0;
+}
+
+.chat-character-wallpaper-image {
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+  transform: translateZ(0);
+}
+
+.chat-character-wallpaper-mask {
+  background: rgba(244, 244, 247, var(--chat-wallpaper-mask-opacity, 0.7));
+}
+
+.chat-workspace > .chat-header,
+.chat-workspace > .chat-thread,
+.chat-workspace > .chat-tavern-script-buttons,
+.chat-workspace > .chat-composer {
+  position: relative;
+  z-index: 1;
 }
 
 .chat-header {
@@ -3823,7 +4015,7 @@ summary:focus-visible {
   border: 1px solid #dfe4ec;
   border-radius: 8px;
   color: #172033;
-  background: #ffffff;
+  background: rgba(255, 255, 255, var(--chat-bubble-opacity, 1));
   box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
   overflow: hidden;
   overflow-wrap: anywhere;
@@ -3940,7 +4132,7 @@ summary:focus-visible {
 .chat-message.user .chat-bubble {
   color: #0f172a;
   border-color: #95ec69;
-  background: #95ec69;
+  background: rgba(149, 236, 105, var(--chat-bubble-opacity, 1));
 }
 
 .chat-bubble.editing,
@@ -4086,6 +4278,16 @@ summary:focus-visible {
   color: inherit;
   font-size: 14px;
   line-height: 1.65;
+}
+
+.mes_text {
+  font-family: var(--chat-message-font-family, inherit);
+  font-size: var(--chat-message-font-size, 16px);
+}
+
+.mes_text .chat-rendered-content .chat-text-part,
+.mes_text .chat-markdown-list {
+  font-size: 1em;
 }
 
 .chat-personalized-quote,
@@ -5573,29 +5775,6 @@ summary:focus-visible {
   line-height: 1.55;
 }
 
-.module-nav {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-}
-
-.module-nav button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-height: 32px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
-  color: #d9e3f2;
-  font-weight: 600;
-  background: rgba(255, 255, 255, 0.07);
-}
-
-.module-nav button:hover {
-  background: rgba(255, 255, 255, 0.12);
-}
-
 .workspace {
   min-width: 0;
   padding: 18px;
@@ -6646,9 +6825,7 @@ input[type="range"] {
     font-size: 11px;
   }
 
-  .settings-back,
   .settings-tab,
-  .module-nav button,
   .primary-action,
   .persona-item,
   .local-workspace-button,

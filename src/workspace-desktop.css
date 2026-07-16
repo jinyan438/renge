@@ -1,0 +1,1120 @@
+.portfolio-desktop-shell {
+  --color-brand: #0666dd;
+  --color-brand-strong: #0057be;
+  --color-brand-soft: #eaf3ff;
+  --color-canvas: #f4f4f7;
+  --color-surface: #ffffff;
+  --color-surface-subtle: #f7f7fa;
+  --color-text: #1d1d1f;
+  --color-text-muted: #77777d;
+  --color-border: #dedee3;
+  position: relative;
+  display: grid;
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  padding: 32px;
+  overflow: hidden;
+  place-items: center;
+  background: #6c6963;
+  color: var(--color-text);
+  font-family: 'Inter', 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  isolation: isolate;
+}
+
+.portfolio-desktop-background,
+.portfolio-desktop-shade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.portfolio-desktop-background {
+  z-index: -2;
+  background-image: url('./assets/wallpapers/default-desktop.webp');
+  background-position: center;
+  background-size: cover;
+  transform: translateZ(0) scale(1.015);
+}
+
+.portfolio-desktop-shade {
+  z-index: -1;
+  background:
+    linear-gradient(180deg, rgba(30, 29, 28, 0.12), rgba(0, 0, 0, 0.44)),
+    radial-gradient(circle at 50% 35%, transparent 0, rgba(0, 0, 0, 0.16) 100%);
+}
+
+.portfolio-window-shell {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  width: min(1540px, calc(100vw - 64px));
+  height: calc(100dvh - 64px);
+  min-height: 0;
+  overflow: hidden;
+  grid-template-rows: 42px minmax(0, 1fr);
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 24px;
+  background: rgba(248, 248, 250, 0.97);
+  box-shadow:
+    0 38px 90px rgba(0, 0, 0, 0.32),
+    0 2px 8px rgba(0, 0, 0, 0.12);
+  animation: portfolio-window-in 0.36s cubic-bezier(0.34, 1.28, 0.64, 1);
+  transform-origin: center;
+}
+
+.portfolio-window-bar {
+  position: relative;
+  z-index: 110;
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(150px, 1fr) auto minmax(150px, 1fr);
+  align-items: center;
+  padding: 0 15px;
+  border-bottom: 1px solid rgba(202, 202, 207, 0.76);
+  background: rgba(246, 246, 248, 0.94);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.72) inset;
+  color: #737378;
+}
+
+.portfolio-window-lights {
+  display: flex;
+  align-items: center;
+  justify-self: start;
+  gap: 8px;
+}
+
+.portfolio-window-light {
+  display: block;
+  width: 12px;
+  height: 12px;
+  min-width: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.12) inset;
+}
+
+button.portfolio-window-light.close {
+  background: rgb(253, 93, 92);
+}
+
+button.portfolio-window-light.close:hover {
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.18) inset,
+    0 0 0 3px rgba(253, 93, 92, 0.16);
+  transform: none;
+}
+
+.portfolio-window-light.minimize {
+  background: rgb(250, 201, 0);
+}
+
+.portfolio-window-light.maximize {
+  background: rgb(52, 199, 90);
+}
+
+.portfolio-window-caption {
+  overflow: hidden;
+  justify-self: center;
+  max-width: 46vw;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.portfolio-window-status {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-self: end;
+  gap: 6px;
+  font-size: 10px;
+}
+
+.portfolio-window-status > span {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+.portfolio-window-status > span.ready {
+  background: #32c967;
+  box-shadow: 0 0 0 3px rgba(50, 201, 103, 0.13);
+}
+
+.portfolio-window-status > span.attention {
+  background: #f4b72e;
+  box-shadow: 0 0 0 3px rgba(244, 183, 46, 0.14);
+}
+
+.portfolio-window-status strong,
+.portfolio-window-status small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.portfolio-window-status strong {
+  max-width: 120px;
+  color: #4f4f54;
+  font-weight: 600;
+}
+
+.portfolio-window-status small {
+  max-width: 170px;
+  color: #929297;
+}
+
+.portfolio-window-body {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Scroll-based managers */
+.portfolio-window-body.extension-manager-shell,
+.portfolio-window-body.character-manager-shell {
+  display: block;
+  height: 100%;
+  min-height: 0;
+  padding: 0 24px 40px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: rgba(250, 250, 252, 0.96);
+  overscroll-behavior: contain;
+  scrollbar-color: rgba(95, 95, 102, 0.26) transparent;
+  scrollbar-width: thin;
+}
+
+.portfolio-window-body .extension-manager-header,
+.portfolio-window-body .character-manager-header {
+  position: sticky;
+  top: 0;
+  z-index: 35;
+  min-height: 104px;
+  margin: 0 -24px 24px;
+  padding: 17px 24px;
+  border-bottom-color: rgba(218, 218, 223, 0.84);
+  background: rgba(250, 250, 252, 0.9);
+  box-shadow: 0 1px rgba(255, 255, 255, 0.72) inset;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.portfolio-window-body .extension-manager-header h1,
+.portfolio-window-body .character-manager-header h1 {
+  color: #1d1d1f;
+  font-size: 25px;
+  font-weight: 600;
+  letter-spacing: -0.05em;
+}
+
+.portfolio-window-body .extension-manager-header .eyebrow,
+.portfolio-window-body .character-manager-header .eyebrow,
+.portfolio-window-body .extension-install-panel .eyebrow {
+  color: rgb(0, 102, 221);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+}
+
+.portfolio-window-body .extension-manager-header p,
+.portfolio-window-body .character-manager-header p {
+  color: #77777d;
+  font-size: 11px;
+}
+
+.portfolio-window-body .extension-manager-summary span,
+.portfolio-window-body .extension-version,
+.portfolio-window-body .extension-compatibility,
+.portfolio-window-body .extension-metadata > span,
+.portfolio-window-body .extension-metadata > a {
+  border-color: #dedee4;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #626268;
+}
+
+.portfolio-window-body .extension-compatibility {
+  border-color: rgba(0, 102, 221, 0.2);
+  background: #eaf3ff;
+  color: #005abf;
+}
+
+.portfolio-window-body .extension-install-panel,
+.portfolio-window-body .extension-card,
+.portfolio-window-body .character-cover-card,
+.portfolio-window-body .character-gallery-empty {
+  border-color: #dedee4;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow:
+    0 10px 30px rgba(26, 26, 32, 0.055),
+    0 1px 2px rgba(26, 26, 32, 0.04);
+}
+
+.portfolio-window-body .extension-card.enabled {
+  border-color: rgba(0, 102, 221, 0.3);
+  box-shadow:
+    0 12px 32px rgba(0, 102, 221, 0.08),
+    3px 0 0 rgb(0, 102, 221) inset;
+}
+
+.portfolio-window-body .extension-card-icon {
+  border-radius: 13px;
+  background: linear-gradient(145deg, #67aaff, #0767dc);
+  color: #ffffff;
+}
+
+.portfolio-window-body .character-search,
+.portfolio-window-body .extension-install-form input {
+  border-color: #d4d4da;
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 1px 2px rgba(23, 23, 28, 0.035) inset;
+}
+
+.portfolio-window-body .character-search:focus-within,
+.portfolio-window-body .extension-install-form input:focus {
+  border-color: rgba(0, 102, 221, 0.72);
+  box-shadow: 0 0 0 3px rgba(0, 102, 221, 0.12);
+}
+
+.portfolio-window-body .character-cover-card:hover {
+  border-color: rgba(0, 102, 221, 0.3);
+  box-shadow: 0 18px 38px rgba(20, 20, 25, 0.13);
+}
+
+.portfolio-window-body .character-card-badges span {
+  background: #eaf3ff;
+  color: #075bbd;
+}
+
+.portfolio-window-body .character-card-actions button:hover,
+.portfolio-window-body .character-card-actions button.active {
+  border-color: rgba(0, 102, 221, 0.18);
+  background: #eef6ff;
+  color: #075bbd;
+}
+
+/* Shared split workspaces */
+.portfolio-window-body.chat-shell,
+.portfolio-window-body.app-shell {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: rgba(250, 250, 252, 0.97);
+  color: #29292d;
+}
+
+.portfolio-window-body .sidebar,
+.portfolio-window-body .chat-sidebar {
+  width: auto;
+  max-width: none;
+  height: 100%;
+  min-height: 0;
+  padding: 14px 12px 18px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 0;
+  border-right: 1px solid rgba(205, 205, 211, 0.82);
+  background: rgba(235, 235, 239, 0.94);
+  box-shadow: 1px 0 rgba(255, 255, 255, 0.62) inset;
+  color: #29292d;
+  scrollbar-color: rgba(95, 95, 102, 0.24) transparent;
+  scrollbar-width: thin;
+}
+
+.portfolio-window-body .brand-mark {
+  border-color: rgba(255, 255, 255, 0.5);
+  border-radius: 12px;
+  background: linear-gradient(145deg, #67aaff, #0767dc);
+  box-shadow: 0 6px 16px rgba(0, 102, 221, 0.2);
+  color: #ffffff;
+}
+
+.portfolio-window-body .brand strong,
+.portfolio-window-body .panel-title {
+  color: #28282c;
+}
+
+.portfolio-window-body .brand span,
+.portfolio-window-body .sidebar-panel p {
+  color: #85858b;
+}
+
+.portfolio-window-body .primary-action {
+  border: 1px solid rgba(0, 75, 163, 0.22);
+  border-radius: 10px;
+  background: rgb(0, 102, 221);
+  box-shadow: 0 5px 14px rgba(0, 102, 221, 0.16);
+  color: #ffffff;
+}
+
+.portfolio-window-body .persona-item {
+  border-radius: 11px;
+  color: #414147;
+}
+
+.portfolio-window-body .persona-item small {
+  color: #85858b;
+}
+
+.portfolio-window-body .persona-item:hover {
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.portfolio-window-body .persona-item.active {
+  border-color: rgba(0, 102, 221, 0.2);
+  background: rgb(0, 102, 221);
+  box-shadow: 0 6px 16px rgba(0, 102, 221, 0.18);
+  color: #ffffff;
+}
+
+.portfolio-window-body .persona-item.active small {
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.portfolio-window-body .avatar-dot {
+  border-color: #d7d7dd;
+  background: rgba(255, 255, 255, 0.76);
+  color: #68686e;
+}
+
+.portfolio-window-body .persona-item.active .avatar-dot {
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+}
+
+.portfolio-window-body .sidebar-panel {
+  border-color: #d7d7dd;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.portfolio-window-body .workspace,
+.portfolio-window-body .chat-workspace {
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  min-height: 0;
+  background: rgba(250, 250, 252, 0.97);
+}
+
+.portfolio-window-body .workspace {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.portfolio-window-body .studio-topbar,
+.portfolio-window-body .chat-header {
+  border-bottom-color: rgba(218, 218, 223, 0.84);
+  background: rgba(250, 250, 252, 0.9);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.portfolio-window-body .studio-topbar {
+  position: relative;
+  top: auto;
+  z-index: 80;
+  margin-bottom: 0;
+  background: #fafafc;
+  box-shadow:
+    0 -18px 0 18px #fafafc,
+    0 1px 0 rgba(218, 218, 223, 0.84);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.portfolio-window-body .studio-kind-tabs {
+  position: relative;
+  top: auto;
+  z-index: 70;
+  min-width: 0;
+  margin: 0 0 12px;
+  padding: 8px 0;
+  background: #fafafc;
+}
+
+.portfolio-window-body .workspace > .content-grid {
+  min-height: 0;
+  padding: 0 4px 18px 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: rgba(95, 95, 102, 0.26) transparent;
+  scrollbar-width: thin;
+}
+
+.portfolio-window-body .workspace > .content-grid .inspector {
+  top: 0;
+}
+
+.portfolio-window-body .studio-topbar h1,
+.portfolio-window-body .chat-header h1 {
+  color: #1d1d1f;
+  font-weight: 600;
+  letter-spacing: -0.045em;
+}
+
+.portfolio-window-body .section-block,
+.portfolio-window-body .inspector-panel {
+  border-color: #dedee4;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow:
+    0 10px 30px rgba(26, 26, 32, 0.05),
+    0 1px 2px rgba(26, 26, 32, 0.04);
+}
+
+.portfolio-window-body .small-action,
+.portfolio-window-body .send-button {
+  border-radius: 10px;
+  background: rgb(0, 102, 221);
+  box-shadow: 0 5px 14px rgba(0, 102, 221, 0.16);
+  color: #ffffff;
+}
+
+.portfolio-window-body .ghost-action,
+.portfolio-window-body .icon-button {
+  border-color: #d9d9df;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.88);
+  color: #4c4c52;
+}
+
+.portfolio-window-body .field input,
+.portfolio-window-body .field textarea,
+.portfolio-window-body .field select {
+  border-color: #d4d4da;
+  border-radius: 10px;
+}
+
+.portfolio-window-body .field input:focus,
+.portfolio-window-body .field textarea:focus,
+.portfolio-window-body .field select:focus {
+  border-color: rgba(0, 102, 221, 0.72);
+  box-shadow: 0 0 0 3px rgba(0, 102, 221, 0.12);
+}
+
+.portfolio-window-body input[type='checkbox'],
+.portfolio-window-body input[type='radio'],
+.portfolio-window-body input[type='range'] {
+  accent-color: rgb(0, 102, 221);
+}
+
+.portfolio-window-body .kind-tabs > button.selected,
+.portfolio-window-body .kind-tab.selected {
+  border-color: rgba(0, 102, 221, 0.3);
+  background: #eaf3ff;
+  color: #005abf;
+}
+
+.portfolio-window-body .switch input:checked + span,
+.portfolio-window-body .tool-toggle input:checked {
+  border-color: rgb(0, 102, 221);
+  background: rgb(0, 102, 221);
+}
+
+/* Chat workspace */
+.portfolio-window-body .chat-sidebar {
+  gap: 8px;
+}
+
+.portfolio-window-body .chat-control-panel > span,
+.portfolio-window-body .chat-field > span,
+.portfolio-window-body .chat-session-group-header {
+  color: #77777d;
+}
+
+.portfolio-window-body .chat-mode-toggle {
+  border-color: #d7d7dd;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.portfolio-window-body .chat-mode-toggle button,
+.portfolio-window-body .chat-field input,
+.portfolio-window-body .chat-field select,
+.portfolio-window-body .chat-model-controls input,
+.portfolio-window-body .chat-model-controls select {
+  border-color: #d6d6dc;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.8);
+  color: #45454b;
+}
+
+.portfolio-window-body .chat-mode-toggle button.active {
+  border-color: rgba(0, 102, 221, 0.28);
+  background: rgb(0, 102, 221);
+  color: #ffffff;
+  box-shadow: 0 4px 10px rgba(0, 102, 221, 0.16);
+}
+
+.portfolio-window-body .chat-session-area {
+  border-color: #d7d7dd;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.56);
+}
+
+.portfolio-window-body .chat-session-item > button:first-child {
+  color: #4f4f55;
+}
+
+.portfolio-window-body .chat-session-item.active {
+  box-shadow: inset 3px 0 0 rgb(0, 102, 221);
+  background: #eaf3ff;
+}
+
+.portfolio-window-body .chat-session-item.active > button:first-child {
+  color: #075bbd;
+}
+
+.portfolio-window-body .chat-header {
+  padding: 12px 18px;
+}
+
+.portfolio-window-body .chat-thread {
+  background:
+    radial-gradient(circle at 50% 0, rgba(0, 102, 221, 0.035), transparent 28rem),
+    #f7f7fa;
+}
+
+.portfolio-window-body .chat-character-wallpaper-mask {
+  background: rgba(250, 250, 252, var(--chat-wallpaper-mask-opacity, 0.7));
+}
+
+.portfolio-window-body .chat-workspace.has-character-wallpaper .chat-thread {
+  background: transparent;
+}
+
+.portfolio-window-body .chat-message.user .chat-avatar {
+  background: #07c160;
+}
+
+.portfolio-window-body .chat-message.user .chat-bubble {
+  border-color: #95ec69;
+  background: rgba(149, 236, 105, var(--chat-bubble-opacity, 1));
+  color: #0f172a;
+}
+
+.portfolio-window-body .chat-composer-box:focus-within {
+  border-color: rgba(0, 102, 221, 0.72);
+  box-shadow: 0 0 0 3px rgba(0, 102, 221, 0.12);
+}
+
+.portfolio-window-body .chat-field input:focus,
+.portfolio-window-body .chat-field select:focus,
+.portfolio-window-body .chat-model-controls input:focus,
+.portfolio-window-body .chat-model-controls select:focus {
+  border-color: rgba(0, 102, 221, 0.72);
+  box-shadow: 0 0 0 3px rgba(0, 102, 221, 0.12);
+}
+
+.portfolio-window-body .chat-output-options .tool-toggle,
+.portfolio-window-body .local-workspace-button,
+.portfolio-window-body .mcp-chat-status {
+  border-color: #d7d7dd;
+  background: rgba(255, 255, 255, 0.64);
+  color: #626268;
+}
+
+.portfolio-window-body .chat-worldbook-control {
+  color: #44444a;
+}
+
+.portfolio-window-body .chat-worldbook-control > summary {
+  border-color: #d6d6dc;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.portfolio-window-body .chat-worldbook-control > summary span {
+  color: #77777d;
+}
+
+.portfolio-window-body .chat-worldbook-control > summary strong {
+  color: #3e3e44;
+}
+
+.portfolio-window-body .chat-worldbook-options {
+  border-color: #d6d6dc;
+  background: #f8f8fa;
+  box-shadow: 0 8px 20px rgba(25, 25, 30, 0.08);
+}
+
+.portfolio-window-body .chat-worldbook-options .tool-toggle {
+  background: #ffffff;
+  color: #4c4c52;
+}
+
+.portfolio-window-body .chat-worldbook-options p {
+  color: #77777d;
+}
+
+.portfolio-window-body .chat-roleplay-scope {
+  border-color: rgba(22, 163, 74, 0.28);
+  background: #eaf7ee;
+  color: #166534;
+}
+
+.portfolio-window-body .chat-roleplay-scope strong {
+  color: #14532d;
+}
+
+.portfolio-window-body .chat-roleplay-scope span {
+  color: #3f6f52;
+}
+
+.portfolio-window-body .tool-toggle,
+.portfolio-window-body .local-tools-panel p {
+  color: #66666c;
+}
+
+.portfolio-window-body .tool-toggle input {
+  border-color: #c7c7ce;
+  background: #d7d7dd;
+}
+
+.portfolio-window-body .tool-toggle input::after {
+  background: #ffffff;
+}
+
+.portfolio-window-body .chat-empty-suggestions button:hover,
+.portfolio-window-body .chat-empty-model.ready {
+  border-color: rgba(0, 102, 221, 0.24);
+  background: #eaf3ff;
+  color: #075bbd;
+}
+
+.portfolio-window-body .chat-inline-editor-actions button.primary {
+  border-color: rgb(0, 102, 221);
+  background: rgb(0, 102, 221);
+}
+
+.portfolio-window-body .studio-save-status {
+  border-color: rgba(0, 102, 221, 0.24);
+  background: #eaf3ff;
+  color: #075bbd;
+}
+
+/* Dialogs opened from the framed workspaces */
+.portfolio-desktop-shell .modal-backdrop {
+  background: rgba(10, 10, 12, 0.42);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.portfolio-desktop-shell .crop-modal,
+.portfolio-desktop-shell .pc-browser-modal,
+.portfolio-desktop-shell .character-editor-modal,
+.portfolio-desktop-shell .character-translation-modal,
+.portfolio-desktop-shell .character-translation-prompt-modal {
+  border-color: rgba(222, 222, 228, 0.92);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 32px 80px rgba(0, 0, 0, 0.28);
+}
+
+.portfolio-desktop-shell .modal-backdrop .small-action {
+  border-radius: 10px;
+  background: rgb(0, 102, 221);
+  box-shadow: 0 5px 14px rgba(0, 102, 221, 0.16);
+}
+
+.portfolio-desktop-shell .modal-backdrop .ghost-action,
+.portfolio-desktop-shell .modal-backdrop .icon-button {
+  border-color: #d9d9df;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #4c4c52;
+}
+
+@keyframes portfolio-window-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@media (max-width: 1180px) {
+  .portfolio-desktop-shell {
+    padding: 20px;
+  }
+
+  .portfolio-window-shell {
+    width: calc(100vw - 40px);
+    height: calc(100dvh - 40px);
+  }
+
+  .portfolio-window-body.app-shell {
+    grid-template-columns: 230px minmax(0, 1fr);
+  }
+
+  .portfolio-window-body.chat-shell {
+    grid-template-columns: 250px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 820px) {
+  .portfolio-desktop-shell {
+    display: block;
+    height: 100dvh;
+    padding: 0;
+  }
+
+  .portfolio-desktop-background {
+    transform: translateZ(0);
+  }
+
+  .portfolio-window-shell {
+    width: 100%;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+    animation-duration: 0.24s;
+  }
+
+  .portfolio-window-bar {
+    grid-template-columns: 72px minmax(0, 1fr) 72px;
+    padding: 0 12px;
+  }
+
+  .portfolio-window-caption {
+    max-width: 100%;
+    font-size: 12px;
+  }
+
+  .portfolio-window-status strong,
+  .portfolio-window-status small {
+    display: none;
+  }
+
+  .portfolio-window-body.extension-manager-shell,
+  .portfolio-window-body.character-manager-shell {
+    padding: 0 14px 30px;
+  }
+
+  .portfolio-window-body .extension-manager-header,
+  .portfolio-window-body .character-manager-header {
+    min-height: 0;
+    margin: 0 -14px 16px;
+    padding: 14px;
+  }
+
+  .portfolio-window-body .extension-manager-header h1,
+  .portfolio-window-body .character-manager-header h1 {
+    font-size: 21px;
+  }
+
+  .portfolio-window-body .extension-manager-header p,
+  .portfolio-window-body .character-manager-header p {
+    display: none;
+  }
+
+  .portfolio-window-body.chat-shell,
+  .portfolio-window-body.app-shell {
+    position: relative;
+    width: 100%;
+    max-width: 100vw;
+    height: 100%;
+    min-height: 0;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .portfolio-window-body .mobile-sidebar-toggle {
+    position: fixed;
+    top: 52px;
+    left: 12px;
+    z-index: 210;
+    display: grid;
+    width: 40px;
+    height: 40px;
+    place-items: center;
+    border: 1px solid rgba(210, 210, 216, 0.86);
+    border-radius: 11px;
+    background: rgba(255, 255, 255, 0.9);
+    box-shadow: 0 5px 18px rgba(20, 20, 25, 0.1);
+    color: #29292d;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  .portfolio-window-body.mobile-sidebar-open .mobile-sidebar-toggle {
+    display: none;
+  }
+
+  .portfolio-window-body .sidebar,
+  .portfolio-window-body .chat-sidebar {
+    position: fixed;
+    top: 42px;
+    bottom: 0;
+    left: 0;
+    z-index: 205;
+    width: min(82vw, 300px);
+    max-width: min(82vw, 300px);
+    height: calc(100dvh - 42px);
+    min-height: 0;
+    padding: 14px 12px 22px;
+    border-right: 1px solid rgba(196, 196, 202, 0.9);
+    background: rgba(237, 237, 241, 0.98);
+    box-shadow: 18px 0 40px rgba(18, 18, 22, 0.18);
+    transform: translateX(-105%);
+  }
+
+  .portfolio-window-body.mobile-sidebar-open .sidebar,
+  .portfolio-window-body.mobile-sidebar-open .chat-sidebar {
+    transform: translateX(0);
+  }
+
+  .portfolio-window-body.mobile-sidebar-open .mobile-sidebar-backdrop {
+    position: fixed;
+    inset: 42px 0 0;
+    z-index: 200;
+    display: block;
+    border: 0;
+    background: rgba(8, 8, 10, 0.38);
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+  }
+
+  .portfolio-window-body .workspace,
+  .portfolio-window-body .chat-workspace {
+    width: 100%;
+    max-width: 100vw;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .portfolio-window-body .workspace {
+    padding-top: 66px;
+  }
+
+  .portfolio-window-body .chat-header {
+    padding-left: 64px;
+  }
+}
+
+@media (max-width: 520px) {
+  .portfolio-window-lights {
+    gap: 6px;
+  }
+
+  .portfolio-window-light {
+    width: 10px;
+    height: 10px;
+    min-width: 10px;
+  }
+
+  .portfolio-window-body .extension-install-panel,
+  .portfolio-window-body .extension-card,
+  .portfolio-window-body .character-cover-card,
+  .portfolio-window-body .section-block,
+  .portfolio-window-body .inspector-panel {
+    border-radius: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .portfolio-window-shell {
+    animation: none;
+  }
+
+  .portfolio-window-body .persona-item,
+  .portfolio-window-body .character-cover-card {
+    transition: none;
+  }
+}
+
+/* Shared desktop window management layer. The desktop home owns the wallpaper;
+   module shells only contribute interactive windows above it. */
+.portfolio-desktop-shell.managed-window-layer,
+.settings-shell.settings-desktop.managed-window-layer {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
+  background: transparent;
+  pointer-events: none;
+  isolation: isolate;
+}
+
+.managed-window-layer.is-minimized {
+  display: none !important;
+}
+
+.managed-window-layer .portfolio-desktop-background,
+.managed-window-layer .portfolio-desktop-shade,
+.managed-window-layer .settings-desktop-background,
+.managed-window-layer .settings-desktop-shade {
+  display: none;
+}
+
+.managed-window-layer .portfolio-window-shell,
+.managed-window-layer .settings-window-shell {
+  pointer-events: auto;
+  animation: managed-window-appear 180ms ease-out;
+}
+
+.managed-window-drag-handle {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.managed-window-drag-handle:active {
+  cursor: grabbing;
+}
+
+.managed-window-layer.is-maximized .managed-window-drag-handle {
+  cursor: default;
+}
+
+.managed-window-layer .managed-window-maximized {
+  position: fixed !important;
+  inset: 8px !important;
+  width: auto !important;
+  height: auto !important;
+  max-width: none !important;
+  max-height: none !important;
+  border-radius: 18px;
+  transform: none !important;
+}
+
+button.portfolio-window-light.minimize,
+button.settings-window-light.minimize,
+.desktop-home-window-light.minimize {
+  background: rgb(250, 201, 0);
+}
+
+button.portfolio-window-light.maximize,
+button.settings-window-light.maximize,
+.desktop-home-window-light.maximize {
+  background: rgb(52, 199, 90);
+}
+
+button.portfolio-window-light.minimize:hover,
+button.settings-window-light.minimize:hover,
+.desktop-home-window-light.minimize:hover {
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.18) inset,
+    0 0 0 3px rgba(250, 201, 0, 0.18);
+  transform: none;
+}
+
+button.portfolio-window-light.maximize:hover,
+button.settings-window-light.maximize:hover,
+.desktop-home-window-light.maximize:hover {
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.18) inset,
+    0 0 0 3px rgba(52, 199, 90, 0.16);
+  transform: none;
+}
+
+.desktop-home-window-lights {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.desktop-home-window-light {
+  width: 12px;
+  height: 12px;
+  min-width: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.12) inset;
+}
+
+.desktop-home-window-light.close {
+  background: rgb(253, 93, 92);
+}
+
+.desktop-home-window-light.close:hover {
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.18) inset,
+    0 0 0 3px rgba(253, 93, 92, 0.16);
+  transform: none;
+}
+
+.desktop-home-window-drag-layer.is-maximized {
+  transform: none !important;
+}
+
+.desktop-home-window-shell.is-maximized {
+  position: fixed !important;
+  inset: 8px !important;
+  width: auto !important;
+  height: auto !important;
+  max-width: none !important;
+  max-height: none !important;
+  border-radius: 18px !important;
+}
+
+.managed-global-overlays.portfolio-desktop-shell {
+  position: fixed;
+  z-index: 10000;
+  inset: 0;
+  width: auto;
+  height: auto;
+  padding: 0;
+  background: transparent;
+  pointer-events: none;
+  isolation: isolate;
+}
+
+.managed-global-overlays > .modal-backdrop {
+  pointer-events: auto;
+}
+
+@keyframes managed-window-appear {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@media (max-width: 820px) {
+  .portfolio-desktop-shell.managed-window-layer,
+  .settings-shell.settings-desktop.managed-window-layer {
+    padding: 0;
+  }
+
+  .managed-window-layer .portfolio-window-shell,
+  .managed-window-layer .settings-window-shell {
+    transform: none !important;
+  }
+
+  .managed-window-layer .managed-window-maximized,
+  .desktop-home-window-shell.is-maximized {
+    inset: 0 !important;
+    border-radius: 0 !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .managed-window-layer .portfolio-window-shell,
+  .managed-window-layer .settings-window-shell {
+    animation: none;
+  }
+}
