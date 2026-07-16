@@ -1682,6 +1682,26 @@ function createRoleplayGreetingMessage(
   };
 }
 
+function getRoleplayGreetingPreview(content: string) {
+  const preview = content
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
+    .replace(/<\|\s*\/?(?:delete(?:d)?|remove)?audio\s*\|>/gi, " ")
+    .replace(/```[^\r\n]*[\r\n]?/g, " ")
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, " $1 ")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, " $1 ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;|&#160;|&#xA0;/gi, " ")
+    .replace(/&quot;|&#34;|&#x22;/gi, '"')
+    .replace(/&apos;|&#39;|&#x27;/gi, "'")
+    .replace(/&amp;|&#38;|&#x26;/gi, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!preview) return "包含结构化界面或脚本内容";
+  return preview.length > 260 ? `${preview.slice(0, 260).trimEnd()}…` : preview;
+}
+
 function deleteChatSessionsWithMemoryCleanup(
   sessions: ChatSession[],
   shouldDelete: (session: ChatSession) => boolean,
@@ -7841,6 +7861,8 @@ export function App() {
     x: number;
     y: number;
   } | null>(null);
+  const [roleplayGreetingSelectorOpen, setRoleplayGreetingSelectorOpen] =
+    useState(false);
   const [editingChatMessage, setEditingChatMessage] = useState<{
     messageId: string;
     content: string;
@@ -10317,6 +10339,35 @@ export function App() {
       Math.max(0, activeRoleplayGreetings.length - 1),
     ),
   );
+  useEffect(() => {
+    setRoleplayGreetingSelectorOpen(false);
+  }, [activeChatSessionId]);
+  useEffect(() => {
+    if (!roleplayGreetingSelectorOpen) return;
+    const chatWindowState = openWindows.find((windowState) => windowState.id === "chat");
+    if (
+      !chatWindowState ||
+      chatWindowState.minimized ||
+      chatMode !== "roleplay" ||
+      !activeSessionRoleplayCard ||
+      activeRoleplayGreetings.length < 2
+    ) {
+      setRoleplayGreetingSelectorOpen(false);
+      return;
+    }
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setRoleplayGreetingSelectorOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [
+    activeRoleplayGreetings.length,
+    activeSessionRoleplayCard,
+    chatMode,
+    openWindows,
+    roleplayGreetingSelectorOpen,
+  ]);
   const activeTavernScripts = useMemo(
     () => [
       ...tavernScripts,
@@ -12438,10 +12489,15 @@ export function App() {
     setChatSessions((current) => [...current, session]);
     activateRoleplaySession(session);
   };
-  const cycleRoleplayGreeting = () => {
+  const selectRoleplayGreeting = (requestedIndex: number) => {
     if (!activeChatSession || !activeSessionRoleplayCard) return;
     if (activeRoleplayGreetings.length < 2) return;
-    const nextIndex = (activeRoleplayGreetingIndex + 1) % activeRoleplayGreetings.length;
+    if (!Number.isFinite(requestedIndex)) return;
+    const nextIndex = Math.max(
+      0,
+      Math.min(Math.floor(requestedIndex), activeRoleplayGreetings.length - 1),
+    );
+    if (nextIndex === activeRoleplayGreetingIndex) return;
     const greeting = createRoleplayGreetingMessage(
       activeSessionRoleplayCard,
       nextIndex,
@@ -12464,6 +12520,12 @@ export function App() {
       current.map((session) => (session.id === activeChatSession.id ? nextSession : session)),
     );
     processRoleplayGreeting(nextSession, activeSessionRoleplayCard, true);
+  };
+  const cycleRoleplayGreeting = () => {
+    if (activeRoleplayGreetings.length < 2) return;
+    selectRoleplayGreeting(
+      (activeRoleplayGreetingIndex + 1) % activeRoleplayGreetings.length,
+    );
   };
   const recentChatSessions = useMemo(
     () =>
@@ -22256,6 +22318,87 @@ export function App() {
   const chatWindowState = openWindows.find(
     (windowState) => windowState.id === "chat",
   );
+  const roleplayGreetingSelectorModal =
+    roleplayGreetingSelectorOpen &&
+    chatWindowState &&
+    !chatWindowState.minimized &&
+    activeSessionRoleplayCard &&
+    activeRoleplayGreetings.length > 1 ? (
+      <div
+        className="modal-backdrop roleplay-greeting-selector-backdrop"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="roleplay-greeting-selector-title"
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget) {
+            setRoleplayGreetingSelectorOpen(false);
+          }
+        }}
+      >
+        <section className="roleplay-greeting-selector-modal">
+          <header className="roleplay-greeting-selector-header">
+            <div className="roleplay-greeting-selector-heading">
+              <span className="roleplay-greeting-selector-icon" aria-hidden="true">
+                <MessageSquare size={18} />
+              </span>
+              <div>
+                <h2 id="roleplay-greeting-selector-title">选择开场白</h2>
+                <p>
+                  {activeSessionRoleplayCard.name} · 共 {activeRoleplayGreetings.length} 条
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="roleplay-greeting-selector-close"
+              title="关闭"
+              aria-label="关闭开场白选择框"
+              onClick={() => setRoleplayGreetingSelectorOpen(false)}
+            >
+              <X size={18} />
+            </button>
+          </header>
+
+          <div className="roleplay-greeting-selector-list" aria-label="开场白列表">
+            {activeRoleplayGreetings.map((greeting, index) => {
+              const isCurrent = index === activeRoleplayGreetingIndex;
+              return (
+                <button
+                  type="button"
+                  className={`roleplay-greeting-option ${isCurrent ? "current" : ""}`}
+                  aria-current={isCurrent ? "true" : undefined}
+                  autoFocus={isCurrent}
+                  disabled={chatStatus.status === "loading"}
+                  key={`${index}-${greeting.length}`}
+                  onClick={() => {
+                    setRoleplayGreetingSelectorOpen(false);
+                    selectRoleplayGreeting(index);
+                  }}
+                >
+                  <span className="roleplay-greeting-option-index">{index + 1}</span>
+                  <span className="roleplay-greeting-option-content">
+                    <span className="roleplay-greeting-option-title">
+                      <strong>开场白 {index + 1}</strong>
+                      <small>{greeting.length.toLocaleString("zh-CN")} 字符</small>
+                    </span>
+                    <span className="roleplay-greeting-option-preview">
+                      {getRoleplayGreetingPreview(greeting)}
+                    </span>
+                  </span>
+                  <span className="roleplay-greeting-option-status" aria-hidden="true">
+                    {isCurrent ? <Check size={16} /> : null}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          <footer className="roleplay-greeting-selector-footer">
+            点击任意条目立即切换；右下角循环图标仍可快速切到下一条。
+          </footer>
+        </section>
+      </div>
+    ) : null;
   const chatWindow = chatWindowState ? (
       <PortfolioDesktopWindow
         title="对话工作区"
@@ -23009,27 +23152,45 @@ export function App() {
                             {segmentIndex === 0 &&
                               renderChatAttachments(message.attachments ?? [])}
                             {showGreetingSwitch && (
-                              <button
-                                type="button"
-                                className="roleplay-greeting-switch"
-                                disabled={chatStatus.status === "loading"}
-                                title={`切换开场白（${activeRoleplayGreetingIndex + 1}/${activeRoleplayGreetings.length}）`}
-                                aria-label={`切换开场白，当前第 ${activeRoleplayGreetingIndex + 1} 个，共 ${activeRoleplayGreetings.length} 个`}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setChatMessageMenu(null);
-                                  cycleRoleplayGreeting();
-                                }}
+                              <div
+                                className="roleplay-greeting-controls"
                                 onContextMenu={(event) => {
                                   event.preventDefault();
                                   event.stopPropagation();
                                 }}
                               >
-                                <RefreshCw size={13} />
-                                <span>
+                                <button
+                                  type="button"
+                                  className="roleplay-greeting-next"
+                                  disabled={chatStatus.status === "loading"}
+                                  title="切换到下一条开场白"
+                                  aria-label={`切换到下一条开场白，当前第 ${activeRoleplayGreetingIndex + 1} 个，共 ${activeRoleplayGreetings.length} 个`}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setChatMessageMenu(null);
+                                    setRoleplayGreetingSelectorOpen(false);
+                                    cycleRoleplayGreeting();
+                                  }}
+                                >
+                                  <RefreshCw size={13} />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="roleplay-greeting-count"
+                                  disabled={chatStatus.status === "loading"}
+                                  title="选择开场白"
+                                  aria-haspopup="dialog"
+                                  aria-expanded={roleplayGreetingSelectorOpen}
+                                  aria-label={`选择开场白，当前第 ${activeRoleplayGreetingIndex + 1} 个，共 ${activeRoleplayGreetings.length} 个`}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setChatMessageMenu(null);
+                                    setRoleplayGreetingSelectorOpen(true);
+                                  }}
+                                >
                                   {activeRoleplayGreetingIndex + 1}/{activeRoleplayGreetings.length}
-                                </span>
-                              </button>
+                                </button>
+                              </div>
                             )}
                           </>
                         )}
@@ -24078,10 +24239,11 @@ export function App() {
       {settingsWindow}
       {chatWindow}
       {studioWindow}
-      {(avatarCropModal || pcBrowserModal) && (
+      {(avatarCropModal || pcBrowserModal || roleplayGreetingSelectorModal) && (
         <div className="managed-global-overlays portfolio-desktop-shell">
           {avatarCropModal}
           {pcBrowserModal}
+          {roleplayGreetingSelectorModal}
         </div>
       )}
     </>
