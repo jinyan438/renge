@@ -6977,6 +6977,62 @@ function getHorizontalDropPlacement(event: DragEvent<HTMLElement>): DragPlacemen
   return event.clientX < rect.left + rect.width / 2 ? "before" : "after";
 }
 
+type PortfolioDesktopWindowProps = {
+  title: string;
+  bodyClassName: string;
+  statusPrimary: string;
+  statusSecondary: string;
+  statusReady?: boolean;
+  bodyStyle?: CSSProperties;
+  onClose: () => void;
+  overlays?: ReactNode;
+  children: ReactNode;
+};
+
+function PortfolioDesktopWindow({
+  title,
+  bodyClassName,
+  statusPrimary,
+  statusSecondary,
+  statusReady = true,
+  bodyStyle,
+  onClose,
+  overlays,
+  children,
+}: PortfolioDesktopWindowProps) {
+  return (
+    <main className="portfolio-desktop-shell">
+      <div className="portfolio-desktop-background" aria-hidden="true" />
+      <div className="portfolio-desktop-shade" aria-hidden="true" />
+      <section className="portfolio-window-shell" aria-label={`Renge ${title}`}>
+        <header className="portfolio-window-bar">
+          <div className="portfolio-window-lights">
+            <button
+              type="button"
+              className="portfolio-window-light close"
+              title="关闭并返回主页"
+              aria-label="关闭并返回主页"
+              onClick={onClose}
+            />
+            <span className="portfolio-window-light minimize" aria-hidden="true" />
+            <span className="portfolio-window-light maximize" aria-hidden="true" />
+          </div>
+          <span className="portfolio-window-caption">Renge Agent Lab — {title}</span>
+          <div className="portfolio-window-status" title={statusSecondary}>
+            <span className={statusReady ? "ready" : "attention"} />
+            <strong>{statusPrimary}</strong>
+            <small>{statusSecondary}</small>
+          </div>
+        </header>
+        <div className={`portfolio-window-body ${bodyClassName}`} style={bodyStyle}>
+          {children}
+        </div>
+      </section>
+      {overlays}
+    </main>
+  );
+}
+
 export function App() {
   const [view, setView] = useState<AppView>("home");
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -17254,7 +17310,15 @@ export function App() {
 
   if (view === "extensions") {
     return (
-      <main className="extension-manager-shell">
+      <PortfolioDesktopWindow
+        title="扩展管理器"
+        bodyClassName="extension-manager-shell"
+        statusPrimary={`${extensions.length} 个扩展`}
+        statusSecondary={`${extensions.filter((extension) => extensionRuntimeStates[extension.id]?.status === "active").length} 个运行中`}
+        statusReady={extensionStatus.status !== "error"}
+        onClose={() => setView("home")}
+        overlays={pcBrowserModal}
+      >
         <header className="extension-manager-header">
           <div>
             <button type="button" className="ghost-action" onClick={() => setView("home")}>
@@ -17665,14 +17729,19 @@ export function App() {
             </div>
           )}
         </section>
-        {pcBrowserModal}
-      </main>
+      </PortfolioDesktopWindow>
     );
   }
 
   if (view === "characters") {
     return (
-      <main className="character-manager-shell">
+      <PortfolioDesktopWindow
+        title="角色卡管理器"
+        bodyClassName="character-manager-shell"
+        statusPrimary={`${characterCards.length} 张角色卡`}
+        statusSecondary={activeRoleplayCard?.name ?? "角色资产库"}
+        onClose={() => setView("home")}
+      >
         <header className="character-manager-header">
           <div>
             <button type="button" className="ghost-action" onClick={() => setView("home")}>
@@ -18484,7 +18553,7 @@ export function App() {
             </section>
           </div>
         )}
-      </main>
+      </PortfolioDesktopWindow>
     );
   }
 
@@ -21313,16 +21382,25 @@ export function App() {
 
   if (view === "chat") {
     return (
-      <main
-        className={`chat-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""} ${
+      <PortfolioDesktopWindow
+        title="对话工作区"
+        bodyClassName={`chat-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""} ${
           chatPersonalization.quoteStyleEnabled ? "quote-style-enabled" : ""
         } ${chatPersonalization.italicStyleEnabled ? "italic-style-enabled" : ""}`}
-        style={
+        bodyStyle={
           {
             "--chat-quote-color": chatPersonalization.quoteStyleColor,
             "--chat-italic-color": chatPersonalization.italicStyleColor,
           } as CSSProperties
         }
+        statusPrimary={activePersona.name}
+        statusSecondary={chatModelLabel}
+        statusReady={chatModelReady}
+        onClose={() => {
+          setView("home");
+          closeMobileSidebar();
+        }}
+        overlays={pcBrowserModal}
       >
         <button
           type="button"
@@ -22596,13 +22674,21 @@ export function App() {
             </div>
           </section>
         </section>
-        {pcBrowserModal}
-      </main>
+      </PortfolioDesktopWindow>
     );
   }
 
   return (
-    <main className={`app-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""}`}>
+    <PortfolioDesktopWindow
+      title="人格工作室"
+      bodyClassName={`app-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""}`}
+      statusPrimary={activePersona.name}
+      statusSecondary={`${getEntryCount(activePersona)} 个人格条目`}
+      onClose={() => {
+        setView("home");
+        closeMobileSidebar();
+      }}
+    >
       <button
         type="button"
         className="mobile-sidebar-toggle"
@@ -23244,7 +23330,7 @@ export function App() {
         </div>
       )}
       {pcBrowserModal}
-    </main>
+    </PortfolioDesktopWindow>
   );
 }
 
