@@ -83,8 +83,28 @@ type ProjectSpec = {
 };
 
 type DragOffset = { x: number; y: number };
+type ProjectSnapTarget = { id: string; x: number; y: number };
+type ProjectDragState = {
+  active: boolean;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  originX: number;
+  originY: number;
+  startCenterX: number;
+  startCenterY: number;
+  distance: number;
+  snapTargets: ProjectSnapTarget[];
+  snapXTargetId: string | null;
+  snapYTargetId: string | null;
+};
 
 const glassBorder = "1px solid rgba(255,255,255,0.2)";
+const PROJECT_CARD_SELECTOR = "[data-desktop-project-icon]";
+const PROJECT_ICON_CENTER_Y = 54;
+const PROJECT_SNAP_THRESHOLD = 14;
+const PROJECT_SNAP_RELEASE_THRESHOLD = 22;
+const PROJECT_SNAP_NEARBY_DISTANCE = 280;
 
 function useCompactViewport() {
   const [compact, setCompact] = useState(() =>
@@ -127,14 +147,19 @@ function useDraggable() {
   const offsetRef = useRef<DragOffset>({ x: 0, y: 0 });
   const pendingOffsetRef = useRef<DragOffset>({ x: 0, y: 0 });
   const frameRef = useRef<number | null>(null);
-  const dragRef = useRef({
+  const dragRef = useRef<ProjectDragState>({
     active: false,
     pointerId: -1,
     startX: 0,
     startY: 0,
     originX: 0,
     originY: 0,
+    startCenterX: 0,
+    startCenterY: 0,
     distance: 0,
+    snapTargets: [],
+    snapXTargetId: null,
+    snapYTargetId: null,
   });
   const suppressClickRef = useRef(false);
 
@@ -154,8 +179,23 @@ function useDraggable() {
     if (event.button !== 0) return;
     const node = elementRef.current;
     if (!node) return;
+    const rect = node.getBoundingClientRect();
+    const snapTargets = node.parentElement
+      ? Array.from(node.parentElement.querySelectorAll<HTMLDivElement>(PROJECT_CARD_SELECTOR))
+          .filter((target) => target !== node)
+          .map((target) => {
+            const targetRect = target.getBoundingClientRect();
+            return {
+              id: target.dataset.desktopProjectIcon ?? "",
+              x: targetRect.left + targetRect.width / 2,
+              y: targetRect.top + PROJECT_ICON_CENTER_Y,
+            };
+          })
+          .filter((target) => target.id)
+      : [];
     node.setPointerCapture(event.pointerId);
     node.style.willChange = "transform";
+    pendingOffsetRef.current = { ...offsetRef.current };
     dragRef.current = {
       active: true,
       pointerId: event.pointerId,
@@ -163,7 +203,12 @@ function useDraggable() {
       startY: event.clientY,
       originX: offsetRef.current.x,
       originY: offsetRef.current.y,
+      startCenterX: rect.left + rect.width / 2,
+      startCenterY: rect.top + PROJECT_ICON_CENTER_Y,
       distance: 0,
+      snapTargets,
+      snapXTargetId: null,
+      snapYTargetId: null,
     };
   }, []);
 
@@ -174,7 +219,55 @@ function useDraggable() {
       const dx = event.clientX - drag.startX;
       const dy = event.clientY - drag.startY;
       drag.distance = Math.hypot(dx, dy);
-      pendingOffsetRef.current = { x: drag.originX + dx, y: drag.originY + dy };
+      const centerX = drag.startCenterX + dx;
+      const centerY = drag.startCenterY + dy;
+
+      const pickSnapTarget = (axis: "x" | "y", lockedTargetId: string | null) => {
+        const axisDistance = (target: ProjectSnapTarget) =>
+          Math.abs((axis === "x" ? target.x : target.y) - (axis === "x" ? centerX : centerY));
+        const crossDistance = (target: ProjectSnapTarget) =>
+          Math.abs((axis === "x" ? target.y : target.x) - (axis === "x" ? centerY : centerX));
+        const lockedTarget = lockedTargetId
+          ? drag.snapTargets.find((target) => target.id === lockedTargetId)
+          : undefined;
+
+        if (
+          lockedTarget &&
+          axisDistance(lockedTarget) <= PROJECT_SNAP_RELEASE_THRESHOLD &&
+          crossDistance(lockedTarget) <= PROJECT_SNAP_NEARBY_DISTANCE
+        ) {
+          return lockedTarget;
+        }
+
+        let closestTarget: ProjectSnapTarget | null = null;
+        let closestDistance = PROJECT_SNAP_THRESHOLD + 1;
+        for (const target of drag.snapTargets) {
+          const distance = axisDistance(target);
+          if (
+            distance <= PROJECT_SNAP_THRESHOLD &&
+            distance < closestDistance &&
+            crossDistance(target) <= PROJECT_SNAP_NEARBY_DISTANCE
+          ) {
+            closestTarget = target;
+            closestDistance = distance;
+          }
+        }
+        return closestTarget;
+      };
+
+      let snapXTarget = pickSnapTarget("x", drag.snapXTargetId);
+      let snapYTarget = pickSnapTarget("y", drag.snapYTargetId);
+      if (snapXTarget?.id === snapYTarget?.id) {
+        snapXTarget = null;
+        snapYTarget = null;
+      }
+      drag.snapXTargetId = snapXTarget?.id ?? null;
+      drag.snapYTargetId = snapYTarget?.id ?? null;
+
+      pendingOffsetRef.current = {
+        x: drag.originX + dx + (snapXTarget ? snapXTarget.x - centerX : 0),
+        y: drag.originY + dy + (snapYTarget ? snapYTarget.y - centerY : 0),
+      };
       schedulePaint();
     },
     [schedulePaint],
@@ -184,6 +277,9 @@ function useDraggable() {
     const drag = dragRef.current;
     if (!drag.active || drag.pointerId !== event.pointerId) return;
     drag.active = false;
+    drag.snapTargets = [];
+    drag.snapXTargetId = null;
+    drag.snapYTargetId = null;
     suppressClickRef.current = drag.distance >= 5;
     offsetRef.current = pendingOffsetRef.current;
     const node = elementRef.current;
@@ -241,6 +337,7 @@ function ProjectCard({
   return (
     <div
       ref={drag.elementRef}
+      data-desktop-project-icon={project.id}
       role="button"
       tabIndex={0}
       aria-label={`打开${project.title}`}
