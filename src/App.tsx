@@ -162,6 +162,7 @@ import {
   type PromptTemplateStoredMessage,
 } from "./promptTemplateExtension";
 import { DesktopHome } from "./DesktopHome";
+import { WindowResizeHandles } from "./WindowResizeHandles";
 import settingsModuleIcon from "./assets/module-icons/settings.png";
 import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryType } from "./types";
 
@@ -7002,11 +7003,13 @@ function PortfolioDesktopWindow({
   overlays,
   children,
 }: PortfolioDesktopWindowProps) {
+  const windowRef = useRef<HTMLElement | null>(null);
   return (
     <main className="portfolio-desktop-shell">
       <div className="portfolio-desktop-background" aria-hidden="true" />
       <div className="portfolio-desktop-shade" aria-hidden="true" />
-      <section className="portfolio-window-shell" aria-label={`Renge ${title}`}>
+      <section ref={windowRef} className="portfolio-window-shell" aria-label={`Renge ${title}`}>
+        <WindowResizeHandles targetRef={windowRef} minWidth={720} minHeight={480} />
         <header className="portfolio-window-bar">
           <div className="portfolio-window-lights">
             <button
@@ -7037,6 +7040,7 @@ function PortfolioDesktopWindow({
 
 export function App() {
   const [view, setView] = useState<AppView>("home");
+  const settingsWindowRef = useRef<HTMLElement | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [mobilePromptPreviewOpen, setMobilePromptPreviewOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("providers");
@@ -18558,7 +18562,8 @@ export function App() {
       >
         <div className="settings-desktop-background" aria-hidden="true" />
         <div className="settings-desktop-shade" aria-hidden="true" />
-        <section className="settings-window-shell" aria-label="Renge 系统设置">
+        <section ref={settingsWindowRef} className="settings-window-shell" aria-label="Renge 系统设置">
+          <WindowResizeHandles targetRef={settingsWindowRef} minWidth={720} minHeight={480} />
           <header className="settings-window-bar">
             <div className="settings-window-lights">
               <button

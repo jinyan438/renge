@@ -26,6 +26,7 @@ import recentSessionsModuleIcon from "./assets/module-icons/recent-sessions.png"
 import rengeBrandModuleIcon from "./assets/module-icons/renge-brand.png";
 import settingsModuleIcon from "./assets/module-icons/settings.png";
 import defaultDesktopWallpaper from "./assets/wallpapers/default-desktop.webp";
+import { WindowResizeHandles } from "./WindowResizeHandles";
 
 const BACKGROUND_IMAGE = defaultDesktopWallpaper;
 
@@ -748,6 +749,7 @@ function WindowShell({
   const [visible, setVisible] = useState(false);
   const compact = useCompactViewport();
   const reducedMotion = useReducedMotion();
+  const windowRef = useRef<HTMLElement | null>(null);
   const dragLayerRef = useRef<HTMLDivElement | null>(null);
   const offsetRef = useRef<DragOffset>({ x: 0, y: 0 });
   const dragRef = useRef({ active: false, pointerId: -1, startX: 0, startY: 0, x: 0, y: 0 });
@@ -837,10 +839,12 @@ function WindowShell({
     >
       <div ref={dragLayerRef} style={{ transform: "translate3d(0,0,0)" }}>
         <section
+          ref={windowRef}
           role="dialog"
           aria-modal="true"
           aria-label={title}
           style={{
+            position: "relative",
             display: "flex",
             width: compact ? "calc(100vw - 24px)" : wide ? "70vw" : "60vw",
             maxWidth: wide ? 840 : 720,
@@ -860,6 +864,7 @@ function WindowShell({
               : "transform 0.4s cubic-bezier(0.34,1.28,0.64,1), opacity 0.3s ease",
           }}
         >
+          <WindowResizeHandles targetRef={windowRef} minWidth={320} minHeight={240} />
           <div
             onPointerDown={onTitlePointerDown}
             onPointerMove={onTitlePointerMove}
