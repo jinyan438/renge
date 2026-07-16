@@ -7037,6 +7037,9 @@ export function App() {
   }>({ status: "idle", message: "" });
   const [characterTranslationAdditionalPrompt, setCharacterTranslationAdditionalPrompt] =
     useState(() => localStorage.getItem(CHARACTER_TRANSLATION_PROMPT_STORAGE_KEY) ?? "");
+  const [characterTranslationPromptDraft, setCharacterTranslationPromptDraft] = useState("");
+  const [characterTranslationPromptDialogOpen, setCharacterTranslationPromptDialogOpen] =
+    useState(false);
   const [characterTranslationPreview, setCharacterTranslationPreview] = useState<{
     cardId: string;
     items: Array<{
@@ -9311,6 +9314,14 @@ export function App() {
     } finally {
       if (characterAvatarInputRef.current) characterAvatarInputRef.current.value = "";
     }
+  };
+  const openCharacterTranslationPromptDialog = () => {
+    setCharacterTranslationPromptDraft(characterTranslationAdditionalPrompt);
+    setCharacterTranslationPromptDialogOpen(true);
+  };
+  const saveCharacterTranslationPrompt = () => {
+    setCharacterTranslationAdditionalPrompt(characterTranslationPromptDraft);
+    setCharacterTranslationPromptDialogOpen(false);
   };
   const translateCharacterCard = async (card: CharacterCard) => {
     const modelId = getEffectiveProviderModelId(chatProvider);
@@ -17813,37 +17824,6 @@ export function App() {
           </div>
         )}
 
-        <section className="character-translation-settings" aria-labelledby="character-translation-settings-title">
-          <header>
-            <div>
-              <Languages size={18} />
-              <div>
-                <h2 id="character-translation-settings-title">角色卡翻译设置</h2>
-                <p>所有角色卡共用，输入后会自动保存在本机。</p>
-              </div>
-            </div>
-            {characterTranslationAdditionalPrompt && (
-              <button
-                type="button"
-                className="ghost-action"
-                onClick={() => setCharacterTranslationAdditionalPrompt("")}
-              >
-                清空
-              </button>
-            )}
-          </header>
-          <label className="field">
-            <span>追加翻译提示词（可选）</span>
-            <textarea
-              rows={3}
-              value={characterTranslationAdditionalPrompt}
-              placeholder="例如：角色名称保持原文；台词使用古风中文；不要翻译特定术语……"
-              onChange={(event) => setCharacterTranslationAdditionalPrompt(event.target.value)}
-            />
-            <small>点击角色卡的翻译按钮时，这些要求会自动追加到默认翻译规则中。</small>
-          </label>
-        </section>
-
         <section className="character-gallery" aria-label="角色卡列表">
           {filteredCharacterCards.length === 0 ? (
             <div className="character-gallery-empty">
@@ -17915,6 +17895,20 @@ export function App() {
                   </button>
                   <button
                     type="button"
+                    className={`character-translation-prompt-button ${
+                      characterTranslationAdditionalPrompt.trim() ? "active" : ""
+                    }`}
+                    title={
+                      characterTranslationAdditionalPrompt.trim()
+                        ? "编辑追加翻译提示词（已保存）"
+                        : "设置追加翻译提示词"
+                    }
+                    onClick={openCharacterTranslationPromptDialog}
+                  >
+                    <SlidersHorizontal size={15} />
+                  </button>
+                  <button
+                    type="button"
                     title="翻译角色卡"
                     disabled={characterTranslationState.status === "loading"}
                     onClick={() => void translateCharacterCard(card)}
@@ -17965,6 +17959,16 @@ export function App() {
                   </span>
                 </div>
                 <div>
+                  <button
+                    type="button"
+                    className={`ghost-action character-translation-prompt-button ${
+                      characterTranslationAdditionalPrompt.trim() ? "active" : ""
+                    }`}
+                    onClick={openCharacterTranslationPromptDialog}
+                  >
+                    <SlidersHorizontal size={15} />
+                    追加提示词
+                  </button>
                   <button
                     type="button"
                     className="ghost-action"
@@ -18422,6 +18426,78 @@ export function App() {
                   <button type="button" className="ghost-action" onClick={() => exportCharacterJson(editingCharacterCard)}><FileJson size={15} />导出 JSON</button>
                   <button type="button" className="ghost-action" onClick={() => void exportCharacterPng(editingCharacterCard)}><Download size={15} />导出 PNG</button>
                   <button type="button" className="small-action" onClick={() => setEditingCharacterCardId("")}><Check size={15} />完成</button>
+                </div>
+              </footer>
+            </section>
+          </div>
+        )}
+
+        {characterTranslationPromptDialogOpen && (
+          <div
+            className="modal-backdrop character-translation-prompt-backdrop"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="character-translation-prompt-title"
+          >
+            <section className="character-translation-prompt-modal">
+              <header className="character-editor-header">
+                <div>
+                  <h2 id="character-translation-prompt-title">追加翻译提示词</h2>
+                  <span>保存后会用于所有角色卡的后续翻译。</span>
+                </div>
+                <button
+                  type="button"
+                  className="icon-button flat"
+                  title="关闭"
+                  onClick={() => setCharacterTranslationPromptDialogOpen(false)}
+                >
+                  <X size={18} />
+                </button>
+              </header>
+              <div className="character-translation-prompt-content">
+                <label className="field">
+                  <span>提示词内容（可选）</span>
+                  <textarea
+                    rows={9}
+                    autoFocus
+                    value={characterTranslationPromptDraft}
+                    placeholder="例如：角色名称保持原文；台词使用古风中文；不要翻译特定术语……"
+                    onChange={(event) => setCharacterTranslationPromptDraft(event.target.value)}
+                  />
+                  <small>
+                    这段内容会追加到默认翻译规则中；留空并保存可恢复默认翻译行为。
+                  </small>
+                </label>
+                <div className="character-translation-prompt-notice">
+                  <Save size={16} />
+                  <span>只有点击“保存”才会更新本机持久化内容，取消不会覆盖此前设置。</span>
+                </div>
+              </div>
+              <footer className="character-editor-footer">
+                <button
+                  type="button"
+                  className="ghost-action"
+                  disabled={!characterTranslationPromptDraft}
+                  onClick={() => setCharacterTranslationPromptDraft("")}
+                >
+                  清空输入
+                </button>
+                <div>
+                  <button
+                    type="button"
+                    className="ghost-action"
+                    onClick={() => setCharacterTranslationPromptDialogOpen(false)}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    className="small-action"
+                    onClick={saveCharacterTranslationPrompt}
+                  >
+                    <Save size={15} />
+                    保存
+                  </button>
                 </div>
               </footer>
             </section>
