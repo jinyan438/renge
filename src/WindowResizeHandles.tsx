@@ -36,6 +36,7 @@ type WindowResizeHandlesProps = {
   minWidth: number;
   minHeight: number;
   viewportMargin?: number;
+  disabled?: boolean;
 };
 
 const handleStyles: Array<{
@@ -73,6 +74,7 @@ export function WindowResizeHandles({
   minWidth,
   minHeight,
   viewportMargin = 8,
+  disabled = false,
 }: WindowResizeHandlesProps) {
   const sessionRef = useRef<ResizeSession>({ ...initialSession });
   const pendingRef = useRef<ResizeBounds | null>(null);
@@ -258,6 +260,8 @@ export function WindowResizeHandles({
     compactQuery.addEventListener("change", resetForCompactViewport);
     return () => compactQuery.removeEventListener("change", resetForCompactViewport);
   }, [targetRef]);
+
+  if (disabled) return null;
 
   return (
     <>

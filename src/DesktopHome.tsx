@@ -747,6 +747,7 @@ function WindowShell({
   children: ReactNode;
 }) {
   const [visible, setVisible] = useState(false);
+  const [maximized, setMaximized] = useState(false);
   const compact = useCompactViewport();
   const reducedMotion = useReducedMotion();
   const windowRef = useRef<HTMLElement | null>(null);
@@ -781,7 +782,13 @@ function WindowShell({
   );
 
   const onTitlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+    if (
+      maximized ||
+      event.button !== 0 ||
+      (event.target as HTMLElement).closest("button")
+    ) {
+      return;
+    }
     event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = {
       active: true,
@@ -837,9 +844,14 @@ function WindowShell({
         pointerEvents: "none",
       }}
     >
-      <div ref={dragLayerRef} style={{ transform: "translate3d(0,0,0)" }}>
+      <div
+        ref={dragLayerRef}
+        className={`desktop-home-window-drag-layer ${maximized ? "is-maximized" : ""}`}
+        style={{ transform: "translate3d(0,0,0)" }}
+      >
         <section
           ref={windowRef}
+          className={`desktop-home-window-shell ${maximized ? "is-maximized" : ""}`}
           role="dialog"
           aria-modal="true"
           aria-label={title}
@@ -864,12 +876,18 @@ function WindowShell({
               : "transform 0.4s cubic-bezier(0.34,1.28,0.64,1), opacity 0.3s ease",
           }}
         >
-          <WindowResizeHandles targetRef={windowRef} minWidth={320} minHeight={240} />
+          <WindowResizeHandles
+            targetRef={windowRef}
+            minWidth={320}
+            minHeight={240}
+            disabled={maximized}
+          />
           <div
             onPointerDown={onTitlePointerDown}
             onPointerMove={onTitlePointerMove}
             onPointerUp={onTitlePointerUp}
             onPointerCancel={onTitlePointerUp}
+            onDoubleClick={() => setMaximized((current) => !current)}
             style={{
               position: "relative",
               display: "flex",
@@ -878,28 +896,32 @@ function WindowShell({
               alignItems: "center",
               padding: "0 16px",
               borderBottom: "1px solid rgb(229,229,234)",
-              cursor: "grab",
+              cursor: maximized ? "default" : "grab",
               touchAction: "none",
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {["rgb(253,93,92)", "rgb(250,201,0)", "rgb(52,199,90)"].map((color) => (
-                <button
-                  key={color}
-                  type="button"
-                  aria-label="关闭窗口"
-                  onClick={onClose}
-                  style={{
-                    width: 12,
-                    height: 12,
-                    minWidth: 12,
-                    padding: 0,
-                    border: 0,
-                    borderRadius: "50%",
-                    background: color,
-                  }}
-                />
-              ))}
+            <div className="desktop-home-window-lights">
+              <button
+                type="button"
+                className="desktop-home-window-light close"
+                title="关闭窗口"
+                aria-label="关闭窗口"
+                onClick={onClose}
+              />
+              <button
+                type="button"
+                className="desktop-home-window-light minimize"
+                title="最小化窗口"
+                aria-label="最小化窗口"
+                onClick={onClose}
+              />
+              <button
+                type="button"
+                className="desktop-home-window-light maximize"
+                title={maximized ? "还原窗口" : "最大化窗口"}
+                aria-label={maximized ? "还原窗口" : "最大化窗口"}
+                onClick={() => setMaximized((current) => !current)}
+              />
             </div>
             <span
               style={{
