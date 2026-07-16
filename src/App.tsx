@@ -3330,7 +3330,10 @@ function splitEmbeddedHtmlBlocks(content: string): PlainChatHtmlSegment[] {
   return segments.length > 0 ? segments : [{ type: "text", content }];
 }
 
-function parsePlainChatContent(content: string): ChatContentPart[] {
+function parsePlainChatContent(
+  content: string,
+  audioRenderingEnabled: boolean,
+): ChatContentPart[] {
   const parts: ChatContentPart[] = [];
   // 修复 LLM 偶尔把 ![alt](url) 写错的几种情况：
   //   1. ![alt]\n  (url)        → ![alt](url)
@@ -3364,21 +3367,23 @@ function parsePlainChatContent(content: string): ChatContentPart[] {
         continue;
       }
 
-      parts.push(...parsePlainChatContent(segment.content));
+      parts.push(...parsePlainChatContent(segment.content, audioRenderingEnabled));
     }
     return parts;
   }
 
-  const audioSegments = splitChatAudioEmbeds(normalized);
-  if (audioSegments.some((segment) => segment.type === "audio")) {
-    for (const segment of audioSegments) {
-      if (segment.type === "audio") {
-        parts.push(segment);
-      } else {
-        parts.push(...parsePlainChatContent(segment.content));
+  if (audioRenderingEnabled) {
+    const audioSegments = splitChatAudioEmbeds(normalized);
+    if (audioSegments.some((segment) => segment.type === "audio")) {
+      for (const segment of audioSegments) {
+        if (segment.type === "audio") {
+          parts.push(segment);
+        } else {
+          parts.push(...parsePlainChatContent(segment.content, audioRenderingEnabled));
+        }
       }
+      return parts;
     }
-    return parts;
   }
 
   const liveStreamSegments = splitChatLiveStreamEmbeds(normalized);
@@ -3387,7 +3392,7 @@ function parsePlainChatContent(content: string): ChatContentPart[] {
       if (segment.type === "liveStream") {
         parts.push(segment);
       } else {
-        parts.push(...parsePlainChatContent(segment.content));
+        parts.push(...parsePlainChatContent(segment.content, audioRenderingEnabled));
       }
     }
     return parts;
@@ -3476,7 +3481,10 @@ function appendFencedHtmlDocumentParts(
   }
 }
 
-function parseGenericChatContentParts(content: string): ChatContentPart[] {
+function parseGenericChatContentParts(
+  content: string,
+  audioRenderingEnabled: boolean,
+): ChatContentPart[] {
   const parts: ChatContentPart[] = [];
   const fencePattern =
     /^[ \t]*```([A-Za-z0-9_-]*)[ \t]*\r?\n([\s\S]*?)^[ \t]*```[ \t]*\r?$/gm;
@@ -3485,7 +3493,7 @@ function parseGenericChatContentParts(content: string): ChatContentPart[] {
 
   while ((match = fencePattern.exec(content))) {
     const plainContent = content.slice(cursor, match.index);
-    parts.push(...parsePlainChatContent(plainContent));
+    parts.push(...parsePlainChatContent(plainContent, audioRenderingEnabled));
 
     const language = (match[1] || "text").toLowerCase();
     const codeContent = match[2].replace(/^\n|\n$/g, "");
@@ -3499,13 +3507,16 @@ function parseGenericChatContentParts(content: string): ChatContentPart[] {
     cursor = match.index + match[0].length;
   }
 
-  parts.push(...parsePlainChatContent(content.slice(cursor)));
+  parts.push(...parsePlainChatContent(content.slice(cursor), audioRenderingEnabled));
   return parts.filter(
     (part) => part.type === "audio" || part.type === "liveStream" || part.content.length > 0,
   );
 }
 
-function parseFencedHtmlDocuments(content: string): ChatContentPart[] | null {
+function parseFencedHtmlDocuments(
+  content: string,
+  audioRenderingEnabled: boolean,
+): ChatContentPart[] | null {
   const fenceLinePattern = /^[ \t]*```([A-Za-z0-9_-]*)([^\r\n]*)(?:\r?\n|$)/gim;
   const roots: FencedHtmlDocumentNode[] = [];
   const stack: FencedHtmlDocumentNode[] = [];
@@ -3550,19 +3561,32 @@ function parseFencedHtmlDocuments(content: string): ChatContentPart[] | null {
   let cursor = 0;
   roots.forEach((root) => {
     if (root.openStart > cursor) {
-      parts.push(...parseGenericChatContentParts(content.slice(cursor, root.openStart)));
+      parts.push(
+        ...parseGenericChatContentParts(
+          content.slice(cursor, root.openStart),
+          audioRenderingEnabled,
+        ),
+      );
     }
     appendFencedHtmlDocumentParts(parts, content, root);
     cursor = root.closeEnd;
   });
-  parts.push(...parseGenericChatContentParts(content.slice(cursor)));
+  parts.push(
+    ...parseGenericChatContentParts(content.slice(cursor), audioRenderingEnabled),
+  );
   return parts.filter(
     (part) => part.type === "audio" || part.type === "liveStream" || part.content.length > 0,
   );
 }
 
-function parseChatContentParts(content: string): ChatContentPart[] {
-  return parseFencedHtmlDocuments(content) ?? parseGenericChatContentParts(content);
+function parseChatContentParts(
+  content: string,
+  audioRenderingEnabled: boolean,
+): ChatContentPart[] {
+  return (
+    parseFencedHtmlDocuments(content, audioRenderingEnabled) ??
+    parseGenericChatContentParts(content, audioRenderingEnabled)
+  );
 }
 
 function looksLikeRenderableHtml(content: string) {
@@ -14918,7 +14942,7 @@ export function App() {
     }
 
     const displayContent = substituteUserNicknameMacro(content, userProfile.nickname);
-    const parts = parseChatContentParts(displayContent);
+    const parts = parseChatContentParts(displayContent, chatHtmlRenderEnabled);
     let htmlPreviewContext: HtmlPreviewContext | null = null;
     const htmlPreviewSessionId =
       (activeChatSession?.id ?? activeChatSessionId) || "no-session";
