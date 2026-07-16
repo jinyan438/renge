@@ -1972,6 +1972,10 @@ type HtmlPreviewContext = {
   characterName: string;
   chatId: string;
   chatInput: string;
+  personalization: Pick<
+    ChatPersonalizationSettings,
+    "quoteStyleEnabled" | "quoteStyleColor"
+  >;
 };
 
 type ChatToolProgressLink = {
@@ -2135,9 +2139,10 @@ function parseTavernSlashCommand(command: string): ParsedTavernSlashCommand | nu
 }
 const htmlPreviewStyle = [
   '<style data-renge-html-preview="true">',
-  ":root{--TH-viewport-height:100vh;--renge-parent-viewport-height:100vh;}",
+  ":root{--TH-viewport-height:100vh;--renge-parent-viewport-height:100vh;--renge-chat-quote-color:#E18A24;}",
   "html,body{overflow:hidden!important;}",
   "body{box-sizing:border-box;}",
+  "html[data-renge-quote-style] .renge-personalized-quote{color:var(--renge-chat-quote-color,#E18A24)!important;}",
   "</style>",
 ].join("");
 const htmlPreviewJqueryScript = [
@@ -2658,6 +2663,106 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "};",
     "document.addEventListener(\"pointerdown\", notifyParentInteraction, true);",
     "document.addEventListener(\"contextmenu\", notifyParentInteraction, true);",
+    "})();",
+    "</script>",
+  ].join("");
+}
+
+function buildHtmlPreviewPersonalizationScript(context: HtmlPreviewContext) {
+  const personalizationLiteral = serializeHtmlPreviewValue(context.personalization);
+
+  return [
+    '<script data-renge-html-preview-personalization="true">',
+    "(() => {",
+    `let personalization = ${personalizationLiteral};`,
+    'const quoteClassName = "renge-personalized-quote";',
+    'const skippedTags = new Set(["SCRIPT", "STYLE", "TEXTAREA", "INPUT", "SELECT", "OPTION", "TEMPLATE", "NOSCRIPT", "CODE", "PRE"]);',
+    'const quotePattern = /"[^"\\n]+"|＂[^＂\\n]+＂|“[^”\\n]+”|〝[^〞\\n]+〞|「[^」\\n]+」|｢[^｣\\n]+｣|『[^』\\n]+』/g;',
+    "const pendingRoots = new Set();",
+    "let processingFrame = 0;",
+    "const quoteStyleEnabled = () => personalization?.quoteStyleEnabled === true;",
+    "const syncPersonalization = (nextPersonalization) => {",
+    '  if (nextPersonalization && typeof nextPersonalization === "object") personalization = { ...personalization, ...nextPersonalization };',
+    "  const root = document.documentElement;",
+    "  if (!root) return false;",
+    "  const enabled = quoteStyleEnabled();",
+    '  root.toggleAttribute("data-renge-quote-style", enabled);',
+    '  const color = typeof personalization?.quoteStyleColor === "string" && /^#[0-9a-f]{6}$/i.test(personalization.quoteStyleColor)',
+    '    ? personalization.quoteStyleColor : "#E18A24";',
+    '  root.style.setProperty("--renge-chat-quote-color", color);',
+    "  return enabled;",
+    "};",
+    "const shouldSkipTextNode = (node) => {",
+    "  const parentElement = node.parentElement;",
+    "  if (!parentElement) return true;",
+    '  if (parentElement.namespaceURI !== "http://www.w3.org/1999/xhtml") return true;',
+    "  if (skippedTags.has(parentElement.tagName) || parentElement.isContentEditable) return true;",
+    '  return Boolean(parentElement.closest(`.${quoteClassName},[contenteditable="true"],[contenteditable=""]`));',
+    "};",
+    "const decorateTextNode = (node) => {",
+    "  if (!quoteStyleEnabled() || shouldSkipTextNode(node)) return;",
+    '  const value = node.nodeValue || "";',
+    "  quotePattern.lastIndex = 0;",
+    "  if (!quotePattern.test(value)) return;",
+    "  quotePattern.lastIndex = 0;",
+    "  const fragment = document.createDocumentFragment();",
+    "  let cursor = 0;",
+    "  value.replace(quotePattern, (quote, offset) => {",
+    "    if (offset > cursor) fragment.append(document.createTextNode(value.slice(cursor, offset)));",
+    '    const span = document.createElement("span");',
+    "    span.className = quoteClassName;",
+    "    span.textContent = quote;",
+    "    fragment.append(span);",
+    "    cursor = offset + quote.length;",
+    "    return quote;",
+    "  });",
+    "  if (cursor < value.length) fragment.append(document.createTextNode(value.slice(cursor)));",
+    "  node.replaceWith(fragment);",
+    "};",
+    "const decorateQuotes = (root) => {",
+    "  if (!quoteStyleEnabled() || !root) return;",
+    "  if (root.nodeType === Node.TEXT_NODE) { decorateTextNode(root); return; }",
+    "  if (root.nodeType !== Node.ELEMENT_NODE && root.nodeType !== Node.DOCUMENT_FRAGMENT_NODE && root.nodeType !== Node.DOCUMENT_NODE) return;",
+    "  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);",
+    "  const textNodes = [];",
+    "  let textNode;",
+    "  while ((textNode = walker.nextNode())) textNodes.push(textNode);",
+    "  textNodes.forEach(decorateTextNode);",
+    "};",
+    "const scheduleQuoteDecoration = (root) => {",
+    "  if (!quoteStyleEnabled() || !root) return;",
+    "  pendingRoots.add(root);",
+    "  if (processingFrame) return;",
+    "  processingFrame = requestAnimationFrame(() => {",
+    "    processingFrame = 0;",
+    "    const roots = Array.from(pendingRoots);",
+    "    pendingRoots.clear();",
+    "    roots.forEach((pendingRoot) => {",
+    "      if (pendingRoot === document || pendingRoot === document.body || pendingRoot.isConnected) decorateQuotes(pendingRoot);",
+    "    });",
+    "  });",
+    "};",
+    "const startObserver = () => {",
+    "  syncPersonalization(personalization);",
+    "  scheduleQuoteDecoration(document.body);",
+    "  try {",
+    "    const observer = new MutationObserver((mutations) => {",
+    "      mutations.forEach((mutation) => {",
+    "        if (mutation.type === \"characterData\") scheduleQuoteDecoration(mutation.target);",
+    "        mutation.addedNodes?.forEach((node) => scheduleQuoteDecoration(node));",
+    "      });",
+    "    });",
+    "    observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });",
+    '    window.addEventListener("unload", () => observer.disconnect(), { once: true });',
+    "  } catch {}",
+    "};",
+    'window.addEventListener("renge-html-preview-context-updated", (event) => {',
+    "  if (syncPersonalization(event.detail?.personalization)) scheduleQuoteDecoration(document.body);",
+    "});",
+    'window.addEventListener("load", () => scheduleQuoteDecoration(document.body));',
+    'if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", startObserver, { once: true });',
+    "else startObserver();",
+    "syncPersonalization(personalization);",
     "})();",
     "</script>",
   ].join("");
@@ -3878,7 +3983,7 @@ function buildHtmlPreviewDocument(
   // `$("body").load(...)`. Install the resize runtime in the head before card
   // scripts start, so asynchronous body replacement cannot remove the only
   // path that reports the finished layout height to the host.
-  const headInjection = `${htmlPreviewStyle}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewScript(previewId, heavyContent)}`;
+  const headInjection = `${htmlPreviewStyle}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${buildHtmlPreviewScript(previewId, heavyContent)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
     return injectHtmlPreviewHead(trimmedContent, headInjection);
   }
@@ -14847,6 +14952,10 @@ export function App() {
         characterName: activeSessionRoleplayCard?.name || "Assistant",
         chatId: activeChatSession?.id ?? activeChatSessionId,
         chatInput,
+        personalization: {
+          quoteStyleEnabled: chatPersonalization.quoteStyleEnabled,
+          quoteStyleColor: chatPersonalization.quoteStyleColor,
+        },
       };
       return htmlPreviewContext;
     };
