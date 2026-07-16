@@ -591,13 +591,30 @@ button.portfolio-window-light.close:hover {
     #f7f7fa;
 }
 
+.portfolio-window-body .chat-workspace.has-character-wallpaper {
+  background-color: rgba(250, 250, 252, 0.97);
+  background-image:
+    linear-gradient(
+      rgba(250, 250, 252, var(--chat-wallpaper-mask-opacity, 0.7)),
+      rgba(250, 250, 252, var(--chat-wallpaper-mask-opacity, 0.7))
+    ),
+    var(--chat-wallpaper-image);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
+.portfolio-window-body .chat-workspace.has-character-wallpaper .chat-thread {
+  background: transparent;
+}
+
 .portfolio-window-body .chat-message.user .chat-avatar {
   background: #07c160;
 }
 
 .portfolio-window-body .chat-message.user .chat-bubble {
   border-color: #95ec69;
-  background: #95ec69;
+  background: rgba(149, 236, 105, var(--chat-bubble-opacity, 1));
   color: #0f172a;
 }
 

@@ -613,6 +613,12 @@ button.settings-window-light.close:hover {
   border-radius: 8px;
 }
 
+.settings-desktop .personalization-opacity-heading output {
+  border-color: rgba(0, 102, 221, 0.22);
+  color: #005abf;
+  background: #eaf3ff;
+}
+
 @keyframes settings-window-in {
   from {
     opacity: 0;
