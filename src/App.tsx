@@ -7098,6 +7098,7 @@ function PortfolioDesktopWindow({
 export function App() {
   const [openWindows, setOpenWindows] = useState<ManagedWindowState[]>([]);
   const topWindowZIndexRef = useRef(100);
+  const [desktopOverlayZIndex, setDesktopOverlayZIndex] = useState(50);
   const windowSpawnIndexRef = useRef(0);
   const settingsWindowRef = useRef<HTMLElement | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -7140,6 +7141,11 @@ export function App() {
         windowState.id === id ? { ...windowState, zIndex } : windowState,
       ),
     );
+  }, []);
+
+  const activateDesktopOverlay = useCallback(() => {
+    const zIndex = ++topWindowZIndexRef.current;
+    setDesktopOverlayZIndex(zIndex);
   }, []);
 
   const closeWindow = useCallback((id: ModuleWindowId) => {
@@ -17437,6 +17443,8 @@ export function App() {
       extensionCount={extensions.length}
       enabledExtensionCount={extensions.filter((extension) => extension.enabled).length}
       sessionCount={chatSessions.length}
+      overlayZIndex={desktopOverlayZIndex}
+      onOverlayActivate={activateDesktopOverlay}
       recentSessions={recentChatSessions.map((session) => ({
         id: session.id,
         title: session.title,
