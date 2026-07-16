@@ -163,6 +163,9 @@ import {
   type PromptTemplateStoredMessage,
 } from "./promptTemplateExtension";
 import { DesktopHome } from "./DesktopHome";
+import settingsModuleIcon from "./assets/module-icons/settings.png";
+import workspaceToolsModuleIcon from "./assets/module-icons/workspace-tools.png";
+import worldbookNotesModuleIcon from "./assets/module-icons/worldbook-notes.png";
 import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryType } from "./types";
 
 const AVATAR_OUTPUT_SIZE = 512;
@@ -18612,7 +18615,7 @@ export function App() {
           </button>
           <div className="settings-title">
             <span className="settings-title-icon">
-              <Settings2 size={20} />
+              <img className="settings-title-image" src={settingsModuleIcon} alt="" />
             </span>
             <span className="settings-title-copy">
               <strong>系统设置</strong>
@@ -18661,7 +18664,7 @@ export function App() {
               closeMobileSidebar();
             }}
           >
-            <Bookmark size={16} />
+            <img className="settings-tab-image" src={worldbookNotesModuleIcon} alt="" />
             世界书
           </button>
           <button
@@ -18718,7 +18721,7 @@ export function App() {
               closeMobileSidebar();
             }}
           >
-            <Boxes size={16} />
+            <img className="settings-tab-image" src={workspaceToolsModuleIcon} alt="" />
             MCP 服务器
           </button>
           <button

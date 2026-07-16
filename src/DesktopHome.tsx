@@ -18,22 +18,28 @@ import {
   useRef,
   useState,
 } from "react";
+import characterCardsModuleIcon from "./assets/module-icons/character-cards.png";
+import chatModuleIcon from "./assets/module-icons/chat.png";
+import extensionsModuleIcon from "./assets/module-icons/extensions.png";
+import personaStudioModuleIcon from "./assets/module-icons/persona-studio.png";
+import recentSessionsModuleIcon from "./assets/module-icons/recent-sessions.png";
+import rengeBrandModuleIcon from "./assets/module-icons/renge-brand.png";
+import settingsModuleIcon from "./assets/module-icons/settings.png";
 
 const BACKGROUND_IMAGE =
   "https://images.higgs.ai/?default=1&output=webp&url=https%3A%2F%2Fd8j0ntlcm91z4.cloudfront.net%2Fuser_38xzZboKViGWJOttwIXH07lWA1P%2Fhf_20260624_151236_784929aa-a992-4292-9938-1dd9b5296a29.png&w=1920&q=85";
 
 const PROJECT_THUMBNAILS = [
-  "https://images.higgs.ai/?default=1&output=webp&url=https%3A%2F%2Fd8j0ntlcm91z4.cloudfront.net%2Fuser_38xzZboKViGWJOttwIXH07lWA1P%2Fhf_20260606_153138_ef8b2e9b-3d18-4b75-8df7-5bc6f0f84fca.png&w=240&q=80",
-  "https://images.higgs.ai/?default=1&output=webp&url=https%3A%2F%2Fd8j0ntlcm91z4.cloudfront.net%2Fuser_38xzZboKViGWJOttwIXH07lWA1P%2Fhf_20260609_092743_5be19a2a-e188-4bca-9ed6-74049aa3d83b.png&w=240&q=80",
-  "https://images.higgs.ai/?default=1&output=webp&url=https%3A%2F%2Fd8j0ntlcm91z4.cloudfront.net%2Fuser_38xzZboKViGWJOttwIXH07lWA1P%2Fhf_20260530_012333_aca09e65-227f-4185-a25f-85191cfac44d.png&w=240&q=80",
-  "https://images.higgs.ai/?default=1&output=webp&url=https%3A%2F%2Fd8j0ntlcm91z4.cloudfront.net%2Fuser_38xzZboKViGWJOttwIXH07lWA1P%2Fhf_20260527_084631_63ecf071-0fd9-42e3-989a-144728ce8ddb.png&w=240&q=80",
-  "https://images.higgs.ai/?default=1&output=webp&url=https%3A%2F%2Fd8j0ntlcm91z4.cloudfront.net%2Fuser_38xzZboKViGWJOttwIXH07lWA1P%2Fhf_20260525_053312_b4d2b145-7bb2-4755-b7a0-79a8e81b1265.png&w=240&q=80",
-  "https://images.higgs.ai/?default=1&output=webp&url=https%3A%2F%2Fd8j0ntlcm91z4.cloudfront.net%2Fuser_38xzZboKViGWJOttwIXH07lWA1P%2Fhf_20260512_012043_9764f2d0-5c6e-4faa-94a6-a8253df08c5e.png&w=240&q=80",
+  chatModuleIcon,
+  personaStudioModuleIcon,
+  characterCardsModuleIcon,
+  extensionsModuleIcon,
+  settingsModuleIcon,
+  recentSessionsModuleIcon,
 ] as const;
 
-const ABOUT_ICON =
-  "https://images.higgs.ai/?default=1&output=webp&url=https%3A%2F%2Fd8j0ntlcm91z4.cloudfront.net%2Fuser_38xzZboKViGWJOttwIXH07lWA1P%2Fhf_20260624_151824_5f47765e-d133-4a38-b8bc-d968a07881a3.png&w=160&q=80";
-const NOTES_ICON = "https://framerusercontent.com/images/4ar8CL6aUtjymV8jTsXrcPzXCM.svg";
+const ABOUT_ICON = rengeBrandModuleIcon;
+const NOTES_ICON = recentSessionsModuleIcon;
 
 export type HomeDestination = "studio" | "characters" | "extensions" | "settings" | "chat";
 
@@ -994,31 +1000,25 @@ export function DesktopHome({
         />
         <DockIcon
           label="人格工作室"
-          background="linear-gradient(145deg,#63d791,#079f57)"
+          image={personaStudioModuleIcon}
           compact={compact}
           reducedMotion={reducedMotion}
           onClick={() => goTo("studio")}
-        >
-          <Bot size={compact ? 20 : 23} />
-        </DockIcon>
+        />
         <DockIcon
           label="开始对话"
-          background="linear-gradient(145deg,#67aaff,#0767dc)"
+          image={chatModuleIcon}
           compact={compact}
           reducedMotion={reducedMotion}
           onClick={() => goTo("chat")}
-        >
-          <MessageSquare size={compact ? 20 : 23} />
-        </DockIcon>
+        />
         <DockIcon
           label="系统设置"
-          background="linear-gradient(145deg,#858990,#3e424a)"
+          image={settingsModuleIcon}
           compact={compact}
           reducedMotion={reducedMotion}
           onClick={() => goTo("settings")}
-        >
-          <Settings2 size={compact ? 20 : 23} />
-        </DockIcon>
+        />
       </nav>
 
       {activeProject && activeProject.id !== "recent" && (
