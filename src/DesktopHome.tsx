@@ -411,7 +411,7 @@ function DockIcon({
           placeItems: "center",
           border: image ? 0 : glassBorder,
           borderRadius: "28%",
-          background: background ?? "rgba(255,255,255,0.92)",
+          background: image ? "transparent" : (background ?? "rgba(255,255,255,0.92)"),
           boxShadow: "0 5px 14px rgba(0,0,0,0.18)",
           color: "white",
           transform: hovered ? "translate3d(0,-2px,0) scale(1.12)" : "translate3d(0,0,0) scale(1)",
