@@ -164,6 +164,11 @@ import {
 import { DesktopHome, type HomeDestination } from "./DesktopHome";
 import { WindowResizeHandles } from "./WindowResizeHandles";
 import { useWindowDrag, type WindowOffset } from "./useWindowDrag";
+import {
+  containsChatAudioMarkup,
+  splitChatAudioEmbeds,
+  type ChatAudioEmbed,
+} from "./chatAudioUtils";
 import settingsModuleIcon from "./assets/module-icons/settings.png";
 import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryType } from "./types";
 
@@ -1872,6 +1877,7 @@ function getChatMessageSegments(message: ChatMessage, splitShortChatLines = true
   if (message.role !== "assistant") return [content];
   if (parseToolProgressContent(content)) return [content];
   if (content.includes("```")) return [content];
+  if (containsChatAudioMarkup(content)) return [content];
 
   const toolProgressSegments = splitAssistantToolProgressSegments(content);
   if (toolProgressSegments.length > 1) return toolProgressSegments;
@@ -1940,7 +1946,8 @@ type RenderedChatItem =
 
 type ChatContentPart =
   | { type: "text"; content: string }
-  | { type: "code"; content: string; language: string; executable: boolean };
+  | { type: "code"; content: string; language: string; executable: boolean }
+  | ChatAudioEmbed;
 
 type HtmlPreviewContext = {
   currentMessageIndex: number;
@@ -3250,6 +3257,18 @@ function parsePlainChatContent(content: string): ChatContentPart[] {
     return parts;
   }
 
+  const audioSegments = splitChatAudioEmbeds(normalized);
+  if (audioSegments.some((segment) => segment.type === "audio")) {
+    for (const segment of audioSegments) {
+      if (segment.type === "audio") {
+        parts.push(segment);
+      } else {
+        parts.push(...parsePlainChatContent(segment.content));
+      }
+    }
+    return parts;
+  }
+
   const lines = normalized.split("\n");
   let textBuffer: string[] = [];
   let codeBuffer: string[] = [];
@@ -3357,7 +3376,7 @@ function parseGenericChatContentParts(content: string): ChatContentPart[] {
   }
 
   parts.push(...parsePlainChatContent(content.slice(cursor)));
-  return parts.filter((part) => part.content.length > 0);
+  return parts.filter((part) => part.type === "audio" || part.content.length > 0);
 }
 
 function parseFencedHtmlDocuments(content: string): ChatContentPart[] | null {
@@ -3411,7 +3430,7 @@ function parseFencedHtmlDocuments(content: string): ChatContentPart[] | null {
     cursor = root.closeEnd;
   });
   parts.push(...parseGenericChatContentParts(content.slice(cursor)));
-  return parts.filter((part) => part.content.length > 0);
+  return parts.filter((part) => part.type === "audio" || part.content.length > 0);
 }
 
 function parseChatContentParts(content: string): ChatContentPart[] {
@@ -14706,6 +14725,35 @@ export function App() {
             return (
               <div className="chat-markdown" key={`${messageId}-text-${partIndex}`}>
                 {renderMarkdownBlocks(part.content, `${messageId}-text-${partIndex}`)}
+              </div>
+            );
+          }
+
+          if (part.type === "audio") {
+            return (
+              <div className="chat-audio-card" key={`${messageId}-audio-${partIndex}`}>
+                <div className="chat-audio-card-header">
+                  <span className="chat-audio-card-icon" aria-hidden="true">
+                    <Play size={14} />
+                  </span>
+                  <div>
+                    <strong title={part.fileName}>{part.fileName}</strong>
+                    <span>音频 · 点击下方播放</span>
+                  </div>
+                  <a
+                    className="chat-audio-download"
+                    href={part.downloadUrl}
+                    rel="noopener noreferrer"
+                    target="_blank"
+                    title={part.downloadLabel}
+                    aria-label={part.downloadLabel}
+                  >
+                    <Download size={14} />
+                  </a>
+                </div>
+                <audio controls preload="metadata" src={part.src}>
+                  当前环境不支持音频播放，请使用右上角按钮打开音频地址。
+                </audio>
               </div>
             );
           }
