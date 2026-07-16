@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu } from "electron";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { execFile } from "node:child_process";
@@ -13,6 +13,8 @@ let mainWindow = null;
 let serverController = null;
 let workspaceRoot = null;
 let electronRuntimeCacheDir = null;
+let desktopProjectPositionsWriteQueue = Promise.resolve();
+const desktopProjectPositionsFilename = "desktop-project-positions.json";
 const highRiskGitCommands = new Set([
   "checkout",
   "clean",
@@ -31,6 +33,32 @@ function getPersistentDataDir() {
   if (process.env.RENGE_DATA_DIR) return resolve(process.env.RENGE_DATA_DIR);
   if (process.env.APPDATA) return join(process.env.APPDATA, "Renge Agent Lab");
   return join(app.getPath("home"), ".renge-agent-lab");
+}
+
+function getDesktopProjectPositionsPath() {
+  return join(getPersistentDataDir(), desktopProjectPositionsFilename);
+}
+
+async function loadDesktopProjectPositions() {
+  try {
+    return JSON.parse(await readFile(getDesktopProjectPositionsPath(), "utf8"));
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function saveDesktopProjectPositions(positions) {
+  if (!positions || typeof positions !== "object" || Array.isArray(positions)) {
+    throw new Error("桌面图标位置格式无效");
+  }
+  const serialized = JSON.stringify(positions);
+  if (Buffer.byteLength(serialized, "utf8") > 64 * 1024) {
+    throw new Error("桌面图标位置数据过大");
+  }
+  await mkdir(getPersistentDataDir(), { recursive: true });
+  await writeFile(getDesktopProjectPositionsPath(), serialized, "utf8");
+  return { ok: true };
 }
 
 function getElectronCacheRootDir() {
@@ -549,6 +577,15 @@ async function runPackageScript({ script, args = [] }) {
 }
 
 function registerIpcHandlers() {
+  ipcMain.handle("desktop-layout:load", async () => loadDesktopProjectPositions());
+
+  ipcMain.handle("desktop-layout:save", async (_event, positions = {}) => {
+    desktopProjectPositionsWriteQueue = desktopProjectPositionsWriteQueue
+      .catch(() => undefined)
+      .then(() => saveDesktopProjectPositions(positions));
+    return desktopProjectPositionsWriteQueue;
+  });
+
   ipcMain.handle("workspace:select", async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ["openDirectory", "createDirectory"],
@@ -699,6 +736,8 @@ async function createMainWindow() {
     dataDir: getPersistentDataDir(),
   });
 
+  Menu.setApplicationMenu(null);
+
   mainWindow = new BrowserWindow({
     width: 1360,
     height: 900,
@@ -706,6 +745,7 @@ async function createMainWindow() {
     minHeight: 720,
     title: "Renge Agent Lab",
     backgroundColor: "#f5f7fa",
+    autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -713,6 +753,8 @@ async function createMainWindow() {
       sandbox: false,
     },
   });
+
+  mainWindow.removeMenu();
 
   await mainWindow.loadURL(serverController.url);
 }

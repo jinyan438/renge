@@ -17,7 +17,6 @@ import {
   FolderOpen,
   GripHorizontal,
   GripVertical,
-  Home,
   KeyRound,
   ListPlus,
   Languages,
@@ -162,6 +161,10 @@ import {
   type PromptTemplateRuntimeOptions,
   type PromptTemplateStoredMessage,
 } from "./promptTemplateExtension";
+import { DesktopHome, type HomeDestination } from "./DesktopHome";
+import { WindowResizeHandles } from "./WindowResizeHandles";
+import { useWindowDrag, type WindowOffset } from "./useWindowDrag";
+import settingsModuleIcon from "./assets/module-icons/settings.png";
 import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryType } from "./types";
 
 const AVATAR_OUTPUT_SIZE = 512;
@@ -190,8 +193,75 @@ type TypeDragTarget = {
   placement: DragPlacement;
 };
 
-type AppView = "home" | "studio" | "characters" | "extensions" | "settings" | "chat";
+type ModuleWindowId = HomeDestination;
+type ManagedWindowState = {
+  id: ModuleWindowId;
+  minimized: boolean;
+  maximized: boolean;
+  zIndex: number;
+  initialOffset: WindowOffset;
+};
 type SettingsTab = "providers" | "prompts" | "presets" | "worldbooks" | "regexes" | "scripts" | "user" | "personalization" | "mcp" | "skills" | "device";
+const SETTINGS_TAB_META: Record<
+  SettingsTab,
+  { title: string; eyebrow: string; description: string }
+> = {
+  providers: {
+    title: "供应商渠道",
+    eyebrow: "MODEL CONNECTIONS",
+    description: "连接模型服务、管理凭据，并为会话选择默认模型。",
+  },
+  prompts: {
+    title: "提示词",
+    eyebrow: "SYSTEM PROMPTS",
+    description: "维护可复用的系统指令，让不同会话保持稳定的表达与边界。",
+  },
+  presets: {
+    title: "预设",
+    eyebrow: "CHAT PRESETS",
+    description: "组织采样参数、提示词顺序和 SillyTavern 兼容预设。",
+  },
+  worldbooks: {
+    title: "世界书",
+    eyebrow: "WORLD BOOKS",
+    description: "管理按关键词激活的背景知识，为对话补充持续一致的世界设定。",
+  },
+  regexes: {
+    title: "正则后处理",
+    eyebrow: "REGEX PIPELINE",
+    description: "按顺序处理模型输出的显示文本，同时保留原始会话内容。",
+  },
+  scripts: {
+    title: "酒馆脚本",
+    eyebrow: "TAVERN SCRIPTS",
+    description: "管理全局与角色脚本、交互按钮、变量和事件运行日志。",
+  },
+  user: {
+    title: "用户资料",
+    eyebrow: "USER PROFILE",
+    description: "设置你的头像、称呼和简介，为角色扮演提供稳定的用户身份。",
+  },
+  personalization: {
+    title: "个性化",
+    eyebrow: "APPEARANCE",
+    description: "调整聊天文本、角色卡背景和消息气泡，让阅读体验更符合你的偏好。",
+  },
+  mcp: {
+    title: "MCP 服务器",
+    eyebrow: "TOOL CONNECTIONS",
+    description: "连接外部工具服务器，并控制哪些能力可以提供给当前会话。",
+  },
+  skills: {
+    title: "Skills",
+    eyebrow: "AGENT SKILLS",
+    description: "导入可复用技能说明，让智能体根据任务自动匹配工作流。",
+  },
+  device: {
+    title: "手机端",
+    eyebrow: "DEVICE & STORAGE",
+    description: "管理移动设备工作区、ROOT 权限与本地文件访问能力。",
+  },
+};
 type ProviderPullState = "idle" | "loading" | "success" | "error";
 type ChatGenerationState = "idle" | "running" | "stopping";
 type ExtensionRuntimeState = {
@@ -325,11 +395,17 @@ type UserProfile = {
   updatedAt: string;
 };
 
+type ChatMessageFontFamily = "system" | "lxgw-wenkai-screen";
+
 type ChatPersonalizationSettings = {
+  messageFontFamily: ChatMessageFontFamily;
+  messageFontSize: number;
   quoteStyleEnabled: boolean;
   quoteStyleColor: string;
   italicStyleEnabled: boolean;
   italicStyleColor: string;
+  wallpaperMaskOpacity: number;
+  bubbleOpacity: number;
 };
 
 type PcConnectionData = {
@@ -475,6 +551,8 @@ type PcFileEntry = {
 
 type RengeDesktopApi = {
   isElectron: boolean;
+  loadDesktopProjectPositions?(): Promise<unknown>;
+  saveDesktopProjectPositions?(positions: unknown): Promise<{ ok: boolean }>;
   selectWorkspace(): Promise<ElectronWorkspaceHandle | null>;
   selectSkillFolder?(): Promise<{ path: string; name: string } | null>;
   restoreWorkspace(options: { path: string }): Promise<ElectronWorkspaceHandle>;
@@ -648,10 +726,27 @@ function buildCharacterTranslationSystemPrompt(additionalPrompt: string) {
 const MAX_HEARTBEAT_INTERVAL_MINUTES = 24 * 60;
 const MAX_MULTI_AGENT_ROUNDS = 20;
 const DEFAULT_CHAT_PERSONALIZATION: ChatPersonalizationSettings = {
+  messageFontFamily: "system",
+  messageFontSize: 16,
   quoteStyleEnabled: false,
   quoteStyleColor: "#E18A24",
   italicStyleEnabled: false,
   italicStyleColor: "#808080",
+  wallpaperMaskOpacity: 70,
+  bubbleOpacity: 100,
+};
+const CHAT_MESSAGE_FONT_OPTIONS: Array<{
+  value: ChatMessageFontFamily;
+  label: string;
+}> = [
+  { value: "system", label: "系统默认" },
+  { value: "lxgw-wenkai-screen", label: "LXGW WenKai Screen" },
+];
+const CHAT_ASSISTANT_BUBBLE_OPACITY_STYLE: CSSProperties = {
+  backgroundColor: "rgba(255, 255, 255, var(--chat-bubble-opacity, 1))",
+};
+const CHAT_USER_BUBBLE_OPACITY_STYLE: CSSProperties = {
+  backgroundColor: "rgba(149, 236, 105, var(--chat-bubble-opacity, 1))",
 };
 const VOLCENGINE_CODING_PLAN_NAME = "火山方舟 Coding Plan";
 const VOLCENGINE_CODING_PLAN_API_BASE_URL = "https://ark.cn-beijing.volces.com/api/coding/v3";
@@ -1270,10 +1365,36 @@ function normalizePersonalizationColor(value: unknown, fallback: string) {
     : fallback;
 }
 
+function normalizePersonalizationOpacity(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? clamp(Math.round(value), 0, 100)
+    : fallback;
+}
+
+function normalizeChatMessageFontFamily(value: unknown): ChatMessageFontFamily {
+  return value === "lxgw-wenkai-screen" || value === "LXGW WenKai Screen"
+    ? "lxgw-wenkai-screen"
+    : "system";
+}
+
+function normalizeChatMessageFontSize(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? clamp(Math.round(value), 12, 24)
+    : DEFAULT_CHAT_PERSONALIZATION.messageFontSize;
+}
+
+function getChatMessageFontFamily(fontFamily: ChatMessageFontFamily) {
+  return fontFamily === "lxgw-wenkai-screen"
+    ? '"LXGW WenKai Screen", "Microsoft YaHei", "PingFang SC", sans-serif'
+    : 'Inter, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif';
+}
+
 function normalizeChatPersonalization(
   rawSettings?: Partial<ChatPersonalizationSettings> | null,
 ): ChatPersonalizationSettings {
   return {
+    messageFontFamily: normalizeChatMessageFontFamily(rawSettings?.messageFontFamily),
+    messageFontSize: normalizeChatMessageFontSize(rawSettings?.messageFontSize),
     quoteStyleEnabled:
       typeof rawSettings?.quoteStyleEnabled === "boolean"
         ? rawSettings.quoteStyleEnabled
@@ -1289,6 +1410,14 @@ function normalizeChatPersonalization(
     italicStyleColor: normalizePersonalizationColor(
       rawSettings?.italicStyleColor,
       DEFAULT_CHAT_PERSONALIZATION.italicStyleColor,
+    ),
+    wallpaperMaskOpacity: normalizePersonalizationOpacity(
+      rawSettings?.wallpaperMaskOpacity,
+      DEFAULT_CHAT_PERSONALIZATION.wallpaperMaskOpacity,
+    ),
+    bubbleOpacity: normalizePersonalizationOpacity(
+      rawSettings?.bubbleOpacity,
+      DEFAULT_CHAT_PERSONALIZATION.bubbleOpacity,
     ),
   };
 }
@@ -1529,10 +1658,9 @@ function normalizeChatSession(rawSession: Partial<ChatSession>): ChatSession {
 
 function createRoleplayGreetingMessage(
   card: CharacterCard,
-  userName: string,
   greetingIndex = 0,
 ): ChatMessage | null {
-  const greetings = getCharacterCardGreetings(card, userName);
+  const greetings = getCharacterCardGreetings(card, "{{user}}");
   if (greetings.length === 0) return null;
   const safeIndex = Math.max(0, Math.min(greetingIndex, greetings.length - 1));
   return {
@@ -4726,6 +4854,34 @@ function getChatApiMessageText(message?: ChatApiMessage) {
     .join("\n");
 }
 
+function substituteUserNicknameMacro(value: string, nickname: string) {
+  const resolvedNickname = nickname.trim() || "用户";
+  return value.replace(/{{\s*user\s*}}/gi, () => resolvedNickname);
+}
+
+function substituteUserNicknameInApiMessages(
+  messages: ChatApiMessage[],
+  nickname: string,
+) {
+  return messages.map((message) => {
+    if (typeof message.content === "string") {
+      const content = substituteUserNicknameMacro(message.content, nickname);
+      return content === message.content ? message : { ...message, content };
+    }
+    if (!Array.isArray(message.content)) return message;
+
+    let changed = false;
+    const content = message.content.map((part) => {
+      if (part.type !== "text" || typeof part.text !== "string") return part;
+      const text = substituteUserNicknameMacro(part.text, nickname);
+      if (text === part.text) return part;
+      changed = true;
+      return { ...part, text };
+    });
+    return changed ? { ...message, content } : message;
+  });
+}
+
 function getReasoningTextFromValue(value: unknown): string {
   if (typeof value === "string") return value.trim();
   if (Array.isArray(value)) {
@@ -6916,10 +7072,270 @@ function getHorizontalDropPlacement(event: DragEvent<HTMLElement>): DragPlacemen
   return event.clientX < rect.left + rect.width / 2 ? "before" : "after";
 }
 
+type PersonalizationOpacityCardProps = {
+  title: string;
+  description: string;
+  label: string;
+  hint: string;
+  value: number;
+  previewVariable: "--chat-wallpaper-mask-opacity" | "--chat-bubble-opacity";
+  onCommit: (value: number) => void;
+};
+
+function PersonalizationOpacityCard({
+  title,
+  description,
+  label,
+  hint,
+  value,
+  previewVariable,
+  onCommit,
+}: PersonalizationOpacityCardProps) {
+  const [draftValue, setDraftValue] = useState(value);
+
+  useEffect(() => setDraftValue(value), [value]);
+
+  const readValue = (input: HTMLInputElement) =>
+    clamp(Number(input.value) || 0, 0, 100);
+
+  const previewValue = (nextValue: number) => {
+    setDraftValue(nextValue);
+    document.querySelectorAll<HTMLElement>(".chat-shell").forEach((chatShell) => {
+      chatShell.style.setProperty(previewVariable, String(nextValue / 100));
+    });
+  };
+
+  const commitValue = (input: HTMLInputElement) => {
+    const nextValue = readValue(input);
+    previewValue(nextValue);
+    if (nextValue !== value) onCommit(nextValue);
+  };
+
+  return (
+    <article className="personalization-style-card personalization-opacity-card">
+      <div className="personalization-opacity-heading">
+        <div>
+          <h3>{title}</h3>
+          <p>{description}</p>
+        </div>
+        <output>{draftValue}%</output>
+      </div>
+      <label className="personalization-range-field">
+        <span>{label}</span>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={5}
+          value={draftValue}
+          onChange={(event) => previewValue(readValue(event.currentTarget))}
+          onPointerUp={(event) => commitValue(event.currentTarget)}
+          onPointerCancel={(event) => commitValue(event.currentTarget)}
+          onKeyUp={(event) => commitValue(event.currentTarget)}
+          onBlur={(event) => commitValue(event.currentTarget)}
+        />
+        <small>{hint}</small>
+      </label>
+    </article>
+  );
+}
+
+type PortfolioDesktopWindowProps = {
+  title: string;
+  bodyClassName: string;
+  statusPrimary: string;
+  statusSecondary: string;
+  statusReady?: boolean;
+  bodyStyle?: CSSProperties;
+  zIndex: number;
+  minimized: boolean;
+  maximized: boolean;
+  initialOffset: WindowOffset;
+  onClose: () => void;
+  onActivate: () => void;
+  onMinimize: () => void;
+  onToggleMaximize: () => void;
+  children: ReactNode;
+};
+
+function PortfolioDesktopWindow({
+  title,
+  bodyClassName,
+  statusPrimary,
+  statusSecondary,
+  statusReady = true,
+  bodyStyle,
+  zIndex,
+  minimized,
+  maximized,
+  initialOffset,
+  onClose,
+  onActivate,
+  onMinimize,
+  onToggleMaximize,
+  children,
+}: PortfolioDesktopWindowProps) {
+  const windowRef = useRef<HTMLElement | null>(null);
+  const titleDragHandlers = useWindowDrag({
+    targetRef: windowRef,
+    initialOffset,
+    disabled: maximized,
+  });
+  return (
+    <main
+      className={`portfolio-desktop-shell managed-window-layer ${
+        minimized ? "is-minimized" : ""
+      } ${maximized ? "is-maximized" : ""}`}
+      style={{ zIndex }}
+      aria-hidden={minimized}
+    >
+      <div className="portfolio-desktop-background" aria-hidden="true" />
+      <div className="portfolio-desktop-shade" aria-hidden="true" />
+      <section
+        ref={windowRef}
+        className={`portfolio-window-shell ${maximized ? "managed-window-maximized" : ""}`}
+        aria-label={`Renge ${title}`}
+        style={{ transform: `translate3d(${initialOffset.x}px, ${initialOffset.y}px, 0)` }}
+        onPointerDownCapture={() => onActivate()}
+      >
+        <WindowResizeHandles
+          targetRef={windowRef}
+          minWidth={720}
+          minHeight={480}
+          disabled={maximized}
+        />
+        <header
+          className="portfolio-window-bar managed-window-drag-handle"
+          onDoubleClick={onToggleMaximize}
+          {...titleDragHandlers}
+        >
+          <div className="portfolio-window-lights">
+            <button
+              type="button"
+              className="portfolio-window-light close"
+              title="关闭窗口"
+              aria-label="关闭窗口"
+              onClick={onClose}
+            />
+            <button
+              type="button"
+              className="portfolio-window-light minimize"
+              title="最小化窗口"
+              aria-label="最小化窗口"
+              onClick={onMinimize}
+            />
+            <button
+              type="button"
+              className="portfolio-window-light maximize"
+              title={maximized ? "还原窗口" : "最大化窗口"}
+              aria-label={maximized ? "还原窗口" : "最大化窗口"}
+              onClick={onToggleMaximize}
+            />
+          </div>
+          <span className="portfolio-window-caption">Renge Agent Lab — {title}</span>
+          <div className="portfolio-window-status" title={statusSecondary}>
+            <span className={statusReady ? "ready" : "attention"} />
+            <strong>{statusPrimary}</strong>
+            <small>{statusSecondary}</small>
+          </div>
+        </header>
+        <div className={`portfolio-window-body ${bodyClassName}`} style={bodyStyle}>
+          {children}
+        </div>
+      </section>
+    </main>
+  );
+}
+
 export function App() {
-  const [view, setView] = useState<AppView>("home");
+  const [openWindows, setOpenWindows] = useState<ManagedWindowState[]>([]);
+  const topWindowZIndexRef = useRef(100);
+  const [desktopOverlayZIndex, setDesktopOverlayZIndex] = useState(50);
+  const windowSpawnIndexRef = useRef(0);
+  const settingsWindowRef = useRef<HTMLElement | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [mobilePromptPreviewOpen, setMobilePromptPreviewOpen] = useState(false);
+
+  const openWindow = useCallback((id: ModuleWindowId) => {
+    const zIndex = ++topWindowZIndexRef.current;
+    const spawnIndex = windowSpawnIndexRef.current++;
+    setOpenWindows((current) => {
+      const existing = current.find((windowState) => windowState.id === id);
+      if (existing) {
+        return current.map((windowState) =>
+          windowState.id === id
+            ? { ...windowState, minimized: false, zIndex }
+            : windowState,
+        );
+      }
+      const cascadeStep = spawnIndex % 5;
+      return [
+        ...current,
+        {
+          id,
+          minimized: false,
+          maximized: false,
+          zIndex,
+          initialOffset: {
+            x: (cascadeStep - 2) * 8,
+            y: (cascadeStep - 2) * 6,
+          },
+        },
+      ];
+    });
+    setMobileSidebarOpen(false);
+  }, []);
+
+  const activateWindow = useCallback((id: ModuleWindowId) => {
+    const zIndex = ++topWindowZIndexRef.current;
+    setOpenWindows((current) =>
+      current.map((windowState) =>
+        windowState.id === id ? { ...windowState, zIndex } : windowState,
+      ),
+    );
+  }, []);
+
+  const activateDesktopOverlay = useCallback(() => {
+    const zIndex = ++topWindowZIndexRef.current;
+    setDesktopOverlayZIndex(zIndex);
+  }, []);
+
+  const closeWindow = useCallback((id: ModuleWindowId) => {
+    setOpenWindows((current) => current.filter((windowState) => windowState.id !== id));
+  }, []);
+
+  const minimizeWindow = useCallback((id: ModuleWindowId) => {
+    setOpenWindows((current) =>
+      current.map((windowState) =>
+        windowState.id === id ? { ...windowState, minimized: true } : windowState,
+      ),
+    );
+    setMobileSidebarOpen(false);
+  }, []);
+
+  const toggleMaximizeWindow = useCallback((id: ModuleWindowId) => {
+    const zIndex = ++topWindowZIndexRef.current;
+    setOpenWindows((current) =>
+      current.map((windowState) =>
+        windowState.id === id
+          ? {
+              ...windowState,
+              minimized: false,
+              maximized: !windowState.maximized,
+              zIndex,
+            }
+          : windowState,
+      ),
+    );
+  }, []);
+  const settingsWindowState = openWindows.find(
+    (windowState) => windowState.id === "settings",
+  );
+  const settingsTitleDragHandlers = useWindowDrag({
+    targetRef: settingsWindowRef,
+    initialOffset: settingsWindowState?.initialOffset,
+    disabled: settingsWindowState?.maximized ?? false,
+  });
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("providers");
   const [providers, setProviders] = useState<ModelProviderChannel[]>(loadProviderChannels);
   const [activeProviderId, setActiveProviderId] = useState(() => {
@@ -7259,10 +7675,6 @@ export function App() {
     chatMessagesRef.current = nextMessages;
     setChatMessages(nextMessages);
   };
-
-  useEffect(() => {
-    setMobileSidebarOpen(false);
-  }, [view]);
 
   useEffect(() => {
     activeChatSessionIdRef.current = activeChatSessionId;
@@ -9544,6 +9956,37 @@ export function App() {
     () => scopedRoleplayCard,
     [scopedRoleplayCard],
   );
+  const chatVisualStyle = useMemo(
+    () =>
+      ({
+        "--chat-message-font-family": getChatMessageFontFamily(
+          chatPersonalization.messageFontFamily,
+        ),
+        "--chat-message-font-size": `${chatPersonalization.messageFontSize}px`,
+        "--chat-quote-color": chatPersonalization.quoteStyleColor,
+        "--chat-italic-color": chatPersonalization.italicStyleColor,
+        "--chat-wallpaper-mask-opacity":
+          chatPersonalization.wallpaperMaskOpacity / 100,
+        "--chat-bubble-opacity": chatPersonalization.bubbleOpacity / 100,
+      }) as CSSProperties,
+    [
+      chatPersonalization.bubbleOpacity,
+      chatPersonalization.italicStyleColor,
+      chatPersonalization.messageFontFamily,
+      chatPersonalization.messageFontSize,
+      chatPersonalization.quoteStyleColor,
+      chatPersonalization.wallpaperMaskOpacity,
+    ],
+  );
+  const chatWallpaperImageStyle = useMemo(
+    () =>
+      ({
+        backgroundImage: activeSessionRoleplayCard?.avatarDataUrl
+          ? `url("${activeSessionRoleplayCard.avatarDataUrl}")`
+          : "none",
+      }) as CSSProperties,
+    [activeSessionRoleplayCard?.avatarDataUrl],
+  );
   const activeRoleplayGreetings = useMemo(
     () =>
       activeSessionRoleplayCard
@@ -11515,7 +11958,6 @@ export function App() {
   ) => {
     const greeting = createRoleplayGreetingMessage(
       card,
-      userProfile.nickname.trim() || "用户",
       greetingIndex,
     );
     return {
@@ -11619,7 +12061,7 @@ export function App() {
     setEditingChatMessage(null);
     setChatMessageMenu(null);
     setChatStatus({ status: "idle", message: "" });
-    setView("chat");
+    openWindow("chat");
     const card = characterCardsRef.current.find(
       (candidate) => candidate.id === session.roleplayCharacterCardId,
     );
@@ -11659,7 +12101,7 @@ export function App() {
           (Date.parse(right.updatedAt) || 0) - (Date.parse(left.updatedAt) || 0),
       )[0];
     markCharacterCardUsed(card.id);
-    setView("chat");
+    openWindow("chat");
 
     if (existingSession) {
       void openChatSession(existingSession.id);
@@ -11689,7 +12131,6 @@ export function App() {
     const nextIndex = (activeRoleplayGreetingIndex + 1) % activeRoleplayGreetings.length;
     const greeting = createRoleplayGreetingMessage(
       activeSessionRoleplayCard,
-      userProfile.nickname.trim() || "用户",
       nextIndex,
     );
     if (!greeting) return;
@@ -11887,7 +12328,7 @@ export function App() {
     setProviders((current) => [...current, provider]);
     setActiveProviderId(provider.id);
     setSettingsTab("providers");
-    setView("settings");
+    openWindow("settings");
     setProviderPullState({ status: "idle", message: "" });
   };
 
@@ -11902,7 +12343,7 @@ export function App() {
     if (existingProvider) {
       setActiveProviderId(existingProvider.id);
       setSettingsTab("providers");
-      setView("settings");
+      openWindow("settings");
       setProviderPullState({ status: "idle", message: "" });
       return;
     }
@@ -11910,7 +12351,7 @@ export function App() {
     setProviders((current) => [...current, presetProvider]);
     setActiveProviderId(presetProvider.id);
     setSettingsTab("providers");
-    setView("settings");
+    openWindow("settings");
     setProviderPullState({ status: "idle", message: "" });
   };
 
@@ -11938,7 +12379,7 @@ export function App() {
     setMcpServers((current) => [...current, server]);
     setActiveMcpServerId(server.id);
     setSettingsTab("mcp");
-    setView("settings");
+    openWindow("settings");
     setMcpStatus({ status: "idle", message: "" });
   };
 
@@ -12079,7 +12520,7 @@ export function App() {
     });
     setSkillFolderPath("");
     setSettingsTab("skills");
-    setView("settings");
+    openWindow("settings");
   };
 
   const importSkillFolder = async (path?: string) => {
@@ -12195,7 +12636,7 @@ export function App() {
     setActiveSystemPromptId(promptProfile.id);
     setActiveSystemPromptIds((current) => [...current, promptProfile.id]);
     setSettingsTab("prompts");
-    setView("settings");
+    openWindow("settings");
   };
 
   const toggleSystemPromptSelection = (promptId: string) => {
@@ -14155,6 +14596,10 @@ export function App() {
   const renderChatReasoning = (reasoning: string | undefined, keyPrefix: string) => {
     const trimmedReasoning = reasoning?.trim();
     if (!chatReasoningVisible || !trimmedReasoning) return null;
+    const displayReasoning = substituteUserNicknameMacro(
+      trimmedReasoning,
+      userProfile.nickname,
+    );
 
     return (
       <details className="chat-reasoning" open>
@@ -14163,7 +14608,7 @@ export function App() {
           <strong>思维链</strong>
         </summary>
         <div className="chat-reasoning-body">
-          {renderMarkdownBlocks(trimmedReasoning, `${keyPrefix}-reasoning`)}
+          {renderMarkdownBlocks(displayReasoning, `${keyPrefix}-reasoning`)}
         </div>
       </details>
     );
@@ -14183,7 +14628,8 @@ export function App() {
       );
     }
 
-    const parts = parseChatContentParts(content);
+    const displayContent = substituteUserNicknameMacro(content, userProfile.nickname);
+    const parts = parseChatContentParts(displayContent);
     let htmlPreviewContext: HtmlPreviewContext | null = null;
     const htmlPreviewSessionId =
       (activeChatSession?.id ?? activeChatSessionId) || "no-session";
@@ -14647,6 +15093,10 @@ export function App() {
         onReasoningDelta?: (delta: string) => void;
       }) => {
         throwIfChatAborted(abortSignal);
+        const requestMessages = substituteUserNicknameInApiMessages(
+          messages,
+          userProfile.nickname,
+        );
         const response = await fetch("/api/chat/completions", {
           method: "POST",
           headers: {
@@ -14659,7 +15109,7 @@ export function App() {
             sessionId: activeChatSessionId,
             request: {
               model: requestModelId,
-              messages,
+              messages: requestMessages,
               ...(options.includeTools
                 ? {
                     tools: availableChatTools,
@@ -15527,6 +15977,10 @@ export function App() {
               }
             : undefined;
 
+      const requestMessages = substituteUserNicknameInApiMessages(
+        apiMessages,
+        userProfile.nickname,
+      );
       const response = await fetch("/api/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -15545,7 +15999,7 @@ export function App() {
             normalizedConfig.custom_include_headers,
           request: {
             model: requestModelId,
-            messages: apiMessages,
+            messages: requestMessages,
             ...(hasCustomApi
               ? {}
               : activeChatPresetRequestParameters ?? {
@@ -15954,6 +16408,10 @@ export function App() {
         onReasoningDelta?: (delta: string) => void;
       }) => {
         throwIfChatAborted(abortSignal);
+        const requestMessages = substituteUserNicknameInApiMessages(
+          messages,
+          userProfile.nickname,
+        );
         const response = await fetch("/api/chat/completions", {
           method: "POST",
           headers: {
@@ -15966,7 +16424,7 @@ export function App() {
             sessionId: activeChatSessionId,
             request: {
               model: requestModelId,
-              messages,
+              messages: requestMessages,
               ...(options.includeTools
                 ? {
                     tools: availableChatTools,
@@ -17159,224 +17617,64 @@ export function App() {
     return <div className="boot">正在初始化人格工作台...</div>;
   }
 
-  if (view === "home") {
-    return (
-      <main className="home-shell">
-        <header className="home-topbar">
-          <div className="brand home-brand">
-            <div className="brand-mark">
-              <Boxes size={22} />
-            </div>
-            <div>
-              <strong>Renge Agent Lab</strong>
-              <span>人格与智能体工作台</span>
-            </div>
-          </div>
-          <nav className="home-nav" aria-label="主要导航">
-            <button type="button" title="人格工作室" onClick={() => setView("studio")}>
-              <Bot size={16} />
-              人格工作室
-            </button>
-            <button type="button" title="角色卡管理器" onClick={() => setView("characters")}>
-              <BookOpen size={16} />
-              角色卡
-            </button>
-            <button type="button" title="扩展管理器" onClick={() => setView("extensions")}>
-              <Puzzle size={16} />
-              扩展
-            </button>
-            <button type="button" title="对话" onClick={() => setView("chat")}>
-              <MessageSquare size={16} />
-              对话
-            </button>
-            <button
-              type="button"
-              title="设置"
-              onClick={() => {
-                setSettingsTab("providers");
-                setView("settings");
-              }}
-            >
-              <Settings2 size={16} />
-              设置
-            </button>
-          </nav>
-        </header>
+  const createManagedWindowProps = (windowState: ManagedWindowState) => ({
+    zIndex: windowState.zIndex,
+    minimized: windowState.minimized,
+    maximized: windowState.maximized,
+    initialOffset: windowState.initialOffset,
+    onActivate: () => activateWindow(windowState.id),
+    onMinimize: () => minimizeWindow(windowState.id),
+    onToggleMaximize: () => toggleMaximizeWindow(windowState.id),
+    onClose: () => {
+      closeWindow(windowState.id);
+      closeMobileSidebar();
+    },
+  });
 
-        <section className="home-main">
-          <div className="home-heading">
-            <div>
-              <div className="eyebrow">工作台</div>
-              <h1>Agent 工作台</h1>
-            </div>
-            <div className="home-status-strip" aria-label="当前工作状态">
-              <span>
-                <UserRound size={15} />
-                {activePersona.name}
-              </span>
-              <span className={chatModelReady ? "ready" : "attention"}>
-                <Server size={15} />
-                {chatModelLabel}
-              </span>
-              <span>
-                <MessageSquare size={15} />
-                {chatSessions.length} 个会话
-              </span>
-            </div>
-          </div>
+  const desktopHome = (
+    <DesktopHome
+      activePersonaName={activePersona.name}
+      chatModelLabel={chatModelLabel}
+      chatModelReady={chatModelReady}
+      personaCount={personas.length}
+      characterCount={characterCards.length}
+      extensionCount={extensions.length}
+      enabledExtensionCount={extensions.filter((extension) => extension.enabled).length}
+      sessionCount={chatSessions.length}
+      overlayZIndex={desktopOverlayZIndex}
+      onOverlayActivate={activateDesktopOverlay}
+      recentSessions={recentChatSessions.map((session) => ({
+        id: session.id,
+        title: session.title,
+        workspaceName: session.workspaceName,
+        messageCount: session.messages.length,
+        updatedAt: session.updatedAt,
+      }))}
+      onNavigate={(destination) => {
+        if (destination === "settings") setSettingsTab("providers");
+        openWindow(destination);
+      }}
+      onOpenRecentSession={(sessionId) => {
+        void openChatSession(sessionId);
+        openWindow("chat");
+      }}
+    />
+  );
 
-          <div className="module-grid">
-            <article className="module-card">
-              <div className="module-icon">
-                <Bot size={24} />
-              </div>
-              <div className="module-card-copy">
-                <h2>人格工作室</h2>
-                <p>编辑人格档案、长期记忆、行为边界与类型化条目。</p>
-              </div>
-              <div className="module-meta">
-                <span>{personas.length} 个人格</span>
-                <span>{getEntryCount(activePersona)} 个当前条目</span>
-              </div>
-              <button type="button" className="home-primary-action" onClick={() => setView("studio")}>
-                <Pencil size={16} />
-                打开工作室
-              </button>
-            </article>
-
-            <article className="module-card character-module-card">
-              <div className="module-icon">
-                <BookOpen size={24} />
-              </div>
-              <div className="module-card-copy">
-                <h2>角色卡管理器</h2>
-                <p>导入、编辑、翻译和导出酒馆 PNG / JSON 角色卡。</p>
-              </div>
-              <div className="module-meta">
-                <span>{characterCards.length} 张角色卡</span>
-                <span>
-                  {characterCards.filter((card) => card.characterBook).length} 本内置世界书 · {characterCards.reduce((total, card) => total + card.regexScripts.length, 0)} 条私有正则 · {characterCards.reduce((total, card) => total + card.tavernScripts.length, 0)} 个内置脚本
-                </span>
-              </div>
-              <button
-                type="button"
-                className="home-primary-action"
-                onClick={() => setView("characters")}
-              >
-                <BookOpen size={16} />
-                打开管理器
-              </button>
-            </article>
-
-            <article className="module-card extension-module-card">
-              <div className="module-icon">
-                <Puzzle size={24} />
-              </div>
-              <div className="module-card-copy">
-                <h2>扩展管理器</h2>
-                <p>安装和运行酒馆扩展兼容层，为会话增加模板、变量和提示词处理能力。</p>
-              </div>
-              <div className="module-meta">
-                <span>{extensions.length} 个已安装扩展</span>
-                <span>{extensions.filter((extension) => extension.enabled).length} 个已启用</span>
-              </div>
-              <button
-                type="button"
-                className="home-primary-action"
-                onClick={() => setView("extensions")}
-              >
-                <Puzzle size={16} />
-                管理扩展
-              </button>
-            </article>
-
-            <article className="module-card">
-              <div className="module-icon">
-                <MessageSquare size={24} />
-              </div>
-              <div className="module-card-copy">
-                <h2>Codex Chat</h2>
-                <p>使用当前模型直接对话，或带着人格设定进入会话。</p>
-              </div>
-              <div className="module-meta">
-                <span>
-                  {chatMode === "persona"
-                    ? "人格 Agent"
-                    : chatMode === "multi"
-                      ? `${multiAgentPersonas.length} Agent 轮流`
-                      : chatMode === "roleplay"
-                        ? activeRoleplayCard
-                          ? `角色扮演 · ${activeRoleplayCard.name}`
-                          : "角色扮演"
-                      : "AI 直连"}
-                </span>
-                <span>{chatModelLabel}</span>
-              </div>
-              <button type="button" className="home-primary-action" onClick={() => setView("chat")}>
-                <MessageSquare size={16} />
-                开始对话
-              </button>
-            </article>
-          </div>
-
-          <section className="home-recent" aria-labelledby="recent-chat-title">
-            <div className="home-section-heading">
-              <div>
-                <div className="eyebrow">继续处理</div>
-                <h2 id="recent-chat-title">最近会话</h2>
-              </div>
-              <button type="button" onClick={() => setView("chat")}>
-                <MessageSquare size={15} />
-                查看全部
-              </button>
-            </div>
-            <div className="home-recent-list">
-              {recentChatSessions.map((session) => (
-                <button
-                  type="button"
-                  className="home-recent-item"
-                  key={session.id}
-                  onClick={() => {
-                    void openChatSession(session.id);
-                    setView("chat");
-                  }}
-                >
-                  <span className="home-recent-icon">
-                    <MessageSquare size={17} />
-                  </span>
-                  <span className="home-recent-copy">
-                    <strong>{session.title}</strong>
-                    <span>
-                      {session.workspaceName} · {session.messages.length} 条消息
-                    </span>
-                  </span>
-                  <time dateTime={session.updatedAt}>
-                    {new Date(session.updatedAt).toLocaleString("zh-CN", {
-                      month: "numeric",
-                      day: "numeric",
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
-                  </time>
-                </button>
-              ))}
-            </div>
-          </section>
-        </section>
-        {pcBrowserModal}
-      </main>
-    );
-  }
-
-  if (view === "extensions") {
-    return (
-      <main className="extension-manager-shell">
+  const extensionsWindowState = openWindows.find(
+    (windowState) => windowState.id === "extensions",
+  );
+  const extensionsWindow = extensionsWindowState ? (
+      <PortfolioDesktopWindow
+        title="扩展管理器"
+        bodyClassName="extension-manager-shell"
+        statusPrimary={`${extensions.length} 个扩展`}
+        statusSecondary={`${extensions.filter((extension) => extensionRuntimeStates[extension.id]?.status === "active").length} 个运行中`}
+        statusReady={extensionStatus.status !== "error"}
+        {...createManagedWindowProps(extensionsWindowState)}
+      >
         <header className="extension-manager-header">
           <div>
-            <button type="button" className="ghost-action" onClick={() => setView("home")}>
-              <ArrowLeft size={16} />
-              主页
-            </button>
             <div>
               <div className="eyebrow">SillyTavern Extensions</div>
               <h1>扩展管理器</h1>
@@ -17781,20 +18079,22 @@ export function App() {
             </div>
           )}
         </section>
-        {pcBrowserModal}
-      </main>
-    );
-  }
+      </PortfolioDesktopWindow>
+  ) : null;
 
-  if (view === "characters") {
-    return (
-      <main className="character-manager-shell">
+  const charactersWindowState = openWindows.find(
+    (windowState) => windowState.id === "characters",
+  );
+  const charactersWindow = charactersWindowState ? (
+      <PortfolioDesktopWindow
+        title="角色卡管理器"
+        bodyClassName="character-manager-shell"
+        statusPrimary={`${characterCards.length} 张角色卡`}
+        statusSecondary={activeRoleplayCard?.name ?? "角色资产库"}
+        {...createManagedWindowProps(charactersWindowState)}
+      >
         <header className="character-manager-header">
           <div>
-            <button type="button" className="ghost-action" onClick={() => setView("home")}>
-              <ArrowLeft size={16} />
-              主页
-            </button>
             <div>
               <div className="eyebrow">SillyTavern Character Cards</div>
               <h1>角色卡管理器</h1>
@@ -18425,7 +18725,7 @@ export function App() {
                                   setSelectedTavernScriptKey(`character:${editingCharacterCard.id}:${script.id}`);
                                   setEditingCharacterCardId("");
                                   setSettingsTab("scripts");
-                                  setView("settings");
+                                  openWindow("settings");
                                 }}
                               >
                                 <Settings2 size={14} />
@@ -18600,38 +18900,98 @@ export function App() {
             </section>
           </div>
         )}
-      </main>
-    );
-  }
+      </PortfolioDesktopWindow>
+  ) : null;
 
-  if (view === "settings") {
-    return (
-      <main className={`settings-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""}`}>
-        <button
-          type="button"
-          className="mobile-sidebar-toggle"
-          title="打开菜单"
-          aria-label="打开菜单"
-          onClick={openMobileSidebar}
+  const settingsWindow = settingsWindowState ? (
+      <main
+        className={`settings-shell settings-desktop managed-window-layer ${
+          mobileSidebarOpen ? "mobile-sidebar-open" : ""
+        } ${settingsWindowState.minimized ? "is-minimized" : ""} ${
+          settingsWindowState.maximized ? "is-maximized" : ""
+        }`}
+        style={{ zIndex: settingsWindowState.zIndex }}
+        aria-hidden={settingsWindowState.minimized}
+      >
+        <div className="settings-desktop-background" aria-hidden="true" />
+        <div className="settings-desktop-shade" aria-hidden="true" />
+        <section
+          ref={settingsWindowRef}
+          className={`settings-window-shell ${
+            settingsWindowState.maximized ? "managed-window-maximized" : ""
+          }`}
+          aria-label="Renge 系统设置"
+          style={{
+            transform: `translate3d(${settingsWindowState.initialOffset.x}px, ${settingsWindowState.initialOffset.y}px, 0)`,
+          }}
+          onPointerDownCapture={() => activateWindow("settings")}
         >
-          <Menu size={19} />
-        </button>
-        <aside className="settings-nav">
-          <button
-            type="button"
-            className="settings-back"
-            onClick={() => {
-              setView("home");
-              closeMobileSidebar();
-            }}
+          <WindowResizeHandles
+            targetRef={settingsWindowRef}
+            minWidth={720}
+            minHeight={480}
+            disabled={settingsWindowState.maximized}
+          />
+          <header
+            className="settings-window-bar managed-window-drag-handle"
+            onDoubleClick={() => toggleMaximizeWindow("settings")}
+            {...settingsTitleDragHandlers}
           >
-            <ArrowLeft size={16} />
-            主页
-          </button>
+            <div className="settings-window-lights">
+              <button
+                type="button"
+                className="settings-window-light close"
+                title="关闭设置窗口"
+                aria-label="关闭设置窗口"
+                onClick={() => {
+                  closeWindow("settings");
+                  closeMobileSidebar();
+                }}
+              />
+              <button
+                type="button"
+                className="settings-window-light minimize"
+                title="最小化设置窗口"
+                aria-label="最小化设置窗口"
+                onClick={() => minimizeWindow("settings")}
+              />
+              <button
+                type="button"
+                className="settings-window-light maximize"
+                title={settingsWindowState.maximized ? "还原设置窗口" : "最大化设置窗口"}
+                aria-label={settingsWindowState.maximized ? "还原设置窗口" : "最大化设置窗口"}
+                onClick={() => toggleMaximizeWindow("settings")}
+              />
+            </div>
+            <span className="settings-window-caption">Renge Agent Lab — 设置</span>
+            <div className="settings-window-status" title={chatModelLabel}>
+              <span className={chatModelReady ? "ready" : "attention"} />
+              <strong>{activePersona.name}</strong>
+              <small>{chatModelLabel}</small>
+            </div>
+          </header>
+
+          <div className="settings-window-body">
+            <button
+              type="button"
+              className="mobile-sidebar-toggle"
+              title="打开菜单"
+              aria-label="打开菜单"
+              onClick={openMobileSidebar}
+            >
+              <Menu size={19} />
+            </button>
+            <aside className="settings-nav">
           <div className="settings-title">
-            <Settings2 size={18} />
-            <strong>设置</strong>
+            <span className="settings-title-icon">
+              <img className="settings-title-image" src={settingsModuleIcon} alt="" />
+            </span>
+            <span className="settings-title-copy">
+              <strong>系统设置</strong>
+              <small>Renge Preferences</small>
+            </span>
           </div>
+          <div className="settings-nav-label">AI 与内容</div>
           <button
             type="button"
             className={`settings-tab ${settingsTab === "providers" ? "active" : ""}`}
@@ -18698,6 +19058,7 @@ export function App() {
             <Play size={16} />
             酒馆脚本
           </button>
+          <div className="settings-nav-label">个人</div>
           <button
             type="button"
             className={`settings-tab ${settingsTab === "user" ? "active" : ""}`}
@@ -18720,6 +19081,7 @@ export function App() {
             <Palette size={16} />
             个性化
           </button>
+          <div className="settings-nav-label">连接与设备</div>
           <button
             type="button"
             className={`settings-tab ${settingsTab === "mcp" ? "active" : ""}`}
@@ -18753,42 +19115,21 @@ export function App() {
             <Wrench size={16} />
             手机端
           </button>
-        </aside>
-        <button
-          type="button"
-          className="mobile-sidebar-backdrop"
-          title="关闭菜单"
-          aria-label="关闭菜单"
-          onClick={closeMobileSidebar}
-        />
+            </aside>
+            <button
+              type="button"
+              className="mobile-sidebar-backdrop"
+              title="关闭菜单"
+              aria-label="关闭菜单"
+              onClick={closeMobileSidebar}
+            />
 
-        <section className="settings-content">
+            <section className="settings-content">
           <header className="topbar">
-            <div>
-              <div className="eyebrow">系统设置</div>
-              <h1>
-                {settingsTab === "providers"
-                  ? "供应商渠道"
-                  : settingsTab === "prompts"
-                    ? "提示词"
-                    : settingsTab === "presets"
-                      ? "预设"
-                      : settingsTab === "worldbooks"
-                        ? "世界书"
-                        : settingsTab === "regexes"
-                          ? "正则后处理"
-                          : settingsTab === "scripts"
-                            ? "酒馆脚本"
-                            : settingsTab === "user"
-                              ? "用户资料"
-                              : settingsTab === "personalization"
-                                ? "个性化"
-                                : settingsTab === "mcp"
-                                  ? "MCP 服务器"
-                                  : settingsTab === "skills"
-                                    ? "Skills"
-                                    : "手机端"}
-              </h1>
+            <div className="settings-heading-copy">
+              <div className="eyebrow">{SETTINGS_TAB_META[settingsTab].eyebrow}</div>
+              <h1>{SETTINGS_TAB_META[settingsTab].title}</h1>
+              <p>{SETTINGS_TAB_META[settingsTab].description}</p>
             </div>
             {settingsTab === "providers" && (
               <div className="topbar-actions">
@@ -19216,7 +19557,7 @@ export function App() {
                 <div className="section-heading compact">
                   <div>
                     <h2>System Prompt</h2>
-                    <p>左侧勾选的多个提示词会按顺序组合，在 Codex Chat 发送时生效。</p>
+                    <p>左侧勾选的多个提示词会按顺序组合，在 Agent Chat 发送时生效。</p>
                   </div>
                   <button
                     type="button"
@@ -19246,7 +19587,7 @@ export function App() {
                     <textarea
                       className="system-prompt-textarea"
                       value={activeSystemPrompt.content}
-                      placeholder="输入会注入到 Codex Chat 的 System Prompt"
+                      placeholder="输入会注入到 Agent Chat 的 System Prompt"
                       onChange={(event) =>
                         updateSystemPrompt(activeSystemPrompt.id, {
                           content: event.target.value,
@@ -20846,6 +21187,10 @@ export function App() {
               } ${chatPersonalization.italicStyleEnabled ? "italic-style-enabled" : ""}`}
               style={
                 {
+                  "--chat-message-font-family": getChatMessageFontFamily(
+                    chatPersonalization.messageFontFamily,
+                  ),
+                  "--chat-message-font-size": `${chatPersonalization.messageFontSize}px`,
                   "--chat-quote-color": chatPersonalization.quoteStyleColor,
                   "--chat-italic-color": chatPersonalization.italicStyleColor,
                 } as CSSProperties
@@ -20854,11 +21199,73 @@ export function App() {
               <div className="section-heading compact">
                 <div>
                   <h2>聊天文字样式</h2>
-                  <p>为对话中的引用内容和斜体内容设置独立颜色。</p>
+                  <p>设置消息正文的字体与字号，并为引用和斜体内容设置独立颜色。</p>
                 </div>
               </div>
 
               <div className="personalization-style-list">
+                <article className="personalization-style-card personalization-font-card">
+                  <div className="personalization-font-heading">
+                    <h3>自定义消息字体</h3>
+                    <p>只调整聊天气泡内的消息正文，不影响应用界面、代码块和输入框。</p>
+                  </div>
+                  <div className="personalization-font-grid">
+                    <label className="field">
+                      <span>消息字体</span>
+                      <select
+                        value={chatPersonalization.messageFontFamily}
+                        onChange={(event) =>
+                          setChatPersonalization((current) => ({
+                            ...current,
+                            messageFontFamily: event.target.value as ChatMessageFontFamily,
+                          }))
+                        }
+                      >
+                        {CHAT_MESSAGE_FONT_OPTIONS.map((option) => (
+                          <option value={option.value} key={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="field">
+                      <span>消息字体大小（px）</span>
+                      <input
+                        type="number"
+                        min={12}
+                        max={24}
+                        step={1}
+                        defaultValue={chatPersonalization.messageFontSize}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") event.currentTarget.blur();
+                        }}
+                        onBlur={(event) => {
+                          const parsedSize = Number.parseInt(event.currentTarget.value, 10);
+                          const messageFontSize = Number.isFinite(parsedSize)
+                            ? clamp(parsedSize, 12, 24)
+                            : chatPersonalization.messageFontSize;
+                          event.currentTarget.value = String(messageFontSize);
+                          if (messageFontSize !== chatPersonalization.messageFontSize) {
+                            setChatPersonalization((current) => ({
+                              ...current,
+                              messageFontSize,
+                            }));
+                          }
+                        }}
+                      />
+                    </label>
+                  </div>
+                  <div className="personalization-font-preview" aria-label="消息字体预览">
+                    <span>消息字体预览</span>
+                    <p>「愿每一段对话，都保留属于角色自己的声音。」</p>
+                    <small>
+                      {chatPersonalization.messageFontSize}px · {CHAT_MESSAGE_FONT_OPTIONS.find(
+                        (option) => option.value === chatPersonalization.messageFontFamily,
+                      )?.label ?? "系统默认"}
+                    </small>
+                  </div>
+                </article>
+
                 <article className="personalization-style-card">
                   <div className="personalization-style-heading">
                     <label className="tool-toggle personalization-toggle">
@@ -20935,6 +21342,45 @@ export function App() {
                     {renderInlineText("*这是斜体文样式预览*")}
                   </div>
                 </article>
+              </div>
+
+              <div className="section-heading compact personalization-visual-heading">
+                <div>
+                  <h2>角色卡视觉效果</h2>
+                  <p>角色卡会话自动使用当前角色封面作为聊天背景，并可调节蒙版和气泡透明度。</p>
+                </div>
+              </div>
+
+              <div className="personalization-visual-list">
+                <PersonalizationOpacityCard
+                  title="角色卡壁纸设置"
+                  description="调整覆盖在角色封面背景上的浅色蒙版。"
+                  label="壁纸蒙版不透明度"
+                  hint="数值越低，角色封面越清晰；数值越高，消息内容越易读。"
+                  value={chatPersonalization.wallpaperMaskOpacity}
+                  previewVariable="--chat-wallpaper-mask-opacity"
+                  onCommit={(wallpaperMaskOpacity) =>
+                    setChatPersonalization((current) => ({
+                      ...current,
+                      wallpaperMaskOpacity,
+                    }))
+                  }
+                />
+
+                <PersonalizationOpacityCard
+                  title="消息气泡设置"
+                  description="调整用户消息和 AI 消息气泡的背景不透明度。"
+                  label="消息气泡不透明度"
+                  hint="降低数值可让角色封面透过气泡显示；0% 为完全透明。"
+                  value={chatPersonalization.bubbleOpacity}
+                  previewVariable="--chat-bubble-opacity"
+                  onCommit={(bubbleOpacity) =>
+                    setChatPersonalization((current) => ({
+                      ...current,
+                      bubbleOpacity,
+                    }))
+                  }
+                />
               </div>
             </section>
           )}
@@ -21402,25 +21848,26 @@ export function App() {
               </div>
             </section>
           )}
+            </section>
+          </div>
         </section>
-        {avatarCropModal}
-        {pcBrowserModal}
       </main>
-    );
-  }
+  ) : null;
 
-  if (view === "chat") {
-    return (
-      <main
-        className={`chat-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""} ${
+  const chatWindowState = openWindows.find(
+    (windowState) => windowState.id === "chat",
+  );
+  const chatWindow = chatWindowState ? (
+      <PortfolioDesktopWindow
+        title="对话工作区"
+        bodyClassName={`chat-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""} ${
           chatPersonalization.quoteStyleEnabled ? "quote-style-enabled" : ""
         } ${chatPersonalization.italicStyleEnabled ? "italic-style-enabled" : ""}`}
-        style={
-          {
-            "--chat-quote-color": chatPersonalization.quoteStyleColor,
-            "--chat-italic-color": chatPersonalization.italicStyleColor,
-          } as CSSProperties
-        }
+        bodyStyle={chatVisualStyle}
+        statusPrimary={activePersona.name}
+        statusSecondary={chatModelLabel}
+        statusReady={chatModelReady}
+        {...createManagedWindowProps(chatWindowState)}
       >
         <button
           type="button"
@@ -21432,30 +21879,6 @@ export function App() {
           <Menu size={19} />
         </button>
         <aside className="chat-sidebar">
-          <div className="module-nav">
-            <button
-              type="button"
-              onClick={() => {
-                setView("home");
-                closeMobileSidebar();
-              }}
-            >
-              <Home size={16} />
-              主页
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setSettingsTab("providers");
-                setView("settings");
-                closeMobileSidebar();
-              }}
-            >
-              <Settings2 size={16} />
-              设置
-            </button>
-          </div>
-
           <div className="chat-control-panel">
             <div className="chat-mode-toggle">
               <button
@@ -21683,7 +22106,17 @@ export function App() {
           onClick={closeMobileSidebar}
         />
 
-        <section className="chat-workspace">
+        <section
+          className={`chat-workspace ${
+            activeSessionRoleplayCard?.avatarDataUrl ? "has-character-wallpaper" : ""
+          }`}
+        >
+          {activeSessionRoleplayCard?.avatarDataUrl && (
+            <div className="chat-character-wallpaper" aria-hidden="true">
+              <div className="chat-character-wallpaper-image" style={chatWallpaperImageStyle} />
+              <div className="chat-character-wallpaper-mask" />
+            </div>
+          )}
           <header className="chat-header">
             <div>
               <h1>
@@ -21827,7 +22260,6 @@ export function App() {
                     chatMode === "roleplay" && activeSessionRoleplayCard
                       ? createRoleplayGreetingMessage(
                           activeSessionRoleplayCard,
-                          userProfile.nickname.trim() || "用户",
                           activeChatSession?.roleplayGreetingIndex ?? 0,
                         )
                       : null;
@@ -21899,7 +22331,7 @@ export function App() {
                       <button
                         type="button"
                         className="chat-empty-action"
-                        onClick={() => setView("characters")}
+                        onClick={() => openWindow("characters")}
                       >
                         <BookOpen size={16} />
                         导入角色卡
@@ -21930,7 +22362,7 @@ export function App() {
                         className="chat-empty-action"
                         onClick={() => {
                           setSettingsTab("providers");
-                          setView("settings");
+                          openWindow("settings");
                         }}
                       >
                         <Settings2 size={16} />
@@ -22093,6 +22525,13 @@ export function App() {
                         className={`chat-bubble ${isEditingMessage ? "editing" : ""} ${
                           showGreetingSwitch ? "roleplay-greeting-bubble" : ""
                         }`}
+                        style={
+                          isEditingMessage
+                            ? undefined
+                            : message.role === "user"
+                              ? CHAT_USER_BUBBLE_OPACITY_STYLE
+                              : CHAT_ASSISTANT_BUBBLE_OPACITY_STYLE
+                        }
                         onContextMenu={(event) =>
                           handleChatBubbleContextMenu(message.id, event)
                         }
@@ -22537,7 +22976,7 @@ export function App() {
                             </button>
                           ))
                         ) : (
-                          <button type="button" onClick={() => setView("characters")}>
+                          <button type="button" onClick={() => openWindow("characters")}>
                             <BookOpen size={15} />
                             <span>导入角色卡</span>
                           </button>
@@ -22694,13 +23133,20 @@ export function App() {
             </div>
           </section>
         </section>
-        {pcBrowserModal}
-      </main>
-    );
-  }
+      </PortfolioDesktopWindow>
+  ) : null;
 
-  return (
-    <main className={`app-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""}`}>
+  const studioWindowState = openWindows.find(
+    (windowState) => windowState.id === "studio",
+  );
+  const studioWindow = studioWindowState ? (
+    <PortfolioDesktopWindow
+      title="人格工作室"
+      bodyClassName={`app-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""}`}
+      statusPrimary={activePersona.name}
+      statusSecondary={`${getEntryCount(activePersona)} 个人格条目`}
+      {...createManagedWindowProps(studioWindowState)}
+    >
       <button
         type="button"
         className="mobile-sidebar-toggle"
@@ -22711,30 +23157,6 @@ export function App() {
         <Menu size={19} />
       </button>
       <aside className="sidebar">
-        <div className="module-nav">
-          <button
-            type="button"
-            onClick={() => {
-              setView("home");
-              closeMobileSidebar();
-            }}
-          >
-            <Home size={16} />
-            主页
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setSettingsTab("providers");
-              setView("settings");
-              closeMobileSidebar();
-            }}
-          >
-            <Settings2 size={16} />
-            设置
-          </button>
-        </div>
-
         <button
           className="primary-action"
           type="button"
@@ -22840,6 +23262,104 @@ export function App() {
           </div>
         </header>
 
+        <div className="kind-tabs studio-kind-tabs">
+          <button
+            type="button"
+            className={selectedTypeId === "all" ? "selected" : ""}
+            onClick={() => setSelectedTypeId("all")}
+          >
+            全部
+          </button>
+          {activeTypes.map((type) => (
+            <span
+              className={`kind-tab ${selectedTypeId === type.id ? "selected" : ""} ${
+                draggedTypeId === type.id ? "dragging" : ""
+              } ${
+                dragOverType?.typeId === type.id
+                  ? `drag-over ${dragOverType.placement}`
+                  : ""
+              }`}
+              key={type.id}
+              onDragOver={(event) => {
+                if (!draggedTypeId) return;
+                event.preventDefault();
+                setDragOverType({
+                  typeId: type.id,
+                  placement: getHorizontalDropPlacement(event),
+                });
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                if (draggedTypeId && dragOverType) {
+                  reorderEntryType(
+                    draggedTypeId,
+                    dragOverType.typeId,
+                    dragOverType.placement,
+                  );
+                }
+                setDraggedTypeId(null);
+                setDragOverType(null);
+              }}
+            >
+              <button
+                type="button"
+                className="type-drag-handle"
+                draggable
+                title="拖动类型排序"
+                onDragStart={(event) => {
+                  event.stopPropagation();
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("text/plain", type.id);
+                  setDraggedTypeId(type.id);
+                }}
+                onDragEnd={() => {
+                  setDraggedTypeId(null);
+                  setDragOverType(null);
+                }}
+              >
+                <GripHorizontal size={13} />
+              </button>
+              <button
+                type="button"
+                className="kind-tab-main"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setSelectedTypeId(type.id);
+                }}
+              >
+                {type.name}
+              </button>
+              <select
+                className="influence-select"
+                value={type.influence}
+                title={`${type.name} 影响等级`}
+                onChange={(event) =>
+                  updateEntryType(type.id, { influence: event.target.value as InfluenceLevel })
+                }
+              >
+                {influenceLevels.map((level) => (
+                  <option key={level} value={level}>
+                    {level}
+                  </option>
+                ))}
+              </select>
+              {activeTypes.length > 1 && (
+                <button
+                  type="button"
+                  className="kind-tab-remove"
+                  title={`删除类型 ${type.name}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    deleteEntryType(type.id);
+                  }}
+                >
+                  <X size={13} />
+                </button>
+              )}
+            </span>
+          ))}
+        </div>
+
         <div className="content-grid">
           <section className="editor-column">
             <div className="section-block">
@@ -22913,104 +23433,6 @@ export function App() {
                   <Plus size={16} />
                   添加类型
                 </button>
-              </div>
-
-              <div className="kind-tabs">
-                <button
-                  type="button"
-                  className={selectedTypeId === "all" ? "selected" : ""}
-                  onClick={() => setSelectedTypeId("all")}
-                >
-                  全部
-                </button>
-                {activeTypes.map((type) => (
-                  <span
-                    className={`kind-tab ${selectedTypeId === type.id ? "selected" : ""} ${
-                      draggedTypeId === type.id ? "dragging" : ""
-                    } ${
-                      dragOverType?.typeId === type.id
-                        ? `drag-over ${dragOverType.placement}`
-                        : ""
-                    }`}
-                    key={type.id}
-                    onDragOver={(event) => {
-                      if (!draggedTypeId) return;
-                      event.preventDefault();
-                      setDragOverType({
-                        typeId: type.id,
-                        placement: getHorizontalDropPlacement(event),
-                      });
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      if (draggedTypeId && dragOverType) {
-                        reorderEntryType(
-                          draggedTypeId,
-                          dragOverType.typeId,
-                          dragOverType.placement,
-                        );
-                      }
-                      setDraggedTypeId(null);
-                      setDragOverType(null);
-                    }}
-                  >
-                    <button
-                      type="button"
-                      className="type-drag-handle"
-                      draggable
-                      title="拖动类型排序"
-                      onDragStart={(event) => {
-                        event.stopPropagation();
-                        event.dataTransfer.effectAllowed = "move";
-                        event.dataTransfer.setData("text/plain", type.id);
-                        setDraggedTypeId(type.id);
-                      }}
-                      onDragEnd={() => {
-                        setDraggedTypeId(null);
-                        setDragOverType(null);
-                      }}
-                    >
-                      <GripHorizontal size={13} />
-                    </button>
-                    <button
-                      type="button"
-                      className="kind-tab-main"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setSelectedTypeId(type.id);
-                      }}
-                    >
-                      {type.name}
-                    </button>
-                    <select
-                      className="influence-select"
-                      value={type.influence}
-                      title={`${type.name} 影响等级`}
-                      onChange={(event) =>
-                        updateEntryType(type.id, { influence: event.target.value as InfluenceLevel })
-                      }
-                    >
-                      {influenceLevels.map((level) => (
-                        <option key={level} value={level}>
-                          {level}
-                        </option>
-                      ))}
-                    </select>
-                    {activeTypes.length > 1 && (
-                      <button
-                        type="button"
-                        className="kind-tab-remove"
-                        title={`删除类型 ${type.name}`}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          deleteEntryType(type.id);
-                        }}
-                      >
-                        <X size={13} />
-                      </button>
-                    )}
-                  </span>
-                ))}
               </div>
 
               <div className="entry-list">
@@ -23246,103 +23668,24 @@ export function App() {
           </section>
         </div>
       )}
+    </PortfolioDesktopWindow>
+  ) : null;
 
-      {avatarCrop && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="裁剪头像">
-          <section className="crop-modal">
-            <div className="crop-header">
-              <h2>裁剪头像</h2>
-              <button type="button" className="icon-button flat" title="关闭" onClick={closeAvatarCrop}>
-                <X size={18} />
-              </button>
-            </div>
-            <div className="crop-stage">
-              <img
-                src={avatarCrop.src}
-                alt="待裁剪头像"
-                style={{
-                  width: `${cropMetrics?.scaledWidth ?? CROP_PREVIEW_SIZE}px`,
-                  height: `${cropMetrics?.scaledHeight ?? CROP_PREVIEW_SIZE}px`,
-                  left: `${
-                    CROP_PREVIEW_SIZE / 2 +
-                    avatarCrop.offsetX -
-                    (cropMetrics?.scaledWidth ?? CROP_PREVIEW_SIZE) / 2
-                  }px`,
-                  top: `${
-                    CROP_PREVIEW_SIZE / 2 +
-                    avatarCrop.offsetY -
-                    (cropMetrics?.scaledHeight ?? CROP_PREVIEW_SIZE) / 2
-                  }px`,
-                }}
-              />
-            </div>
-            <div className="crop-controls">
-              <label className="field">
-                <span>缩放</span>
-                <input
-                  type="range"
-                  min="1"
-                  max="3"
-                  step="0.01"
-                  value={avatarCrop.zoom}
-                  onChange={(event) =>
-                    setAvatarCrop((current) =>
-                      current
-                        ? clampAvatarCrop({ ...current, zoom: Number(event.target.value) })
-                        : current,
-                    )
-                  }
-                />
-              </label>
-              <label className="field">
-                <span>水平位置</span>
-                <input
-                  type="range"
-                  min={-(cropMetrics?.maxOffsetX ?? 0)}
-                  max={cropMetrics?.maxOffsetX ?? 0}
-                  step="1"
-                  value={avatarCrop.offsetX}
-                  onChange={(event) =>
-                    setAvatarCrop((current) =>
-                      current
-                        ? clampAvatarCrop({ ...current, offsetX: Number(event.target.value) })
-                        : current,
-                    )
-                  }
-                />
-              </label>
-              <label className="field">
-                <span>垂直位置</span>
-                <input
-                  type="range"
-                  min={-(cropMetrics?.maxOffsetY ?? 0)}
-                  max={cropMetrics?.maxOffsetY ?? 0}
-                  step="1"
-                  value={avatarCrop.offsetY}
-                  onChange={(event) =>
-                    setAvatarCrop((current) =>
-                      current
-                        ? clampAvatarCrop({ ...current, offsetY: Number(event.target.value) })
-                        : current,
-                    )
-                  }
-                />
-              </label>
-            </div>
-            <div className="crop-actions">
-              <button type="button" className="ghost-action" onClick={closeAvatarCrop}>
-                取消
-              </button>
-              <button type="button" className="small-action" onClick={saveCroppedAvatar}>
-                <Check size={16} />
-                保存头像
-              </button>
-            </div>
-          </section>
+  return (
+    <>
+      {desktopHome}
+      {extensionsWindow}
+      {charactersWindow}
+      {settingsWindow}
+      {chatWindow}
+      {studioWindow}
+      {(avatarCropModal || pcBrowserModal) && (
+        <div className="managed-global-overlays portfolio-desktop-shell">
+          {avatarCropModal}
+          {pcBrowserModal}
         </div>
       )}
-      {pcBrowserModal}
-    </main>
+    </>
   );
 }
 
