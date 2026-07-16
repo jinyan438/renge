@@ -1658,10 +1658,9 @@ function normalizeChatSession(rawSession: Partial<ChatSession>): ChatSession {
 
 function createRoleplayGreetingMessage(
   card: CharacterCard,
-  userName: string,
   greetingIndex = 0,
 ): ChatMessage | null {
-  const greetings = getCharacterCardGreetings(card, userName);
+  const greetings = getCharacterCardGreetings(card, "{{user}}");
   if (greetings.length === 0) return null;
   const safeIndex = Math.max(0, Math.min(greetingIndex, greetings.length - 1));
   return {
@@ -4853,6 +4852,34 @@ function getChatApiMessageText(message?: ChatApiMessage) {
     .filter((part): part is Extract<ChatApiContentPart, { type: "text" }> => part.type === "text")
     .map((part) => part.text)
     .join("\n");
+}
+
+function substituteUserNicknameMacro(value: string, nickname: string) {
+  const resolvedNickname = nickname.trim() || "用户";
+  return value.replace(/{{\s*user\s*}}/gi, () => resolvedNickname);
+}
+
+function substituteUserNicknameInApiMessages(
+  messages: ChatApiMessage[],
+  nickname: string,
+) {
+  return messages.map((message) => {
+    if (typeof message.content === "string") {
+      const content = substituteUserNicknameMacro(message.content, nickname);
+      return content === message.content ? message : { ...message, content };
+    }
+    if (!Array.isArray(message.content)) return message;
+
+    let changed = false;
+    const content = message.content.map((part) => {
+      if (part.type !== "text" || typeof part.text !== "string") return part;
+      const text = substituteUserNicknameMacro(part.text, nickname);
+      if (text === part.text) return part;
+      changed = true;
+      return { ...part, text };
+    });
+    return changed ? { ...message, content } : message;
+  });
 }
 
 function getReasoningTextFromValue(value: unknown): string {
@@ -11931,7 +11958,6 @@ export function App() {
   ) => {
     const greeting = createRoleplayGreetingMessage(
       card,
-      userProfile.nickname.trim() || "用户",
       greetingIndex,
     );
     return {
@@ -12105,7 +12131,6 @@ export function App() {
     const nextIndex = (activeRoleplayGreetingIndex + 1) % activeRoleplayGreetings.length;
     const greeting = createRoleplayGreetingMessage(
       activeSessionRoleplayCard,
-      userProfile.nickname.trim() || "用户",
       nextIndex,
     );
     if (!greeting) return;
@@ -14571,6 +14596,10 @@ export function App() {
   const renderChatReasoning = (reasoning: string | undefined, keyPrefix: string) => {
     const trimmedReasoning = reasoning?.trim();
     if (!chatReasoningVisible || !trimmedReasoning) return null;
+    const displayReasoning = substituteUserNicknameMacro(
+      trimmedReasoning,
+      userProfile.nickname,
+    );
 
     return (
       <details className="chat-reasoning" open>
@@ -14579,7 +14608,7 @@ export function App() {
           <strong>思维链</strong>
         </summary>
         <div className="chat-reasoning-body">
-          {renderMarkdownBlocks(trimmedReasoning, `${keyPrefix}-reasoning`)}
+          {renderMarkdownBlocks(displayReasoning, `${keyPrefix}-reasoning`)}
         </div>
       </details>
     );
@@ -14599,7 +14628,8 @@ export function App() {
       );
     }
 
-    const parts = parseChatContentParts(content);
+    const displayContent = substituteUserNicknameMacro(content, userProfile.nickname);
+    const parts = parseChatContentParts(displayContent);
     let htmlPreviewContext: HtmlPreviewContext | null = null;
     const htmlPreviewSessionId =
       (activeChatSession?.id ?? activeChatSessionId) || "no-session";
@@ -15063,6 +15093,10 @@ export function App() {
         onReasoningDelta?: (delta: string) => void;
       }) => {
         throwIfChatAborted(abortSignal);
+        const requestMessages = substituteUserNicknameInApiMessages(
+          messages,
+          userProfile.nickname,
+        );
         const response = await fetch("/api/chat/completions", {
           method: "POST",
           headers: {
@@ -15075,7 +15109,7 @@ export function App() {
             sessionId: activeChatSessionId,
             request: {
               model: requestModelId,
-              messages,
+              messages: requestMessages,
               ...(options.includeTools
                 ? {
                     tools: availableChatTools,
@@ -15943,6 +15977,10 @@ export function App() {
               }
             : undefined;
 
+      const requestMessages = substituteUserNicknameInApiMessages(
+        apiMessages,
+        userProfile.nickname,
+      );
       const response = await fetch("/api/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -15961,7 +15999,7 @@ export function App() {
             normalizedConfig.custom_include_headers,
           request: {
             model: requestModelId,
-            messages: apiMessages,
+            messages: requestMessages,
             ...(hasCustomApi
               ? {}
               : activeChatPresetRequestParameters ?? {
@@ -16370,6 +16408,10 @@ export function App() {
         onReasoningDelta?: (delta: string) => void;
       }) => {
         throwIfChatAborted(abortSignal);
+        const requestMessages = substituteUserNicknameInApiMessages(
+          messages,
+          userProfile.nickname,
+        );
         const response = await fetch("/api/chat/completions", {
           method: "POST",
           headers: {
@@ -16382,7 +16424,7 @@ export function App() {
             sessionId: activeChatSessionId,
             request: {
               model: requestModelId,
-              messages,
+              messages: requestMessages,
               ...(options.includeTools
                 ? {
                     tools: availableChatTools,
@@ -22218,7 +22260,6 @@ export function App() {
                     chatMode === "roleplay" && activeSessionRoleplayCard
                       ? createRoleplayGreetingMessage(
                           activeSessionRoleplayCard,
-                          userProfile.nickname.trim() || "用户",
                           activeChatSession?.roleplayGreetingIndex ?? 0,
                         )
                       : null;
