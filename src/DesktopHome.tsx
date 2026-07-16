@@ -83,6 +83,16 @@ type ProjectSpec = {
 };
 
 type DragOffset = { x: number; y: number };
+type ProjectPosition = { x: number; y: number };
+type ProjectPositionLayout = "desktop" | "compact";
+type StoredProjectPositions = Partial<
+  Record<ProjectPositionLayout, Partial<Record<ProjectId, ProjectPosition>>>
+>;
+type DragCompletion = {
+  offset: DragOffset;
+  containerWidth: number;
+  containerHeight: number;
+};
 type ProjectSnapTarget = { id: string; x: number; y: number };
 type ProjectDragState = {
   active: boolean;
@@ -105,6 +115,58 @@ const PROJECT_ICON_CENTER_Y = 54;
 const PROJECT_SNAP_THRESHOLD = 14;
 const PROJECT_SNAP_RELEASE_THRESHOLD = 22;
 const PROJECT_SNAP_NEARBY_DISTANCE = 280;
+const PROJECT_POSITIONS_STORAGE_KEY = "renge.desktop.projectPositions.v1";
+
+function isStoredProjectPosition(value: unknown): value is ProjectPosition {
+  if (!value || typeof value !== "object") return false;
+  const position = value as Partial<ProjectPosition>;
+  return (
+    Number.isFinite(position.x) &&
+    Number.isFinite(position.y) &&
+    (position.x as number) >= -25 &&
+    (position.x as number) <= 125 &&
+    (position.y as number) >= -25 &&
+    (position.y as number) <= 125
+  );
+}
+
+function loadProjectPosition(projectId: ProjectId, layout: ProjectPositionLayout) {
+  if (typeof window === "undefined") return null;
+  try {
+    const rawValue = localStorage.getItem(PROJECT_POSITIONS_STORAGE_KEY);
+    if (!rawValue) return null;
+    const stored = JSON.parse(rawValue) as StoredProjectPositions;
+    const position = stored?.[layout]?.[projectId];
+    return isStoredProjectPosition(position) ? position : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveProjectPosition(
+  projectId: ProjectId,
+  layout: ProjectPositionLayout,
+  position: ProjectPosition,
+) {
+  if (typeof window === "undefined" || !isStoredProjectPosition(position)) return;
+  try {
+    const rawValue = localStorage.getItem(PROJECT_POSITIONS_STORAGE_KEY);
+    const parsed = rawValue ? (JSON.parse(rawValue) as unknown) : null;
+    const stored = parsed && typeof parsed === "object" ? (parsed as StoredProjectPositions) : {};
+    const layoutPositions =
+      stored[layout] && typeof stored[layout] === "object" ? stored[layout] : {};
+    const next: StoredProjectPositions = {
+      ...stored,
+      [layout]: {
+        ...layoutPositions,
+        [projectId]: position,
+      },
+    };
+    localStorage.setItem(PROJECT_POSITIONS_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // Storage may be unavailable in privacy-restricted browser contexts.
+  }
+}
 
 function useCompactViewport() {
   const [compact, setCompact] = useState(() =>
@@ -142,7 +204,13 @@ function useReducedMotion() {
   return reduced;
 }
 
-function useDraggable() {
+function useDraggable({
+  resetKey,
+  onDragComplete,
+}: {
+  resetKey: string;
+  onDragComplete: (completion: DragCompletion) => void;
+}) {
   const elementRef = useRef<HTMLDivElement | null>(null);
   const offsetRef = useRef<DragOffset>({ x: 0, y: 0 });
   const pendingOffsetRef = useRef<DragOffset>({ x: 0, y: 0 });
@@ -281,13 +349,27 @@ function useDraggable() {
     drag.snapXTargetId = null;
     drag.snapYTargetId = null;
     suppressClickRef.current = drag.distance >= 5;
-    offsetRef.current = pendingOffsetRef.current;
+    const completedOffset = { ...pendingOffsetRef.current };
+    offsetRef.current = completedOffset;
     const node = elementRef.current;
     if (node) {
       if (node.hasPointerCapture(event.pointerId)) node.releasePointerCapture(event.pointerId);
       node.style.willChange = "auto";
+      const containerRect = node.parentElement?.getBoundingClientRect();
+      if (
+        drag.distance >= 5 &&
+        containerRect &&
+        containerRect.width > 0 &&
+        containerRect.height > 0
+      ) {
+        onDragComplete({
+          offset: completedOffset,
+          containerWidth: containerRect.width,
+          containerHeight: containerRect.height,
+        });
+      }
     }
-  }, []);
+  }, [onDragComplete]);
 
   const consumeSuppressedClick = useCallback(() => {
     if (!suppressClickRef.current) return false;
@@ -301,6 +383,24 @@ function useDraggable() {
     },
     [],
   );
+
+  useEffect(() => {
+    const drag = dragRef.current;
+    const node = elementRef.current;
+    if (node && drag.active && node.hasPointerCapture(drag.pointerId)) {
+      node.releasePointerCapture(drag.pointerId);
+    }
+    drag.active = false;
+    drag.snapTargets = [];
+    drag.snapXTargetId = null;
+    drag.snapYTargetId = null;
+    offsetRef.current = { x: 0, y: 0 };
+    pendingOffsetRef.current = { x: 0, y: 0 };
+    if (node) {
+      node.style.transform = "translate3d(0,0,0)";
+      node.style.willChange = "auto";
+    }
+  }, [resetKey]);
 
   return {
     elementRef,
@@ -326,9 +426,23 @@ function ProjectCard({
   reducedMotion: boolean;
 }) {
   const [hovered, setHovered] = useState(false);
-  const drag = useDraggable();
-  const anchorX = compact ? compactPosition.x : project.anchorX;
-  const anchorY = compact ? compactPosition.y : project.anchorY;
+  const positionLayout: ProjectPositionLayout = compact ? "compact" : "desktop";
+  const storedPosition = useMemo(
+    () => loadProjectPosition(project.id, positionLayout),
+    [positionLayout, project.id],
+  );
+  const anchorX = storedPosition?.x ?? (compact ? compactPosition.x : project.anchorX);
+  const anchorY = storedPosition?.y ?? (compact ? compactPosition.y : project.anchorY);
+  const persistPosition = useCallback(
+    ({ offset, containerWidth, containerHeight }: DragCompletion) => {
+      saveProjectPosition(project.id, positionLayout, {
+        x: anchorX + (offset.x / containerWidth) * 100,
+        y: anchorY + (offset.y / containerHeight) * 100,
+      });
+    },
+    [anchorX, anchorY, positionLayout, project.id],
+  );
+  const drag = useDraggable({ resetKey: positionLayout, onDragComplete: persistPosition });
 
   const open = () => {
     if (!drag.consumeSuppressedClick()) onOpen();
