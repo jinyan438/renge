@@ -161,8 +161,9 @@ import {
   type PromptTemplateRuntimeOptions,
   type PromptTemplateStoredMessage,
 } from "./promptTemplateExtension";
-import { DesktopHome } from "./DesktopHome";
+import { DesktopHome, type HomeDestination } from "./DesktopHome";
 import { WindowResizeHandles } from "./WindowResizeHandles";
+import { useWindowDrag, type WindowOffset } from "./useWindowDrag";
 import settingsModuleIcon from "./assets/module-icons/settings.png";
 import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryType } from "./types";
 
@@ -192,7 +193,14 @@ type TypeDragTarget = {
   placement: DragPlacement;
 };
 
-type AppView = "home" | "studio" | "characters" | "extensions" | "settings" | "chat";
+type ModuleWindowId = HomeDestination;
+type ManagedWindowState = {
+  id: ModuleWindowId;
+  minimized: boolean;
+  maximized: boolean;
+  zIndex: number;
+  initialOffset: WindowOffset;
+};
 type SettingsTab = "providers" | "prompts" | "presets" | "worldbooks" | "regexes" | "scripts" | "user" | "personalization" | "mcp" | "skills" | "device";
 const SETTINGS_TAB_META: Record<
   SettingsTab,
@@ -6987,8 +6995,14 @@ type PortfolioDesktopWindowProps = {
   statusSecondary: string;
   statusReady?: boolean;
   bodyStyle?: CSSProperties;
+  zIndex: number;
+  minimized: boolean;
+  maximized: boolean;
+  initialOffset: WindowOffset;
   onClose: () => void;
-  overlays?: ReactNode;
+  onActivate: () => void;
+  onMinimize: () => void;
+  onToggleMaximize: () => void;
   children: ReactNode;
 };
 
@@ -6999,28 +7013,72 @@ function PortfolioDesktopWindow({
   statusSecondary,
   statusReady = true,
   bodyStyle,
+  zIndex,
+  minimized,
+  maximized,
+  initialOffset,
   onClose,
-  overlays,
+  onActivate,
+  onMinimize,
+  onToggleMaximize,
   children,
 }: PortfolioDesktopWindowProps) {
   const windowRef = useRef<HTMLElement | null>(null);
+  const titleDragHandlers = useWindowDrag({
+    targetRef: windowRef,
+    initialOffset,
+    disabled: maximized,
+  });
   return (
-    <main className="portfolio-desktop-shell">
+    <main
+      className={`portfolio-desktop-shell managed-window-layer ${
+        minimized ? "is-minimized" : ""
+      } ${maximized ? "is-maximized" : ""}`}
+      style={{ zIndex }}
+      aria-hidden={minimized}
+    >
       <div className="portfolio-desktop-background" aria-hidden="true" />
       <div className="portfolio-desktop-shade" aria-hidden="true" />
-      <section ref={windowRef} className="portfolio-window-shell" aria-label={`Renge ${title}`}>
-        <WindowResizeHandles targetRef={windowRef} minWidth={720} minHeight={480} />
-        <header className="portfolio-window-bar">
+      <section
+        ref={windowRef}
+        className={`portfolio-window-shell ${maximized ? "managed-window-maximized" : ""}`}
+        aria-label={`Renge ${title}`}
+        style={{ transform: `translate3d(${initialOffset.x}px, ${initialOffset.y}px, 0)` }}
+        onPointerDownCapture={() => onActivate()}
+      >
+        <WindowResizeHandles
+          targetRef={windowRef}
+          minWidth={720}
+          minHeight={480}
+          disabled={maximized}
+        />
+        <header
+          className="portfolio-window-bar managed-window-drag-handle"
+          onDoubleClick={onToggleMaximize}
+          {...titleDragHandlers}
+        >
           <div className="portfolio-window-lights">
             <button
               type="button"
               className="portfolio-window-light close"
-              title="关闭并返回主页"
-              aria-label="关闭并返回主页"
+              title="关闭窗口"
+              aria-label="关闭窗口"
               onClick={onClose}
             />
-            <span className="portfolio-window-light minimize" aria-hidden="true" />
-            <span className="portfolio-window-light maximize" aria-hidden="true" />
+            <button
+              type="button"
+              className="portfolio-window-light minimize"
+              title="最小化窗口"
+              aria-label="最小化窗口"
+              onClick={onMinimize}
+            />
+            <button
+              type="button"
+              className="portfolio-window-light maximize"
+              title={maximized ? "还原窗口" : "最大化窗口"}
+              aria-label={maximized ? "还原窗口" : "最大化窗口"}
+              onClick={onToggleMaximize}
+            />
           </div>
           <span className="portfolio-window-caption">Renge Agent Lab — {title}</span>
           <div className="portfolio-window-status" title={statusSecondary}>
@@ -7033,16 +7091,93 @@ function PortfolioDesktopWindow({
           {children}
         </div>
       </section>
-      {overlays}
     </main>
   );
 }
 
 export function App() {
-  const [view, setView] = useState<AppView>("home");
+  const [openWindows, setOpenWindows] = useState<ManagedWindowState[]>([]);
+  const topWindowZIndexRef = useRef(100);
+  const windowSpawnIndexRef = useRef(0);
   const settingsWindowRef = useRef<HTMLElement | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [mobilePromptPreviewOpen, setMobilePromptPreviewOpen] = useState(false);
+
+  const openWindow = useCallback((id: ModuleWindowId) => {
+    const zIndex = ++topWindowZIndexRef.current;
+    const spawnIndex = windowSpawnIndexRef.current++;
+    setOpenWindows((current) => {
+      const existing = current.find((windowState) => windowState.id === id);
+      if (existing) {
+        return current.map((windowState) =>
+          windowState.id === id
+            ? { ...windowState, minimized: false, zIndex }
+            : windowState,
+        );
+      }
+      const cascadeStep = spawnIndex % 5;
+      return [
+        ...current,
+        {
+          id,
+          minimized: false,
+          maximized: false,
+          zIndex,
+          initialOffset: {
+            x: (cascadeStep - 2) * 8,
+            y: (cascadeStep - 2) * 6,
+          },
+        },
+      ];
+    });
+    setMobileSidebarOpen(false);
+  }, []);
+
+  const activateWindow = useCallback((id: ModuleWindowId) => {
+    const zIndex = ++topWindowZIndexRef.current;
+    setOpenWindows((current) =>
+      current.map((windowState) =>
+        windowState.id === id ? { ...windowState, zIndex } : windowState,
+      ),
+    );
+  }, []);
+
+  const closeWindow = useCallback((id: ModuleWindowId) => {
+    setOpenWindows((current) => current.filter((windowState) => windowState.id !== id));
+  }, []);
+
+  const minimizeWindow = useCallback((id: ModuleWindowId) => {
+    setOpenWindows((current) =>
+      current.map((windowState) =>
+        windowState.id === id ? { ...windowState, minimized: true } : windowState,
+      ),
+    );
+    setMobileSidebarOpen(false);
+  }, []);
+
+  const toggleMaximizeWindow = useCallback((id: ModuleWindowId) => {
+    const zIndex = ++topWindowZIndexRef.current;
+    setOpenWindows((current) =>
+      current.map((windowState) =>
+        windowState.id === id
+          ? {
+              ...windowState,
+              minimized: false,
+              maximized: !windowState.maximized,
+              zIndex,
+            }
+          : windowState,
+      ),
+    );
+  }, []);
+  const settingsWindowState = openWindows.find(
+    (windowState) => windowState.id === "settings",
+  );
+  const settingsTitleDragHandlers = useWindowDrag({
+    targetRef: settingsWindowRef,
+    initialOffset: settingsWindowState?.initialOffset,
+    disabled: settingsWindowState?.maximized ?? false,
+  });
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("providers");
   const [providers, setProviders] = useState<ModelProviderChannel[]>(loadProviderChannels);
   const [activeProviderId, setActiveProviderId] = useState(() => {
@@ -7382,10 +7517,6 @@ export function App() {
     chatMessagesRef.current = nextMessages;
     setChatMessages(nextMessages);
   };
-
-  useEffect(() => {
-    setMobileSidebarOpen(false);
-  }, [view]);
 
   useEffect(() => {
     activeChatSessionIdRef.current = activeChatSessionId;
@@ -11742,7 +11873,7 @@ export function App() {
     setEditingChatMessage(null);
     setChatMessageMenu(null);
     setChatStatus({ status: "idle", message: "" });
-    setView("chat");
+    openWindow("chat");
     const card = characterCardsRef.current.find(
       (candidate) => candidate.id === session.roleplayCharacterCardId,
     );
@@ -11782,7 +11913,7 @@ export function App() {
           (Date.parse(right.updatedAt) || 0) - (Date.parse(left.updatedAt) || 0),
       )[0];
     markCharacterCardUsed(card.id);
-    setView("chat");
+    openWindow("chat");
 
     if (existingSession) {
       void openChatSession(existingSession.id);
@@ -12010,7 +12141,7 @@ export function App() {
     setProviders((current) => [...current, provider]);
     setActiveProviderId(provider.id);
     setSettingsTab("providers");
-    setView("settings");
+    openWindow("settings");
     setProviderPullState({ status: "idle", message: "" });
   };
 
@@ -12025,7 +12156,7 @@ export function App() {
     if (existingProvider) {
       setActiveProviderId(existingProvider.id);
       setSettingsTab("providers");
-      setView("settings");
+      openWindow("settings");
       setProviderPullState({ status: "idle", message: "" });
       return;
     }
@@ -12033,7 +12164,7 @@ export function App() {
     setProviders((current) => [...current, presetProvider]);
     setActiveProviderId(presetProvider.id);
     setSettingsTab("providers");
-    setView("settings");
+    openWindow("settings");
     setProviderPullState({ status: "idle", message: "" });
   };
 
@@ -12061,7 +12192,7 @@ export function App() {
     setMcpServers((current) => [...current, server]);
     setActiveMcpServerId(server.id);
     setSettingsTab("mcp");
-    setView("settings");
+    openWindow("settings");
     setMcpStatus({ status: "idle", message: "" });
   };
 
@@ -12202,7 +12333,7 @@ export function App() {
     });
     setSkillFolderPath("");
     setSettingsTab("skills");
-    setView("settings");
+    openWindow("settings");
   };
 
   const importSkillFolder = async (path?: string) => {
@@ -12318,7 +12449,7 @@ export function App() {
     setActiveSystemPromptId(promptProfile.id);
     setActiveSystemPromptIds((current) => [...current, promptProfile.id]);
     setSettingsTab("prompts");
-    setView("settings");
+    openWindow("settings");
   };
 
   const toggleSystemPromptSelection = (promptId: string) => {
@@ -17282,48 +17413,59 @@ export function App() {
     return <div className="boot">正在初始化人格工作台...</div>;
   }
 
-  if (view === "home") {
-    return (
-      <DesktopHome
-        activePersonaName={activePersona.name}
-        chatModelLabel={chatModelLabel}
-        chatModelReady={chatModelReady}
-        personaCount={personas.length}
-        characterCount={characterCards.length}
-        extensionCount={extensions.length}
-        enabledExtensionCount={extensions.filter((extension) => extension.enabled).length}
-        sessionCount={chatSessions.length}
-        recentSessions={recentChatSessions.map((session) => ({
-          id: session.id,
-          title: session.title,
-          workspaceName: session.workspaceName,
-          messageCount: session.messages.length,
-          updatedAt: session.updatedAt,
-        }))}
-        onNavigate={(destination) => {
-          if (destination === "settings") setSettingsTab("providers");
-          setView(destination);
-        }}
-        onOpenRecentSession={(sessionId) => {
-          void openChatSession(sessionId);
-          setView("chat");
-        }}
-      >
-        {pcBrowserModal}
-      </DesktopHome>
-    );
-  }
+  const createManagedWindowProps = (windowState: ManagedWindowState) => ({
+    zIndex: windowState.zIndex,
+    minimized: windowState.minimized,
+    maximized: windowState.maximized,
+    initialOffset: windowState.initialOffset,
+    onActivate: () => activateWindow(windowState.id),
+    onMinimize: () => minimizeWindow(windowState.id),
+    onToggleMaximize: () => toggleMaximizeWindow(windowState.id),
+    onClose: () => {
+      closeWindow(windowState.id);
+      closeMobileSidebar();
+    },
+  });
 
-  if (view === "extensions") {
-    return (
+  const desktopHome = (
+    <DesktopHome
+      activePersonaName={activePersona.name}
+      chatModelLabel={chatModelLabel}
+      chatModelReady={chatModelReady}
+      personaCount={personas.length}
+      characterCount={characterCards.length}
+      extensionCount={extensions.length}
+      enabledExtensionCount={extensions.filter((extension) => extension.enabled).length}
+      sessionCount={chatSessions.length}
+      recentSessions={recentChatSessions.map((session) => ({
+        id: session.id,
+        title: session.title,
+        workspaceName: session.workspaceName,
+        messageCount: session.messages.length,
+        updatedAt: session.updatedAt,
+      }))}
+      onNavigate={(destination) => {
+        if (destination === "settings") setSettingsTab("providers");
+        openWindow(destination);
+      }}
+      onOpenRecentSession={(sessionId) => {
+        void openChatSession(sessionId);
+        openWindow("chat");
+      }}
+    />
+  );
+
+  const extensionsWindowState = openWindows.find(
+    (windowState) => windowState.id === "extensions",
+  );
+  const extensionsWindow = extensionsWindowState ? (
       <PortfolioDesktopWindow
         title="扩展管理器"
         bodyClassName="extension-manager-shell"
         statusPrimary={`${extensions.length} 个扩展`}
         statusSecondary={`${extensions.filter((extension) => extensionRuntimeStates[extension.id]?.status === "active").length} 个运行中`}
         statusReady={extensionStatus.status !== "error"}
-        onClose={() => setView("home")}
-        overlays={pcBrowserModal}
+        {...createManagedWindowProps(extensionsWindowState)}
       >
         <header className="extension-manager-header">
           <div>
@@ -17732,17 +17874,18 @@ export function App() {
           )}
         </section>
       </PortfolioDesktopWindow>
-    );
-  }
+  ) : null;
 
-  if (view === "characters") {
-    return (
+  const charactersWindowState = openWindows.find(
+    (windowState) => windowState.id === "characters",
+  );
+  const charactersWindow = charactersWindowState ? (
       <PortfolioDesktopWindow
         title="角色卡管理器"
         bodyClassName="character-manager-shell"
         statusPrimary={`${characterCards.length} 张角色卡`}
         statusSecondary={activeRoleplayCard?.name ?? "角色资产库"}
-        onClose={() => setView("home")}
+        {...createManagedWindowProps(charactersWindowState)}
       >
         <header className="character-manager-header">
           <div>
@@ -18376,7 +18519,7 @@ export function App() {
                                   setSelectedTavernScriptKey(`character:${editingCharacterCard.id}:${script.id}`);
                                   setEditingCharacterCardId("");
                                   setSettingsTab("scripts");
-                                  setView("settings");
+                                  openWindow("settings");
                                 }}
                               >
                                 <Settings2 size={14} />
@@ -18552,32 +18695,67 @@ export function App() {
           </div>
         )}
       </PortfolioDesktopWindow>
-    );
-  }
+  ) : null;
 
-  if (view === "settings") {
-    return (
+  const settingsWindow = settingsWindowState ? (
       <main
-        className={`settings-shell settings-desktop ${mobileSidebarOpen ? "mobile-sidebar-open" : ""}`}
+        className={`settings-shell settings-desktop managed-window-layer ${
+          mobileSidebarOpen ? "mobile-sidebar-open" : ""
+        } ${settingsWindowState.minimized ? "is-minimized" : ""} ${
+          settingsWindowState.maximized ? "is-maximized" : ""
+        }`}
+        style={{ zIndex: settingsWindowState.zIndex }}
+        aria-hidden={settingsWindowState.minimized}
       >
         <div className="settings-desktop-background" aria-hidden="true" />
         <div className="settings-desktop-shade" aria-hidden="true" />
-        <section ref={settingsWindowRef} className="settings-window-shell" aria-label="Renge 系统设置">
-          <WindowResizeHandles targetRef={settingsWindowRef} minWidth={720} minHeight={480} />
-          <header className="settings-window-bar">
+        <section
+          ref={settingsWindowRef}
+          className={`settings-window-shell ${
+            settingsWindowState.maximized ? "managed-window-maximized" : ""
+          }`}
+          aria-label="Renge 系统设置"
+          style={{
+            transform: `translate3d(${settingsWindowState.initialOffset.x}px, ${settingsWindowState.initialOffset.y}px, 0)`,
+          }}
+          onPointerDownCapture={() => activateWindow("settings")}
+        >
+          <WindowResizeHandles
+            targetRef={settingsWindowRef}
+            minWidth={720}
+            minHeight={480}
+            disabled={settingsWindowState.maximized}
+          />
+          <header
+            className="settings-window-bar managed-window-drag-handle"
+            onDoubleClick={() => toggleMaximizeWindow("settings")}
+            {...settingsTitleDragHandlers}
+          >
             <div className="settings-window-lights">
               <button
                 type="button"
                 className="settings-window-light close"
-                title="关闭设置并返回主页"
-                aria-label="关闭设置并返回主页"
+                title="关闭设置窗口"
+                aria-label="关闭设置窗口"
                 onClick={() => {
-                  setView("home");
+                  closeWindow("settings");
                   closeMobileSidebar();
                 }}
               />
-              <span className="settings-window-light minimize" aria-hidden="true" />
-              <span className="settings-window-light maximize" aria-hidden="true" />
+              <button
+                type="button"
+                className="settings-window-light minimize"
+                title="最小化设置窗口"
+                aria-label="最小化设置窗口"
+                onClick={() => minimizeWindow("settings")}
+              />
+              <button
+                type="button"
+                className="settings-window-light maximize"
+                title={settingsWindowState.maximized ? "还原设置窗口" : "最大化设置窗口"}
+                aria-label={settingsWindowState.maximized ? "还原设置窗口" : "最大化设置窗口"}
+                onClick={() => toggleMaximizeWindow("settings")}
+              />
             </div>
             <span className="settings-window-caption">Renge Agent Lab — 设置</span>
             <div className="settings-window-status" title={chatModelLabel}>
@@ -21362,14 +21540,13 @@ export function App() {
             </section>
           </div>
         </section>
-        {avatarCropModal}
-        {pcBrowserModal}
       </main>
-    );
-  }
+  ) : null;
 
-  if (view === "chat") {
-    return (
+  const chatWindowState = openWindows.find(
+    (windowState) => windowState.id === "chat",
+  );
+  const chatWindow = chatWindowState ? (
       <PortfolioDesktopWindow
         title="对话工作区"
         bodyClassName={`chat-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""} ${
@@ -21384,11 +21561,7 @@ export function App() {
         statusPrimary={activePersona.name}
         statusSecondary={chatModelLabel}
         statusReady={chatModelReady}
-        onClose={() => {
-          setView("home");
-          closeMobileSidebar();
-        }}
-        overlays={pcBrowserModal}
+        {...createManagedWindowProps(chatWindowState)}
       >
         <button
           type="button"
@@ -21843,7 +22016,7 @@ export function App() {
                       <button
                         type="button"
                         className="chat-empty-action"
-                        onClick={() => setView("characters")}
+                        onClick={() => openWindow("characters")}
                       >
                         <BookOpen size={16} />
                         导入角色卡
@@ -21874,7 +22047,7 @@ export function App() {
                         className="chat-empty-action"
                         onClick={() => {
                           setSettingsTab("providers");
-                          setView("settings");
+                          openWindow("settings");
                         }}
                       >
                         <Settings2 size={16} />
@@ -22481,7 +22654,7 @@ export function App() {
                             </button>
                           ))
                         ) : (
-                          <button type="button" onClick={() => setView("characters")}>
+                          <button type="button" onClick={() => openWindow("characters")}>
                             <BookOpen size={15} />
                             <span>导入角色卡</span>
                           </button>
@@ -22639,19 +22812,18 @@ export function App() {
           </section>
         </section>
       </PortfolioDesktopWindow>
-    );
-  }
+  ) : null;
 
-  return (
+  const studioWindowState = openWindows.find(
+    (windowState) => windowState.id === "studio",
+  );
+  const studioWindow = studioWindowState ? (
     <PortfolioDesktopWindow
       title="人格工作室"
       bodyClassName={`app-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""}`}
       statusPrimary={activePersona.name}
       statusSecondary={`${getEntryCount(activePersona)} 个人格条目`}
-      onClose={() => {
-        setView("home");
-        closeMobileSidebar();
-      }}
+      {...createManagedWindowProps(studioWindowState)}
     >
       <button
         type="button"
@@ -23174,103 +23346,24 @@ export function App() {
           </section>
         </div>
       )}
+    </PortfolioDesktopWindow>
+  ) : null;
 
-      {avatarCrop && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="裁剪头像">
-          <section className="crop-modal">
-            <div className="crop-header">
-              <h2>裁剪头像</h2>
-              <button type="button" className="icon-button flat" title="关闭" onClick={closeAvatarCrop}>
-                <X size={18} />
-              </button>
-            </div>
-            <div className="crop-stage">
-              <img
-                src={avatarCrop.src}
-                alt="待裁剪头像"
-                style={{
-                  width: `${cropMetrics?.scaledWidth ?? CROP_PREVIEW_SIZE}px`,
-                  height: `${cropMetrics?.scaledHeight ?? CROP_PREVIEW_SIZE}px`,
-                  left: `${
-                    CROP_PREVIEW_SIZE / 2 +
-                    avatarCrop.offsetX -
-                    (cropMetrics?.scaledWidth ?? CROP_PREVIEW_SIZE) / 2
-                  }px`,
-                  top: `${
-                    CROP_PREVIEW_SIZE / 2 +
-                    avatarCrop.offsetY -
-                    (cropMetrics?.scaledHeight ?? CROP_PREVIEW_SIZE) / 2
-                  }px`,
-                }}
-              />
-            </div>
-            <div className="crop-controls">
-              <label className="field">
-                <span>缩放</span>
-                <input
-                  type="range"
-                  min="1"
-                  max="3"
-                  step="0.01"
-                  value={avatarCrop.zoom}
-                  onChange={(event) =>
-                    setAvatarCrop((current) =>
-                      current
-                        ? clampAvatarCrop({ ...current, zoom: Number(event.target.value) })
-                        : current,
-                    )
-                  }
-                />
-              </label>
-              <label className="field">
-                <span>水平位置</span>
-                <input
-                  type="range"
-                  min={-(cropMetrics?.maxOffsetX ?? 0)}
-                  max={cropMetrics?.maxOffsetX ?? 0}
-                  step="1"
-                  value={avatarCrop.offsetX}
-                  onChange={(event) =>
-                    setAvatarCrop((current) =>
-                      current
-                        ? clampAvatarCrop({ ...current, offsetX: Number(event.target.value) })
-                        : current,
-                    )
-                  }
-                />
-              </label>
-              <label className="field">
-                <span>垂直位置</span>
-                <input
-                  type="range"
-                  min={-(cropMetrics?.maxOffsetY ?? 0)}
-                  max={cropMetrics?.maxOffsetY ?? 0}
-                  step="1"
-                  value={avatarCrop.offsetY}
-                  onChange={(event) =>
-                    setAvatarCrop((current) =>
-                      current
-                        ? clampAvatarCrop({ ...current, offsetY: Number(event.target.value) })
-                        : current,
-                    )
-                  }
-                />
-              </label>
-            </div>
-            <div className="crop-actions">
-              <button type="button" className="ghost-action" onClick={closeAvatarCrop}>
-                取消
-              </button>
-              <button type="button" className="small-action" onClick={saveCroppedAvatar}>
-                <Check size={16} />
-                保存头像
-              </button>
-            </div>
-          </section>
+  return (
+    <>
+      {desktopHome}
+      {extensionsWindow}
+      {charactersWindow}
+      {settingsWindow}
+      {chatWindow}
+      {studioWindow}
+      {(avatarCropModal || pcBrowserModal) && (
+        <div className="managed-global-overlays portfolio-desktop-shell">
+          {avatarCropModal}
+          {pcBrowserModal}
         </div>
       )}
-      {pcBrowserModal}
-    </PortfolioDesktopWindow>
+    </>
   );
 }
 
