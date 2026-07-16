@@ -395,7 +395,11 @@ type UserProfile = {
   updatedAt: string;
 };
 
+type ChatMessageFontFamily = "system" | "lxgw-wenkai-screen";
+
 type ChatPersonalizationSettings = {
+  messageFontFamily: ChatMessageFontFamily;
+  messageFontSize: number;
   quoteStyleEnabled: boolean;
   quoteStyleColor: string;
   italicStyleEnabled: boolean;
@@ -722,6 +726,8 @@ function buildCharacterTranslationSystemPrompt(additionalPrompt: string) {
 const MAX_HEARTBEAT_INTERVAL_MINUTES = 24 * 60;
 const MAX_MULTI_AGENT_ROUNDS = 20;
 const DEFAULT_CHAT_PERSONALIZATION: ChatPersonalizationSettings = {
+  messageFontFamily: "system",
+  messageFontSize: 16,
   quoteStyleEnabled: false,
   quoteStyleColor: "#E18A24",
   italicStyleEnabled: false,
@@ -729,6 +735,13 @@ const DEFAULT_CHAT_PERSONALIZATION: ChatPersonalizationSettings = {
   wallpaperMaskOpacity: 70,
   bubbleOpacity: 100,
 };
+const CHAT_MESSAGE_FONT_OPTIONS: Array<{
+  value: ChatMessageFontFamily;
+  label: string;
+}> = [
+  { value: "system", label: "系统默认" },
+  { value: "lxgw-wenkai-screen", label: "LXGW WenKai Screen" },
+];
 const CHAT_ASSISTANT_BUBBLE_OPACITY_STYLE: CSSProperties = {
   backgroundColor: "rgba(255, 255, 255, var(--chat-bubble-opacity, 1))",
 };
@@ -1358,10 +1371,30 @@ function normalizePersonalizationOpacity(value: unknown, fallback: number) {
     : fallback;
 }
 
+function normalizeChatMessageFontFamily(value: unknown): ChatMessageFontFamily {
+  return value === "lxgw-wenkai-screen" || value === "LXGW WenKai Screen"
+    ? "lxgw-wenkai-screen"
+    : "system";
+}
+
+function normalizeChatMessageFontSize(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? clamp(Math.round(value), 12, 24)
+    : DEFAULT_CHAT_PERSONALIZATION.messageFontSize;
+}
+
+function getChatMessageFontFamily(fontFamily: ChatMessageFontFamily) {
+  return fontFamily === "lxgw-wenkai-screen"
+    ? '"LXGW WenKai Screen", "Microsoft YaHei", "PingFang SC", sans-serif'
+    : 'Inter, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif';
+}
+
 function normalizeChatPersonalization(
   rawSettings?: Partial<ChatPersonalizationSettings> | null,
 ): ChatPersonalizationSettings {
   return {
+    messageFontFamily: normalizeChatMessageFontFamily(rawSettings?.messageFontFamily),
+    messageFontSize: normalizeChatMessageFontSize(rawSettings?.messageFontSize),
     quoteStyleEnabled:
       typeof rawSettings?.quoteStyleEnabled === "boolean"
         ? rawSettings.quoteStyleEnabled
@@ -9899,6 +9932,10 @@ export function App() {
   const chatVisualStyle = useMemo(
     () =>
       ({
+        "--chat-message-font-family": getChatMessageFontFamily(
+          chatPersonalization.messageFontFamily,
+        ),
+        "--chat-message-font-size": `${chatPersonalization.messageFontSize}px`,
         "--chat-quote-color": chatPersonalization.quoteStyleColor,
         "--chat-italic-color": chatPersonalization.italicStyleColor,
         "--chat-wallpaper-mask-opacity":
@@ -9908,6 +9945,8 @@ export function App() {
     [
       chatPersonalization.bubbleOpacity,
       chatPersonalization.italicStyleColor,
+      chatPersonalization.messageFontFamily,
+      chatPersonalization.messageFontSize,
       chatPersonalization.quoteStyleColor,
       chatPersonalization.wallpaperMaskOpacity,
     ],
@@ -21106,6 +21145,10 @@ export function App() {
               } ${chatPersonalization.italicStyleEnabled ? "italic-style-enabled" : ""}`}
               style={
                 {
+                  "--chat-message-font-family": getChatMessageFontFamily(
+                    chatPersonalization.messageFontFamily,
+                  ),
+                  "--chat-message-font-size": `${chatPersonalization.messageFontSize}px`,
                   "--chat-quote-color": chatPersonalization.quoteStyleColor,
                   "--chat-italic-color": chatPersonalization.italicStyleColor,
                 } as CSSProperties
@@ -21114,11 +21157,73 @@ export function App() {
               <div className="section-heading compact">
                 <div>
                   <h2>聊天文字样式</h2>
-                  <p>为对话中的引用内容和斜体内容设置独立颜色。</p>
+                  <p>设置消息正文的字体与字号，并为引用和斜体内容设置独立颜色。</p>
                 </div>
               </div>
 
               <div className="personalization-style-list">
+                <article className="personalization-style-card personalization-font-card">
+                  <div className="personalization-font-heading">
+                    <h3>自定义消息字体</h3>
+                    <p>只调整聊天气泡内的消息正文，不影响应用界面、代码块和输入框。</p>
+                  </div>
+                  <div className="personalization-font-grid">
+                    <label className="field">
+                      <span>消息字体</span>
+                      <select
+                        value={chatPersonalization.messageFontFamily}
+                        onChange={(event) =>
+                          setChatPersonalization((current) => ({
+                            ...current,
+                            messageFontFamily: event.target.value as ChatMessageFontFamily,
+                          }))
+                        }
+                      >
+                        {CHAT_MESSAGE_FONT_OPTIONS.map((option) => (
+                          <option value={option.value} key={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="field">
+                      <span>消息字体大小（px）</span>
+                      <input
+                        type="number"
+                        min={12}
+                        max={24}
+                        step={1}
+                        defaultValue={chatPersonalization.messageFontSize}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") event.currentTarget.blur();
+                        }}
+                        onBlur={(event) => {
+                          const parsedSize = Number.parseInt(event.currentTarget.value, 10);
+                          const messageFontSize = Number.isFinite(parsedSize)
+                            ? clamp(parsedSize, 12, 24)
+                            : chatPersonalization.messageFontSize;
+                          event.currentTarget.value = String(messageFontSize);
+                          if (messageFontSize !== chatPersonalization.messageFontSize) {
+                            setChatPersonalization((current) => ({
+                              ...current,
+                              messageFontSize,
+                            }));
+                          }
+                        }}
+                      />
+                    </label>
+                  </div>
+                  <div className="personalization-font-preview" aria-label="消息字体预览">
+                    <span>消息字体预览</span>
+                    <p>「愿每一段对话，都保留属于角色自己的声音。」</p>
+                    <small>
+                      {chatPersonalization.messageFontSize}px · {CHAT_MESSAGE_FONT_OPTIONS.find(
+                        (option) => option.value === chatPersonalization.messageFontFamily,
+                      )?.label ?? "系统默认"}
+                    </small>
+                  </div>
+                </article>
+
                 <article className="personalization-style-card">
                   <div className="personalization-style-heading">
                     <label className="tool-toggle personalization-toggle">
