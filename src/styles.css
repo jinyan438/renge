@@ -108,6 +108,49 @@
   margin: -12px auto 18px;
 }
 
+.character-translation-settings {
+  display: grid;
+  max-width: 1320px;
+  gap: 12px;
+  margin: 0 auto 18px;
+  padding: 15px 16px;
+  border: 1px solid #cfe3d9;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
+}
+
+.character-translation-settings > header,
+.character-translation-settings > header > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.character-translation-settings > header > div > svg {
+  flex: 0 0 auto;
+  color: var(--color-brand-strong);
+}
+
+.character-translation-settings h2 {
+  margin: 0 0 2px;
+  font-size: 15px;
+}
+
+.character-translation-settings p,
+.character-translation-settings small {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.character-translation-settings textarea {
+  min-height: 88px;
+  resize: vertical;
+  line-height: 1.55;
+}
+
 .character-gallery {
   display: grid;
   max-width: 1320px;
@@ -649,6 +692,10 @@
   .character-manager-actions > button,
   .character-search {
     width: 100%;
+  }
+
+  .character-translation-settings {
+    padding: 13px;
   }
 
   .character-gallery {

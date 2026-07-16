@@ -610,6 +610,7 @@ const TAVERN_SCRIPTS_STORAGE_KEY = "renge_tavern_scripts";
 const TAVERN_GLOBAL_VARIABLES_STORAGE_KEY = "renge_tavern_global_variables";
 const CHARACTER_CARDS_STORAGE_KEY = "renge_character_cards";
 const ACTIVE_CHARACTER_CARD_STORAGE_KEY = "renge_active_character_card";
+const CHARACTER_TRANSLATION_PROMPT_STORAGE_KEY = "renge_character_translation_prompt";
 const USER_PROFILE_STORAGE_KEY = "renge_user_profile";
 const CHAT_SENDER_STORAGE_KEY = "renge_chat_sender";
 const CHAT_MULTI_BUBBLE_STORAGE_KEY = "renge_chat_multi_bubble_enabled";
@@ -629,6 +630,19 @@ const DEFAULT_WORKSPACE_NAME = "默认工作区";
 const CHAT_TIME_GROUP_MS = 5 * 60 * 1000;
 const DEFAULT_HEARTBEAT_INTERVAL_MINUTES = 5;
 const MIN_HEARTBEAT_INTERVAL_MINUTES = 1;
+
+function buildCharacterTranslationSystemPrompt(additionalPrompt: string) {
+  const normalizedAdditionalPrompt = additionalPrompt.trim();
+  return [
+    "你是专业的创作内容翻译。默认把输入 JSON 对象的每个字符串值翻译成自然、准确、符合角色语气的简体中文；保留键名、Markdown、HTML、变量、{{user}}、{{char}} 和专有格式。",
+    normalizedAdditionalPrompt
+      ? `用户追加的翻译要求：\n${normalizedAdditionalPrompt}`
+      : "",
+    "请综合以上要求处理所有字段。无论是否有追加要求，都只输出一个键名与输入一致的合法 JSON 对象，不要解释，也不要使用 Markdown 代码块。",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
 const MAX_HEARTBEAT_INTERVAL_MINUTES = 24 * 60;
 const MAX_MULTI_AGENT_ROUNDS = 20;
 const DEFAULT_CHAT_PERSONALIZATION: ChatPersonalizationSettings = {
@@ -7021,6 +7035,8 @@ export function App() {
     status: ProviderPullState;
     message: string;
   }>({ status: "idle", message: "" });
+  const [characterTranslationAdditionalPrompt, setCharacterTranslationAdditionalPrompt] =
+    useState(() => localStorage.getItem(CHARACTER_TRANSLATION_PROMPT_STORAGE_KEY) ?? "");
   const [characterTranslationPreview, setCharacterTranslationPreview] = useState<{
     cardId: string;
     items: Array<{
@@ -8217,6 +8233,13 @@ export function App() {
   }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataLoaded, characterCards, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
+    localStorage.setItem(
+      CHARACTER_TRANSLATION_PROMPT_STORAGE_KEY,
+      characterTranslationAdditionalPrompt,
+    );
+  }, [characterTranslationAdditionalPrompt]);
+
+  useEffect(() => {
     if (!appDataLoaded) return;
     syncPcConnectionToLocalStorage(pcServerUrl, pcTransferWorkspace);
   }, [appDataLoaded, pcServerUrl, pcTransferWorkspace]);
@@ -9326,8 +9349,9 @@ export function App() {
               messages: [
                 {
                   role: "system",
-                  content:
-                    "你是专业的创作内容翻译。把输入 JSON 对象的每个字符串值翻译成自然、准确、符合角色语气的简体中文；保留键名、Markdown、HTML、变量、{{user}}、{{char}} 和专有格式。只输出一个合法 JSON 对象，不要解释。",
+                  content: buildCharacterTranslationSystemPrompt(
+                    characterTranslationAdditionalPrompt,
+                  ),
                 },
                 { role: "user", content: JSON.stringify(source) },
               ],
@@ -17789,6 +17813,37 @@ export function App() {
           </div>
         )}
 
+        <section className="character-translation-settings" aria-labelledby="character-translation-settings-title">
+          <header>
+            <div>
+              <Languages size={18} />
+              <div>
+                <h2 id="character-translation-settings-title">角色卡翻译设置</h2>
+                <p>所有角色卡共用，输入后会自动保存在本机。</p>
+              </div>
+            </div>
+            {characterTranslationAdditionalPrompt && (
+              <button
+                type="button"
+                className="ghost-action"
+                onClick={() => setCharacterTranslationAdditionalPrompt("")}
+              >
+                清空
+              </button>
+            )}
+          </header>
+          <label className="field">
+            <span>追加翻译提示词（可选）</span>
+            <textarea
+              rows={3}
+              value={characterTranslationAdditionalPrompt}
+              placeholder="例如：角色名称保持原文；台词使用古风中文；不要翻译特定术语……"
+              onChange={(event) => setCharacterTranslationAdditionalPrompt(event.target.value)}
+            />
+            <small>点击角色卡的翻译按钮时，这些要求会自动追加到默认翻译规则中。</small>
+          </label>
+        </section>
+
         <section className="character-gallery" aria-label="角色卡列表">
           {filteredCharacterCards.length === 0 ? (
             <div className="character-gallery-empty">
@@ -17913,6 +17968,7 @@ export function App() {
                   <button
                     type="button"
                     className="ghost-action"
+                    disabled={characterTranslationState.status === "loading"}
                     onClick={() => void translateCharacterCard(editingCharacterCard)}
                   >
                     <Languages size={15} />
