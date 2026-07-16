@@ -169,6 +169,11 @@ import {
   splitChatAudioEmbeds,
   type ChatAudioEmbed,
 } from "./chatAudioUtils";
+import {
+  splitChatLiveStreamEmbeds,
+  type ChatLiveStreamEmbed,
+  type ChatLiveStreamTextItem,
+} from "./chatLiveStreamUtils";
 import settingsModuleIcon from "./assets/module-icons/settings.png";
 import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryType } from "./types";
 
@@ -1947,7 +1952,8 @@ type RenderedChatItem =
 type ChatContentPart =
   | { type: "text"; content: string }
   | { type: "code"; content: string; language: string; executable: boolean }
-  | ChatAudioEmbed;
+  | ChatAudioEmbed
+  | ChatLiveStreamEmbed;
 
 type HtmlPreviewContext = {
   currentMessageIndex: number;
@@ -3269,6 +3275,18 @@ function parsePlainChatContent(content: string): ChatContentPart[] {
     return parts;
   }
 
+  const liveStreamSegments = splitChatLiveStreamEmbeds(normalized);
+  if (liveStreamSegments.some((segment) => segment.type === "liveStream")) {
+    for (const segment of liveStreamSegments) {
+      if (segment.type === "liveStream") {
+        parts.push(segment);
+      } else {
+        parts.push(...parsePlainChatContent(segment.content));
+      }
+    }
+    return parts;
+  }
+
   const lines = normalized.split("\n");
   let textBuffer: string[] = [];
   let codeBuffer: string[] = [];
@@ -3376,7 +3394,9 @@ function parseGenericChatContentParts(content: string): ChatContentPart[] {
   }
 
   parts.push(...parsePlainChatContent(content.slice(cursor)));
-  return parts.filter((part) => part.type === "audio" || part.content.length > 0);
+  return parts.filter(
+    (part) => part.type === "audio" || part.type === "liveStream" || part.content.length > 0,
+  );
 }
 
 function parseFencedHtmlDocuments(content: string): ChatContentPart[] | null {
@@ -3430,7 +3450,9 @@ function parseFencedHtmlDocuments(content: string): ChatContentPart[] | null {
     cursor = root.closeEnd;
   });
   parts.push(...parseGenericChatContentParts(content.slice(cursor)));
-  return parts.filter((part) => part.type === "audio" || part.content.length > 0);
+  return parts.filter(
+    (part) => part.type === "audio" || part.type === "liveStream" || part.content.length > 0,
+  );
 }
 
 function parseChatContentParts(content: string): ChatContentPart[] {
@@ -4448,6 +4470,71 @@ function renderMarkdownBlocks(content: string, keyPrefix: string) {
   }
 
   return nodes;
+}
+
+function ChatLiveStreamPanel({ stream }: { stream: ChatLiveStreamEmbed }) {
+  const renderLaneItems = (
+    items: ChatLiveStreamTextItem[],
+    keyPrefix: string,
+    hidden = false,
+  ) => (
+    <div
+      className="chat-live-stream-marquee-group"
+      aria-hidden={hidden ? "true" : undefined}
+    >
+      {items.map((item, index) => (
+        <span
+          key={`${keyPrefix}-${index}`}
+          style={item.color ? { color: item.color } : undefined}
+        >
+          {item.text}
+        </span>
+      ))}
+    </div>
+  );
+
+  return (
+    <section className="chat-live-stream-panel" aria-label="直播弹幕">
+      <header className="chat-live-stream-stats">
+        <strong>【直播人数 👤：{stream.viewers}】</strong>
+        <strong>【直播热度 🔥：{stream.heat}】</strong>
+        <strong>【弹幕风向 📊：{stream.trend}】</strong>
+      </header>
+      {stream.superChat && (
+        <div className="chat-live-stream-super-chat">
+          <span>【SC {stream.superChat.amount} BY </span>
+          <strong style={stream.superChat.color ? { color: stream.superChat.color } : undefined}>
+            {stream.superChat.sender}
+            {stream.superChat.message ? `：${stream.superChat.message}` : ""}
+          </strong>
+          <span>】</span>
+        </div>
+      )}
+      {stream.lanes.length > 0 && (
+        <div className="chat-live-stream-marquees">
+          {stream.lanes.map((items, laneIndex) => {
+            const contentLength = items.reduce((total, item) => total + item.text.length, 0);
+            const duration = Math.max(16, Math.min(42, contentLength * 0.34));
+            return (
+              <div
+                className="chat-live-stream-marquee"
+                aria-label={items.map((item) => item.text).join("，")}
+                key={`live-stream-lane-${laneIndex}`}
+              >
+                <div
+                  className="chat-live-stream-marquee-track"
+                  style={{ animationDuration: `${duration}s` }}
+                >
+                  {renderLaneItems(items, `lane-${laneIndex}-primary`)}
+                  {renderLaneItems(items, `lane-${laneIndex}-copy`, true)}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
 }
 
 function getWorkspaceInfo(
@@ -14755,6 +14842,15 @@ export function App() {
                   当前环境不支持音频播放，请使用右上角按钮打开音频地址。
                 </audio>
               </div>
+            );
+          }
+
+          if (part.type === "liveStream") {
+            return (
+              <ChatLiveStreamPanel
+                key={`${messageId}-live-stream-${partIndex}`}
+                stream={part}
+              />
             );
           }
 
