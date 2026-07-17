@@ -557,6 +557,15 @@ button.portfolio-window-light.close:hover {
   color: #005abf;
 }
 
+.portfolio-window-body .kind-tab.selected .kind-tab-influence {
+  border-color: rgba(0, 102, 221, 0.2);
+}
+
+.portfolio-window-body .selected-type-influence:focus-within {
+  border-color: rgba(0, 102, 221, 0.72);
+  box-shadow: 0 0 0 3px rgba(0, 102, 221, 0.12);
+}
+
 .portfolio-window-body .switch input:checked + span,
 .portfolio-window-body .tool-toggle input:checked {
   border-color: rgb(0, 102, 221);
