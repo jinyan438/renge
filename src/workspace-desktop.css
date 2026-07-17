@@ -666,6 +666,33 @@ button.portfolio-window-light.close:hover {
   color: #0f172a;
 }
 
+.portfolio-window-body .chat-choice-options button:hover:not(:disabled),
+.portfolio-window-body .chat-choice-options button:focus-visible,
+.portfolio-window-body .chat-choice-options button.selected {
+  border-color: rgba(0, 102, 221, 0.34);
+  color: #075bbd;
+  background: #edf5ff;
+  box-shadow: 0 5px 14px rgba(0, 102, 221, 0.08);
+}
+
+.portfolio-window-body .chat-choice-custom input:focus {
+  border-color: rgba(0, 102, 221, 0.62);
+  box-shadow: 0 0 0 3px rgba(0, 102, 221, 0.12);
+}
+
+.portfolio-window-body .chat-choice-custom button {
+  background: #0066dd;
+}
+
+.portfolio-window-body .chat-choice-custom button:hover:not(:disabled),
+.portfolio-window-body .chat-choice-custom button:focus-visible {
+  background: #075bbd;
+}
+
+.portfolio-window-body .chat-choice-status svg {
+  color: #0066dd;
+}
+
 .portfolio-window-body .chat-composer-box:focus-within {
   border-color: rgba(0, 102, 221, 0.72);
   box-shadow: 0 0 0 3px rgba(0, 102, 221, 0.12);

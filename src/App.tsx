@@ -364,6 +364,25 @@ type ChatAttachment = {
   createdAt: string;
 };
 
+type ChatChoiceOption = {
+  id: string;
+  label: string;
+  value: string;
+};
+
+type ChatChoiceResponse = {
+  value: string;
+  optionId?: string;
+  submittedAt: string;
+};
+
+type ChatChoiceRequest = {
+  id: string;
+  options: ChatChoiceOption[];
+  customPlaceholder: string;
+  response?: ChatChoiceResponse;
+};
+
 type ChatMessage = {
   id: string;
   role: ChatRole;
@@ -373,6 +392,7 @@ type ChatMessage = {
   sender?: ChatSenderIdentity;
   attachments?: ChatAttachment[];
   source?: "heartbeat" | "roleplay-greeting";
+  choiceRequest?: ChatChoiceRequest;
   variables?: Record<string, unknown>;
   extra?: Record<string, unknown>;
 };
@@ -742,6 +762,16 @@ type ChatToolCall = {
   function: {
     name: string;
     arguments: string;
+  };
+};
+
+type ChatToolCallDelta = {
+  index?: number;
+  id?: string;
+  type?: "function";
+  function?: {
+    name?: string;
+    arguments?: string;
   };
 };
 
@@ -1566,6 +1596,68 @@ function normalizeChatAttachment(rawAttachment: Partial<ChatAttachment>): ChatAt
   };
 }
 
+function normalizeChatChoiceOption(
+  rawOption: unknown,
+  index: number,
+): ChatChoiceOption | null {
+  const rawRecord = isObjectRecord(rawOption) ? rawOption : null;
+  const label = String(rawRecord?.label ?? rawOption ?? "").trim();
+  const value = String(rawRecord?.value ?? label).trim();
+  if (!label || !value) return null;
+
+  return {
+    id:
+      typeof rawRecord?.id === "string" && rawRecord.id.trim()
+        ? rawRecord.id.trim()
+        : `choice-${index + 1}`,
+    label,
+    value,
+  };
+}
+
+function normalizeChatChoiceRequest(rawRequest: unknown): ChatChoiceRequest | null {
+  if (!isObjectRecord(rawRequest) || !Array.isArray(rawRequest.options)) return null;
+
+  const seenValues = new Set<string>();
+  const options = rawRequest.options
+    .map((option, index) => normalizeChatChoiceOption(option, index))
+    .filter((option): option is ChatChoiceOption => {
+      if (!option || seenValues.has(option.value)) return false;
+      seenValues.add(option.value);
+      return true;
+    })
+    .slice(0, 12);
+  if (options.length === 0) return null;
+
+  const rawResponse = isObjectRecord(rawRequest.response) ? rawRequest.response : null;
+  const responseValue = String(rawResponse?.value ?? "").trim();
+  const response = responseValue
+    ? {
+        value: responseValue,
+        ...(typeof rawResponse?.optionId === "string" && rawResponse.optionId.trim()
+          ? { optionId: rawResponse.optionId.trim() }
+          : {}),
+        submittedAt:
+          typeof rawResponse?.submittedAt === "string" && rawResponse.submittedAt.trim()
+            ? rawResponse.submittedAt
+            : new Date().toISOString(),
+      }
+    : undefined;
+
+  return {
+    id:
+      typeof rawRequest.id === "string" && rawRequest.id.trim()
+        ? rawRequest.id.trim()
+        : crypto.randomUUID(),
+    options,
+    customPlaceholder:
+      typeof rawRequest.customPlaceholder === "string" && rawRequest.customPlaceholder.trim()
+        ? rawRequest.customPlaceholder.trim()
+        : "输入自定义回复",
+    ...(response ? { response } : {}),
+  };
+}
+
 function normalizeChatMessage(rawMessage: Partial<ChatMessage>): ChatMessage {
   const role = rawMessage.role === "assistant" ? "assistant" : "user";
   const attachments = Array.isArray(rawMessage.attachments)
@@ -1575,6 +1667,7 @@ function normalizeChatMessage(rawMessage: Partial<ChatMessage>): ChatMessage {
     : [];
 
   const normalizedSender = normalizeChatSenderIdentity(rawMessage.sender);
+  const choiceRequest = normalizeChatChoiceRequest(rawMessage.choiceRequest);
 
   return {
     id: rawMessage.id ?? crypto.randomUUID(),
@@ -1593,6 +1686,7 @@ function normalizeChatMessage(rawMessage: Partial<ChatMessage>): ChatMessage {
     ...(rawMessage.source === "heartbeat" || rawMessage.source === "roleplay-greeting"
       ? { source: rawMessage.source }
       : {}),
+    ...(role === "assistant" && choiceRequest ? { choiceRequest } : {}),
     ...(isObjectRecord(rawMessage.variables)
       ? { variables: normalizeTavernVariables(rawMessage.variables) }
       : {}),
@@ -5411,7 +5505,17 @@ function formatChatMessageForApi(
   } = {},
 ) {
   if (message.role !== "user") {
-    return message.content;
+    if (!message.choiceRequest) return message.content;
+    return [
+      message.content,
+      "【可选回复】",
+      ...message.choiceRequest.options.map(
+        (option, index) => `${index + 1}. ${option.value}`,
+      ),
+      "用户也可以输入自定义回复。",
+    ]
+      .filter(Boolean)
+      .join("\n");
   }
 
   const sender = message.sender ?? { kind: "user" as const };
@@ -5869,6 +5973,39 @@ const heartbeatToolDefinitions: ChatToolDefinition[] = [
   },
 ];
 
+const chatChoiceToolDefinitions: ChatToolDefinition[] = [
+  {
+    type: "function",
+    function: {
+      name: "chat_present_options",
+      description:
+        "在当前会话中向用户显示一组可点击的回复选项，并同时提供自定义输入框。适合需要用户在多个明确方案中选择或进行结构化澄清时调用；调用后应等待用户选择。",
+      parameters: {
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description: "显示在选项上方、直接面向用户的简短问题或说明。",
+          },
+          options: {
+            type: "array",
+            minItems: 2,
+            maxItems: 12,
+            items: { type: "string" },
+            description:
+              "2 到 12 个清晰、互斥且可直接作为用户下一条消息发送的选项文本。",
+          },
+          customPlaceholder: {
+            type: "string",
+            description: "自定义回复输入框的占位提示，可省略。",
+          },
+        },
+        required: ["prompt", "options"],
+      },
+    },
+  },
+];
+
 const multiAgentControlToolDefinitions: ChatToolDefinition[] = [
   {
     type: "function",
@@ -5896,6 +6033,41 @@ const multiAgentControlToolDefinitions: ChatToolDefinition[] = [
 
 function isSilentChatControlTool(toolName: string) {
   return toolName === "multi_agent_end_rounds";
+}
+
+function isChatChoiceToolName(toolName: string) {
+  return toolName === "chat_present_options";
+}
+
+function hasOnlyChatChoiceTools(tools: Array<{ function: { name: string } }>) {
+  return (
+    tools.length > 0 &&
+    tools.every((tool) => isChatChoiceToolName(tool.function.name))
+  );
+}
+
+function createChatChoiceRequestFromToolCall(toolCall: ChatToolCall) {
+  const args = parseToolCallArgs(toolCall);
+  const prompt = String(args.prompt ?? "").trim() || "请选择一个选项";
+  const rawOptions = Array.isArray(args.options) ? args.options : [];
+  const choiceRequest = normalizeChatChoiceRequest({
+    id: crypto.randomUUID(),
+    options: rawOptions,
+    customPlaceholder: String(args.customPlaceholder ?? "").trim() || "输入其他回复",
+  });
+  if (!choiceRequest || choiceRequest.options.length < 2) {
+    throw new Error("发送选项工具至少需要 2 个有效且不重复的选项。");
+  }
+  return { prompt, choiceRequest };
+}
+
+function buildChatChoiceSystemPrompt() {
+  return [
+    "你可以使用 chat_present_options 向用户发送可点击的回复选项。",
+    "当继续任务确实需要用户在两个或更多明确方案中决定，或结构化澄清能显著减少误解时，优先调用该工具；用户已经给出明确要求时不要调用，也不要把普通交流都改成选择题。",
+    "每个 options 项都应是用户点击后可直接作为下一条用户消息发送的完整文本。界面始终允许用户输入自定义回复，不要额外添加“其他”选项。",
+    "调用 chat_present_options 后立即结束当前回复并等待用户选择；不要在同一次回复中并行调用其他工具。",
+  ].join("\n");
 }
 
 function shouldExposeHeartbeatTools(content: string) {
@@ -6767,7 +6939,20 @@ function parseToolArguments(rawArguments: string) {
   }
 }
 
-function extractStreamContent(payload: unknown) {
+function appendStreamToolFragment(current: string, next: string) {
+  if (!next) return current;
+  if (!current || next.startsWith(current)) return next;
+  if (current.endsWith(next)) return current;
+  return `${current}${next}`;
+}
+
+function extractStreamContent(payload: unknown): {
+  content: string;
+  reasoning: string;
+  mode: "delta" | "cumulative";
+  toolCallDeltas?: ChatToolCallDelta[];
+  toolCalls?: ChatToolCall[];
+} {
   const streamPayload = payload as {
     choices?: Array<{
       delta?: {
@@ -6776,6 +6961,7 @@ function extractStreamContent(payload: unknown) {
         reasoning_content?: unknown;
         thinking?: unknown;
         thinking_content?: unknown;
+        tool_calls?: ChatToolCallDelta[];
       };
       message?: ChatApiMessage;
     }>;
@@ -6783,6 +6969,7 @@ function extractStreamContent(payload: unknown) {
   };
 
   const deltaContent = streamPayload.choices?.[0]?.delta?.content;
+  const deltaToolCalls = streamPayload.choices?.[0]?.delta?.tool_calls ?? [];
   const deltaReasoning = [
     streamPayload.choices?.[0]?.delta?.reasoning,
     streamPayload.choices?.[0]?.delta?.reasoning_content,
@@ -6793,27 +6980,33 @@ function extractStreamContent(payload: unknown) {
     .filter(Boolean)
     .join("\n")
     .trim();
-  if (deltaContent !== undefined) {
-    return { content: deltaContent, reasoning: deltaReasoning, mode: "delta" as const };
+  if (deltaContent !== undefined || deltaReasoning || deltaToolCalls.length > 0) {
+    return {
+      content: deltaContent ?? "",
+      reasoning: deltaReasoning,
+      mode: "delta",
+      ...(deltaToolCalls.length > 0 ? { toolCallDeltas: deltaToolCalls } : {}),
+    };
   }
-  if (deltaReasoning) return { content: "", reasoning: deltaReasoning, mode: "delta" as const };
 
   const message = streamPayload.choices?.[0]?.message;
   const cumulativeReasoning = message ? getChatApiMessageReasoning(message) : "";
   const cumulativeContent =
     (message ? getChatApiMessageText(message) : "") || streamPayload.output_text;
-  if (cumulativeContent !== undefined) {
+  if (
+    cumulativeContent !== undefined ||
+    cumulativeReasoning ||
+    (message?.tool_calls?.length ?? 0) > 0
+  ) {
     return {
-      content: cumulativeContent,
+      content: cumulativeContent ?? "",
       reasoning: cumulativeReasoning,
-      mode: "cumulative" as const,
+      mode: "cumulative",
+      ...(message?.tool_calls?.length ? { toolCalls: message.tool_calls } : {}),
     };
   }
-  if (cumulativeReasoning) {
-    return { content: "", reasoning: cumulativeReasoning, mode: "cumulative" as const };
-  }
 
-  return { content: "", reasoning: "", mode: "delta" as const };
+  return { content: "", reasoning: "", mode: "delta" };
 }
 
 function createChatAbortError() {
@@ -6864,7 +7057,11 @@ async function readChatStream(
     const streamContent = extractStreamContent(payload);
     if (streamContent.content) onDelta(streamContent.content);
     if (streamContent.reasoning) onReasoningDelta(streamContent.reasoning);
-    return { content: streamContent.content, reasoning: streamContent.reasoning };
+    return {
+      content: streamContent.content,
+      reasoning: streamContent.reasoning,
+      toolCalls: streamContent.toolCalls ?? [],
+    };
   }
 
   if (!response.body) throw new Error("流式响应为空");
@@ -6874,6 +7071,33 @@ async function readChatStream(
   let buffer = "";
   let fullContent = "";
   let fullReasoning = "";
+  const toolCallsByIndex = new Map<number, ChatToolCall>();
+
+  const applyToolCallDeltas = (deltas: ChatToolCallDelta[]) => {
+    deltas.forEach((delta, fallbackIndex) => {
+      const index = Number.isFinite(delta.index) ? Number(delta.index) : fallbackIndex;
+      const current = toolCallsByIndex.get(index) ?? {
+        id: delta.id || `stream-tool-call-${index}`,
+        type: "function" as const,
+        function: { name: "", arguments: "" },
+      };
+      toolCallsByIndex.set(index, {
+        id: delta.id || current.id,
+        type: "function",
+        function: {
+          name: appendStreamToolFragment(current.function.name, delta.function?.name ?? ""),
+          arguments: appendStreamToolFragment(
+            current.function.arguments,
+            delta.function?.arguments ?? "",
+          ),
+        },
+      });
+    });
+  };
+
+  const applyCompleteToolCalls = (toolCalls: ChatToolCall[]) => {
+    toolCalls.forEach((toolCall, index) => toolCallsByIndex.set(index, toolCall));
+  };
 
   while (true) {
     throwIfChatAborted(signal);
@@ -6897,6 +7121,12 @@ async function readChatStream(
 
         try {
           const streamContent = extractStreamContent(JSON.parse(data));
+          if (streamContent.toolCallDeltas) {
+            applyToolCallDeltas(streamContent.toolCallDeltas);
+          }
+          if (streamContent.toolCalls) {
+            applyCompleteToolCalls(streamContent.toolCalls);
+          }
           if (streamContent.reasoning) {
             if (streamContent.mode === "delta") {
               fullReasoning += streamContent.reasoning;
@@ -6931,7 +7161,14 @@ async function readChatStream(
     }
   }
 
-  return { content: fullContent, reasoning: fullReasoning };
+  return {
+    content: fullContent,
+    reasoning: fullReasoning,
+    toolCalls: Array.from(toolCallsByIndex.entries())
+      .sort(([left], [right]) => left - right)
+      .map(([, toolCall]) => toolCall)
+      .filter((toolCall) => toolCall.function.name),
+  };
 }
 
 function splitLocalPath(path = "") {
@@ -8201,6 +8438,7 @@ export function App() {
     messageId: string;
     content: string;
   } | null>(null);
+  const [chatChoiceDrafts, setChatChoiceDrafts] = useState<Record<string, string>>({});
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatSessions, setChatSessions] = useState<ChatSession[]>(loadChatSessions);
   const [activeChatSessionId, setActiveChatSessionId] = useState("");
@@ -8334,6 +8572,7 @@ export function App() {
 
   useEffect(() => {
     activeChatSessionIdRef.current = activeChatSessionId;
+    setChatChoiceDrafts({});
   }, [activeChatSessionId]);
 
   useEffect(() => {
@@ -15321,6 +15560,7 @@ export function App() {
       function: tool.function,
     }));
     return [
+      ...chatChoiceToolDefinitions,
       ...localTools,
       ...externalTools,
       ...(includeHeartbeatTools ? heartbeatToolDefinitions : []),
@@ -15916,6 +16156,11 @@ export function App() {
           ? buildLocalToolsSystemPrompt(localWorkspaceHandle)
           : "";
       const mcpToolsSystemPrompt = buildMcpToolsSystemPrompt(requestMcpTools);
+      const chatChoiceSystemPrompt = availableChatTools.some((tool) =>
+        isChatChoiceToolName(tool.function.name),
+      )
+        ? buildChatChoiceSystemPrompt()
+        : "";
       const heartbeatSystemPrompt = options.exposeHeartbeatTools
         ? buildHeartbeatSystemPrompt(activeChatSession?.heartbeat)
         : "";
@@ -15964,6 +16209,7 @@ export function App() {
         characterWorldBookSystemPrompt,
         toolSystemPrompt,
         mcpToolsSystemPrompt,
+        chatChoiceSystemPrompt,
         heartbeatSystemPrompt,
       ]
         .filter(Boolean)
@@ -16012,6 +16258,7 @@ export function App() {
       }
       let assistantContent = "";
       let assistantReasoning = "";
+      let assistantChoiceRequest: ChatChoiceRequest | undefined;
       let assistantMessageVariables: Record<string, unknown> = {};
       let hasVisibleToolResult = false;
       let pendingMcpObservationPrompt = "";
@@ -16069,6 +16316,7 @@ export function App() {
             payload: null,
             content: streamResult.content,
             reasoning: streamResult.reasoning,
+            toolCalls: streamResult.toolCalls,
           };
         }
 
@@ -16089,6 +16337,7 @@ export function App() {
           payload,
           content: "",
           reasoning: getChatCompletionPayloadReasoning(payload),
+          toolCalls: [] as ChatToolCall[],
         };
       };
       const appendStreamingAssistant = (delta: string) => {
@@ -16125,7 +16374,10 @@ export function App() {
           getChatApiMessageReasoning(assistantMessage) || reasoning || assistantReasoning;
         assistantContent =
           getChatApiMessageText(assistantMessage).trim() || payload?.output_text?.trim() || "";
-      } else if (chatStreamEnabled && availableChatTools.length === 0) {
+      } else if (
+        chatStreamEnabled &&
+        (availableChatTools.length === 0 || hasOnlyChatChoiceTools(availableChatTools))
+      ) {
         commitChatMessages((current) => [
           ...current,
           {
@@ -16142,13 +16394,21 @@ export function App() {
           message: options.streamingStatusMessage ?? "正在流式生成回复...",
         });
         const streamResult = await requestChatCompletion(apiMessages, {
-          includeTools: false,
+          includeTools: availableChatTools.length > 0,
           stream: true,
           onDelta: appendStreamingAssistant,
           onReasoningDelta: appendStreamingAssistantReasoning,
         });
         assistantContent = streamResult.content;
         assistantReasoning = streamResult.reasoning || assistantReasoning;
+        const choiceToolCall = streamResult.toolCalls.find((toolCall) =>
+          isChatChoiceToolName(toolCall.function.name),
+        );
+        if (choiceToolCall) {
+          const presentedChoice = createChatChoiceRequestFromToolCall(choiceToolCall);
+          assistantChoiceRequest = presentedChoice.choiceRequest;
+          assistantContent = streamResult.content.trim() || presentedChoice.prompt;
+        }
       } else {
         for (let toolRound = 0; toolRound < 99; toolRound += 1) {
           setChatStatus({
@@ -16177,6 +16437,17 @@ export function App() {
           const assistantMessageContent = getChatApiMessageText(assistantMessage).trim();
           const assistantMessageReasoning =
             getChatApiMessageReasoning(assistantMessage) || reasoning || "";
+          const choiceToolCall = toolCalls.find((toolCall) =>
+            isChatChoiceToolName(toolCall.function.name),
+          );
+          if (choiceToolCall) {
+            const presentedChoice = createChatChoiceRequestFromToolCall(choiceToolCall);
+            assistantChoiceRequest = presentedChoice.choiceRequest;
+            assistantContent =
+              assistantMessageContent || payload?.output_text?.trim() || presentedChoice.prompt;
+            assistantReasoning = assistantMessageReasoning;
+            break;
+          }
           if (hasSilentControlTool) {
             assistantContent = "";
             assistantReasoning = "";
@@ -16366,6 +16637,7 @@ export function App() {
           ? { variables: assistantMessageVariables }
           : {}),
         ...(assistantReasoning.trim() ? { reasoning: assistantReasoning.trim() } : {}),
+        ...(assistantChoiceRequest ? { choiceRequest: assistantChoiceRequest } : {}),
         ...(assistantSender ? { sender: assistantSender } : {}),
         createdAt: new Date().toISOString(),
       };
@@ -16392,7 +16664,12 @@ export function App() {
           ];
         });
       }
-      setChatStatus({ status: "success", message: options.successMessage ?? "回复已重新生成。" });
+      setChatStatus({
+        status: "success",
+        message: assistantChoiceRequest
+          ? "AI 正在等待你的选择。"
+          : options.successMessage ?? "回复已重新生成。",
+      });
       await emitTavernMessageEventNow(
         TAVERN_EVENTS.MESSAGE_RECEIVED,
         finalAssistantMessage.id,
@@ -16534,6 +16811,11 @@ export function App() {
           return false;
         }
         accumulatedMessages = [...accumulatedMessages, assistantMessage];
+        if (assistantMessage.choiceRequest) {
+          pendingMultiAgentEndRef.current = null;
+          setChatStatus({ status: "success", message: "AI 正在等待你的选择。" });
+          return true;
+        }
         const earlyEndRequest = pendingMultiAgentEndRef.current as {
           reason: string;
           evidence: string;
@@ -17225,6 +17507,11 @@ export function App() {
           ? buildLocalToolsSystemPrompt(localWorkspaceHandle)
           : "";
       const mcpToolsSystemPrompt = buildMcpToolsSystemPrompt(requestMcpTools);
+      const chatChoiceSystemPrompt = availableChatTools.some((tool) =>
+        isChatChoiceToolName(tool.function.name),
+      )
+        ? buildChatChoiceSystemPrompt()
+        : "";
       const heartbeatSystemPrompt = exposeHeartbeatTools
         ? buildHeartbeatSystemPrompt(activeChatSession?.heartbeat)
         : "";
@@ -17276,6 +17563,7 @@ export function App() {
         characterWorldBookSystemPrompt,
         toolSystemPrompt,
         mcpToolsSystemPrompt,
+        chatChoiceSystemPrompt,
         heartbeatSystemPrompt,
       ]
         .filter(Boolean)
@@ -17327,6 +17615,7 @@ export function App() {
       }
       let assistantContent = "";
       let assistantReasoning = "";
+      let assistantChoiceRequest: ChatChoiceRequest | undefined;
       let assistantMessageVariables: Record<string, unknown> = {};
       let hasVisibleToolResult = false;
       let pendingMcpObservationPrompt = "";
@@ -17384,6 +17673,7 @@ export function App() {
             payload: null,
             content: streamResult.content,
             reasoning: streamResult.reasoning,
+            toolCalls: streamResult.toolCalls,
           };
         }
 
@@ -17404,6 +17694,7 @@ export function App() {
           payload,
           content: "",
           reasoning: getChatCompletionPayloadReasoning(payload),
+          toolCalls: [] as ChatToolCall[],
         };
       };
       const appendStreamingAssistant = (delta: string) => {
@@ -17437,7 +17728,10 @@ export function App() {
           getChatApiMessageReasoning(assistantMessage) || reasoning || assistantReasoning;
         assistantContent =
           getChatApiMessageText(assistantMessage).trim() || payload?.output_text?.trim() || "";
-      } else if (chatStreamEnabled && availableChatTools.length === 0) {
+      } else if (
+        chatStreamEnabled &&
+        (availableChatTools.length === 0 || hasOnlyChatChoiceTools(availableChatTools))
+      ) {
         commitChatMessages((current) => [
           ...current,
           {
@@ -17450,13 +17744,21 @@ export function App() {
         streamingAssistantInserted = true;
         setChatStatus({ status: "loading", message: "正在流式生成回复..." });
         const streamResult = await requestChatCompletion(apiMessages, {
-          includeTools: false,
+          includeTools: availableChatTools.length > 0,
           stream: true,
           onDelta: appendStreamingAssistant,
           onReasoningDelta: appendStreamingAssistantReasoning,
         });
         assistantContent = streamResult.content;
         assistantReasoning = streamResult.reasoning || assistantReasoning;
+        const choiceToolCall = streamResult.toolCalls.find((toolCall) =>
+          isChatChoiceToolName(toolCall.function.name),
+        );
+        if (choiceToolCall) {
+          const presentedChoice = createChatChoiceRequestFromToolCall(choiceToolCall);
+          assistantChoiceRequest = presentedChoice.choiceRequest;
+          assistantContent = streamResult.content.trim() || presentedChoice.prompt;
+        }
       } else {
         for (let toolRound = 0; toolRound < 99; toolRound += 1) {
           setChatStatus({
@@ -17485,6 +17787,17 @@ export function App() {
           const assistantMessageContent = getChatApiMessageText(assistantMessage).trim();
           const assistantMessageReasoning =
             getChatApiMessageReasoning(assistantMessage) || reasoning || "";
+          const choiceToolCall = toolCalls.find((toolCall) =>
+            isChatChoiceToolName(toolCall.function.name),
+          );
+          if (choiceToolCall) {
+            const presentedChoice = createChatChoiceRequestFromToolCall(choiceToolCall);
+            assistantChoiceRequest = presentedChoice.choiceRequest;
+            assistantContent =
+              assistantMessageContent || payload?.output_text?.trim() || presentedChoice.prompt;
+            assistantReasoning = assistantMessageReasoning;
+            break;
+          }
           if (hasSilentControlTool) {
             assistantContent = "";
             assistantReasoning = "";
@@ -17667,6 +17980,7 @@ export function App() {
                     ? { variables: assistantMessageVariables }
                     : {}),
                   ...(assistantReasoning.trim() ? { reasoning: assistantReasoning.trim() } : {}),
+                  ...(assistantChoiceRequest ? { choiceRequest: assistantChoiceRequest } : {}),
                 }
               : message,
           ),
@@ -17686,12 +18000,16 @@ export function App() {
                 ? { variables: assistantMessageVariables }
                 : {}),
               ...(assistantReasoning.trim() ? { reasoning: assistantReasoning.trim() } : {}),
+              ...(assistantChoiceRequest ? { choiceRequest: assistantChoiceRequest } : {}),
               createdAt: new Date().toISOString(),
             },
           ];
         });
       }
-      setChatStatus({ status: "success", message: "回复已生成。" });
+      setChatStatus({
+        status: "success",
+        message: assistantChoiceRequest ? "AI 正在等待你的选择。" : "回复已生成。",
+      });
       await emitTavernMessageEventNow(
         TAVERN_EVENTS.MESSAGE_RECEIVED,
         assistantMessageId,
@@ -17730,6 +18048,135 @@ export function App() {
     }
   };
   sendChatMessageRef.current = sendChatMessage;
+
+  const respondToChatChoice = (
+    messageId: string,
+    value: string,
+    optionId?: string,
+  ) => {
+    const normalizedValue = value.trim();
+    if (!normalizedValue || chatStatus.status === "loading") return;
+
+    const choiceMessageIndex = chatMessagesRef.current.findIndex(
+      (message) => message.id === messageId,
+    );
+    const choiceMessage = chatMessagesRef.current[choiceMessageIndex];
+    if (
+      !choiceMessage?.choiceRequest ||
+      choiceMessage.choiceRequest.response ||
+      chatMessagesRef.current
+        .slice(choiceMessageIndex + 1)
+        .some((message) => message.role === "user")
+    ) {
+      return;
+    }
+
+    const beforeMessageCount = chatMessagesRef.current.length;
+    const sendPromise = sendChatMessage(normalizedValue, []);
+    if (chatMessagesRef.current.length > beforeMessageCount) {
+      const submittedAt = new Date().toISOString();
+      commitChatMessages((current) =>
+        current.map((message) =>
+          message.id === messageId && message.choiceRequest && !message.choiceRequest.response
+            ? {
+                ...message,
+                choiceRequest: {
+                  ...message.choiceRequest,
+                  response: {
+                    value: normalizedValue,
+                    ...(optionId ? { optionId } : {}),
+                    submittedAt,
+                  },
+                },
+              }
+            : message,
+        ),
+      );
+      setChatChoiceDrafts((current) => {
+        const next = { ...current };
+        delete next[messageId];
+        return next;
+      });
+    }
+    void sendPromise;
+  };
+
+  const renderChatChoiceRequest = (message: ChatMessage, messageIndex: number) => {
+    const choiceRequest = message.choiceRequest;
+    if (!choiceRequest) return null;
+
+    const hasLaterUserMessage = chatMessages
+      .slice(messageIndex + 1)
+      .some((candidate) => candidate.role === "user");
+    const expired = !choiceRequest.response && hasLaterUserMessage;
+    const disabled = Boolean(choiceRequest.response) || expired || chatStatus.status === "loading";
+    const customDraft = chatChoiceDrafts[message.id] ?? "";
+
+    return (
+      <div
+        className={`chat-choice-panel ${choiceRequest.response ? "answered" : ""} ${expired ? "expired" : ""}`}
+        aria-label="AI 提供的回复选项"
+        onContextMenu={(event) => event.stopPropagation()}
+      >
+        <div className="chat-choice-options">
+          {choiceRequest.options.map((option) => {
+            const selected = choiceRequest.response?.optionId === option.id;
+            return (
+              <button
+                type="button"
+                className={selected ? "selected" : ""}
+                disabled={disabled}
+                key={option.id}
+                onClick={() => respondToChatChoice(message.id, option.value, option.id)}
+              >
+                <span>{option.label}</span>
+                {selected && <Check size={15} aria-hidden="true" />}
+              </button>
+            );
+          })}
+        </div>
+        {choiceRequest.response ? (
+          <p className="chat-choice-status">
+            <Check size={14} aria-hidden="true" />
+            已回复：{choiceRequest.response.value}
+          </p>
+        ) : expired ? (
+          <p className="chat-choice-status">已通过后续消息继续，本组选项已关闭。</p>
+        ) : (
+          <form
+            className="chat-choice-custom"
+            onSubmit={(event) => {
+              event.preventDefault();
+              respondToChatChoice(message.id, customDraft);
+            }}
+          >
+            <input
+              type="text"
+              value={customDraft}
+              maxLength={2000}
+              disabled={chatStatus.status === "loading"}
+              placeholder={choiceRequest.customPlaceholder}
+              aria-label="输入自定义回复"
+              onChange={(event) =>
+                setChatChoiceDrafts((current) => ({
+                  ...current,
+                  [message.id]: event.target.value,
+                }))
+              }
+            />
+            <button
+              type="submit"
+              disabled={!customDraft.trim() || chatStatus.status === "loading"}
+              title="发送自定义回复"
+              aria-label="发送自定义回复"
+            >
+              <Send size={15} />
+            </button>
+          </form>
+        )}
+      </div>
+    );
+  };
 
   const finalizeHeartbeatRun = (sessionId: string) => {
     const timestamp = new Date().toISOString();
@@ -23908,6 +24355,8 @@ export function App() {
                             </div>
                             {segmentIndex === 0 &&
                               renderChatAttachments(message.attachments ?? [])}
+                            {renderedSegmentIndex === renderedSegments.length - 1 &&
+                              renderChatChoiceRequest(message, messageIndex)}
                             {showGreetingSwitch && (
                               <div
                                 className="roleplay-greeting-controls"
