@@ -2,6 +2,7 @@ package com.renge.agentlab;
 
 import android.content.Context;
 import android.content.res.AssetManager;
+import android.util.AtomicFile;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -29,9 +30,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class LocalWebServer {
+    private static final int PREFERRED_PORT = 5191;
     private final Context context;
     private final ExecutorService executor = Executors.newCachedThreadPool();
     private final File appDataFile;
+    private final File appDataBackupFile;
 
     private ServerSocket serverSocket;
     private Thread acceptThread;
@@ -40,10 +43,15 @@ public class LocalWebServer {
     public LocalWebServer(Context context) {
         this.context = context.getApplicationContext();
         this.appDataFile = new File(this.context.getFilesDir(), "app-data.json");
+        this.appDataBackupFile = new File(this.context.getFilesDir(), "app-data.previous.json");
     }
 
     public String start() throws IOException {
-        serverSocket = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
+        try {
+            serverSocket = new ServerSocket(PREFERRED_PORT, 50, InetAddress.getByName("127.0.0.1"));
+        } catch (IOException ignored) {
+            serverSocket = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
+        }
         running = true;
         acceptThread = new Thread(this::acceptLoop, "renge-local-server");
         acceptThread.start();
@@ -229,25 +237,57 @@ public class LocalWebServer {
         sendJson(output, 405, jsonError("Method not allowed"));
     }
 
-    private JSONObject readAppData() {
-        if (!appDataFile.exists()) return new JSONObject();
-        try {
-            byte[] bytes = readAll(new java.io.FileInputStream(appDataFile));
+    private JSONObject readJsonObject(File file) {
+        try (InputStream input = new AtomicFile(file).openRead()) {
+            byte[] bytes = readAll(input);
             String text = new String(bytes, StandardCharsets.UTF_8);
-            return text.trim().isEmpty() ? new JSONObject() : new JSONObject(text);
+            return text.trim().isEmpty() ? null : new JSONObject(text);
         } catch (Exception ignored) {
-            return new JSONObject();
+            return null;
         }
     }
 
-    private void writeAppData(Object data) throws IOException {
-        File parent = appDataFile.getParentFile();
+    private void writeJsonAtomically(File file, String content) throws IOException {
+        File parent = file.getParentFile();
         if (parent != null) parent.mkdirs();
-        try (FileOutputStream output = new FileOutputStream(appDataFile)) {
-            String content = data instanceof JSONObject
-                    ? ((JSONObject) data).toString(2)
-                    : String.valueOf(data);
+        AtomicFile atomicFile = new AtomicFile(file);
+        FileOutputStream output = null;
+        try {
+            output = atomicFile.startWrite();
             output.write(content.getBytes(StandardCharsets.UTF_8));
+            output.getFD().sync();
+            atomicFile.finishWrite(output);
+        } catch (IOException error) {
+            if (output != null) atomicFile.failWrite(output);
+            throw error;
+        }
+    }
+
+    private synchronized JSONObject readAppData() {
+        JSONObject primary = readJsonObject(appDataFile);
+        if (primary != null) return primary;
+
+        JSONObject backup = readJsonObject(appDataBackupFile);
+        if (backup != null) {
+            try {
+                writeJsonAtomically(appDataFile, backup.toString(2));
+            } catch (Exception ignored) {
+            }
+            return backup;
+        }
+        return new JSONObject();
+    }
+
+    private synchronized void writeAppData(Object data) throws IOException {
+        try {
+            JSONObject normalized = data instanceof JSONObject
+                    ? (JSONObject) data
+                    : new JSONObject(String.valueOf(data));
+            JSONObject current = readJsonObject(appDataFile);
+            if (current != null) {
+                writeJsonAtomically(appDataBackupFile, current.toString(2));
+            }
+            writeJsonAtomically(appDataFile, normalized.toString(2));
         } catch (JSONException error) {
             throw new IOException(error);
         }

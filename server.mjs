@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { createReadStream, createWriteStream } from "node:fs";
-import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { homedir, networkInterfaces, tmpdir } from "node:os";
@@ -13,6 +13,8 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const distDir = resolve(__dirname, "dist");
 const defaultPort = Number(process.env.PORT ?? 5190);
 const appDataFileName = "app-data.json";
+const appDataBackupCount = 3;
+const appDataWriteQueues = new Map();
 const mcpClientCache = new Map();
 
 const mimeTypes = {
@@ -770,21 +772,100 @@ function getDefaultDataDir() {
   return join(homedir(), ".renge-agent-lab");
 }
 
-async function readAppData(dataFilePath) {
+function isMissingFileError(error) {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
+}
+
+function parseAppDataContent(content) {
+  if (!content.trim()) throw new Error("应用数据文件为空");
+  const parsed = JSON.parse(content);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("应用数据必须是 JSON 对象");
+  }
+  return parsed;
+}
+
+function getAppDataBackupPath(dataFilePath, index) {
+  return join(dirname(dataFilePath), `app-data.backup-${index}.json`);
+}
+
+async function readAppDataFile(dataFilePath) {
+  return parseAppDataContent(await readFile(dataFilePath, "utf8"));
+}
+
+async function writeAppDataFileAtomically(dataFilePath, payload) {
+  const serialized = JSON.stringify(payload, null, 2);
+  parseAppDataContent(serialized);
+  await mkdir(dirname(dataFilePath), { recursive: true });
+  const temporaryPath = `${dataFilePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   try {
-    const content = await readFile(dataFilePath, "utf8");
-    return content ? JSON.parse(content) : {};
-  } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-      return {};
-    }
-    throw error;
+    await writeFile(temporaryPath, serialized, "utf8");
+    await readAppDataFile(temporaryPath);
+    await rename(temporaryPath, dataFilePath);
+  } finally {
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
   }
 }
 
+async function rotateAppDataBackups(dataFilePath) {
+  for (let index = appDataBackupCount; index >= 2; index -= 1) {
+    try {
+      const previous = await readAppDataFile(getAppDataBackupPath(dataFilePath, index - 1));
+      await writeAppDataFileAtomically(getAppDataBackupPath(dataFilePath, index), previous);
+    } catch (error) {
+      if (!isMissingFileError(error)) {
+        // A broken backup is skipped so it cannot replace an older valid generation.
+      }
+    }
+  }
+  try {
+    const current = await readAppDataFile(dataFilePath);
+    await writeAppDataFileAtomically(getAppDataBackupPath(dataFilePath, 1), current);
+  } catch (error) {
+    if (!isMissingFileError(error)) {
+      // Never copy a truncated or malformed primary file into the backup chain.
+    }
+  }
+}
+
+async function readAppData(dataFilePath) {
+  let primaryError = null;
+  try {
+    return await readAppDataFile(dataFilePath);
+  } catch (error) {
+    primaryError = error;
+  }
+
+  for (let index = 1; index <= appDataBackupCount; index += 1) {
+    try {
+      const backup = await readAppDataFile(getAppDataBackupPath(dataFilePath, index));
+      await writeAppDataFileAtomically(dataFilePath, backup).catch(() => undefined);
+      return backup;
+    } catch {
+      // Try the next backup generation.
+    }
+  }
+
+  if (isMissingFileError(primaryError)) return {};
+  throw primaryError;
+}
+
 async function writeAppData(dataFilePath, payload) {
-  await mkdir(dirname(dataFilePath), { recursive: true });
-  await writeFile(dataFilePath, JSON.stringify(payload, null, 2), "utf8");
+  const previousWrite = appDataWriteQueues.get(dataFilePath) ?? Promise.resolve();
+  const operation = previousWrite
+    .catch(() => undefined)
+    .then(async () => {
+      await rotateAppDataBackups(dataFilePath);
+      await writeAppDataFileAtomically(dataFilePath, payload);
+    });
+  appDataWriteQueues.set(dataFilePath, operation);
+  try {
+    await operation;
+  } finally {
+    if (appDataWriteQueues.get(dataFilePath) === operation) {
+      appDataWriteQueues.delete(dataFilePath);
+    }
+  }
 }
 
 function getSkillsDir(dataFilePath) {

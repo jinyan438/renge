@@ -535,6 +535,7 @@ type RengeAppData = {
 const COMPLETE_BACKUP_FORMAT = "renge-agent-complete-backup" as const;
 const COMPLETE_BACKUP_VERSION = 1 as const;
 const RENGE_STORAGE_PREFIX = "renge";
+const APP_DATA_SAVE_DEBOUNCE_MS = 800;
 
 type RengeCompleteBackup = {
   format: typeof COMPLETE_BACKUP_FORMAT;
@@ -543,6 +544,11 @@ type RengeCompleteBackup = {
   appData: RengeAppData;
   localStorage: Record<string, string>;
   desktopProjectPositions?: unknown;
+};
+
+type PersistentAppDataLoadResult = {
+  available: boolean;
+  data: RengeAppData | null;
 };
 
 type LocalFileHandle = {
@@ -1771,33 +1777,151 @@ function loadChatSessions() {
   }
 }
 
-async function loadPersistentAppData(): Promise<RengeAppData | null> {
+async function loadPersistentAppData(): Promise<PersistentAppDataLoadResult> {
   try {
     const response = await fetch("/api/app-data", {
       method: "GET",
       headers: { Accept: "application/json" },
     });
-    if (!response.ok) return null;
+    if (!response.ok) return { available: false, data: null };
 
     const payload = (await response.json()) as { data?: RengeAppData };
-    return payload.data && typeof payload.data === "object" ? payload.data : null;
+    return {
+      available: true,
+      data: payload.data && typeof payload.data === "object" ? payload.data : null,
+    };
   } catch {
-    return null;
+    return { available: false, data: null };
   }
 }
 
+let persistentAppDataSaveQueue: Promise<void> = Promise.resolve();
+
 async function savePersistentAppData(data: RengeAppData): Promise<boolean> {
+  const operation = persistentAppDataSaveQueue.then(async () => {
+    try {
+      const response = await fetch("/api/app-data", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data }),
+      });
+      return response.ok;
+    } catch {
+      // The app can still run with localStorage when the persistence API is unavailable.
+      return false;
+    }
+  });
+  persistentAppDataSaveQueue = operation.then(
+    () => undefined,
+    () => undefined,
+  );
+  return operation;
+}
+
+function setLocalStorageValueSafely(key: string, value: string) {
   try {
-    const response = await fetch("/api/app-data", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ data }),
-    });
-    return response.ok;
+    localStorage.setItem(key, value);
   } catch {
-    // The app can still run with localStorage when the persistence API is unavailable.
-    return false;
+    // The server-side app-data file remains the authoritative fallback.
   }
+}
+
+function setLocalStorageJsonSafely(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Large chats and images can exceed a browser origin's localStorage quota.
+  }
+}
+
+function persistAppDataToLocalStores(data: RengeAppData) {
+  const personas = data.personas ?? [];
+  if (personas.length > 0) {
+    void personaStore.save(personas).catch(() => undefined);
+  }
+  setLocalStorageJsonSafely(PROVIDER_STORAGE_KEY, data.providers ?? []);
+  setLocalStorageValueSafely(ACTIVE_PROVIDER_STORAGE_KEY, data.activeProviderId ?? "");
+  setLocalStorageJsonSafely(CHAT_SESSIONS_STORAGE_KEY, data.chatSessions ?? []);
+  setLocalStorageValueSafely(CHAT_MODE_STORAGE_KEY, data.chatMode ?? "ai");
+  setLocalStorageJsonSafely(MULTI_AGENT_PERSONAS_STORAGE_KEY, data.multiAgentPersonaIds ?? []);
+  setLocalStorageValueSafely(MULTI_AGENT_ROUNDS_STORAGE_KEY, String(data.multiAgentRounds ?? 1));
+  setLocalStorageJsonSafely(MULTI_AGENT_MODELS_STORAGE_KEY, data.multiAgentModelConfigs ?? {});
+  setLocalStorageValueSafely(
+    MULTI_AGENT_AUTO_STOP_STORAGE_KEY,
+    String(data.multiAgentAutoStopEnabled ?? false),
+  );
+  setLocalStorageValueSafely(
+    MULTI_AGENT_STOP_CONDITION_STORAGE_KEY,
+    data.multiAgentStopCondition ?? "",
+  );
+  setLocalStorageValueSafely(ACTIVE_PERSONA_STORAGE_KEY, data.activePersonaId ?? "");
+  setLocalStorageJsonSafely(SYSTEM_PROMPTS_STORAGE_KEY, data.systemPrompts ?? []);
+  setLocalStorageValueSafely(
+    ACTIVE_SYSTEM_PROMPT_STORAGE_KEY,
+    data.activeSystemPromptId ?? "",
+  );
+  setLocalStorageJsonSafely(
+    ACTIVE_SYSTEM_PROMPTS_STORAGE_KEY,
+    data.activeSystemPromptIds ?? [],
+  );
+  setLocalStorageJsonSafely(CHAT_PRESETS_STORAGE_KEY, data.chatPresets ?? []);
+  setLocalStorageValueSafely(ACTIVE_CHAT_PRESET_STORAGE_KEY, data.activeChatPresetId ?? "");
+  setLocalStorageValueSafely(
+    CHAT_PRESET_ENABLED_STORAGE_KEY,
+    String(data.chatPresetEnabled ?? false),
+  );
+  setLocalStorageJsonSafely(WORLD_BOOKS_STORAGE_KEY, data.worldBooks ?? []);
+  setLocalStorageJsonSafely(ACTIVE_WORLD_BOOKS_STORAGE_KEY, data.activeWorldBookIds ?? []);
+  setLocalStorageJsonSafely(REGEX_SCRIPTS_STORAGE_KEY, data.regexScripts ?? []);
+  setLocalStorageJsonSafely(TAVERN_SCRIPTS_STORAGE_KEY, data.tavernScripts ?? []);
+  setLocalStorageJsonSafely(
+    TAVERN_GLOBAL_VARIABLES_STORAGE_KEY,
+    data.tavernGlobalVariables ?? {},
+  );
+
+  const characterCards = data.characterCards ?? [];
+  void saveCharacterCardsToDatabase(characterCards);
+  setLocalStorageJsonSafely(
+    CHARACTER_CARDS_STORAGE_KEY,
+    characterCards.map((card) => ({ ...card, avatarDataUrl: "" })),
+  );
+  setLocalStorageValueSafely(
+    ACTIVE_CHARACTER_CARD_STORAGE_KEY,
+    data.activeCharacterCardId ?? "",
+  );
+  setLocalStorageValueSafely(
+    CHARACTER_TRANSLATION_PROMPT_STORAGE_KEY,
+    data.characterTranslationAdditionalPrompt ?? "",
+  );
+  setLocalStorageValueSafely(
+    CHARACTER_TRANSLATION_PROMPT_ENABLED_STORAGE_KEY,
+    String(data.characterTranslationPromptEnabled ?? true),
+  );
+  setLocalStorageJsonSafely(USER_PROFILE_STORAGE_KEY, data.userProfile ?? {});
+  setLocalStorageJsonSafely(CHAT_SENDER_STORAGE_KEY, data.chatSender ?? { kind: "user" });
+  setLocalStorageValueSafely(
+    CHAT_MULTI_BUBBLE_STORAGE_KEY,
+    String(data.chatMultiBubbleEnabled ?? false),
+  );
+  setLocalStorageValueSafely(
+    CHAT_HTML_RENDER_STORAGE_KEY,
+    String(data.chatHtmlRenderEnabled ?? false),
+  );
+  setLocalStorageValueSafely(
+    CHAT_REASONING_VISIBLE_STORAGE_KEY,
+    String(data.chatReasoningVisible ?? false),
+  );
+  setLocalStorageValueSafely(
+    CHAT_HEARTBEAT_REMINDER_VISIBLE_STORAGE_KEY,
+    String(data.chatHeartbeatReminderVisible ?? true),
+  );
+  setLocalStorageJsonSafely(
+    CHAT_PERSONALIZATION_STORAGE_KEY,
+    data.chatPersonalization ?? {},
+  );
+  setLocalStorageJsonSafely(MCP_SERVERS_STORAGE_KEY, data.mcpServers ?? []);
+  setLocalStorageJsonSafely(SKILLS_STORAGE_KEY, data.skills ?? []);
+  setLocalStorageJsonSafely(EXTENSIONS_STORAGE_KEY, data.extensions ?? []);
 }
 
 function collectRengeLocalStorage() {
@@ -8060,6 +8184,7 @@ export function App() {
   const mcpImportInputRef = useRef<HTMLInputElement>(null);
   const skillZipInputRef = useRef<HTMLInputElement>(null);
   const completeBackupImportInputRef = useRef<HTMLInputElement>(null);
+  const persistentStoreReadyRef = useRef(false);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatSendButtonRef = useRef<HTMLButtonElement>(null);
   const sendChatMessageRef = useRef<
@@ -8766,12 +8891,14 @@ export function App() {
     let cancelled = false;
 
     async function loadInitialAppData() {
-      const [persistentData, localPersonas, databaseCharacterCards] = await Promise.all([
+      const [persistentResult, localPersonas, databaseCharacterCards] = await Promise.all([
         loadPersistentAppData(),
         personaStore.list(),
         loadCharacterCardsFromDatabase(),
       ]);
       if (cancelled) return;
+      const persistentData = persistentResult.data;
+      persistentStoreReadyRef.current = persistentResult.available;
 
       const normalizedPersonas = mergeBuiltInPersonas(
         persistentData?.personas && persistentData.personas.length > 0
@@ -9051,77 +9178,28 @@ export function App() {
 
   useEffect(() => {
     if (!appDataLoaded) return;
+    const timer = window.setTimeout(() => {
+      const snapshot = buildCurrentAppData();
+      persistAppDataToLocalStores(snapshot);
+      if (persistentStoreReadyRef.current) {
+        void savePersistentAppData(snapshot);
+      }
+    }, APP_DATA_SAVE_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [appDataLoaded, buildCurrentAppData]);
 
-    if (personas.length > 0) {
-      void personaStore.save(personas);
-    }
-    localStorage.setItem(PROVIDER_STORAGE_KEY, JSON.stringify(providers));
-    localStorage.setItem(ACTIVE_PROVIDER_STORAGE_KEY, activeProviderId);
-    localStorage.setItem(CHAT_SESSIONS_STORAGE_KEY, JSON.stringify(chatSessions));
-    localStorage.setItem(CHAT_MODE_STORAGE_KEY, chatMode);
-    localStorage.setItem(
-      MULTI_AGENT_PERSONAS_STORAGE_KEY,
-      JSON.stringify(multiAgentPersonaIds),
-    );
-    localStorage.setItem(
-      MULTI_AGENT_ROUNDS_STORAGE_KEY,
-      String(multiAgentRounds),
-    );
-    localStorage.setItem(
-      MULTI_AGENT_MODELS_STORAGE_KEY,
-      JSON.stringify(multiAgentModelConfigs),
-    );
-    localStorage.setItem(
-      MULTI_AGENT_AUTO_STOP_STORAGE_KEY,
-      String(multiAgentAutoStopEnabled),
-    );
-    localStorage.setItem(
-      MULTI_AGENT_STOP_CONDITION_STORAGE_KEY,
-      multiAgentStopCondition,
-    );
-    localStorage.setItem(ACTIVE_PERSONA_STORAGE_KEY, activePersonaId);
-    localStorage.setItem(SYSTEM_PROMPTS_STORAGE_KEY, JSON.stringify(systemPrompts));
-    localStorage.setItem(ACTIVE_SYSTEM_PROMPT_STORAGE_KEY, activeSystemPromptId);
-    localStorage.setItem(ACTIVE_SYSTEM_PROMPTS_STORAGE_KEY, JSON.stringify(activeSystemPromptIds));
-    localStorage.setItem(CHAT_PRESETS_STORAGE_KEY, JSON.stringify(chatPresets));
-    localStorage.setItem(ACTIVE_CHAT_PRESET_STORAGE_KEY, activeChatPresetId);
-    localStorage.setItem(CHAT_PRESET_ENABLED_STORAGE_KEY, String(chatPresetEnabled));
-    localStorage.setItem(WORLD_BOOKS_STORAGE_KEY, JSON.stringify(worldBooks));
-    localStorage.setItem(ACTIVE_WORLD_BOOKS_STORAGE_KEY, JSON.stringify(activeWorldBookIds));
-    localStorage.setItem(REGEX_SCRIPTS_STORAGE_KEY, JSON.stringify(regexScripts));
-    localStorage.setItem(TAVERN_SCRIPTS_STORAGE_KEY, JSON.stringify(tavernScripts));
-    localStorage.setItem(
-      TAVERN_GLOBAL_VARIABLES_STORAGE_KEY,
-      JSON.stringify(tavernGlobalVariables),
-    );
-    void saveCharacterCardsToDatabase(characterCards);
-    try {
-      localStorage.setItem(
-        CHARACTER_CARDS_STORAGE_KEY,
-        JSON.stringify(characterCards.map((card) => ({ ...card, avatarDataUrl: "" }))),
-      );
-    } catch {
-      localStorage.removeItem(CHARACTER_CARDS_STORAGE_KEY);
-    }
-    localStorage.setItem(ACTIVE_CHARACTER_CARD_STORAGE_KEY, activeCharacterCardId);
-    localStorage.setItem(USER_PROFILE_STORAGE_KEY, JSON.stringify(userProfile));
-    localStorage.setItem(CHAT_SENDER_STORAGE_KEY, JSON.stringify(chatSender));
-    localStorage.setItem(CHAT_MULTI_BUBBLE_STORAGE_KEY, String(chatMultiBubbleEnabled));
-    localStorage.setItem(CHAT_HTML_RENDER_STORAGE_KEY, String(chatHtmlRenderEnabled));
-    localStorage.setItem(CHAT_REASONING_VISIBLE_STORAGE_KEY, String(chatReasoningVisible));
-    localStorage.setItem(
-      CHAT_HEARTBEAT_REMINDER_VISIBLE_STORAGE_KEY,
-      String(chatHeartbeatReminderVisible),
-    );
-    localStorage.setItem(
-      CHAT_PERSONALIZATION_STORAGE_KEY,
-      JSON.stringify(chatPersonalization),
-    );
-    localStorage.setItem(MCP_SERVERS_STORAGE_KEY, JSON.stringify(mcpServers));
-    localStorage.setItem(SKILLS_STORAGE_KEY, JSON.stringify(skills));
-    localStorage.setItem(EXTENSIONS_STORAGE_KEY, JSON.stringify(extensions));
-    void savePersistentAppData(buildCurrentAppData());
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataLoaded, buildCurrentAppData, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  useEffect(() => {
+    if (!appDataLoaded) return;
+    const flushLatestSnapshot = () => {
+      const snapshot = buildCurrentAppData();
+      persistAppDataToLocalStores(snapshot);
+      if (persistentStoreReadyRef.current) {
+        void savePersistentAppData(snapshot);
+      }
+    };
+    window.addEventListener("pagehide", flushLatestSnapshot);
+    return () => window.removeEventListener("pagehide", flushLatestSnapshot);
+  }, [appDataLoaded, buildCurrentAppData]);
 
   useEffect(() => {
     localStorage.setItem(
