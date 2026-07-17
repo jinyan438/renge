@@ -24204,6 +24204,13 @@ export function App() {
                 ) => {
                 const isEditingMessage = editingChatMessage?.messageId === message.id;
                 if (isEditingMessage && segmentIndex > 0) return null;
+                const messageSegmentCount =
+                  message.role === "assistant"
+                    ? getChatMessageSegments(message, chatMultiBubbleEnabled).length
+                    : chatMultiBubbleEnabled
+                      ? getChatMessageSegments(message).length
+                      : 1;
+                const isLastMessageSegment = segmentIndex === messageSegmentCount - 1;
                 const showGreetingSwitch =
                   !isEditingMessage &&
                   message.source === "roleplay-greeting" &&
@@ -24401,7 +24408,7 @@ export function App() {
                           )}
                         </div>
                         {!isEditingMessage &&
-                          renderedSegmentIndex === renderedSegments.length - 1 &&
+                          isLastMessageSegment &&
                           message.choiceRequest && (
                             <div
                               className="chat-bubble chat-choice-bubble"
