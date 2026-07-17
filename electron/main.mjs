@@ -19,7 +19,9 @@ let serverController = null;
 let workspaceRoot = null;
 let electronRuntimeCacheDir = null;
 let desktopProjectPositionsWriteQueue = Promise.resolve();
+const desktopServerPort = 5191;
 const desktopProjectPositionsFilename = "desktop-project-positions.json";
+const singleInstanceLockAcquired = app.requestSingleInstanceLock();
 const highRiskGitCommands = new Set([
   "checkout",
   "clean",
@@ -88,7 +90,7 @@ function configureElectronCache() {
   app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
 }
 
-configureElectronCache();
+if (singleInstanceLockAcquired) configureElectronCache();
 
 function assertWorkspace() {
   if (!workspaceRoot) {
@@ -735,11 +737,19 @@ function registerIpcHandlers() {
 }
 
 async function createMainWindow() {
-  serverController = await startRengeServer({
+  const serverOptions = {
     host: "127.0.0.1",
-    port: 0,
     dataDir: getPersistentDataDir(),
-  });
+  };
+  try {
+    serverController = await startRengeServer({
+      ...serverOptions,
+      port: desktopServerPort,
+    });
+  } catch (error) {
+    if (!error || typeof error !== "object" || error.code !== "EADDRINUSE") throw error;
+    serverController = await startRengeServer({ ...serverOptions, port: 0 });
+  }
 
   Menu.setApplicationMenu(null);
 
@@ -765,27 +775,38 @@ async function createMainWindow() {
   await mainWindow.loadURL(serverController.url);
 }
 
-registerIpcHandlers();
+if (!singleInstanceLockAcquired) {
+  app.quit();
+} else {
+  registerIpcHandlers();
 
-app.whenReady().then(() => {
-  if (process.platform === "win32") {
-    app.setAppUserModelId("com.renge.agentlab");
-  }
-  return createMainWindow();
-});
+  app.on("second-instance", () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
 
-app.on("window-all-closed", () => {
-  serverController?.server.close();
-  if (process.platform !== "darwin") app.quit();
-});
+  app.whenReady().then(() => {
+    if (process.platform === "win32") {
+      app.setAppUserModelId("com.renge.agentlab");
+    }
+    return createMainWindow();
+  });
 
-app.on("will-quit", () => {
-  if (!electronRuntimeCacheDir) return;
-  void rm(electronRuntimeCacheDir, { recursive: true, force: true }).catch(() => undefined);
-});
+  app.on("window-all-closed", () => {
+    serverController?.server.close();
+    if (process.platform !== "darwin") app.quit();
+  });
 
-app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createMainWindow();
-  }
-});
+  app.on("will-quit", () => {
+    if (!electronRuntimeCacheDir) return;
+    void rm(electronRuntimeCacheDir, { recursive: true, force: true }).catch(() => undefined);
+  });
+
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createMainWindow();
+    }
+  });
+}
