@@ -6756,8 +6756,7 @@ input[type="range"] {
 }
 
 .kind-tab-main,
-.kind-tab-remove,
-.influence-select {
+.kind-tab-influence {
   border: 0;
   background: transparent;
 }
@@ -6786,46 +6785,21 @@ input[type="range"] {
   white-space: nowrap;
 }
 
-.kind-tab-remove {
+.kind-tab-influence {
   display: grid;
   flex: 0 0 28px;
   width: 28px;
   height: 28px;
   margin-right: 3px;
-  padding: 0;
   place-items: center;
-  border-radius: 999px;
-  color: #8a94a6;
-  cursor: pointer;
-}
-
-.kind-tab-remove:hover {
-  color: #b42318;
-  background: #fee4e2;
-}
-
-.influence-select {
-  flex: 0 0 40px;
-  width: 40px;
-  height: 28px;
-  max-width: 40px;
-  margin-right: 3px;
-  padding: 0 3px;
   border: 1px solid #e0e5ec;
   border-radius: 8px;
   color: #334155;
   font-size: 11px;
   font-weight: 700;
-  text-align: center;
-  text-align-last: center;
   background: rgba(248, 250, 252, 0.92);
-  cursor: pointer;
-  outline: 0;
-}
-
-.influence-select:focus-visible {
-  border-color: #07C160;
-  box-shadow: 0 0 0 2px rgba(7, 193, 96, 0.14);
+  pointer-events: none;
+  user-select: none;
 }
 
 .kind-tabs > button.selected,
@@ -6833,6 +6807,12 @@ input[type="range"] {
   border-color: #07C160;
   color: #059B4D;
   background: #E6F8EF;
+}
+
+.kind-tab.selected .kind-tab-influence {
+  border-color: rgba(7, 193, 96, 0.22);
+  color: inherit;
+  background: rgba(255, 255, 255, 0.58);
 }
 
 .kind-tab.dragging {
@@ -6845,6 +6825,102 @@ input[type="range"] {
 
 .kind-tab.drag-over.after {
   box-shadow: 3px 0 0 #07C160;
+}
+
+.entry-section-title {
+  min-width: 0;
+}
+
+.entry-section-heading,
+.entry-section-actions {
+  flex-wrap: wrap;
+}
+
+.entry-section-title h2 {
+  max-width: min(360px, 42vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entry-section-actions,
+.selected-type-actions,
+.selected-type-influence,
+.type-delete-action {
+  display: flex;
+  align-items: center;
+}
+
+.entry-section-actions,
+.selected-type-actions {
+  gap: 8px;
+}
+
+.entry-section-actions {
+  min-width: 0;
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.selected-type-influence {
+  min-height: 38px;
+  overflow: hidden;
+  border: 1px solid #d9dee8;
+  border-radius: 9px;
+  background: #ffffff;
+}
+
+.selected-type-influence > span {
+  padding: 0 9px;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.selected-type-influence select {
+  align-self: stretch;
+  min-width: 94px;
+  padding: 0 26px 0 10px;
+  border: 0;
+  border-left: 1px solid #e4e8ef;
+  color: #263247;
+  font-size: 12px;
+  font-weight: 750;
+  background: #f8fafc;
+  cursor: pointer;
+  outline: 0;
+}
+
+.selected-type-influence:focus-within {
+  border-color: #07C160;
+  box-shadow: 0 0 0 3px rgba(7, 193, 96, 0.12);
+}
+
+.type-delete-action {
+  justify-content: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 0 11px;
+  border: 1px solid #f0c9c6;
+  border-radius: 9px;
+  color: #b42318;
+  font-size: 12px;
+  font-weight: 650;
+  background: #fffafa;
+  white-space: nowrap;
+}
+
+.type-delete-action:hover:not(:disabled) {
+  border-color: #e7aaa5;
+  background: #fff1f0;
+}
+
+.type-delete-action:disabled {
+  color: #a8afbc;
+  border-color: #e5e7eb;
+  background: #f8fafc;
+  cursor: not-allowed;
 }
 
 .entry-list {
@@ -8060,14 +8136,62 @@ input[type="range"] {
     max-width: 88px;
   }
 
-  .studio-kind-tabs .influence-select {
-    height: 32px;
-  }
-
-  .studio-kind-tabs .kind-tab-remove {
+  .studio-kind-tabs .kind-tab-influence {
     flex-basis: 32px;
     width: 32px;
     height: 32px;
+  }
+
+  .section-heading.entry-section-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .entry-section-title h2 {
+    max-width: 100%;
+  }
+
+  .entry-section-actions {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .selected-type-actions {
+    flex: 1 1 184px;
+    min-width: 0;
+    gap: 6px;
+  }
+
+  .selected-type-influence {
+    flex: 1 1 auto;
+    min-width: 132px;
+    min-height: 40px;
+  }
+
+  .selected-type-influence > span {
+    padding-inline: 8px;
+  }
+
+  .selected-type-influence select {
+    width: 100%;
+    min-width: 82px;
+  }
+
+  .type-delete-action {
+    flex: 0 0 40px;
+    width: 40px;
+    min-height: 40px;
+    padding: 0;
+  }
+
+  .type-delete-action span {
+    display: none;
+  }
+
+  .entry-section-actions > .small-action {
+    min-height: 40px;
+    margin-left: auto;
   }
 
   .studio-topbar .topbar-actions {

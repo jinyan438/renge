@@ -12671,6 +12671,11 @@ export function App() {
   const selectedModelOption = modelOptions.find((option) => option.value === selectedModelValue);
 
   const activeTypes = activePersona?.entryTypes ?? [];
+  const selectedEntryType =
+    selectedTypeId === "all"
+      ? null
+      : activeTypes.find((entryType) => entryType.id === selectedTypeId) ?? null;
+  const selectedEntrySectionTitle = selectedEntryType?.name ?? "全部";
   const prompt = useMemo(
     () => (activePersona ? buildPersonaPrompt(activePersona) : ""),
     [activePersona],
@@ -17560,9 +17565,7 @@ export function App() {
         ),
     }));
 
-    if (selectedTypeId === typeId) {
-      setSelectedTypeId("all");
-    }
+    if (selectedTypeId === typeId) setSelectedTypeId(fallbackType.id);
   };
 
   const removeEntry = (typeId: string, entryId: string) => {
@@ -23919,33 +23922,13 @@ export function App() {
               >
                 <span className="kind-tab-name">{type.name}</span>
               </button>
-              <select
-                className="influence-select"
-                value={type.influence}
-                title={`${type.name} 影响等级`}
-                onChange={(event) =>
-                  updateEntryType(type.id, { influence: event.target.value as InfluenceLevel })
-                }
+              <span
+                className="kind-tab-influence"
+                title={`${type.name} 影响等级：${type.influence}`}
+                aria-label={`${type.name} 影响等级：${type.influence}`}
               >
-                {influenceLevels.map((level) => (
-                  <option key={level} value={level}>
-                    {influenceLevelShortLabels[level]}
-                  </option>
-                ))}
-              </select>
-              {activeTypes.length > 1 && (
-                <button
-                  type="button"
-                  className="kind-tab-remove"
-                  title={`删除类型 ${type.name}`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    deleteEntryType(type.id);
-                  }}
-                >
-                  <X size={13} />
-                </button>
-              )}
+                {influenceLevelShortLabels[type.influence]}
+              </span>
             </span>
           ))}
         </div>
@@ -23996,15 +23979,54 @@ export function App() {
             </div>
 
             <div className="section-block">
-              <div className="section-heading compact">
-                <div>
-                  <h2>人格条目</h2>
-                  <p>影响等级只作用于条目类型，条目本身不再重复保存类型和影响等级。</p>
+              <div className="section-heading compact entry-section-heading">
+                <div className="entry-section-title">
+                  <h2>{selectedEntrySectionTitle}</h2>
                 </div>
-                <button type="button" className="small-action" onClick={addEntry}>
-                  <ListPlus size={16} />
-                  添加条目
-                </button>
+                <div className="entry-section-actions">
+                  {selectedEntryType && (
+                    <div className="selected-type-actions">
+                      <label className="selected-type-influence">
+                        <span>影响等级</span>
+                        <select
+                          value={selectedEntryType.influence}
+                          title={`修改 ${selectedEntryType.name} 的影响等级`}
+                          aria-label={`修改 ${selectedEntryType.name} 的影响等级`}
+                          onChange={(event) =>
+                            updateEntryType(selectedEntryType.id, {
+                              influence: event.target.value as InfluenceLevel,
+                            })
+                          }
+                        >
+                          {influenceLevels.map((level) => (
+                            <option key={level} value={level}>
+                              {level}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <button
+                        type="button"
+                        className="type-delete-action"
+                        title={
+                          activeTypes.length <= 1
+                            ? "至少需要保留一个类型"
+                            : `删除类型 ${selectedEntryType.name}`
+                        }
+                        aria-label={`删除类型 ${selectedEntryType.name}`}
+                        disabled={activeTypes.length <= 1}
+                        onClick={() => deleteEntryType(selectedEntryType.id)}
+                      >
+                        <Trash2 size={15} />
+                        <span>删除类型</span>
+                      </button>
+                    </div>
+                  )}
+                  <button type="button" className="small-action" onClick={addEntry}>
+                    <ListPlus size={16} />
+                    添加条目
+                  </button>
+                </div>
               </div>
 
               <div className="type-tools">
