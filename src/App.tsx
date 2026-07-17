@@ -217,7 +217,19 @@ type ManagedWindowState = {
   zIndex: number;
   initialOffset: WindowOffset;
 };
-type SettingsTab = "providers" | "prompts" | "presets" | "worldbooks" | "regexes" | "scripts" | "user" | "personalization" | "mcp" | "skills" | "device";
+type SettingsTab =
+  | "providers"
+  | "prompts"
+  | "presets"
+  | "worldbooks"
+  | "regexes"
+  | "scripts"
+  | "user"
+  | "personalization"
+  | "mcp"
+  | "skills"
+  | "device"
+  | "data";
 const SETTINGS_TAB_META: Record<
   SettingsTab,
   { title: string; eyebrow: string; description: string }
@@ -276,6 +288,11 @@ const SETTINGS_TAB_META: Record<
     title: "手机端",
     eyebrow: "DEVICE & STORAGE",
     description: "管理移动设备工作区、ROOT 权限与本地文件访问能力。",
+  },
+  data: {
+    title: "数据",
+    eyebrow: "DATA & BACKUP",
+    description: "导出或恢复应用的完整数据快照，方便迁移设备与保存重要配置。",
   },
 };
 type ProviderPullState = "idle" | "loading" | "success" | "error";
@@ -513,6 +530,19 @@ type RengeAppData = {
   extensions?: InstalledExtension[];
   pcConnection?: PcConnectionData;
   updatedAt?: string;
+};
+
+const COMPLETE_BACKUP_FORMAT = "renge-agent-complete-backup" as const;
+const COMPLETE_BACKUP_VERSION = 1 as const;
+const RENGE_STORAGE_PREFIX = "renge";
+
+type RengeCompleteBackup = {
+  format: typeof COMPLETE_BACKUP_FORMAT;
+  version: typeof COMPLETE_BACKUP_VERSION;
+  exportedAt: string;
+  appData: RengeAppData;
+  localStorage: Record<string, string>;
+  desktopProjectPositions?: unknown;
 };
 
 type LocalFileHandle = {
@@ -1756,16 +1786,105 @@ async function loadPersistentAppData(): Promise<RengeAppData | null> {
   }
 }
 
-async function savePersistentAppData(data: RengeAppData) {
+async function savePersistentAppData(data: RengeAppData): Promise<boolean> {
   try {
-    await fetch("/api/app-data", {
+    const response = await fetch("/api/app-data", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ data }),
     });
+    return response.ok;
   } catch {
     // The app can still run with localStorage when the persistence API is unavailable.
+    return false;
   }
+}
+
+function collectRengeLocalStorage() {
+  const entries: Record<string, string> = {};
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (!key?.startsWith(RENGE_STORAGE_PREFIX)) continue;
+    entries[key] = localStorage.getItem(key) ?? "";
+  }
+  return entries;
+}
+
+function replaceRengeLocalStorage(entries: Record<string, string>) {
+  const currentKeys = Array.from({ length: localStorage.length }, (_, index) =>
+    localStorage.key(index),
+  ).filter((key): key is string => Boolean(key?.startsWith(RENGE_STORAGE_PREFIX)));
+  currentKeys.forEach((key) => localStorage.removeItem(key));
+  Object.entries(entries).forEach(([key, value]) => {
+    if (key.startsWith(RENGE_STORAGE_PREFIX)) localStorage.setItem(key, value);
+  });
+}
+
+function parseCompleteBackup(value: unknown): RengeCompleteBackup {
+  if (!isObjectRecord(value)) throw new Error("备份文件不是有效的 JSON 对象。");
+  if (value.format !== COMPLETE_BACKUP_FORMAT) {
+    throw new Error("这不是 Renge Agent 完整备份文件。");
+  }
+  if (value.version !== COMPLETE_BACKUP_VERSION) {
+    throw new Error(`暂不支持此备份版本：${String(value.version ?? "未知")}。`);
+  }
+  if (typeof value.exportedAt !== "string" || !isObjectRecord(value.appData)) {
+    throw new Error("备份缺少导出时间或应用主数据。");
+  }
+  if (!isObjectRecord(value.localStorage)) {
+    throw new Error("备份缺少本地设置数据。");
+  }
+
+  const requiredArrayFields: Array<keyof RengeAppData> = [
+    "personas",
+    "providers",
+    "chatSessions",
+    "systemPrompts",
+    "chatPresets",
+    "worldBooks",
+    "regexScripts",
+    "tavernScripts",
+    "characterCards",
+    "mcpServers",
+    "skills",
+    "extensions",
+  ];
+  for (const field of requiredArrayFields) {
+    if (!Array.isArray(value.appData[field])) {
+      throw new Error(`备份缺少完整数据字段：${field}。`);
+    }
+  }
+
+  const storageEntries: Record<string, string> = {};
+  for (const [key, entryValue] of Object.entries(value.localStorage)) {
+    if (!key.startsWith(RENGE_STORAGE_PREFIX) || typeof entryValue !== "string") {
+      throw new Error("备份中的本地设置格式无效。");
+    }
+    storageEntries[key] = entryValue;
+  }
+  if (
+    value.desktopProjectPositions !== undefined &&
+    value.desktopProjectPositions !== null &&
+    !isObjectRecord(value.desktopProjectPositions)
+  ) {
+    throw new Error("备份中的桌面图标位置格式无效。");
+  }
+
+  return {
+    format: COMPLETE_BACKUP_FORMAT,
+    version: COMPLETE_BACKUP_VERSION,
+    exportedAt: value.exportedAt,
+    appData: value.appData as RengeAppData,
+    localStorage: storageEntries,
+    ...(isObjectRecord(value.desktopProjectPositions)
+      ? { desktopProjectPositions: value.desktopProjectPositions }
+      : {}),
+  };
+}
+
+function getCompleteBackupFileTimestamp(date: Date) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
 }
 
 function getStoredPcConnection(): PcConnectionData {
@@ -7663,6 +7782,10 @@ export function App() {
     disabled: settingsWindowState?.maximized ?? false,
   });
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("providers");
+  const [dataBackupState, setDataBackupState] = useState<{
+    status: ProviderPullState;
+    message: string;
+  }>({ status: "idle", message: "" });
   const [providers, setProviders] = useState<ModelProviderChannel[]>(loadProviderChannels);
   const [activeProviderId, setActiveProviderId] = useState(() => {
     const storedProviderId = localStorage.getItem(ACTIVE_PROVIDER_STORAGE_KEY);
@@ -7936,6 +8059,7 @@ export function App() {
   const characterAvatarInputRef = useRef<HTMLInputElement>(null);
   const mcpImportInputRef = useRef<HTMLInputElement>(null);
   const skillZipInputRef = useRef<HTMLInputElement>(null);
+  const completeBackupImportInputRef = useRef<HTMLInputElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatSendButtonRef = useRef<HTMLButtonElement>(null);
   const sendChatMessageRef = useRef<
@@ -8585,6 +8709,59 @@ export function App() {
     };
   }, []);
 
+  const buildCurrentAppData = useCallback((): RengeAppData => {
+    const pcConnection: PcConnectionData = {
+      baseUrl: pcTransferWorkspace?.baseUrl ?? pcServerUrl.trim(),
+      ...(pcTransferWorkspace
+        ? {
+            workspacePath: pcTransferWorkspace.path,
+            workspaceName: pcTransferWorkspace.name,
+          }
+        : {}),
+    };
+    return {
+      version: 1,
+      personas,
+      activePersonaId,
+      providers,
+      activeProviderId,
+      chatSessions,
+      chatMode,
+      multiAgentPersonaIds,
+      multiAgentRounds,
+      multiAgentModelConfigs,
+      multiAgentAutoStopEnabled,
+      multiAgentStopCondition,
+      systemPrompts,
+      activeSystemPromptId,
+      activeSystemPromptIds,
+      chatPresets,
+      activeChatPresetId,
+      chatPresetEnabled,
+      worldBooks,
+      activeWorldBookIds,
+      regexScripts,
+      tavernScripts,
+      tavernGlobalVariables,
+      characterCards,
+      activeCharacterCardId,
+      characterTranslationAdditionalPrompt,
+      characterTranslationPromptEnabled,
+      userProfile,
+      chatSender,
+      chatMultiBubbleEnabled,
+      chatHtmlRenderEnabled,
+      chatReasoningVisible,
+      chatHeartbeatReminderVisible,
+      chatPersonalization,
+      mcpServers,
+      skills,
+      extensions,
+      ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
+      updatedAt: new Date().toISOString(),
+    };
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -8943,57 +9120,8 @@ export function App() {
     localStorage.setItem(MCP_SERVERS_STORAGE_KEY, JSON.stringify(mcpServers));
     localStorage.setItem(SKILLS_STORAGE_KEY, JSON.stringify(skills));
     localStorage.setItem(EXTENSIONS_STORAGE_KEY, JSON.stringify(extensions));
-    const pcConnection: PcConnectionData = {
-      baseUrl: pcTransferWorkspace?.baseUrl ?? pcServerUrl.trim(),
-      ...(pcTransferWorkspace
-        ? {
-            workspacePath: pcTransferWorkspace.path,
-            workspaceName: pcTransferWorkspace.name,
-          }
-        : {}),
-    };
-    void savePersistentAppData({
-      version: 1,
-      personas,
-      activePersonaId,
-      providers,
-      activeProviderId,
-      chatSessions,
-      chatMode,
-      multiAgentPersonaIds,
-      multiAgentRounds,
-      multiAgentModelConfigs,
-      multiAgentAutoStopEnabled,
-      multiAgentStopCondition,
-      systemPrompts,
-      activeSystemPromptId,
-      activeSystemPromptIds,
-      chatPresets,
-      activeChatPresetId,
-      chatPresetEnabled,
-      worldBooks,
-      activeWorldBookIds,
-      regexScripts,
-      tavernScripts,
-      tavernGlobalVariables,
-      characterCards,
-      activeCharacterCardId,
-      characterTranslationAdditionalPrompt,
-      characterTranslationPromptEnabled,
-      userProfile,
-      chatSender,
-      chatMultiBubbleEnabled,
-      chatHtmlRenderEnabled,
-      chatReasoningVisible,
-      chatHeartbeatReminderVisible,
-      chatPersonalization,
-      mcpServers,
-      skills,
-      extensions,
-      ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
-      updatedAt: new Date().toISOString(),
-    });
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataLoaded, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+    void savePersistentAppData(buildCurrentAppData());
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataLoaded, buildCurrentAppData, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -9798,6 +9926,133 @@ export function App() {
         status: "error",
         message: error instanceof Error ? `脚本数据无效：${error.message}` : "脚本数据无效。",
       });
+    }
+  };
+
+  const exportCompleteAppData = async () => {
+    if (!appDataLoaded || dataBackupState.status === "loading") return;
+    setDataBackupState({ status: "loading", message: "正在整理全部应用数据..." });
+    try {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      const exportedAt = new Date();
+      const desktopProjectPositions =
+        typeof window.rengeDesktop?.loadDesktopProjectPositions === "function"
+          ? await window.rengeDesktop.loadDesktopProjectPositions()
+          : undefined;
+      const backup: RengeCompleteBackup = {
+        format: COMPLETE_BACKUP_FORMAT,
+        version: COMPLETE_BACKUP_VERSION,
+        exportedAt: exportedAt.toISOString(),
+        appData: buildCurrentAppData(),
+        localStorage: collectRengeLocalStorage(),
+        ...(desktopProjectPositions && isObjectRecord(desktopProjectPositions)
+          ? { desktopProjectPositions }
+          : {}),
+      };
+      const blob = new Blob([JSON.stringify(backup, null, 2)], {
+        type: "application/json;charset=utf-8",
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `Renge-Agent-complete-backup-${getCompleteBackupFileTimestamp(exportedAt)}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setDataBackupState({
+        status: "success",
+        message: `完整备份已导出（${formatFileSize(blob.size)}）。请将文件保存在可信位置。`,
+      });
+    } catch (error) {
+      setDataBackupState({
+        status: "error",
+        message: error instanceof Error ? `导出失败：${error.message}` : "完整备份导出失败。",
+      });
+    }
+  };
+
+  const importCompleteAppData = async (file?: File) => {
+    if (!file || dataBackupState.status === "loading") return;
+    setDataBackupState({ status: "loading", message: "正在校验完整备份..." });
+    let previousAppData: RengeAppData | null = null;
+    let previousLocalStorage: Record<string, string> | null = null;
+    let restoreStarted = false;
+    try {
+      const backup = parseCompleteBackup(JSON.parse(await file.text()) as unknown);
+      const exportedDate = new Date(backup.exportedAt);
+      const exportedLabel = Number.isNaN(exportedDate.getTime())
+        ? backup.exportedAt
+        : exportedDate.toLocaleString("zh-CN");
+      const confirmed = window.confirm(
+        `即将导入 ${exportedLabel} 的完整备份。\n\n这会替换当前全部应用数据，包括人格、角色卡、聊天、API Key、脚本、扩展和界面设置。此操作不可直接撤销，是否继续？`,
+      );
+      if (!confirmed) {
+        setDataBackupState({ status: "idle", message: "已取消导入，当前数据未发生变化。" });
+        return;
+      }
+
+      setDataBackupState({ status: "loading", message: "正在恢复全部应用数据，请勿关闭应用..." });
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      previousAppData = buildCurrentAppData();
+      previousLocalStorage = collectRengeLocalStorage();
+      restoreStarted = true;
+
+      const restoredPersonas = (backup.appData.personas ?? []).map(normalizePersona);
+      const restoredCharacterCards = (backup.appData.characterCards ?? []).map(
+        (card, index) => normalizeCharacterCard(card, index),
+      );
+      const restoredAppData: RengeAppData = {
+        ...backup.appData,
+        version: 1,
+        personas: restoredPersonas,
+        characterCards: restoredCharacterCards,
+      };
+
+      await saveCharacterCardsToDatabase(restoredCharacterCards);
+      const appDataSaved = await savePersistentAppData(restoredAppData);
+      if (!appDataSaved) {
+        throw new Error("无法写入应用主数据，请确认本地数据服务正在运行。");
+      }
+      replaceRengeLocalStorage(backup.localStorage);
+      await personaStore.save(restoredPersonas);
+
+      if (
+        backup.desktopProjectPositions !== undefined &&
+        typeof window.rengeDesktop?.saveDesktopProjectPositions === "function"
+      ) {
+        const positionResult = await window.rengeDesktop.saveDesktopProjectPositions(
+          backup.desktopProjectPositions,
+        );
+        if (!positionResult?.ok) throw new Error("桌面图标位置恢复失败。");
+      }
+
+      setDataBackupState({
+        status: "success",
+        message: "完整数据已恢复，正在重新载入应用...",
+      });
+      window.setTimeout(() => window.location.reload(), 450);
+    } catch (error) {
+      if (restoreStarted && previousAppData && previousLocalStorage) {
+        await Promise.allSettled([
+          savePersistentAppData(previousAppData),
+          saveCharacterCardsToDatabase(characterCards),
+        ]);
+        try {
+          replaceRengeLocalStorage(previousLocalStorage);
+          await personaStore.save(previousAppData.personas ?? personas);
+        } catch {
+          // Keep the original restore error visible even if a local rollback also fails.
+        }
+      }
+      setDataBackupState({
+        status: "error",
+        message: error instanceof Error ? `导入失败：${error.message}` : "完整备份导入失败。",
+      });
+    } finally {
+      if (completeBackupImportInputRef.current) {
+        completeBackupImportInputRef.current.value = "";
+      }
     }
   };
 
@@ -19597,6 +19852,18 @@ export function App() {
             <Wrench size={16} />
             手机端
           </button>
+          <div className="settings-nav-label">数据与备份</div>
+          <button
+            type="button"
+            className={`settings-tab ${settingsTab === "data" ? "active" : ""}`}
+            onClick={() => {
+              setSettingsTab("data");
+              closeMobileSidebar();
+            }}
+          >
+            <Database size={16} />
+            数据
+          </button>
             </aside>
             <button
               type="button"
@@ -22329,6 +22596,111 @@ export function App() {
                 )}
               </div>
             </section>
+          )}
+
+          {settingsTab === "data" && (
+            <div className="data-backup-page">
+              <section className="section-block data-backup-overview">
+                <div className="section-heading compact">
+                  <div>
+                    <h2>完整数据快照</h2>
+                    <p>
+                      一次打包应用内部的全部数据，用于设备迁移、重装恢复或手动留档。
+                    </p>
+                  </div>
+                  <span className="data-backup-badge">
+                    <Database size={15} />
+                    完整备份
+                  </span>
+                </div>
+
+                <div className="data-backup-sensitive-notice">
+                  <KeyRound size={19} aria-hidden="true" />
+                  <div>
+                    <strong>备份包含敏感信息，文件不会加密</strong>
+                    <p>
+                      其中可能包含供应商 API Key、聊天记录、角色卡、个人资料和电脑连接信息。请勿上传到公共仓库，也不要分享给不可信的人。
+                    </p>
+                  </div>
+                </div>
+              </section>
+
+              <div className="data-backup-grid">
+                <section className="section-block data-backup-card">
+                  <div className="data-backup-card-heading">
+                    <span className="data-backup-icon export" aria-hidden="true">
+                      <Download size={21} />
+                    </span>
+                    <div>
+                      <h2>导出完整备份</h2>
+                      <p>生成一个可离线保存的 JSON 快照。</p>
+                    </div>
+                  </div>
+                  <ul className="data-backup-list">
+                    <li>人格、角色卡及原始封面</li>
+                    <li>聊天、世界书、预设与脚本</li>
+                    <li>供应商、MCP、Skills 配置与扩展</li>
+                    <li>个性化设置与桌面图标位置</li>
+                  </ul>
+                  <div className="data-backup-summary">
+                    {personas.length} 个人格 · {characterCards.length} 张角色卡 · {chatSessions.length} 个会话
+                  </div>
+                  <button
+                    type="button"
+                    className="small-action data-backup-action"
+                    disabled={!appDataLoaded || dataBackupState.status === "loading"}
+                    onClick={() => void exportCompleteAppData()}
+                  >
+                    <Download size={16} />
+                    {dataBackupState.status === "loading" ? "正在处理" : "导出完整备份"}
+                  </button>
+                </section>
+
+                <section className="section-block data-backup-card warning">
+                  <div className="data-backup-card-heading">
+                    <span className="data-backup-icon import" aria-hidden="true">
+                      <Upload size={21} />
+                    </span>
+                    <div>
+                      <h2>导入完整备份</h2>
+                      <p>从之前导出的快照恢复整个应用。</p>
+                    </div>
+                  </div>
+                  <div className="data-backup-replace-warning">
+                    导入会覆盖当前全部应用数据。开始前建议先导出一次当前数据，以便需要时恢复。
+                  </div>
+                  <p className="data-backup-import-note">
+                    仅支持由本页面导出的 Renge Agent 完整备份 JSON 文件。导入成功后应用会自动重新载入。
+                  </p>
+                  <input
+                    ref={completeBackupImportInputRef}
+                    className="hidden-input"
+                    type="file"
+                    accept=".json,application/json"
+                    onChange={(event) => void importCompleteAppData(event.target.files?.[0])}
+                  />
+                  <button
+                    type="button"
+                    className="ghost-action data-backup-action import"
+                    disabled={dataBackupState.status === "loading"}
+                    onClick={() => completeBackupImportInputRef.current?.click()}
+                  >
+                    <Upload size={16} />
+                    选择备份并导入
+                  </button>
+                </section>
+              </div>
+
+              {dataBackupState.message && (
+                <p
+                  className={`provider-status data-backup-status ${dataBackupState.status}`}
+                  role={dataBackupState.status === "error" ? "alert" : "status"}
+                  aria-live="polite"
+                >
+                  {dataBackupState.message}
+                </p>
+              )}
+            </div>
           )}
             </section>
           </div>
