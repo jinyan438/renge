@@ -499,6 +499,8 @@ type RengeAppData = {
   tavernGlobalVariables?: Record<string, unknown>;
   characterCards?: CharacterCard[];
   activeCharacterCardId?: string;
+  characterTranslationAdditionalPrompt?: string;
+  characterTranslationPromptEnabled?: boolean;
   userProfile?: UserProfile;
   chatSender?: ChatSenderIdentity;
   chatMultiBubbleEnabled?: boolean;
@@ -8787,6 +8789,14 @@ export function App() {
         typeof persistentData?.chatPresetEnabled === "boolean"
           ? persistentData.chatPresetEnabled
           : localStorage.getItem(CHAT_PRESET_ENABLED_STORAGE_KEY) === "true";
+      const nextCharacterTranslationAdditionalPrompt =
+        typeof persistentData?.characterTranslationAdditionalPrompt === "string"
+          ? persistentData.characterTranslationAdditionalPrompt
+          : localStorage.getItem(CHARACTER_TRANSLATION_PROMPT_STORAGE_KEY) ?? "";
+      const nextCharacterTranslationPromptEnabled =
+        typeof persistentData?.characterTranslationPromptEnabled === "boolean"
+          ? persistentData.characterTranslationPromptEnabled
+          : localStorage.getItem(CHARACTER_TRANSLATION_PROMPT_ENABLED_STORAGE_KEY) !== "false";
       let storedActiveWorldBookIds: unknown = [];
       try {
         storedActiveWorldBookIds = JSON.parse(
@@ -8827,6 +8837,8 @@ export function App() {
       setTavernGlobalVariables(nextTavernGlobalVariables);
       setCharacterCards(normalizedCharacterCards);
       setActiveCharacterCardId(nextActiveCharacterCardId);
+      setCharacterTranslationAdditionalPrompt(nextCharacterTranslationAdditionalPrompt);
+      setCharacterTranslationPromptEnabled(nextCharacterTranslationPromptEnabled);
       setUserProfile(normalizedUserProfile);
       setChatSender(nextChatSender);
       setChatMode(nextChatMode);
@@ -8966,6 +8978,8 @@ export function App() {
       tavernGlobalVariables,
       characterCards,
       activeCharacterCardId,
+      characterTranslationAdditionalPrompt,
+      characterTranslationPromptEnabled,
       userProfile,
       chatSender,
       chatMultiBubbleEnabled,
@@ -8979,7 +8993,7 @@ export function App() {
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     });
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataLoaded, characterCards, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataLoaded, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -10087,6 +10101,14 @@ export function App() {
     setCharacterTranslationPromptDialogOpen(true);
   };
   const saveCharacterTranslationPrompt = () => {
+    localStorage.setItem(
+      CHARACTER_TRANSLATION_PROMPT_STORAGE_KEY,
+      characterTranslationPromptDraft,
+    );
+    localStorage.setItem(
+      CHARACTER_TRANSLATION_PROMPT_ENABLED_STORAGE_KEY,
+      String(characterTranslationPromptEnabledDraft),
+    );
     setCharacterTranslationAdditionalPrompt(characterTranslationPromptDraft);
     setCharacterTranslationPromptEnabled(characterTranslationPromptEnabledDraft);
     setCharacterTranslationPromptDialogOpen(false);
@@ -18642,25 +18664,6 @@ export function App() {
                     }}
                   >
                     <Pencil size={15} />
-                  </button>
-                  <button
-                    type="button"
-                    className={`character-translation-prompt-button ${
-                      characterTranslationPromptEnabled &&
-                      characterTranslationAdditionalPrompt.trim()
-                        ? "active"
-                        : ""
-                    }`}
-                    title={
-                      characterTranslationAdditionalPrompt.trim()
-                        ? characterTranslationPromptEnabled
-                          ? "编辑追加翻译提示词（已启用）"
-                          : "编辑追加翻译提示词（已停用）"
-                        : "设置追加翻译提示词"
-                    }
-                    onClick={openCharacterTranslationPromptDialog}
-                  >
-                    <SlidersHorizontal size={15} />
                   </button>
                   <button
                     type="button"
