@@ -937,13 +937,13 @@ button.portfolio-window-light.close:hover {
   }
 
   .portfolio-window-body .character-cover-card {
-    border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(20, 20, 25, 0.07);
+    border-radius: 12px;
+    box-shadow: 0 5px 16px rgba(20, 20, 25, 0.08);
   }
 
   .portfolio-window-body .character-cover-card:hover {
     border-color: rgba(0, 102, 221, 0.2);
-    box-shadow: 0 2px 8px rgba(20, 20, 25, 0.07);
+    box-shadow: 0 5px 16px rgba(20, 20, 25, 0.08);
   }
 
   .portfolio-window-body.chat-shell,
