@@ -23939,7 +23939,6 @@ export function App() {
               <div className="section-heading">
                 <div>
                   <h2>基础档案</h2>
-                  <p>这些字段是人格容器元数据，不直接等同于人格条目。</p>
                 </div>
                 <Save size={18} />
               </div>
@@ -23972,6 +23971,20 @@ export function App() {
                     value={activePersona.name}
                     onChange={(event) =>
                       updatePersona((persona) => ({ ...persona, name: event.target.value }))
+                    }
+                  />
+                </label>
+
+                <label className="field persona-description-field">
+                  <span>补充设定</span>
+                  <textarea
+                    value={activePersona.description}
+                    placeholder="补充身份背景、表达方式或行为要求…"
+                    onChange={(event) =>
+                      updatePersona((persona) => ({
+                        ...persona,
+                        description: event.target.value,
+                      }))
                     }
                   />
                 </label>

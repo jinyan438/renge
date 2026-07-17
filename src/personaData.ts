@@ -9,7 +9,6 @@ const now = () => new Date().toISOString();
 const promptPersonaHeaderPattern = /^你是\s*(.+)$/;
 const promptSectionPattern = /^\[(.+?)\s*\|\s*influence\s*=\s*(HIGH|MEDIUM|LOW)\]$/i;
 const promptEntryPattern = /^(?:[-*]\s*)?([^：:]+?)\s*[：:]\s*(.*)$/;
-const importedPromptDescription = "从 Prompt 预览文本导入的人格。";
 
 const legacyEntryKindLabels: Record<string, string> = {
   identity: "身份",
@@ -66,7 +65,7 @@ export function createPersona(name = "新建人格"): AgentPersona {
     id: createId("persona"),
     name,
     avatarImage: "",
-    description: "一个可被逐步塑造的人类 Agent 人格。",
+    description: "",
     modelProfile: {
       provider: "OpenAI Compatible",
       model: "gpt-4.1",
@@ -117,9 +116,24 @@ export function createPersonaFromPromptText(
   }
 
   const lines = text.split("\n");
-  const headerLine = lines.find((line) => promptPersonaHeaderPattern.test(line.trim()))?.trim() ?? "";
+  const headerIndex = lines.findIndex((line) => promptPersonaHeaderPattern.test(line.trim()));
+  const headerLine = headerIndex >= 0 ? lines[headerIndex].trim() : "";
   const headerMatch = headerLine.match(promptPersonaHeaderPattern);
   const name = options.name?.trim() || headerMatch?.[1]?.trim() || "导入人格";
+  const entryMarkerIndex = lines.findIndex(
+    (line, index) =>
+      index > headerIndex && ["人格条目：", "人格条目:"].includes(line.trim()),
+  );
+  const firstSectionIndex = lines.findIndex(
+    (line, index) => index > headerIndex && promptSectionPattern.test(line.trim()),
+  );
+  const descriptionEndIndex = [entryMarkerIndex, firstSectionIndex]
+    .filter((index) => index >= 0)
+    .reduce((earliest, index) => Math.min(earliest, index), lines.length);
+  const importedDescription =
+    headerIndex >= 0
+      ? lines.slice(headerIndex + 1, descriptionEndIndex).join("\n").trim()
+      : "";
   const entryTypes: PersonalityEntryType[] = [];
   const timestamp = now();
   let currentType: PersonalityEntryType | null = null;
@@ -180,7 +194,7 @@ export function createPersonaFromPromptText(
     ...basePersona,
     id: options.id ?? basePersona.id,
     name,
-    description: options.description ?? importedPromptDescription,
+    description: options.description ?? importedDescription,
     entryTypes,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -288,7 +302,7 @@ export function normalizePersona(rawPersona: AgentPersona): AgentPersona {
   return {
     ...personaWithoutColor,
     avatarImage: source.avatarImage ?? "",
-    description: source.description ?? "",
+    description: typeof source.description === "string" ? source.description : "",
     modelProfile: {
       provider: source.modelProfile?.provider ?? "OpenAI Compatible",
       model: source.modelProfile?.model ?? "gpt-4.1",
@@ -392,6 +406,7 @@ export function getEnabledEntryCount(persona: AgentPersona) {
 }
 
 export function buildPersonaPrompt(persona: AgentPersona) {
+  const description = persona.description.trim();
   const sections = persona.entryTypes.map((type) => {
     const lines = type.entries
       .filter((entry) => entry.enabled)
@@ -402,7 +417,7 @@ export function buildPersonaPrompt(persona: AgentPersona) {
 
   return [
     `你是${persona.name}`,
-    "",
+    description,
     "人格条目：",
     ...sections,
   ]

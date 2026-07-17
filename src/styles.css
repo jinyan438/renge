@@ -6579,6 +6579,10 @@ h2 {
   align-items: end;
 }
 
+.persona-description-field textarea {
+  min-height: 104px;
+}
+
 .field {
   display: flex;
   flex-direction: column;
