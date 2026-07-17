@@ -607,6 +607,205 @@ button.settings-window-light.close:hover {
   color: #11733b;
 }
 
+.settings-desktop .data-backup-page {
+  display: flex;
+  width: min(100%, 980px);
+  flex-direction: column;
+  gap: 16px;
+}
+
+.settings-desktop .data-backup-overview .section-heading {
+  margin-bottom: 16px;
+}
+
+.settings-desktop .data-backup-badge {
+  display: inline-flex;
+  min-height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid rgba(0, 102, 221, 0.18);
+  border-radius: 999px;
+  color: #005abf;
+  background: #eaf3ff;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.settings-desktop .data-backup-sensitive-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 13px 14px;
+  border: 1px solid rgba(183, 110, 0, 0.2);
+  border-radius: 12px;
+  color: #7c4b00;
+  background: #fff8e8;
+}
+
+.settings-desktop .data-backup-sensitive-notice > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: #b36b00;
+}
+
+.settings-desktop .data-backup-sensitive-notice strong,
+.settings-desktop .data-backup-sensitive-notice p {
+  display: block;
+}
+
+.settings-desktop .data-backup-sensitive-notice strong {
+  font-size: 12px;
+}
+
+.settings-desktop .data-backup-sensitive-notice p {
+  margin-top: 4px;
+  color: #8a642a;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.settings-desktop .data-backup-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.settings-desktop .data-backup-card {
+  display: flex;
+  min-width: 0;
+  min-height: 310px;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.settings-desktop .data-backup-card.warning {
+  border-color: rgba(183, 110, 0, 0.2);
+}
+
+.settings-desktop .data-backup-card-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-desktop .data-backup-card-heading > div {
+  min-width: 0;
+}
+
+.settings-desktop .data-backup-card-heading h2 {
+  color: #27272b;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.035em;
+}
+
+.settings-desktop .data-backup-card-heading p {
+  margin-top: 4px;
+  color: #7a7a80;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.settings-desktop .data-backup-icon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 13px;
+}
+
+.settings-desktop .data-backup-icon.export {
+  color: #005abf;
+  background: #eaf3ff;
+  box-shadow: 0 5px 14px rgba(0, 102, 221, 0.1);
+}
+
+.settings-desktop .data-backup-icon.import {
+  color: #a55c00;
+  background: #fff3db;
+  box-shadow: 0 5px 14px rgba(183, 110, 0, 0.08);
+}
+
+.settings-desktop .data-backup-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-desktop .data-backup-list li {
+  position: relative;
+  padding-left: 17px;
+  color: #5f5f65;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.settings-desktop .data-backup-list li::before {
+  position: absolute;
+  top: 0.48em;
+  left: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4c96e8;
+  content: "";
+}
+
+.settings-desktop .data-backup-summary {
+  margin-top: auto;
+  padding: 10px 11px;
+  border: 1px solid #e2e2e7;
+  border-radius: 10px;
+  color: #66666c;
+  background: #f8f8fa;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.settings-desktop .data-backup-replace-warning {
+  padding: 11px 12px;
+  border: 1px solid rgba(183, 110, 0, 0.17);
+  border-radius: 10px;
+  color: #895300;
+  background: #fff8e9;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.settings-desktop .data-backup-import-note {
+  margin: 0 0 auto;
+  color: #6f6f75;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.settings-desktop .data-backup-action {
+  align-self: flex-start;
+}
+
+.settings-desktop .data-backup-action.import {
+  border-color: rgba(183, 110, 0, 0.26);
+  color: #8a5000;
+  background: #fffaf0;
+}
+
+.settings-desktop .data-backup-action.import:hover {
+  border-color: rgba(183, 110, 0, 0.38);
+  color: #6f4000;
+  background: #fff6e5;
+}
+
+.settings-desktop .data-backup-status {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .settings-desktop .personalization-color-field code,
 .settings-desktop .mcp-tool-row code,
 .settings-desktop .root-access-details {
@@ -800,6 +999,19 @@ button.settings-window-light.close:hover {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .settings-desktop .data-backup-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-desktop .data-backup-card {
+    min-height: 0;
+  }
+
+  .settings-desktop .data-backup-action {
+    width: 100%;
+    justify-content: center;
+  }
+
   .settings-desktop .preset-list-panel,
   .settings-desktop .worldbook-list-panel,
   .settings-desktop .regex-list-panel,
@@ -822,6 +1034,15 @@ button.settings-window-light.close:hover {
   .settings-desktop .section-block {
     padding: 14px;
     border-radius: 14px;
+  }
+
+  .settings-desktop .data-backup-overview .section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .settings-desktop .data-backup-sensitive-notice {
+    padding: 12px;
   }
 
   .settings-desktop .provider-item {
