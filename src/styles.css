@@ -6579,6 +6579,10 @@ h2 {
   align-items: end;
 }
 
+.profile-grid .avatar-upload {
+  width: 170px;
+}
+
 .persona-description-field textarea {
   min-height: 104px;
 }
@@ -8234,6 +8238,10 @@ input[type="range"] {
 
   .avatar-upload {
     width: min(154px, 100%);
+  }
+
+  .profile-grid .avatar-upload {
+    width: min(170px, 100%);
   }
 
   .entry-main-row {
