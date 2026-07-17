@@ -7927,6 +7927,8 @@ export function App() {
     status: ProviderPullState;
     message: string;
   }>({ status: "idle", message: "" });
+  const [dataClearConfirmationOpen, setDataClearConfirmationOpen] = useState(false);
+  const [dataClearConfirmationText, setDataClearConfirmationText] = useState("");
   const [providers, setProviders] = useState<ModelProviderChannel[]>(loadProviderChannels);
   const [activeProviderId, setActiveProviderId] = useState(() => {
     const storedProviderId = localStorage.getItem(ACTIVE_PROVIDER_STORAGE_KEY);
@@ -10154,7 +10156,7 @@ export function App() {
     }
   };
 
-  const clearAllAppData = async () => {
+  const requestClearAllAppData = () => {
     if (dataBackupState.status === "loading") return;
     const confirmed = window.confirm(
       "这会永久清除全部应用数据并恢复出厂状态，包括聊天、角色卡、人格、API Key、世界书、脚本、扩展、Skills 和界面设置。\n\n你手动导出的 JSON 备份和外部工作区文件不会被删除。是否继续？",
@@ -10163,15 +10165,18 @@ export function App() {
       setDataBackupState({ status: "idle", message: "已取消清除，当前数据未发生变化。" });
       return;
     }
-    const confirmationText = window.prompt(
-      "此操作不可撤销。请输入“清除全部数据”进行最终确认：",
-      "",
-    );
-    if (confirmationText?.trim() !== "清除全部数据") {
-      setDataBackupState({ status: "idle", message: "确认文字不匹配，未清除任何数据。" });
+    setDataClearConfirmationText("");
+    setDataClearConfirmationOpen(true);
+  };
+
+  const clearAllAppData = async () => {
+    if (
+      dataBackupState.status === "loading" ||
+      dataClearConfirmationText.trim() !== "清除全部数据"
+    ) {
       return;
     }
-
+    setDataClearConfirmationOpen(false);
     appDataClearingRef.current = true;
     setDataBackupState({ status: "loading", message: "正在清除全部应用数据，请勿关闭应用..." });
     const persistentDataCleared = await clearPersistentAppData();
@@ -18294,6 +18299,89 @@ export function App() {
     closeAvatarCrop();
   };
 
+  const dataClearConfirmationMatches =
+    dataClearConfirmationText.trim() === "清除全部数据";
+  const closeDataClearConfirmation = () => {
+    setDataClearConfirmationOpen(false);
+    setDataClearConfirmationText("");
+  };
+  const dataClearConfirmationModal = dataClearConfirmationOpen ? (
+    <div
+      className="modal-backdrop data-clear-confirmation-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="data-clear-confirmation-title"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) closeDataClearConfirmation();
+      }}
+    >
+      <section className="data-clear-confirmation-modal">
+        <header className="data-clear-confirmation-header">
+          <div className="data-clear-confirmation-heading">
+            <span className="data-clear-confirmation-icon" aria-hidden="true">
+              <Trash2 size={20} />
+            </span>
+            <div>
+              <h2 id="data-clear-confirmation-title">最终确认</h2>
+              <p>此操作不可撤销，应用将恢复为出厂状态。</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="icon-button flat"
+            title="取消"
+            aria-label="取消清除所有数据"
+            onClick={closeDataClearConfirmation}
+          >
+            <X size={18} />
+          </button>
+        </header>
+
+        <div className="data-clear-confirmation-warning">
+          清除后，聊天、角色卡、人格、供应商与 API Key、世界书、脚本、扩展、Skills 和界面设置都无法从应用内部恢复。
+        </div>
+
+        <label className="field data-clear-confirmation-field">
+          <span>
+            请输入 <strong>清除全部数据</strong> 以启用清除按钮
+          </span>
+          <input
+            autoFocus
+            value={dataClearConfirmationText}
+            placeholder="清除全部数据"
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(event) => setDataClearConfirmationText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                closeDataClearConfirmation();
+              } else if (event.key === "Enter" && dataClearConfirmationMatches) {
+                event.preventDefault();
+                void clearAllAppData();
+              }
+            }}
+          />
+        </label>
+
+        <div className="data-clear-confirmation-actions">
+          <button type="button" className="ghost-action" onClick={closeDataClearConfirmation}>
+            取消
+          </button>
+          <button
+            type="button"
+            className="data-clear-confirm-button"
+            disabled={!dataClearConfirmationMatches}
+            onClick={() => void clearAllAppData()}
+          >
+            <Trash2 size={16} />
+            永久清除
+          </button>
+        </div>
+      </section>
+    </div>
+  ) : null;
+
   const avatarCropModal = avatarCrop ? (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="裁剪头像">
       <section className="crop-modal">
@@ -22858,7 +22946,7 @@ export function App() {
                   type="button"
                   className="ghost-action data-clear-action"
                   disabled={dataBackupState.status === "loading"}
-                  onClick={() => void clearAllAppData()}
+                  onClick={requestClearAllAppData}
                 >
                   <Trash2 size={16} />
                   清除所有数据
@@ -24846,11 +24934,15 @@ export function App() {
       {settingsWindow}
       {chatWindow}
       {studioWindow}
-      {(avatarCropModal || pcBrowserModal || roleplayGreetingSelectorModal) && (
+      {(avatarCropModal ||
+        pcBrowserModal ||
+        roleplayGreetingSelectorModal ||
+        dataClearConfirmationModal) && (
         <div className="managed-global-overlays portfolio-desktop-shell">
           {avatarCropModal}
           {pcBrowserModal}
           {roleplayGreetingSelectorModal}
+          {dataClearConfirmationModal}
         </div>
       )}
     </>
