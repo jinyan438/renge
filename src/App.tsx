@@ -673,6 +673,12 @@ type RengeDesktopApi = {
 
 type RengeAndroidApi = {
   isAndroid: boolean;
+  saveDownload(options: {
+    fileName: string;
+    mimeType?: string;
+    content?: string;
+    base64?: string;
+  }): Promise<{ ok: boolean; fileName: string; bytes: number }>;
   selectWorkspace(): Promise<AndroidWorkspaceHandle | null>;
   selectRootWorkspace(options: { path: string }): Promise<AndroidWorkspaceHandle>;
   restoreWorkspace(options: { uri: string; name?: string }): Promise<AndroidWorkspaceHandle>;
@@ -18201,13 +18207,26 @@ export function App() {
 
   const exportJson = () => {
     if (!activePersona) return;
-    const blob = new Blob([JSON.stringify(activePersona, null, 2)], {
+    const content = JSON.stringify(activePersona, null, 2);
+    const fileName = `${activePersona.name || "persona"}.json`;
+    if (window.rengeAndroid?.isAndroid) {
+      void window.rengeAndroid
+        .saveDownload({
+          fileName,
+          mimeType: "application/json",
+          content,
+        })
+        .catch((error) => console.error("Android 人格导出失败", error));
+      return;
+    }
+
+    const blob = new Blob([content], {
       type: "application/json;charset=utf-8",
     });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${activePersona.name || "persona"}.json`;
+    link.download = fileName;
     link.click();
     URL.revokeObjectURL(url);
   };
