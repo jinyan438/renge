@@ -15,7 +15,6 @@ import {
   EyeOff,
   FileJson,
   FolderOpen,
-  GripHorizontal,
   GripVertical,
   KeyRound,
   ListPlus,
@@ -181,6 +180,11 @@ import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryTy
 
 const AVATAR_OUTPUT_SIZE = 512;
 const CROP_PREVIEW_SIZE = 320;
+const influenceLevelShortLabels: Record<InfluenceLevel, string> = {
+  HIGH: "H",
+  MEDIUM: "M",
+  LOW: "L",
+};
 
 type AvatarCropState = {
   target: "persona" | "user";
@@ -23873,6 +23877,17 @@ export function App() {
                   : ""
               }`}
               key={type.id}
+              draggable
+              title={`拖动调整 ${type.name} 的顺序`}
+              onDragStart={(event) => {
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", type.id);
+                setDraggedTypeId(type.id);
+              }}
+              onDragEnd={() => {
+                setDraggedTypeId(null);
+                setDragOverType(null);
+              }}
               onDragOver={(event) => {
                 if (!draggedTypeId) return;
                 event.preventDefault();
@@ -23896,31 +23911,13 @@ export function App() {
             >
               <button
                 type="button"
-                className="type-drag-handle"
-                draggable
-                title="拖动类型排序"
-                onDragStart={(event) => {
-                  event.stopPropagation();
-                  event.dataTransfer.effectAllowed = "move";
-                  event.dataTransfer.setData("text/plain", type.id);
-                  setDraggedTypeId(type.id);
-                }}
-                onDragEnd={() => {
-                  setDraggedTypeId(null);
-                  setDragOverType(null);
-                }}
-              >
-                <GripHorizontal size={13} />
-              </button>
-              <button
-                type="button"
                 className="kind-tab-main"
                 onClick={(event) => {
                   event.stopPropagation();
                   setSelectedTypeId(type.id);
                 }}
               >
-                {type.name}
+                <span className="kind-tab-name">{type.name}</span>
               </button>
               <select
                 className="influence-select"
@@ -23932,7 +23929,7 @@ export function App() {
               >
                 {influenceLevels.map((level) => (
                   <option key={level} value={level}>
-                    {level}
+                    {influenceLevelShortLabels[level]}
                   </option>
                 ))}
               </select>

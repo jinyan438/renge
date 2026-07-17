@@ -477,9 +477,10 @@ button.portfolio-window-light.close:hover {
   top: auto;
   z-index: 70;
   min-width: 0;
-  margin: 0 0 12px;
-  padding: 8px 0;
-  background: #fafafc;
+  margin: 0 0 14px;
+  padding: 8px;
+  border-color: rgba(210, 210, 216, 0.86);
+  background: rgba(255, 255, 255, 0.74);
 }
 
 .portfolio-window-body .workspace > .content-grid {

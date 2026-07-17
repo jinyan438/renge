@@ -6711,20 +6711,25 @@ input[type="range"] {
 
 .kind-tabs {
   display: flex;
-  gap: 8px;
-  margin-bottom: 12px;
-  overflow-x: auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 14px;
+  overflow: visible;
   position: sticky;
   top: 70px;
   z-index: 12;
-  padding: 8px 0;
-  border-bottom: 1px solid #edf0f4;
+  padding: 8px;
+  border: 1px solid #e4e8ef;
+  border-radius: 13px;
   background: #ffffff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
 }
 
 .kind-tabs > button,
 .kind-tab {
-  min-height: 34px;
+  flex: 0 0 auto;
+  min-height: 36px;
   border: 1px solid #d9dee8;
   border-radius: 999px;
   color: #536074;
@@ -6733,56 +6738,65 @@ input[type="range"] {
 }
 
 .kind-tabs > button {
+  min-width: 56px;
   padding: 0 12px;
+  cursor: pointer;
 }
 
 .kind-tab {
   display: inline-flex;
   align-items: center;
+  max-width: min(220px, 100%);
   overflow: hidden;
+  cursor: grab;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    opacity 140ms ease;
 }
 
 .kind-tab-main,
-.type-drag-handle,
 .kind-tab-remove,
 .influence-select {
   border: 0;
   background: transparent;
 }
 
-.type-drag-handle {
-  display: grid;
-  width: 24px;
-  height: 32px;
-  padding: 0;
-  place-items: center;
-  border-right: 1px solid #e6eaf0;
-  color: #8a94a6;
-  cursor: grab;
-}
-
-.type-drag-handle:active {
+.kind-tab:active {
   cursor: grabbing;
 }
 
 .kind-tab-main {
   display: inline-flex;
+  flex: 0 1 auto;
   align-items: center;
   justify-content: center;
   min-width: 0;
-  min-height: 32px;
-  padding: 0 8px 0 12px;
+  min-height: 34px;
+  padding: 0 9px 0 12px;
   color: inherit;
+  cursor: inherit;
+}
+
+.kind-tab-name {
+  display: block;
+  max-width: 132px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .kind-tab-remove {
   display: grid;
-  width: 24px;
-  height: 24px;
-  margin-right: 4px;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  margin-right: 3px;
+  padding: 0;
   place-items: center;
   border-radius: 999px;
   color: #8a94a6;
+  cursor: pointer;
 }
 
 .kind-tab-remove:hover {
@@ -6791,14 +6805,27 @@ input[type="range"] {
 }
 
 .influence-select {
-  height: 24px;
-  max-width: 94px;
-  padding: 0 4px;
-  border-left: 1px solid #d9dee8;
+  flex: 0 0 40px;
+  width: 40px;
+  height: 28px;
+  max-width: 40px;
+  margin-right: 3px;
+  padding: 0 3px;
+  border: 1px solid #e0e5ec;
+  border-radius: 8px;
   color: #334155;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
+  text-align: center;
+  text-align-last: center;
+  background: rgba(248, 250, 252, 0.92);
+  cursor: pointer;
   outline: 0;
+}
+
+.influence-select:focus-visible {
+  border-color: #07C160;
+  box-shadow: 0 0 0 2px rgba(7, 193, 96, 0.14);
 }
 
 .kind-tabs > button.selected,
@@ -6809,7 +6836,7 @@ input[type="range"] {
 }
 
 .kind-tab.dragging {
-  opacity: 0.55;
+  opacity: 0.52;
 }
 
 .kind-tab.drag-over.before {
@@ -6879,8 +6906,7 @@ input[type="range"] {
   cursor: grab;
 }
 
-.entry-drag-handle:hover,
-.type-drag-handle:hover {
+.entry-drag-handle:hover {
   color: #07C160;
   background: #E6F8EF;
 }
@@ -7995,6 +8021,53 @@ input[type="range"] {
 
   .kind-tabs {
     top: 58px;
+  }
+
+  .studio-kind-tabs {
+    flex-wrap: nowrap;
+    gap: 7px;
+    width: 100%;
+    padding: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-padding-inline: 8px;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .studio-kind-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .studio-kind-tabs > button,
+  .studio-kind-tabs .kind-tab {
+    flex: 0 0 auto;
+    min-height: 40px;
+    scroll-snap-align: start;
+  }
+
+  .studio-kind-tabs .kind-tab {
+    max-width: 178px;
+  }
+
+  .studio-kind-tabs .kind-tab-main {
+    min-height: 38px;
+  }
+
+  .studio-kind-tabs .kind-tab-name {
+    max-width: 88px;
+  }
+
+  .studio-kind-tabs .influence-select {
+    height: 32px;
+  }
+
+  .studio-kind-tabs .kind-tab-remove {
+    flex-basis: 32px;
+    width: 32px;
+    height: 32px;
   }
 
   .studio-topbar .topbar-actions {
