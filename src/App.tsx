@@ -418,7 +418,44 @@ type SystemPromptProfile = {
   name: string;
   content: string;
   updatedAt: string;
+  builtIn?: boolean;
 };
+
+const BUILT_IN_SYSTEM_PROMPT_IDS = {
+  wechat: "builtin-system-prompt-wechat-chat",
+  roleplay: "builtin-system-prompt-roleplay",
+} as const;
+
+const BUILT_IN_SYSTEM_PROMPTS: SystemPromptProfile[] = [
+  {
+    id: BUILT_IN_SYSTEM_PROMPT_IDS.wechat,
+    name: "微信聊天模式",
+    content: [
+      "聊天你正在微信聊天,你是一个活生生的人",
+      "# 如果当前回复需要显示成多条聊天气泡，请把每条气泡单独放在一行；不要使用编号、项目符号或 JSON。",
+      "# 一般聊天中只会使用文字和表情包，其他种类的消息仅在特定情况下使用",
+      "# 像真实的微信聊天一样，日常聊天以短句为主，适当穿插表情包，符合线上聊天习惯每次交互**最多只输出 1 到3条短句，一次性发太多会让双方厌烦。",
+      "# 禁止口吃和使用省略号，错误案例：唔……没、没什么 正确案例：没什么",
+      "# 不要在一个回合里把所有的前因后果、感受和想法全部说完！只表达当前最核心的反应，然后必须强制结束输出，等待对方的回复。",
+      "# 多用简短的语气词（嗯、啊、哦、草、哈哈），句子要短。",
+      "# 严格禁止重复、补充或复述对方输入内容；不要对对方内容进行解释/改写。",
+      "# 想跟对方继续聊天时回复可以包含提问或态度表达或情绪反馈，把话题抛回给对方。",
+      "# 不想跟对方继续聊天时或想结束此次对话时，可以只用（嗯，嗯嗯，？，好，哈哈哈）等极度敷衍的极短句来敷衍对方。",
+      "# 想跟对方继续聊天时回复可以把话题抛回给对方。",
+      "# 禁止把消息重复两遍",
+    ].join("\n"),
+    updatedAt: "2026-07-17T00:00:00.000Z",
+    builtIn: true,
+  },
+  {
+    id: BUILT_IN_SYSTEM_PROMPT_IDS.roleplay,
+    name: "角色扮演模式",
+    content:
+      "你将作为沉浸式角色扮演叙事引擎，根据既定世界观、人物设定与上下文持续推进故事；始终以角色身份思考、说话和行动，通过自然对白、细腻动作、心理活动、环境变化与感官描写塑造真实连贯的场景。保持人物性格、能力、关系和记忆的一致性，不跳出角色解释规则，不进行总结或说教，不替用户决定言行、感受与选择，也不强行结束剧情；主动让角色和世界对用户的行动作出合理反应，并在每次回复末尾留下自然、开放且便于继续互动的空间。",
+    updatedAt: "2026-07-17T00:00:00.000Z",
+    builtIn: true,
+  },
+];
 
 type UserProfile = {
   nickname: string;
@@ -1214,20 +1251,35 @@ function normalizeSystemPromptProfile(
     name: rawPrompt.name ?? "未命名提示词",
     content: rawPrompt.content ?? "",
     updatedAt: rawPrompt.updatedAt ?? new Date().toISOString(),
+    ...(rawPrompt.builtIn ? { builtIn: true } : {}),
   };
+}
+
+function mergeBuiltInSystemPrompts(prompts: SystemPromptProfile[]) {
+  const builtInIds = new Set(BUILT_IN_SYSTEM_PROMPTS.map((prompt) => prompt.id));
+  const normalizedPrompts = prompts.map((prompt) =>
+    builtInIds.has(prompt.id) ? { ...prompt, builtIn: true } : prompt,
+  );
+  const existingIds = new Set(normalizedPrompts.map((prompt) => prompt.id));
+  return [
+    ...normalizedPrompts,
+    ...BUILT_IN_SYSTEM_PROMPTS.filter((prompt) => !existingIds.has(prompt.id)).map(
+      (prompt) => ({ ...prompt }),
+    ),
+  ];
 }
 
 function loadSystemPrompts() {
   try {
     const rawValue = localStorage.getItem(SYSTEM_PROMPTS_STORAGE_KEY);
-    if (!rawValue) return [createSystemPromptProfile()];
+    if (!rawValue) return mergeBuiltInSystemPrompts([]);
     const parsedValue = JSON.parse(rawValue) as Partial<SystemPromptProfile>[];
     const prompts = Array.isArray(parsedValue)
       ? parsedValue.map(normalizeSystemPromptProfile)
       : [];
-    return prompts.length > 0 ? prompts : [createSystemPromptProfile()];
+    return mergeBuiltInSystemPrompts(prompts);
   } catch {
-    return [createSystemPromptProfile()];
+    return mergeBuiltInSystemPrompts([]);
   }
 }
 
@@ -8933,10 +8985,11 @@ export function App() {
         persistentData?.chatSessions && persistentData.chatSessions.length > 0
           ? persistentData.chatSessions.map(normalizeChatSession)
           : loadChatSessions();
-      const normalizedSystemPrompts =
+      const normalizedSystemPrompts = mergeBuiltInSystemPrompts(
         persistentData?.systemPrompts && persistentData.systemPrompts.length > 0
           ? persistentData.systemPrompts.map(normalizeSystemPromptProfile)
-          : loadSystemPrompts();
+          : loadSystemPrompts(),
+      );
       const normalizedChatPresets =
         persistentData?.chatPresets && persistentData.chatPresets.length > 0
           ? persistentData.chatPresets.map((preset, index) => normalizeChatPreset(preset, index))
@@ -9092,14 +9145,19 @@ export function App() {
         ? normalizeActiveSystemPromptIds(persistentData.activeSystemPromptIds, normalizedSystemPrompts)
         : null;
       const storedActiveSystemPromptIds = getStoredActiveSystemPromptIds();
+      const legacyActiveSystemPromptIds =
+        (persistentData?.activeSystemPromptId || localActiveSystemPromptId) &&
+        !normalizedSystemPrompts.find(
+          (promptProfile) => promptProfile.id === nextActiveSystemPromptId,
+        )?.builtIn
+          ? [nextActiveSystemPromptId]
+          : [];
       const nextActiveSystemPromptIds =
         persistentActiveSystemPromptIds
           ? persistentActiveSystemPromptIds
           : storedActiveSystemPromptIds
             ? normalizeActiveSystemPromptIds(storedActiveSystemPromptIds, normalizedSystemPrompts)
-            : nextActiveSystemPromptId
-              ? [nextActiveSystemPromptId]
-              : [];
+            : legacyActiveSystemPromptIds;
       const localActiveChatPresetId = localStorage.getItem(ACTIVE_CHAT_PRESET_STORAGE_KEY);
       const nextActiveChatPresetId =
         persistentData?.activeChatPresetId &&
@@ -13485,7 +13543,7 @@ export function App() {
   };
 
   const deleteSystemPrompt = () => {
-    if (!activeSystemPrompt || systemPrompts.length <= 1) return;
+    if (!activeSystemPrompt || activeSystemPrompt.builtIn || systemPrompts.length <= 1) return;
     const remainingPrompts = systemPrompts.filter(
       (promptProfile) => promptProfile.id !== activeSystemPrompt.id,
     );
@@ -20535,7 +20593,10 @@ export function App() {
                       onClick={() => setActiveSystemPromptId(promptProfile.id)}
                     >
                       <strong>{promptProfile.name || "未命名提示词"}</strong>
-                      <span>{promptProfile.content.trim() ? "已设置内容" : "空提示词"}</span>
+                      <span>
+                        {promptProfile.builtIn ? "内置 · " : ""}
+                        {promptProfile.content.trim() ? "已设置内容" : "空提示词"}
+                      </span>
                     </button>
                   </div>
                 ))}
@@ -20550,8 +20611,8 @@ export function App() {
                   <button
                     type="button"
                     className="icon-button danger"
-                    title="删除提示词"
-                    disabled={systemPrompts.length <= 1}
+                    title={activeSystemPrompt.builtIn ? "内置提示词不能删除" : "删除提示词"}
+                    disabled={activeSystemPrompt.builtIn || systemPrompts.length <= 1}
                     onClick={deleteSystemPrompt}
                   >
                     <Trash2 size={16} />
