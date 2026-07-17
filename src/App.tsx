@@ -24267,139 +24267,149 @@ export function App() {
                           )}
                         </div>
                       </div>
-                      <div
-                        className={`chat-bubble ${isEditingMessage ? "editing" : ""} ${
-                          showGreetingSwitch ? "roleplay-greeting-bubble" : ""
-                        }`}
-                        style={
-                          isEditingMessage
-                            ? undefined
-                            : message.role === "user"
-                              ? CHAT_USER_BUBBLE_OPACITY_STYLE
-                              : CHAT_ASSISTANT_BUBBLE_OPACITY_STYLE
-                        }
-                        onContextMenu={(event) =>
-                          handleChatBubbleContextMenu(message.id, event)
-                        }
-                      >
+                      <div className="chat-message-bubble-stack">
                         <div
-                          aria-hidden="true"
-                          className="chat-bubble-context-edges"
-                          onContextMenu={(event) => openChatMessageMenu(message.id, event)}
+                          className={`chat-bubble ${isEditingMessage ? "editing" : ""} ${
+                            showGreetingSwitch ? "roleplay-greeting-bubble" : ""
+                          }`}
+                          style={
+                            isEditingMessage
+                              ? undefined
+                              : message.role === "user"
+                                ? CHAT_USER_BUBBLE_OPACITY_STYLE
+                                : CHAT_ASSISTANT_BUBBLE_OPACITY_STYLE
+                          }
+                          onContextMenu={(event) =>
+                            handleChatBubbleContextMenu(message.id, event)
+                          }
                         >
-                          <span className="chat-bubble-context-edge top" />
-                          <span className="chat-bubble-context-edge right" />
-                          <span className="chat-bubble-context-edge bottom" />
-                          <span className="chat-bubble-context-edge left" />
-                        </div>
-                        {isEditingMessage ? (
-                          <div className="chat-inline-editor">
-                            <textarea
-                              value={editingChatMessage.content}
-                              rows={Math.min(10, Math.max(3, editingChatMessage.content.split("\n").length + 1))}
-                              onChange={(event) =>
-                                setEditingChatMessage((current) =>
-                                  current?.messageId === message.id
-                                    ? { ...current, content: event.target.value }
-                                    : current,
-                                )
-                              }
-                              onKeyDown={(event) => {
-                                if (event.key === "Escape") {
-                                  event.preventDefault();
-                                  cancelEditingChatMessage();
+                          <div
+                            aria-hidden="true"
+                            className="chat-bubble-context-edges"
+                            onContextMenu={(event) => openChatMessageMenu(message.id, event)}
+                          >
+                            <span className="chat-bubble-context-edge top" />
+                            <span className="chat-bubble-context-edge right" />
+                            <span className="chat-bubble-context-edge bottom" />
+                            <span className="chat-bubble-context-edge left" />
+                          </div>
+                          {isEditingMessage ? (
+                            <div className="chat-inline-editor">
+                              <textarea
+                                value={editingChatMessage.content}
+                                rows={Math.min(10, Math.max(3, editingChatMessage.content.split("\n").length + 1))}
+                                onChange={(event) =>
+                                  setEditingChatMessage((current) =>
+                                    current?.messageId === message.id
+                                      ? { ...current, content: event.target.value }
+                                      : current,
+                                  )
                                 }
-                              }}
-                            />
-                            <div className="chat-inline-editor-actions">
-                              <button type="button" onClick={cancelEditingChatMessage}>
-                                取消
-                              </button>
-                              {message.role === "user" ? (
-                                <>
-                                  <button
-                                    type="button"
-                                    disabled={!editingChatMessage.content.trim() || chatStatus.status === "loading"}
-                                    onClick={saveEditedUserMessage}
-                                  >
-                                    保存
-                                  </button>
+                                onKeyDown={(event) => {
+                                  if (event.key === "Escape") {
+                                    event.preventDefault();
+                                    cancelEditingChatMessage();
+                                  }
+                                }}
+                              />
+                              <div className="chat-inline-editor-actions">
+                                <button type="button" onClick={cancelEditingChatMessage}>
+                                  取消
+                                </button>
+                                {message.role === "user" ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={!editingChatMessage.content.trim() || chatStatus.status === "loading"}
+                                      onClick={saveEditedUserMessage}
+                                    >
+                                      保存
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="primary"
+                                      disabled={!editingChatMessage.content.trim() || chatStatus.status === "loading"}
+                                      onClick={() => void resendEditedUserMessage()}
+                                    >
+                                      发送
+                                    </button>
+                                  </>
+                                ) : (
                                   <button
                                     type="button"
                                     className="primary"
                                     disabled={!editingChatMessage.content.trim() || chatStatus.status === "loading"}
-                                    onClick={() => void resendEditedUserMessage()}
+                                    onClick={saveEditedAssistantMessage}
                                   >
-                                    发送
+                                    保存
                                   </button>
-                                </>
-                              ) : (
-                                <button
-                                  type="button"
-                                  className="primary"
-                                  disabled={!editingChatMessage.content.trim() || chatStatus.status === "loading"}
-                                  onClick={saveEditedAssistantMessage}
-                                >
-                                  保存
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        ) : (
-                          <>
-                            {segmentIndex === 0 &&
-                              message.role === "assistant" &&
-                              renderChatReasoning(message.reasoning, id)}
-                            <div className="mes_text">
-                              {renderChatContent(segment, id, message.id)}
-                            </div>
-                            {segmentIndex === 0 &&
-                              renderChatAttachments(message.attachments ?? [])}
-                            {renderedSegmentIndex === renderedSegments.length - 1 &&
-                              renderChatChoiceRequest(message, messageIndex)}
-                            {showGreetingSwitch && (
-                              <div
-                                className="roleplay-greeting-controls"
-                                onContextMenu={(event) => {
-                                  event.preventDefault();
-                                  event.stopPropagation();
-                                }}
-                              >
-                                <button
-                                  type="button"
-                                  className="roleplay-greeting-next"
-                                  disabled={chatStatus.status === "loading"}
-                                  title="切换到下一条开场白"
-                                  aria-label={`切换到下一条开场白，当前第 ${activeRoleplayGreetingIndex + 1} 个，共 ${activeRoleplayGreetings.length} 个`}
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    setChatMessageMenu(null);
-                                    setRoleplayGreetingSelectorOpen(false);
-                                    cycleRoleplayGreeting();
-                                  }}
-                                >
-                                  <RefreshCw size={13} />
-                                </button>
-                                <button
-                                  type="button"
-                                  className="roleplay-greeting-count"
-                                  disabled={chatStatus.status === "loading"}
-                                  title="选择开场白"
-                                  aria-haspopup="dialog"
-                                  aria-expanded={roleplayGreetingSelectorOpen}
-                                  aria-label={`选择开场白，当前第 ${activeRoleplayGreetingIndex + 1} 个，共 ${activeRoleplayGreetings.length} 个`}
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    setChatMessageMenu(null);
-                                    setRoleplayGreetingSelectorOpen(true);
-                                  }}
-                                >
-                                  {activeRoleplayGreetingIndex + 1}/{activeRoleplayGreetings.length}
-                                </button>
+                                )}
                               </div>
-                            )}
-                          </>
-                        )}
+                            </div>
+                          ) : (
+                            <>
+                              {segmentIndex === 0 &&
+                                message.role === "assistant" &&
+                                renderChatReasoning(message.reasoning, id)}
+                              <div className="mes_text">
+                                {renderChatContent(segment, id, message.id)}
+                              </div>
+                              {segmentIndex === 0 &&
+                                renderChatAttachments(message.attachments ?? [])}
+                              {showGreetingSwitch && (
+                                <div
+                                  className="roleplay-greeting-controls"
+                                  onContextMenu={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                  }}
+                                >
+                                  <button
+                                    type="button"
+                                    className="roleplay-greeting-next"
+                                    disabled={chatStatus.status === "loading"}
+                                    title="切换到下一条开场白"
+                                    aria-label={`切换到下一条开场白，当前第 ${activeRoleplayGreetingIndex + 1} 个，共 ${activeRoleplayGreetings.length} 个`}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      setChatMessageMenu(null);
+                                      setRoleplayGreetingSelectorOpen(false);
+                                      cycleRoleplayGreeting();
+                                    }}
+                                  >
+                                    <RefreshCw size={13} />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="roleplay-greeting-count"
+                                    disabled={chatStatus.status === "loading"}
+                                    title="选择开场白"
+                                    aria-haspopup="dialog"
+                                    aria-expanded={roleplayGreetingSelectorOpen}
+                                    aria-label={`选择开场白，当前第 ${activeRoleplayGreetingIndex + 1} 个，共 ${activeRoleplayGreetings.length} 个`}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      setChatMessageMenu(null);
+                                      setRoleplayGreetingSelectorOpen(true);
+                                    }}
+                                  >
+                                    {activeRoleplayGreetingIndex + 1}/{activeRoleplayGreetings.length}
+                                  </button>
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                        {!isEditingMessage &&
+                          renderedSegmentIndex === renderedSegments.length - 1 &&
+                          message.choiceRequest && (
+                            <div
+                              className="chat-bubble chat-choice-bubble"
+                              style={CHAT_ASSISTANT_BUBBLE_OPACITY_STYLE}
+                            >
+                              {renderChatChoiceRequest(message, messageIndex)}
+                            </div>
+                          )}
                       </div>
                     </div>
                   </article>

@@ -4192,18 +4192,31 @@ summary:focus-visible {
   max-width: calc(100% - 60px);
 }
 
-.chat-message.assistant .chat-bubble:has(.chat-choice-panel) {
-  flex: 0 1 540px;
-  width: min(540px, calc(100% - 60px));
+.chat-message-bubble-stack {
+  display: grid;
+  min-width: 0;
+  max-width: calc(100% - 60px);
+  justify-items: start;
+  gap: 8px;
+}
+
+.chat-message.user .chat-message-bubble-stack {
+  justify-items: end;
+}
+
+.chat-message-bubble-stack > .chat-bubble {
+  max-width: 100%;
+}
+
+.chat-choice-bubble {
+  width: min(540px, 100%);
+  padding: 12px 13px;
 }
 
 .chat-choice-panel {
   display: grid;
   gap: 10px;
   min-width: min(360px, 100%);
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid rgba(148, 163, 184, 0.28);
 }
 
 .chat-choice-options {
@@ -4335,8 +4348,8 @@ summary:focus-visible {
 }
 
 @media (max-width: 720px) {
-  .chat-message.assistant .chat-bubble:has(.chat-choice-panel) {
-    width: calc(100% - 56px);
+  .chat-message-bubble-stack {
+    max-width: calc(100% - 56px);
   }
 
   .chat-choice-panel {
