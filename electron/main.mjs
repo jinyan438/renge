@@ -8,6 +8,11 @@ import { fileURLToPath } from "node:url";
 import { startRengeServer } from "../server.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const appIconPath = join(
+  __dirname,
+  "assets",
+  process.platform === "win32" ? "renge-agent.ico" : "renge-agent.png",
+);
 const execFileAsync = promisify(execFile);
 let mainWindow = null;
 let serverController = null;
@@ -744,6 +749,7 @@ async function createMainWindow() {
     minWidth: 1040,
     minHeight: 720,
     title: "Renge Agent Lab",
+    icon: appIconPath,
     backgroundColor: "#f5f7fa",
     autoHideMenuBar: true,
     webPreferences: {
@@ -761,7 +767,12 @@ async function createMainWindow() {
 
 registerIpcHandlers();
 
-app.whenReady().then(createMainWindow);
+app.whenReady().then(() => {
+  if (process.platform === "win32") {
+    app.setAppUserModelId("com.renge.agentlab");
+  }
+  return createMainWindow();
+});
 
 app.on("window-all-closed", () => {
   serverController?.server.close();
