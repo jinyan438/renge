@@ -23795,13 +23795,6 @@ export function App() {
           ))}
         </div>
 
-        <div className="sidebar-panel">
-          <div className="panel-title">
-            <Database size={16} />
-            底层接口
-          </div>
-          <p>当前使用 LocalPersonaAdapter。后续可替换为 REST、GraphQL、向量库或多 Agent 编排服务。</p>
-        </div>
       </aside>
       <button
         type="button"
