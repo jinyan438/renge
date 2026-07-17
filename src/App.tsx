@@ -5505,17 +5505,7 @@ function formatChatMessageForApi(
   } = {},
 ) {
   if (message.role !== "user") {
-    if (!message.choiceRequest) return message.content;
-    return [
-      message.content,
-      "【可选回复】",
-      ...message.choiceRequest.options.map(
-        (option, index) => `${index + 1}. ${option.value}`,
-      ),
-      "用户也可以输入自定义回复。",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    return message.content;
   }
 
   const sender = message.sender ?? { kind: "user" as const };
