@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("rengeDesktop", {
   isElectron: true,
+  clearAppStorage: () => ipcRenderer.invoke("app-data:clear-storage"),
   loadDesktopProjectPositions: () => ipcRenderer.invoke("desktop-layout:load"),
   saveDesktopProjectPositions: (positions) => ipcRenderer.invoke("desktop-layout:save", positions),
   selectWorkspace: () => ipcRenderer.invoke("workspace:select"),

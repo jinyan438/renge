@@ -806,6 +806,61 @@ button.settings-window-light.close:hover {
   overflow-wrap: anywhere;
 }
 
+.settings-desktop .data-danger-zone {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border-color: rgba(190, 42, 42, 0.22);
+  background: #fffafa;
+}
+
+.settings-desktop .data-danger-copy {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.settings-desktop .data-danger-icon {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 12px;
+  color: #b4232d;
+  background: #ffecee;
+}
+
+.settings-desktop .data-danger-copy h2 {
+  color: #762029;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+}
+
+.settings-desktop .data-danger-copy p {
+  max-width: 640px;
+  margin-top: 5px;
+  color: #8c5960;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.settings-desktop .data-clear-action {
+  flex: 0 0 auto;
+  border-color: rgba(180, 35, 45, 0.28);
+  color: #a51f29;
+  background: #fff5f6;
+}
+
+.settings-desktop .data-clear-action:hover {
+  border-color: rgba(180, 35, 45, 0.42);
+  color: #821821;
+  background: #ffecee;
+}
+
 .settings-desktop .personalization-color-field code,
 .settings-desktop .mcp-tool-row code,
 .settings-desktop .root-access-details {
@@ -1008,6 +1063,16 @@ button.settings-window-light.close:hover {
   }
 
   .settings-desktop .data-backup-action {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .settings-desktop .data-danger-zone {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-desktop .data-clear-action {
     width: 100%;
     justify-content: center;
   }
