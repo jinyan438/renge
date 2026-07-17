@@ -4192,6 +4192,158 @@ summary:focus-visible {
   max-width: calc(100% - 60px);
 }
 
+.chat-message.assistant .chat-bubble:has(.chat-choice-panel) {
+  flex: 0 1 540px;
+  width: min(540px, calc(100% - 60px));
+}
+
+.chat-choice-panel {
+  display: grid;
+  gap: 10px;
+  min-width: min(360px, 100%);
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(148, 163, 184, 0.28);
+}
+
+.chat-choice-options {
+  display: grid;
+  gap: 8px;
+}
+
+.chat-choice-options button {
+  display: flex;
+  width: 100%;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid #d9e1ea;
+  border-radius: 9px;
+  color: #273449;
+  background: #f8fafc;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 750;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    color 0.16s ease,
+    background 0.16s ease,
+    transform 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.chat-choice-options button:hover:not(:disabled),
+.chat-choice-options button:focus-visible {
+  border-color: rgba(7, 193, 96, 0.48);
+  color: #047a3d;
+  background: #f1fbf5;
+  box-shadow: 0 5px 14px rgba(7, 193, 96, 0.09);
+  outline: 0;
+  transform: translateY(-1px);
+}
+
+.chat-choice-options button.selected {
+  border-color: rgba(7, 193, 96, 0.52);
+  color: #047a3d;
+  background: #eaf8f0;
+}
+
+.chat-choice-options button:disabled {
+  cursor: default;
+  opacity: 0.68;
+  transform: none;
+}
+
+.chat-choice-options button.selected:disabled {
+  opacity: 1;
+}
+
+.chat-choice-custom {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  gap: 8px;
+}
+
+.chat-choice-custom input {
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 0 11px;
+  border: 1px solid #d9e1ea;
+  border-radius: 9px;
+  color: #172033;
+  background: #ffffff;
+  font: inherit;
+  font-size: 13px;
+  outline: 0;
+}
+
+.chat-choice-custom input:focus {
+  border-color: rgba(7, 193, 96, 0.58);
+  box-shadow: 0 0 0 3px rgba(7, 193, 96, 0.12);
+}
+
+.chat-choice-custom button {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  place-items: center;
+  color: #ffffff;
+  background: #07c160;
+  cursor: pointer;
+}
+
+.chat-choice-custom button:hover:not(:disabled),
+.chat-choice-custom button:focus-visible {
+  background: #059b4d;
+  outline: 0;
+}
+
+.chat-choice-custom button:disabled,
+.chat-choice-custom input:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.chat-choice-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.chat-choice-status svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: #07c160;
+}
+
+.chat-choice-panel.expired .chat-choice-options button {
+  opacity: 0.5;
+}
+
+@media (max-width: 720px) {
+  .chat-message.assistant .chat-bubble:has(.chat-choice-panel) {
+    width: calc(100% - 56px);
+  }
+
+  .chat-choice-panel {
+    min-width: 0;
+  }
+}
+
 .chat-bubble.roleplay-greeting-bubble {
   position: relative;
   padding-bottom: 48px;
