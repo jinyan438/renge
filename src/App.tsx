@@ -18125,14 +18125,9 @@ export function App() {
             );
           })}
         </div>
-        {choiceRequest.response ? (
-          <p className="chat-choice-status">
-            <Check size={14} aria-hidden="true" />
-            已回复：{choiceRequest.response.value}
-          </p>
-        ) : expired ? (
+        {!choiceRequest.response && expired ? (
           <p className="chat-choice-status">已通过后续消息继续，本组选项已关闭。</p>
-        ) : (
+        ) : !choiceRequest.response ? (
           <form
             className="chat-choice-custom"
             onSubmit={(event) => {
@@ -18163,7 +18158,7 @@ export function App() {
               <Send size={15} />
             </button>
           </form>
-        )}
+        ) : null}
       </div>
     );
   };
