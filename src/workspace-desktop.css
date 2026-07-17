@@ -936,6 +936,16 @@ button.portfolio-window-light.close:hover {
     display: none;
   }
 
+  .portfolio-window-body .character-cover-card {
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(20, 20, 25, 0.07);
+  }
+
+  .portfolio-window-body .character-cover-card:hover {
+    border-color: rgba(0, 102, 221, 0.2);
+    box-shadow: 0 2px 8px rgba(20, 20, 25, 0.07);
+  }
+
   .portfolio-window-body.chat-shell,
   .portfolio-window-body.app-shell {
     position: relative;
@@ -1032,7 +1042,6 @@ button.portfolio-window-light.close:hover {
 
   .portfolio-window-body .extension-install-panel,
   .portfolio-window-body .extension-card,
-  .portfolio-window-body .character-cover-card,
   .portfolio-window-body .section-block,
   .portfolio-window-body .inspector-panel {
     border-radius: 14px;
