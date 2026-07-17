@@ -444,6 +444,7 @@ type SystemPromptProfile = {
 const BUILT_IN_SYSTEM_PROMPT_IDS = {
   wechat: "builtin-system-prompt-wechat-chat",
   roleplay: "builtin-system-prompt-roleplay",
+  actionOptions: "8c9d9112-9007-4ebd-a3a8-7fb4f23557da",
 } as const;
 
 const BUILT_IN_SYSTEM_PROMPTS: SystemPromptProfile[] = [
@@ -473,6 +474,19 @@ const BUILT_IN_SYSTEM_PROMPTS: SystemPromptProfile[] = [
     content:
       "你将作为沉浸式角色扮演叙事引擎，根据既定世界观、人物设定与上下文持续推进故事；始终以角色身份思考、说话和行动，通过自然对白、细腻动作、心理活动、环境变化与感官描写塑造真实连贯的场景。保持人物性格、能力、关系和记忆的一致性，不跳出角色解释规则，不进行总结或说教，不替用户决定言行、感受与选择，也不强行结束剧情；主动让角色和世界对用户的行动作出合理反应，并在每次回复末尾留下自然、开放且便于继续互动的空间。",
     updatedAt: "2026-07-17T00:00:00.000Z",
+    builtIn: true,
+  },
+  {
+    id: BUILT_IN_SYSTEM_PROMPT_IDS.actionOptions,
+    name: "行动选项",
+    content: [
+      "每次输出后必须调用chat_present_options工具（禁止用 Markdown、编号列表或普通文本代替），生成4个选项的行动选项：",
+      "1.较为理智的行动",
+      "2.较为感性的行动",
+      "3.较为色情的行动",
+      "4.较为离谱的行动",
+    ].join("\n"),
+    updatedAt: "2026-07-17T15:40:40.896Z",
     builtIn: true,
   },
 ];
