@@ -23,6 +23,8 @@ import {
   MessageSquare,
   Menu,
   Palette,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pencil,
   Play,
   Plus,
@@ -7570,6 +7572,8 @@ export function App() {
   const windowSpawnIndexRef = useRef(0);
   const settingsWindowRef = useRef<HTMLElement | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [chatDesktopSidebarCollapsed, setChatDesktopSidebarCollapsed] =
+    useState(false);
   const [mobilePromptPreviewOpen, setMobilePromptPreviewOpen] = useState(false);
 
   const openWindow = useCallback((id: ModuleWindowId) => {
@@ -18049,6 +18053,7 @@ export function App() {
     onMinimize: () => minimizeWindow(windowState.id),
     onToggleMaximize: () => toggleMaximizeWindow(windowState.id),
     onClose: () => {
+      if (windowState.id === "chat") setChatDesktopSidebarCollapsed(false);
       closeWindow(windowState.id);
       closeMobileSidebar();
     },
@@ -22409,7 +22414,9 @@ export function App() {
   const chatWindow = chatWindowState ? (
       <PortfolioDesktopWindow
         title="对话工作区"
-        bodyClassName={`chat-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""} ${
+        bodyClassName={`chat-shell ${
+          chatDesktopSidebarCollapsed ? "desktop-sidebar-collapsed" : ""
+        } ${mobileSidebarOpen ? "mobile-sidebar-open" : ""} ${
           chatPersonalization.quoteStyleEnabled ? "quote-style-enabled" : ""
         } ${chatPersonalization.italicStyleEnabled ? "italic-style-enabled" : ""}`}
         bodyStyle={chatVisualStyle}
@@ -22667,7 +22674,25 @@ export function App() {
             </div>
           )}
           <header className="chat-header">
-            <div>
+            <div className="chat-header-title">
+              <button
+                type="button"
+                className="desktop-chat-sidebar-toggle"
+                title={chatDesktopSidebarCollapsed ? "展开侧边栏" : "隐藏侧边栏"}
+                aria-label={
+                  chatDesktopSidebarCollapsed ? "展开聊天侧边栏" : "隐藏聊天侧边栏"
+                }
+                aria-pressed={chatDesktopSidebarCollapsed}
+                onClick={() =>
+                  setChatDesktopSidebarCollapsed((current) => !current)
+                }
+              >
+                {chatDesktopSidebarCollapsed ? (
+                  <PanelLeftOpen size={17} />
+                ) : (
+                  <PanelLeftClose size={17} />
+                )}
+              </button>
               <h1>
                 {activeChatSession?.title ??
                   (chatMode === "persona"
