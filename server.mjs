@@ -868,6 +868,45 @@ async function writeAppData(dataFilePath, payload) {
   }
 }
 
+async function clearAppData(dataFilePath) {
+  const previousWrite = appDataWriteQueues.get(dataFilePath) ?? Promise.resolve();
+  const operation = previousWrite
+    .catch(() => undefined)
+    .then(async () => {
+      const dataDirectory = dirname(dataFilePath);
+      const ownedFiles = [
+        dataFilePath,
+        ...Array.from({ length: appDataBackupCount }, (_, index) =>
+          getAppDataBackupPath(dataFilePath, index + 1),
+        ),
+        join(dataDirectory, "app-data.previous.json"),
+        join(dataDirectory, "app-data.previous.json.bak"),
+        `${dataFilePath}.bak`,
+        join(dataDirectory, "desktop-project-positions.json"),
+      ];
+      const dataDirectoryEntries = await readdir(dataDirectory).catch(() => []);
+      dataDirectoryEntries
+        .filter((name) => name.startsWith("app-data") && name.includes(".tmp-"))
+        .forEach((name) => ownedFiles.push(join(dataDirectory, name)));
+      await Promise.all(
+        ownedFiles.map((filePath) => rm(filePath, { force: true })),
+      );
+      await Promise.all(
+        ["extensions", "generated-images", "session-images", "skills"].map((name) =>
+          rm(join(dataDirectory, name), { recursive: true, force: true }),
+        ),
+      );
+    });
+  appDataWriteQueues.set(dataFilePath, operation);
+  try {
+    await operation;
+  } finally {
+    if (appDataWriteQueues.get(dataFilePath) === operation) {
+      appDataWriteQueues.delete(dataFilePath);
+    }
+  }
+}
+
 function getSkillsDir(dataFilePath) {
   return join(dirname(dataFilePath), "skills");
 }
@@ -2677,6 +2716,16 @@ async function handleApi(request, response, pathname, dataFilePath) {
         const body = await readJsonBody(request);
         const payload = body && typeof body === "object" && "data" in body ? body.data : body;
         await writeAppData(dataFilePath, payload ?? {});
+        sendJson(response, 200, {
+          ok: true,
+          dataDir: dirname(dataFilePath),
+          dataFile: dataFilePath,
+        });
+        return;
+      }
+
+      if (request.method === "DELETE") {
+        await clearAppData(dataFilePath);
         sendJson(response, 200, {
           ok: true,
           dataDir: dirname(dataFilePath),

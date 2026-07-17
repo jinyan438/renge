@@ -605,6 +605,7 @@ type PcFileEntry = {
 
 type RengeDesktopApi = {
   isElectron: boolean;
+  clearAppStorage?(): Promise<{ ok: boolean }>;
   loadDesktopProjectPositions?(): Promise<unknown>;
   saveDesktopProjectPositions?(positions: unknown): Promise<{ ok: boolean }>;
   selectWorkspace(): Promise<ElectronWorkspaceHandle | null>;
@@ -1808,6 +1809,22 @@ async function savePersistentAppData(data: RengeAppData): Promise<boolean> {
       return response.ok;
     } catch {
       // The app can still run with localStorage when the persistence API is unavailable.
+      return false;
+    }
+  });
+  persistentAppDataSaveQueue = operation.then(
+    () => undefined,
+    () => undefined,
+  );
+  return operation;
+}
+
+async function clearPersistentAppData(): Promise<boolean> {
+  const operation = persistentAppDataSaveQueue.then(async () => {
+    try {
+      const response = await fetch("/api/app-data", { method: "DELETE" });
+      return response.ok;
+    } catch {
       return false;
     }
   });
@@ -8185,6 +8202,7 @@ export function App() {
   const skillZipInputRef = useRef<HTMLInputElement>(null);
   const completeBackupImportInputRef = useRef<HTMLInputElement>(null);
   const persistentStoreReadyRef = useRef(false);
+  const appDataClearingRef = useRef(false);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatSendButtonRef = useRef<HTMLButtonElement>(null);
   const sendChatMessageRef = useRef<
@@ -9179,6 +9197,7 @@ export function App() {
   useEffect(() => {
     if (!appDataLoaded) return;
     const timer = window.setTimeout(() => {
+      if (appDataClearingRef.current) return;
       const snapshot = buildCurrentAppData();
       persistAppDataToLocalStores(snapshot);
       if (persistentStoreReadyRef.current) {
@@ -9191,6 +9210,7 @@ export function App() {
   useEffect(() => {
     if (!appDataLoaded) return;
     const flushLatestSnapshot = () => {
+      if (appDataClearingRef.current) return;
       const snapshot = buildCurrentAppData();
       persistAppDataToLocalStores(snapshot);
       if (persistentStoreReadyRef.current) {
@@ -10132,6 +10152,59 @@ export function App() {
         completeBackupImportInputRef.current.value = "";
       }
     }
+  };
+
+  const clearAllAppData = async () => {
+    if (dataBackupState.status === "loading") return;
+    const confirmed = window.confirm(
+      "这会永久清除全部应用数据并恢复出厂状态，包括聊天、角色卡、人格、API Key、世界书、脚本、扩展、Skills 和界面设置。\n\n你手动导出的 JSON 备份和外部工作区文件不会被删除。是否继续？",
+    );
+    if (!confirmed) {
+      setDataBackupState({ status: "idle", message: "已取消清除，当前数据未发生变化。" });
+      return;
+    }
+    const confirmationText = window.prompt(
+      "此操作不可撤销。请输入“清除全部数据”进行最终确认：",
+      "",
+    );
+    if (confirmationText?.trim() !== "清除全部数据") {
+      setDataBackupState({ status: "idle", message: "确认文字不匹配，未清除任何数据。" });
+      return;
+    }
+
+    appDataClearingRef.current = true;
+    setDataBackupState({ status: "loading", message: "正在清除全部应用数据，请勿关闭应用..." });
+    const persistentDataCleared = await clearPersistentAppData();
+    if (!persistentDataCleared) {
+      appDataClearingRef.current = false;
+      setDataBackupState({
+        status: "error",
+        message: "清除失败：无法连接应用数据服务，当前数据未被删除。",
+      });
+      return;
+    }
+
+    persistentStoreReadyRef.current = false;
+    try {
+      replaceRengeLocalStorage({});
+    } catch {
+      // The server data is already cleared; reloading will still restore factory defaults.
+    }
+    let platformStorageCleared = Boolean(window.rengeAndroid?.isAndroid);
+    if (typeof window.rengeDesktop?.clearAppStorage === "function") {
+      try {
+        const result = await window.rengeDesktop.clearAppStorage();
+        platformStorageCleared = Boolean(result?.ok);
+      } catch {
+        platformStorageCleared = false;
+      }
+    }
+    if (!platformStorageCleared) await saveCharacterCardsToDatabase([]);
+    setDataBackupState({
+      status: "success",
+      message: "全部应用数据已清除，正在恢复出厂状态...",
+    });
+    window.setTimeout(() => window.location.reload(), 500);
   };
 
   const downloadTavernScriptJson = (content: string, name: string) => {
@@ -22768,6 +22841,29 @@ export function App() {
                   </button>
                 </section>
               </div>
+
+              <section className="section-block data-danger-zone">
+                <div className="data-danger-copy">
+                  <span className="data-danger-icon" aria-hidden="true">
+                    <Trash2 size={20} />
+                  </span>
+                  <div>
+                    <h2>清除所有数据</h2>
+                    <p>
+                      删除应用内部的全部数据和自动备份并恢复出厂状态。手动导出的 JSON 备份以及电脑、手机上的外部工作区文件不会被删除。
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="ghost-action data-clear-action"
+                  disabled={dataBackupState.status === "loading"}
+                  onClick={() => void clearAllAppData()}
+                >
+                  <Trash2 size={16} />
+                  清除所有数据
+                </button>
+              </section>
 
               {dataBackupState.message && (
                 <p

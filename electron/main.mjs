@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, session } from "electron";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { execFile } from "node:child_process";
@@ -584,6 +584,15 @@ async function runPackageScript({ script, args = [] }) {
 }
 
 function registerIpcHandlers() {
+  ipcMain.handle("app-data:clear-storage", async () => {
+    if (!serverController?.url) throw new Error("应用数据服务尚未启动");
+    await session.defaultSession.clearStorageData({
+      origin: serverController.url,
+      storages: ["localstorage", "indexdb", "cachestorage", "serviceworkers"],
+    });
+    return { ok: true };
+  });
+
   ipcMain.handle("desktop-layout:load", async () => loadDesktopProjectPositions());
 
   ipcMain.handle("desktop-layout:save", async (_event, positions = {}) => {

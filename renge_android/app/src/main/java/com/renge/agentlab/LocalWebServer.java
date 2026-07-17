@@ -3,6 +3,7 @@ package com.renge.agentlab;
 import android.content.Context;
 import android.content.res.AssetManager;
 import android.util.AtomicFile;
+import android.webkit.WebStorage;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -234,6 +235,16 @@ public class LocalWebServer {
             return;
         }
 
+        if ("DELETE".equals(request.method)) {
+            clearAppData();
+            JSONObject payload = new JSONObject();
+            payload.put("ok", true);
+            payload.put("dataDir", context.getFilesDir().getAbsolutePath());
+            payload.put("dataFile", appDataFile.getAbsolutePath());
+            sendJson(output, 200, payload);
+            return;
+        }
+
         sendJson(output, 405, jsonError("Method not allowed"));
     }
 
@@ -290,6 +301,33 @@ public class LocalWebServer {
             writeJsonAtomically(appDataFile, normalized.toString(2));
         } catch (JSONException error) {
             throw new IOException(error);
+        }
+    }
+
+    private void deleteRecursively(File file) throws IOException {
+        if (file == null || !file.exists()) return;
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (File child : children) deleteRecursively(child);
+            }
+        }
+        if (!file.delete() && file.exists()) {
+            throw new IOException("无法删除应用数据：" + file.getAbsolutePath());
+        }
+    }
+
+    private synchronized void clearAppData() throws IOException {
+        new AtomicFile(appDataFile).delete();
+        new AtomicFile(appDataBackupFile).delete();
+        WebStorage.getInstance().deleteAllData();
+        boolean preferencesCleared = context.getSharedPreferences("renge_android_workspace", Context.MODE_PRIVATE)
+                .edit()
+                .clear()
+                .commit();
+        if (!preferencesCleared) throw new IOException("无法清除 Android 工作区设置。");
+        for (String name : new String[]{"extensions", "generated-images", "session-images", "skills"}) {
+            deleteRecursively(new File(context.getFilesDir(), name));
         }
     }
 
