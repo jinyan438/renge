@@ -10339,6 +10339,10 @@ export function App() {
       Math.max(0, activeRoleplayGreetings.length - 1),
     ),
   );
+  const roleplayGreetingIsOnlyMessage =
+    chatMessages.length === 1 &&
+    chatMessages[0]?.source === "roleplay-greeting" &&
+    chatMessages[0]?.role === "assistant";
   useEffect(() => {
     setRoleplayGreetingSelectorOpen(false);
   }, [activeChatSessionId]);
@@ -10350,6 +10354,7 @@ export function App() {
       chatWindowState.minimized ||
       chatMode !== "roleplay" ||
       !activeSessionRoleplayCard ||
+      !roleplayGreetingIsOnlyMessage ||
       activeRoleplayGreetings.length < 2
     ) {
       setRoleplayGreetingSelectorOpen(false);
@@ -10366,6 +10371,7 @@ export function App() {
     activeSessionRoleplayCard,
     chatMode,
     openWindows,
+    roleplayGreetingIsOnlyMessage,
     roleplayGreetingSelectorOpen,
   ]);
   const activeTavernScripts = useMemo(
@@ -22323,6 +22329,7 @@ export function App() {
     chatWindowState &&
     !chatWindowState.minimized &&
     activeSessionRoleplayCard &&
+    roleplayGreetingIsOnlyMessage &&
     activeRoleplayGreetings.length > 1 ? (
       <div
         className="modal-backdrop roleplay-greeting-selector-backdrop"
@@ -23005,6 +23012,7 @@ export function App() {
                   !isEditingMessage &&
                   message.source === "roleplay-greeting" &&
                   message.role === "assistant" &&
+                  roleplayGreetingIsOnlyMessage &&
                   activeRoleplayGreetings.length > 1 &&
                   renderedSegmentIndex === renderedSegments.length - 1;
                 const messageSender = message.role === "user" ? (message.sender ?? { kind: "user" as const }) : undefined;
