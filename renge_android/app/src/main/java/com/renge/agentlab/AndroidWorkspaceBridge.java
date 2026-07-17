@@ -1,22 +1,29 @@
 package com.renge.agentlab;
 
 import android.app.Activity;
+import android.content.ContentValues;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
+import android.os.Environment;
 import android.provider.DocumentsContract;
+import android.provider.MediaStore;
 import android.util.Base64;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
+import android.widget.Toast;
 
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -81,6 +88,7 @@ public class AndroidWorkspaceBridge {
                         + "function call(name,options){return Promise.resolve().then(function(){return parse(window.RengeAndroidNative[name](JSON.stringify(options||{})));});}"
                         + "window.rengeAndroid={"
                         + "isAndroid:true,"
+                        + "saveDownload:function(options){return call('saveDownload',options);},"
                         + "selectWorkspace:function(){return new Promise(function(resolve,reject){var id=String(Date.now())+Math.random().toString(16).slice(2);pending[id]={resolve:resolve,reject:reject};window.RengeAndroidNative.selectWorkspace(id);});},"
                         + "selectRootWorkspace:function(options){return call('selectRootWorkspace',options);},"
                         + "restoreWorkspace:function(options){return call('restoreWorkspace',options);},"
@@ -102,6 +110,75 @@ public class AndroidWorkspaceBridge {
                         + "};"
                         + "})();";
         webView.evaluateJavascript(script, null);
+    }
+
+    @JavascriptInterface
+    public String saveDownload(String optionsJson) {
+        Uri pendingUri = null;
+        try {
+            JSONObject options = parseOptions(optionsJson);
+            String fileName = sanitizeDownloadFileName(options.optString("fileName", "download"));
+            String mimeType = options.optString("mimeType", "application/octet-stream").trim();
+            if (mimeType.isEmpty()) mimeType = "application/octet-stream";
+
+            byte[] bytes;
+            if (options.has("base64")) {
+                String base64 = options.optString("base64", "")
+                        .replaceFirst("^data:[^,]*,", "")
+                        .replaceAll("\\s+", "");
+                bytes = Base64.decode(base64, Base64.DEFAULT);
+            } else {
+                bytes = options.optString("content", "").getBytes(StandardCharsets.UTF_8);
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
+                values.put(MediaStore.Downloads.MIME_TYPE, mimeType);
+                values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+                values.put(MediaStore.Downloads.IS_PENDING, 1);
+                pendingUri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                if (pendingUri == null) throw new IOException("无法创建系统下载文件");
+                try (OutputStream output = resolver.openOutputStream(pendingUri, "w")) {
+                    if (output == null) throw new IOException("无法写入系统下载文件");
+                    output.write(bytes);
+                }
+                ContentValues completedValues = new ContentValues();
+                completedValues.put(MediaStore.Downloads.IS_PENDING, 0);
+                resolver.update(pendingUri, completedValues, null, null);
+            } else {
+                File downloadsDirectory = Environment.getExternalStoragePublicDirectory(
+                        Environment.DIRECTORY_DOWNLOADS
+                );
+                if (!downloadsDirectory.exists() && !downloadsDirectory.mkdirs()) {
+                    throw new IOException("无法创建系统下载目录");
+                }
+                File outputFile = createUniqueDownloadFile(downloadsDirectory, fileName);
+                try (OutputStream output = new FileOutputStream(outputFile)) {
+                    output.write(bytes);
+                }
+                fileName = outputFile.getName();
+            }
+
+            JSONObject payload = new JSONObject();
+            payload.put("ok", true);
+            payload.put("fileName", fileName);
+            payload.put("bytes", bytes.length);
+            showToast("已导出到下载目录：" + fileName, Toast.LENGTH_LONG);
+            return payload.toString();
+        } catch (Exception error) {
+            if (pendingUri != null) {
+                try {
+                    resolver.delete(pendingUri, null, null);
+                } catch (Exception ignored) {
+                }
+            }
+            showToast(
+                    "导出失败：" + (error.getMessage() == null ? "无法保存文件" : error.getMessage()),
+                    Toast.LENGTH_LONG
+            );
+            return errorJson(error);
+        }
     }
 
     @JavascriptInterface
@@ -724,6 +801,30 @@ public class AndroidWorkspaceBridge {
                 "window.__rengeAndroidReject && window.__rengeAndroidReject(" + quote(requestId) + "," + quote(message == null ? "工作区授权失败" : message) + ")",
                 null
         ));
+    }
+
+    private void showToast(String message, int duration) {
+        activity.runOnUiThread(() -> Toast.makeText(activity, message, duration).show());
+    }
+
+    private String sanitizeDownloadFileName(String fileName) {
+        String sanitized = fileName == null ? "" : fileName.trim().replaceAll("[\\\\/:*?\"<>|]", "_");
+        return sanitized.isEmpty() ? "download" : sanitized;
+    }
+
+    private File createUniqueDownloadFile(File directory, String fileName) {
+        File candidate = new File(directory, fileName);
+        if (!candidate.exists()) return candidate;
+
+        int dotIndex = fileName.lastIndexOf('.');
+        String baseName = dotIndex > 0 ? fileName.substring(0, dotIndex) : fileName;
+        String extension = dotIndex > 0 ? fileName.substring(dotIndex) : "";
+        int suffix = 2;
+        while (candidate.exists()) {
+            candidate = new File(directory, baseName + " (" + suffix + ")" + extension);
+            suffix += 1;
+        }
+        return candidate;
     }
 
     private String quote(String value) {
