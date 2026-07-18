@@ -5086,6 +5086,10 @@ summary:focus-visible {
   line-height: 1.65;
 }
 
+.chat-streaming-plain-text {
+  overflow-wrap: anywhere;
+}
+
 .mes_text {
   font-family: var(--chat-message-font-family, inherit);
   font-size: var(--chat-message-font-size, 16px);

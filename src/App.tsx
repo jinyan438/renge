@@ -388,6 +388,7 @@ type ChatMessage = {
   role: ChatRole;
   content: string;
   reasoning?: string;
+  renderAsPlainText?: boolean;
   createdAt: string;
   sender?: ChatSenderIdentity;
   attachments?: ChatAttachment[];
@@ -1690,6 +1691,7 @@ function normalizeChatMessage(rawMessage: Partial<ChatMessage>): ChatMessage {
     ...(typeof rawMessage.reasoning === "string" && rawMessage.reasoning.trim()
       ? { reasoning: rawMessage.reasoning }
       : {}),
+    ...(rawMessage.renderAsPlainText === true ? { renderAsPlainText: true } : {}),
     createdAt: rawMessage.createdAt ?? new Date().toISOString(),
     ...(role === "user"
       ? { sender: normalizedSender }
@@ -2365,7 +2367,9 @@ function getRenderedChatSegments(messages: ChatMessage[], multiBubbleEnabled: bo
   return messages.flatMap((message) => {
     const timestamp = new Date(message.createdAt).getTime();
     const messageSegments =
-      message.role === "assistant"
+      message.renderAsPlainText
+        ? [message.content]
+        : message.role === "assistant"
         ? getChatMessageSegments(message, multiBubbleEnabled)
         : multiBubbleEnabled
           ? getChatMessageSegments(message)
@@ -7024,6 +7028,137 @@ function isChatAbortError(error: unknown) {
 
 function throwIfChatAborted(signal?: AbortSignal) {
   if (signal?.aborted) throw createChatAbortError();
+}
+
+type StreamingWordSegment = {
+  segment: string;
+  index: number;
+  isWordLike: boolean;
+};
+
+function createStreamingWordWriter(
+  onWord: (word: string) => void,
+  signal?: AbortSignal,
+) {
+  const segmenter =
+    typeof Intl.Segmenter === "function"
+      ? new Intl.Segmenter(undefined, { granularity: "word" })
+      : null;
+  let pendingText = "";
+  let queuedWords: string[] = [];
+  let timerId: number | undefined;
+  let finished = false;
+  let cancelled = false;
+  let finishPromise: Promise<void> | null = null;
+  let resolveFinish: (() => void) | null = null;
+
+  const segmentText = (text: string): StreamingWordSegment[] => {
+    if (segmenter) {
+      return Array.from(segmenter.segment(text), (item) => ({
+        segment: item.segment,
+        index: item.index,
+        isWordLike: item.isWordLike === true,
+      }));
+    }
+
+    return Array.from(text.matchAll(/\s+|[\p{L}\p{N}_]+|./gu), (match) => ({
+      segment: match[0],
+      index: match.index ?? 0,
+      isWordLike: /^[\p{L}\p{N}_]+$/u.test(match[0]),
+    }));
+  };
+
+  const resolveWhenIdle = () => {
+    if (!finished || timerId !== undefined || queuedWords.length > 0 || pendingText) return;
+    resolveFinish?.();
+    resolveFinish = null;
+  };
+
+  const scheduleNextWord = () => {
+    if (cancelled || timerId !== undefined || queuedWords.length === 0) {
+      resolveWhenIdle();
+      return;
+    }
+
+    const delay = queuedWords.length > 120 ? 8 : queuedWords.length > 40 ? 16 : 32;
+    timerId = window.setTimeout(() => {
+      timerId = undefined;
+      const word = queuedWords.shift();
+      if (word) onWord(word);
+      scheduleNextWord();
+    }, delay);
+  };
+
+  const enqueueStableWords = (flushAll: boolean) => {
+    if (!pendingText) return;
+    const segments = segmentText(pendingText);
+    const lastSegment = segments.at(-1);
+    const stableEnd =
+      !flushAll &&
+      lastSegment?.isWordLike &&
+      lastSegment.index + lastSegment.segment.length === pendingText.length
+        ? lastSegment.index
+        : pendingText.length;
+    if (stableEnd <= 0) return;
+
+    const stableSegments = segments.filter(
+      (item) => item.index + item.segment.length <= stableEnd,
+    );
+    const words: string[] = [];
+    stableSegments.forEach((item) => {
+      if (!item.isWordLike && words.length > 0) {
+        words[words.length - 1] += item.segment;
+      } else {
+        words.push(item.segment);
+      }
+    });
+    queuedWords.push(...words.filter(Boolean));
+    pendingText = pendingText.slice(stableEnd);
+    scheduleNextWord();
+  };
+
+  const cancel = () => {
+    if (cancelled) return;
+    cancelled = true;
+    if (timerId !== undefined) window.clearTimeout(timerId);
+    timerId = undefined;
+    queuedWords = [];
+    pendingText = "";
+    resolveFinish?.();
+    resolveFinish = null;
+    signal?.removeEventListener("abort", cancel);
+  };
+
+  signal?.addEventListener("abort", cancel, { once: true });
+
+  return {
+    push(delta: string) {
+      if (!delta || finished || cancelled) return;
+      pendingText += delta;
+      enqueueStableWords(false);
+    },
+    finish() {
+      if (cancelled) return Promise.resolve();
+      if (!finished) {
+        finished = true;
+        enqueueStableWords(true);
+      }
+      if (timerId === undefined && queuedWords.length === 0 && !pendingText) {
+        signal?.removeEventListener("abort", cancel);
+        return Promise.resolve();
+      }
+      if (!finishPromise) {
+        finishPromise = new Promise<void>((resolve) => {
+          resolveFinish = () => {
+            signal?.removeEventListener("abort", cancel);
+            resolve();
+          };
+        });
+      }
+      return finishPromise;
+    },
+    cancel,
+  };
 }
 
 async function readChatStream(
@@ -15753,7 +15888,17 @@ export function App() {
     content: string,
     messageId: string,
     sourceMessageId = messageId,
+    renderAsPlainText = false,
   ) => {
+    const displayContent = substituteUserNicknameMacro(content, userProfile.nickname);
+    if (renderAsPlainText) {
+      return (
+        <div className="chat-rendered-content">
+          <p className="chat-text-part chat-streaming-plain-text">{displayContent}</p>
+        </div>
+      );
+    }
+
     const toolProgressBlock = parseToolProgressContent(content);
     if (toolProgressBlock) {
       return (
@@ -15763,7 +15908,6 @@ export function App() {
       );
     }
 
-    const displayContent = substituteUserNicknameMacro(content, userProfile.nickname);
     const parts = parseChatContentParts(displayContent, chatHtmlRenderEnabled);
     let htmlPreviewContext: HtmlPreviewContext | null = null;
     const htmlPreviewSessionId =
@@ -16388,6 +16532,7 @@ export function App() {
             id: assistantMessageId,
             role: "assistant",
             content: "",
+            renderAsPlainText: true,
             ...(assistantSender ? { sender: assistantSender } : {}),
             createdAt: new Date().toISOString(),
           },
@@ -16397,21 +16542,36 @@ export function App() {
           status: "loading",
           message: options.streamingStatusMessage ?? "正在流式生成回复...",
         });
-        const streamResult = await requestChatCompletion(apiMessages, {
-          includeTools: availableChatTools.length > 0,
-          stream: true,
-          onDelta: appendStreamingAssistant,
-          onReasoningDelta: appendStreamingAssistantReasoning,
-        });
-        assistantContent = streamResult.content;
-        assistantReasoning = streamResult.reasoning || assistantReasoning;
-        const choiceToolCall = streamResult.toolCalls.find((toolCall) =>
-          isChatChoiceToolName(toolCall.function.name),
+        const assistantWriter = createStreamingWordWriter(
+          appendStreamingAssistant,
+          abortSignal,
         );
-        if (choiceToolCall) {
-          const presentedChoice = createChatChoiceRequestFromToolCall(choiceToolCall);
-          assistantChoiceRequest = presentedChoice.choiceRequest;
-          assistantContent = streamResult.content.trim() || presentedChoice.prompt;
+        const reasoningWriter = createStreamingWordWriter(
+          appendStreamingAssistantReasoning,
+          abortSignal,
+        );
+        try {
+          const streamResult = await requestChatCompletion(apiMessages, {
+            includeTools: availableChatTools.length > 0,
+            stream: true,
+            onDelta: assistantWriter.push,
+            onReasoningDelta: reasoningWriter.push,
+          });
+          await Promise.all([assistantWriter.finish(), reasoningWriter.finish()]);
+          throwIfChatAborted(abortSignal);
+          assistantContent = streamResult.content;
+          assistantReasoning = streamResult.reasoning || assistantReasoning;
+          const choiceToolCall = streamResult.toolCalls.find((toolCall) =>
+            isChatChoiceToolName(toolCall.function.name),
+          );
+          if (choiceToolCall) {
+            const presentedChoice = createChatChoiceRequestFromToolCall(choiceToolCall);
+            assistantChoiceRequest = presentedChoice.choiceRequest;
+            assistantContent = streamResult.content.trim() || presentedChoice.prompt;
+          }
+        } finally {
+          assistantWriter.cancel();
+          reasoningWriter.cancel();
         }
       } else {
         for (let toolRound = 0; toolRound < 99; toolRound += 1) {
@@ -16653,6 +16813,7 @@ export function App() {
               ? {
                   ...message,
                   ...finalAssistantMessage,
+                  renderAsPlainText: false,
                 }
               : message,
           ),
@@ -17742,26 +17903,42 @@ export function App() {
             id: assistantMessageId,
             role: "assistant",
             content: "",
+            renderAsPlainText: true,
             createdAt: new Date().toISOString(),
           },
         ]);
         streamingAssistantInserted = true;
         setChatStatus({ status: "loading", message: "正在流式生成回复..." });
-        const streamResult = await requestChatCompletion(apiMessages, {
-          includeTools: availableChatTools.length > 0,
-          stream: true,
-          onDelta: appendStreamingAssistant,
-          onReasoningDelta: appendStreamingAssistantReasoning,
-        });
-        assistantContent = streamResult.content;
-        assistantReasoning = streamResult.reasoning || assistantReasoning;
-        const choiceToolCall = streamResult.toolCalls.find((toolCall) =>
-          isChatChoiceToolName(toolCall.function.name),
+        const assistantWriter = createStreamingWordWriter(
+          appendStreamingAssistant,
+          abortSignal,
         );
-        if (choiceToolCall) {
-          const presentedChoice = createChatChoiceRequestFromToolCall(choiceToolCall);
-          assistantChoiceRequest = presentedChoice.choiceRequest;
-          assistantContent = streamResult.content.trim() || presentedChoice.prompt;
+        const reasoningWriter = createStreamingWordWriter(
+          appendStreamingAssistantReasoning,
+          abortSignal,
+        );
+        try {
+          const streamResult = await requestChatCompletion(apiMessages, {
+            includeTools: availableChatTools.length > 0,
+            stream: true,
+            onDelta: assistantWriter.push,
+            onReasoningDelta: reasoningWriter.push,
+          });
+          await Promise.all([assistantWriter.finish(), reasoningWriter.finish()]);
+          throwIfChatAborted(abortSignal);
+          assistantContent = streamResult.content;
+          assistantReasoning = streamResult.reasoning || assistantReasoning;
+          const choiceToolCall = streamResult.toolCalls.find((toolCall) =>
+            isChatChoiceToolName(toolCall.function.name),
+          );
+          if (choiceToolCall) {
+            const presentedChoice = createChatChoiceRequestFromToolCall(choiceToolCall);
+            assistantChoiceRequest = presentedChoice.choiceRequest;
+            assistantContent = streamResult.content.trim() || presentedChoice.prompt;
+          }
+        } finally {
+          assistantWriter.cancel();
+          reasoningWriter.cancel();
         }
       } else {
         for (let toolRound = 0; toolRound < 99; toolRound += 1) {
@@ -17980,6 +18157,7 @@ export function App() {
               ? {
                   ...message,
                   content: assistantContent,
+                  renderAsPlainText: false,
                   ...(Object.keys(assistantMessageVariables).length > 0
                     ? { variables: assistantMessageVariables }
                     : {}),
@@ -24358,7 +24536,12 @@ export function App() {
                                 message.role === "assistant" &&
                                 renderChatReasoning(message.reasoning, id)}
                               <div className="mes_text">
-                                {renderChatContent(segment, id, message.id)}
+                                {renderChatContent(
+                                  segment,
+                                  id,
+                                  message.id,
+                                  message.renderAsPlainText === true,
+                                )}
                               </div>
                               {segmentIndex === 0 &&
                                 renderChatAttachments(message.attachments ?? [])}
