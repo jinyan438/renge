@@ -28,6 +28,8 @@ export type ApplyRegexScriptsOptions = {
 };
 
 const SILLY_TAVERN_STATUS_PLACEHOLDER = "<StatusPlaceHolderImpl/>";
+const SILLY_TAVERN_STATUS_PLACEHOLDER_PATTERN =
+  /<\s*StatusPlaceHolderImpl\s*\/?\s*>/gi;
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -388,13 +390,12 @@ export function applyRegexScripts(
     : result;
 }
 
-export function appendSillyTavernStatusPlaceholderToGreeting(
+export function placeSillyTavernStatusPlaceholderOnCurrentMessage(
   content: string,
   scripts: RegexScript[],
+  isCurrentMessage: boolean,
   options: ApplyRegexScriptsOptions = {},
 ) {
-  if (/StatusPlaceHolderImpl/i.test(content)) return content;
-
   const statusRendererScripts = scripts.filter((script) =>
     /StatusPlaceHolderImpl/i.test(script.findRegex),
   );
@@ -416,5 +417,9 @@ export function appendSillyTavernStatusPlaceholderToGreeting(
     return content;
   }
 
-  return `${content.trimEnd()}\n${SILLY_TAVERN_STATUS_PLACEHOLDER}`;
+  const contentWithoutPlaceholder = content
+    .replace(SILLY_TAVERN_STATUS_PLACEHOLDER_PATTERN, "")
+    .trimEnd();
+  if (!isCurrentMessage) return contentWithoutPlaceholder;
+  return `${contentWithoutPlaceholder}${contentWithoutPlaceholder ? "\n" : ""}${SILLY_TAVERN_STATUS_PLACEHOLDER}`;
 }
