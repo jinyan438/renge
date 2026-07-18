@@ -8982,6 +8982,7 @@ export function App() {
               {
                 user_input: typeof payload.userInput === "string" ? payload.userInput : "",
                 should_stream: payload.shouldStream,
+                transport_stream: true,
                 disable_extras: payload.disableExtras === true,
               },
               frame,
@@ -17206,6 +17207,10 @@ export function App() {
         : typeof normalizedConfig.stream === "boolean"
           ? normalizedConfig.stream
           : chatStreamEnabled;
+    const transportStream =
+      typeof normalizedConfig.transport_stream === "boolean"
+        ? normalizedConfig.transport_stream
+        : shouldStream;
     const onStream =
       typeof normalizedConfig.on_stream === "function"
         ? (normalizedConfig.on_stream as (delta: string, fullText: string) => unknown)
@@ -17497,31 +17502,33 @@ export function App() {
               ? { response_format: requestedResponseFormat }
               : {}),
             ...(hasCustomApi ? {} : buildProviderReasoningRequest(chatProvider)),
-            stream: shouldStream,
+            stream: transportStream,
           },
         }),
       });
 
-      if (shouldStream) {
+      if (transportStream) {
         const streamResult = await readChatStream(
           response,
           (delta) => {
             generatedText = `${generatedText}${delta}`;
-            try {
-              onStream?.(delta, generatedText);
-            } catch (error) {
-              console.warn("独立前端流式回调执行失败", error);
+            if (shouldStream) {
+              try {
+                onStream?.(delta, generatedText);
+              } catch (error) {
+                console.warn("独立前端流式回调执行失败", error);
+              }
+              emitHtmlPreviewGenerationEvent(
+                "js_stream_token_received_incrementally",
+                [delta],
+                sourceFrame,
+              );
+              emitHtmlPreviewGenerationEvent(
+                "stream_token_received",
+                [{ token: delta, fullText: generatedText }],
+                sourceFrame,
+              );
             }
-            emitHtmlPreviewGenerationEvent(
-              "js_stream_token_received_incrementally",
-              [delta],
-              sourceFrame,
-            );
-            emitHtmlPreviewGenerationEvent(
-              "stream_token_received",
-              [{ token: delta, fullText: generatedText }],
-              sourceFrame,
-            );
           },
           () => undefined,
           abortSignal,
