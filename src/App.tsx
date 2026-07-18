@@ -3711,6 +3711,74 @@ const htmlVoidTags = new Set([
   "wbr",
 ]);
 const htmlRawTextTags = new Set(["script", "style", "textarea", "title"]);
+const htmlStandardTags = new Set([
+  ...htmlBlockRootTags,
+  ...htmlVoidTags,
+  ...htmlRawTextTags,
+  "a",
+  "abbr",
+  "address",
+  "b",
+  "bdi",
+  "bdo",
+  "button",
+  "caption",
+  "cite",
+  "code",
+  "colgroup",
+  "data",
+  "datalist",
+  "dd",
+  "del",
+  "dfn",
+  "dl",
+  "dt",
+  "em",
+  "fieldset",
+  "figcaption",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "i",
+  "ins",
+  "kbd",
+  "label",
+  "legend",
+  "li",
+  "map",
+  "mark",
+  "menu",
+  "meter",
+  "noscript",
+  "object",
+  "optgroup",
+  "option",
+  "output",
+  "p",
+  "picture",
+  "progress",
+  "q",
+  "rp",
+  "rt",
+  "ruby",
+  "s",
+  "samp",
+  "select",
+  "slot",
+  "small",
+  "span",
+  "strong",
+  "sub",
+  "sup",
+  "template",
+  "time",
+  "u",
+  "var",
+  "video",
+]);
 
 type HtmlTagToken = {
   end: number;
@@ -3822,6 +3890,109 @@ function findMatchingHtmlBlockEnd(content: string, start: number, rootTagName: s
   return -1;
 }
 
+type RecoverableHtmlBlockBoundary = {
+  contentEnd: number;
+  resumeEnd: number;
+};
+
+function findRecoverableHtmlBlockBoundary(
+  content: string,
+  start: number,
+  rootTagName: string,
+): RecoverableHtmlBlockBoundary | null {
+  const openTagDepths = new Map<string, number>();
+  let rootDepth = 0;
+  let cursor = start;
+  let lastRootRawTextEnd = -1;
+
+  while (cursor < content.length) {
+    const nextTagStart = content.indexOf("<", cursor);
+    if (nextTagStart < 0) break;
+
+    const token = readHtmlTagToken(content, nextTagStart);
+    if (!token) {
+      cursor = nextTagStart + 1;
+      continue;
+    }
+
+    const tokenTagName = token.tagName;
+    if (!tokenTagName) {
+      cursor = token.end;
+      continue;
+    }
+
+    if (token.closing) {
+      const openDepth = openTagDepths.get(tokenTagName) ?? 0;
+      if (
+        rootDepth === 1 &&
+        openDepth === 0 &&
+        tokenTagName !== rootTagName &&
+        !htmlStandardTags.has(tokenTagName)
+      ) {
+        return { contentEnd: nextTagStart, resumeEnd: token.end };
+      }
+
+      if (openDepth > 0) {
+        openTagDepths.set(tokenTagName, openDepth - 1);
+      }
+      if (tokenTagName === rootTagName) {
+        rootDepth -= 1;
+        if (rootDepth <= 0) return null;
+      }
+      cursor = token.end;
+      continue;
+    }
+
+    if (token.selfClosing) {
+      cursor = token.end;
+      continue;
+    }
+
+    openTagDepths.set(tokenTagName, (openTagDepths.get(tokenTagName) ?? 0) + 1);
+    if (tokenTagName === rootTagName) rootDepth += 1;
+
+    if (htmlRawTextTags.has(tokenTagName)) {
+      const rawTextEnd = findHtmlClosingTagEnd(content, token.end, tokenTagName);
+      if (rawTextEnd < 0) return null;
+      openTagDepths.set(tokenTagName, 0);
+      if (
+        rootDepth === 1 &&
+        Array.from(openTagDepths.entries()).every(
+          ([tagName, depth]) => tagName === rootTagName || depth === 0,
+        )
+      ) {
+        lastRootRawTextEnd = rawTextEnd;
+      }
+      cursor = rawTextEnd;
+      continue;
+    }
+
+    cursor = token.end;
+  }
+
+  if (lastRootRawTextEnd > start && content.slice(lastRootRawTextEnd).trim()) {
+    return { contentEnd: lastRootRawTextEnd, resumeEnd: lastRootRawTextEnd };
+  }
+
+  return null;
+}
+
+function stripStandaloneOrphanCustomClosingTags(content: string) {
+  return content.replace(
+    /(^|\n)([ \t]*)<\/\s*([A-Za-z][\w:-]*)\s*>([ \t]*)(?=\n|$)/g,
+    (match, lineStart: string, _indentation: string, rawTagName: string) => {
+      const tagName = rawTagName.toLowerCase();
+      if (htmlStandardTags.has(tagName)) return match;
+      const openingTagPattern = new RegExp(
+        `<\\s*${escapeRegExp(tagName)}(?=[\\s>/])`,
+        "i",
+      );
+      if (openingTagPattern.test(content)) return match;
+      return lineStart;
+    },
+  );
+}
+
 function findHtmlDocumentEnd(content: string, start: number) {
   const htmlClosePattern = /<\/\s*html\s*>/i;
   const htmlCloseMatch = htmlClosePattern.exec(content.slice(start));
@@ -3875,6 +4046,21 @@ function splitEmbeddedHtmlBlocks(content: string): PlainChatHtmlSegment[] {
       blockEnd = findMatchingHtmlBlockEnd(content, blockStart, rootTagName);
     }
 
+    let resumeEnd = blockEnd;
+    let syntheticClosingTag = "";
+    if (blockEnd <= blockStart && rootTagName && htmlBlockRootTags.has(rootTagName)) {
+      const recoverableBoundary = findRecoverableHtmlBlockBoundary(
+        content,
+        blockStart,
+        rootTagName,
+      );
+      if (recoverableBoundary) {
+        blockEnd = recoverableBoundary.contentEnd;
+        resumeEnd = recoverableBoundary.resumeEnd;
+        syntheticClosingTag = `</${rootTagName}>`;
+      }
+    }
+
     if (blockEnd <= blockStart) {
       searchCursor = blockStart + 1;
       continue;
@@ -3902,7 +4088,7 @@ function splitEmbeddedHtmlBlocks(content: string): PlainChatHtmlSegment[] {
       trailingCursor = trailingBlockEnd;
     }
 
-    const htmlBlock = content.slice(blockStart, blockEnd);
+    const htmlBlock = `${content.slice(blockStart, blockEnd)}${syntheticClosingTag}`;
     if (!looksLikeRenderableHtml(htmlBlock)) {
       searchCursor = blockStart + 1;
       continue;
@@ -3912,8 +4098,8 @@ function splitEmbeddedHtmlBlocks(content: string): PlainChatHtmlSegment[] {
       pushPlainChatHtmlSegment(segments, "text", content.slice(cursor, blockStart));
     }
     pushPlainChatHtmlSegment(segments, "html", htmlBlock);
-    cursor = blockEnd;
-    searchCursor = blockEnd;
+    cursor = resumeEnd;
+    searchCursor = resumeEnd;
   }
 
   return segments.length > 0 ? segments : [{ type: "text", content }];
@@ -3931,6 +4117,9 @@ function parsePlainChatContent(
   let normalized = content.replace(/\r\n/g, "\n");
   // 隐藏服务端为识图 MCP 注入的本地路径注释（不影响发回模型的 message.content 原文）
   normalized = stripHiddenImageAnnotations(normalized);
+  // 酒馆角色卡常用正则只替换 XML 风格包装标签的开头，并把原闭标签留在消息里。
+  // 这些孤立闭标签不应作为正文显示；真正的 HTML 容器会在下方提取时补齐。
+  normalized = stripStandaloneOrphanCustomClosingTags(normalized);
   // 合并 \"]\" 与 \"(\" 之间的换行与空白
   normalized = normalized.replace(/\](\s*\n\s*)+\(/g, "](");
   // 合并 \"(\" 与 url 之间的空白/换行
