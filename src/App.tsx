@@ -2651,6 +2651,7 @@ const htmlPreviewStyle = [
   ":root{--TH-viewport-height:100vh;--renge-parent-viewport-height:100vh;--renge-chat-quote-color:#E18A24;}",
   "html,body{overflow:hidden!important;}",
   "body{box-sizing:border-box;}",
+  'iframe[data-renge-embedded-html-frame="true"]{display:block;width:100%;min-height:420px;margin:18px 0;border:0;background:transparent;box-sizing:border-box;}',
   "html[data-renge-quote-style] .renge-personalized-quote{color:var(--renge-chat-quote-color,#E18A24)!important;}",
   "</style>",
 ].join("");
@@ -3899,11 +3900,22 @@ function findRecoverableHtmlBlockBoundary(
   content: string,
   start: number,
   rootTagName: string,
+  allowEmptyTrailingContent = false,
 ): RecoverableHtmlBlockBoundary | null {
   const openTagDepths = new Map<string, number>();
   let rootDepth = 0;
   let cursor = start;
-  let lastRootRawTextEnd = -1;
+  let lastRootMarkupEnd = -1;
+  const rememberRootMarkupEnd = (end: number) => {
+    if (
+      rootDepth === 1 &&
+      Array.from(openTagDepths.entries()).every(
+        ([tagName, depth]) => tagName === rootTagName || depth === 0,
+      )
+    ) {
+      lastRootMarkupEnd = end;
+    }
+  };
 
   while (cursor < content.length) {
     const nextTagStart = content.indexOf("<", cursor);
@@ -3939,11 +3951,13 @@ function findRecoverableHtmlBlockBoundary(
         rootDepth -= 1;
         if (rootDepth <= 0) return null;
       }
+      rememberRootMarkupEnd(token.end);
       cursor = token.end;
       continue;
     }
 
     if (token.selfClosing) {
+      rememberRootMarkupEnd(token.end);
       cursor = token.end;
       continue;
     }
@@ -3955,23 +3969,20 @@ function findRecoverableHtmlBlockBoundary(
       const rawTextEnd = findHtmlClosingTagEnd(content, token.end, tokenTagName);
       if (rawTextEnd < 0) return null;
       openTagDepths.set(tokenTagName, 0);
-      if (
-        rootDepth === 1 &&
-        Array.from(openTagDepths.entries()).every(
-          ([tagName, depth]) => tagName === rootTagName || depth === 0,
-        )
-      ) {
-        lastRootRawTextEnd = rawTextEnd;
-      }
+      rememberRootMarkupEnd(rawTextEnd);
       cursor = rawTextEnd;
       continue;
     }
 
+    rememberRootMarkupEnd(token.end);
     cursor = token.end;
   }
 
-  if (lastRootRawTextEnd > start && content.slice(lastRootRawTextEnd).trim()) {
-    return { contentEnd: lastRootRawTextEnd, resumeEnd: lastRootRawTextEnd };
+  if (
+    lastRootMarkupEnd > start &&
+    (allowEmptyTrailingContent || content.slice(lastRootMarkupEnd).trim())
+  ) {
+    return { contentEnd: lastRootMarkupEnd, resumeEnd: lastRootMarkupEnd };
   }
 
   return null;
@@ -3990,6 +4001,307 @@ function stripStandaloneOrphanCustomClosingTags(content: string) {
       if (openingTagPattern.test(content)) return match;
       return lineStart;
     },
+  );
+}
+
+type OrphanCustomClosingTagBoundary = {
+  start: number;
+  end: number;
+  tagName: string;
+};
+
+type ChatFenceBlock = {
+  openStart: number;
+  contentStart: number;
+  contentEnd: number;
+  closeEnd: number;
+  language: string;
+};
+
+const wrappedChatContentStyle = [
+  '<style data-renge-wrapped-chat-content="true">',
+  '[data-renge-wrapped-text="true"]{position:relative;z-index:1;white-space:normal;}',
+  '[data-renge-wrapped-text="true"] .renge-wrapped-paragraph{white-space:pre-wrap;margin:0 0 1em;}',
+  '[data-renge-wrapped-text="true"] blockquote{margin:0 0 1em;padding-left:1em;border-left:3px solid currentColor;opacity:.9;}',
+  '[data-renge-wrapped-text="true"] ul,[data-renge-wrapped-text="true"] ol{margin:0 0 1em;padding-left:1.8em;}',
+  '[data-renge-wrapped-text="true"] pre{overflow:auto;white-space:pre-wrap;}',
+  '[data-renge-wrapped-text="true"] img{max-width:100%;height:auto;}',
+  '</style>',
+].join("");
+
+function escapeChatHtmlText(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeChatHtmlAttribute(value: string) {
+  return escapeChatHtmlText(value)
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderWrappedInlineMarkdown(content: string) {
+  const inlinePattern =
+    /`(?<code>[^`]+)`|!\[(?<imageAlt>[^\]]*)\]\s*\(\s*(?<imageUrl>[^)\s]+)\s*\)|\[(?<linkText>[^\]]+)\]\s*\(\s*(?<linkUrl>[^)\s]+)\s*\)|\*\*(?<doubleAsterisk>[^*]+)\*\*|__(?<doubleUnderscore>[^_]+)__|~~(?<deleted>[^~]+)~~|\*(?<asteriskEm>[^*\n]+)\*|_(?<underscoreEm>[^_\n]+)_/g;
+  let output = "";
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = inlinePattern.exec(content))) {
+    if (match.index > cursor) {
+      output += escapeChatHtmlText(content.slice(cursor, match.index));
+    }
+    const groups = match.groups ?? {};
+    if (groups.code !== undefined) {
+      output += `<code>${escapeChatHtmlText(groups.code)}</code>`;
+    } else if (groups.imageAlt !== undefined && groups.imageUrl !== undefined) {
+      if (/^(?:https?:|data:image\/)/i.test(groups.imageUrl)) {
+        output += `<img alt="${escapeChatHtmlAttribute(groups.imageAlt || "图片")}" loading="lazy" src="${escapeChatHtmlAttribute(groups.imageUrl)}" />`;
+      } else {
+        output += escapeChatHtmlText(match[0]);
+      }
+    } else if (groups.linkText !== undefined && groups.linkUrl !== undefined) {
+      if (/^(?:https?:|mailto:|#|\/)/i.test(groups.linkUrl)) {
+        output += `<a href="${escapeChatHtmlAttribute(groups.linkUrl)}" rel="noreferrer" target="_blank">${renderWrappedInlineMarkdown(groups.linkText)}</a>`;
+      } else {
+        output += escapeChatHtmlText(match[0]);
+      }
+    } else if (groups.doubleAsterisk !== undefined) {
+      output += `<strong>${renderWrappedInlineMarkdown(groups.doubleAsterisk)}</strong>`;
+    } else if (groups.doubleUnderscore !== undefined) {
+      output += `<strong>${renderWrappedInlineMarkdown(groups.doubleUnderscore)}</strong>`;
+    } else if (groups.deleted !== undefined) {
+      output += `<del>${escapeChatHtmlText(groups.deleted)}</del>`;
+    } else if (groups.asteriskEm !== undefined) {
+      output += `<em>${renderWrappedInlineMarkdown(groups.asteriskEm)}</em>`;
+    } else if (groups.underscoreEm !== undefined) {
+      output += `<em>${escapeChatHtmlText(groups.underscoreEm)}</em>`;
+    }
+    cursor = match.index + match[0].length;
+  }
+
+  if (cursor < content.length) output += escapeChatHtmlText(content.slice(cursor));
+  return output;
+}
+
+function renderWrappedMarkdownBlocks(content: string) {
+  const normalized = content.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return "";
+
+  return normalized
+    .split(/\n{2,}/)
+    .map((block) => {
+      const lines = block.split("\n");
+      const trimmedLines = lines.map((line) => line.trim());
+      const headingMatch = /^(#{1,6})\s+(.+)$/.exec(trimmedLines[0]);
+      if (headingMatch && lines.length === 1) {
+        const level = Math.min(6, headingMatch[1].length);
+        return `<h${level}>${renderWrappedInlineMarkdown(headingMatch[2])}</h${level}>`;
+      }
+      if (trimmedLines.every((line) => /^[-*+]\s+/.test(line))) {
+        return `<ul>${trimmedLines
+          .map((line) => `<li>${renderWrappedInlineMarkdown(line.replace(/^[-*+]\s+/, ""))}</li>`)
+          .join("")}</ul>`;
+      }
+      if (trimmedLines.every((line) => /^\d+\.\s+/.test(line))) {
+        return `<ol>${trimmedLines
+          .map((line) => `<li>${renderWrappedInlineMarkdown(line.replace(/^\d+\.\s+/, ""))}</li>`)
+          .join("")}</ol>`;
+      }
+      if (trimmedLines.every((line) => line.startsWith(">"))) {
+        return `<blockquote>${trimmedLines
+          .map((line) => renderWrappedInlineMarkdown(line.replace(/^>\s?/, "")))
+          .join("<br />")}</blockquote>`;
+      }
+      return `<p class="mes_text renge-wrapped-paragraph">${lines
+        .map((line) => renderWrappedInlineMarkdown(line))
+        .join("<br />")}</p>`;
+    })
+    .join("");
+}
+
+function renderWrappedMixedChatContent(content: string) {
+  const segments = splitEmbeddedHtmlBlocks(content);
+  return segments
+    .map((segment) =>
+      segment.type === "html"
+        ? segment.content
+        : renderWrappedMarkdownBlocks(segment.content),
+    )
+    .join("");
+}
+
+function encodeEmbeddedHtmlDocument(content: string) {
+  const bytes = new TextEncoder().encode(content);
+  const buffer = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+  return arrayBufferToBase64(buffer);
+}
+
+function decodeEmbeddedHtmlDocument(content: string) {
+  return new TextDecoder().decode(base64ToArrayBuffer(content));
+}
+
+function createEmbeddedHtmlDocumentMarker(content: string) {
+  return `<script type="application/x-renge-embedded-html">${encodeEmbeddedHtmlDocument(content)}</script>`;
+}
+
+function findStandaloneOrphanCustomClosingTag(
+  content: string,
+  searchStart = 0,
+): OrphanCustomClosingTagBoundary | null {
+  const closingPattern = /(^|\n)([ \t]*)<\/\s*([A-Za-z][\w:-]*)\s*>[ \t]*(?=\n|$)/g;
+  closingPattern.lastIndex = searchStart;
+  let match: RegExpExecArray | null;
+
+  while ((match = closingPattern.exec(content))) {
+    const tagName = match[3].toLowerCase();
+    if (htmlStandardTags.has(tagName)) continue;
+    const openingTagPattern = new RegExp(
+      `<\\s*${escapeRegExp(tagName)}(?=[\\s>/])`,
+      "i",
+    );
+    if (openingTagPattern.test(content)) continue;
+    return {
+      start: match.index + match[1].length + match[2].length,
+      end: match.index + match[0].length,
+      tagName,
+    };
+  }
+
+  return null;
+}
+
+function findNextChatFence(content: string, searchStart: number): ChatFenceBlock | null {
+  const openingPattern = /^[ \t]*```([A-Za-z0-9_-]*)[^\r\n]*(?:\r?\n|$)/gm;
+  openingPattern.lastIndex = searchStart;
+  const openingMatch = openingPattern.exec(content);
+  if (!openingMatch) return null;
+
+  const language = openingMatch[1].toLowerCase();
+  const contentStart = openingMatch.index + openingMatch[0].length;
+  const closingPattern = /^[ \t]*```[ \t]*(?:\r?\n|$)/gm;
+  closingPattern.lastIndex = contentStart;
+  let closingMatch: RegExpExecArray | null;
+
+  while ((closingMatch = closingPattern.exec(content))) {
+    const candidateContent = content.slice(contentStart, closingMatch.index).trimEnd();
+    const fullHtmlDocument = /^(?:<!doctype\s+html|<html[\s>])/i.test(
+      candidateContent.trimStart(),
+    );
+    if (language === "html" && fullHtmlDocument && !/<\/html>\s*$/i.test(candidateContent)) {
+      continue;
+    }
+    return {
+      openStart: openingMatch.index,
+      contentStart,
+      contentEnd: closingMatch.index,
+      closeEnd: closingMatch.index + closingMatch[0].length,
+      language,
+    };
+  }
+
+  return null;
+}
+
+function composeRecoverableHtmlWrapper(
+  wrapperContent: string,
+  rootTagName: string,
+) {
+  let cursor = 0;
+  let firstPlainSegment = true;
+  let foundRootMarkup = false;
+  let output = "";
+
+  const appendPlainSegment = (plainContent: string) => {
+    if (!firstPlainSegment) {
+      output += renderWrappedMixedChatContent(plainContent);
+      return true;
+    }
+
+    firstPlainSegment = false;
+    const boundary = findRecoverableHtmlBlockBoundary(
+      plainContent,
+      0,
+      rootTagName,
+      true,
+    );
+    if (!boundary) return false;
+    output += plainContent.slice(0, boundary.contentEnd);
+    output += wrappedChatContentStyle;
+    output += '<div data-renge-wrapped-text="true">';
+    output += renderWrappedMixedChatContent(plainContent.slice(boundary.resumeEnd));
+    foundRootMarkup = true;
+    return true;
+  };
+
+  while (cursor < wrapperContent.length) {
+    const fence = findNextChatFence(wrapperContent, cursor);
+    if (!fence) break;
+    if (!appendPlainSegment(wrapperContent.slice(cursor, fence.openStart))) return null;
+    const fenceContent = wrapperContent.slice(fence.contentStart, fence.contentEnd).trim();
+    if (htmlLanguages.has(fence.language) || looksLikeRenderableHtml(fenceContent)) {
+      output += createEmbeddedHtmlDocumentMarker(fenceContent);
+    } else {
+      output += `<pre><code>${escapeChatHtmlText(fenceContent)}</code></pre>`;
+    }
+    cursor = fence.closeEnd;
+  }
+
+  if (!appendPlainSegment(wrapperContent.slice(cursor))) return null;
+  if (!foundRootMarkup) return null;
+  output += `</div></${rootTagName}>`;
+  return output;
+}
+
+function parseRecoverableHtmlWrapper(
+  content: string,
+  audioRenderingEnabled: boolean,
+): ChatContentPart[] | null {
+  const orphanClosingTag = findStandaloneOrphanCustomClosingTag(content);
+  if (!orphanClosingTag) return null;
+
+  const htmlStartPattern = /(^|\n)([ \t]*)<([A-Za-z][\w:-]*)(?=[\s>/])/g;
+  let rootMatch: RegExpExecArray | null;
+  let blockStart = -1;
+  let rootTagName = "";
+  while ((rootMatch = htmlStartPattern.exec(content))) {
+    const candidateStart = rootMatch.index + rootMatch[1].length + rootMatch[2].length;
+    const candidateTagName = rootMatch[3].toLowerCase();
+    if (candidateStart >= orphanClosingTag.start) break;
+    if (!htmlBlockRootTags.has(candidateTagName)) continue;
+    blockStart = candidateStart;
+    rootTagName = candidateTagName;
+    break;
+  }
+  if (blockStart < 0 || !rootTagName) return null;
+
+  const wrapperContent = content.slice(blockStart, orphanClosingTag.start);
+  const composedWrapper = composeRecoverableHtmlWrapper(wrapperContent, rootTagName);
+  if (!composedWrapper) return null;
+
+  const parts: ChatContentPart[] = [];
+  const leadingContent = content.slice(0, blockStart);
+  if (leadingContent.trim()) {
+    parts.push(...parseGenericChatContentParts(leadingContent, audioRenderingEnabled));
+  }
+  parts.push({
+    type: "code",
+    content: composedWrapper,
+    language: "html",
+    executable: false,
+  });
+  const trailingContent = content.slice(orphanClosingTag.end);
+  const trailingParts =
+    parseFencedHtmlDocuments(trailingContent, audioRenderingEnabled) ??
+    parseGenericChatContentParts(trailingContent, audioRenderingEnabled);
+  parts.push(...trailingParts);
+  return parts.filter(
+    (part) => part.type === "audio" || part.type === "liveStream" || part.content.length > 0,
   );
 }
 
@@ -4362,6 +4674,7 @@ function parseChatContentParts(
   audioRenderingEnabled: boolean,
 ): ChatContentPart[] {
   return (
+    parseRecoverableHtmlWrapper(content, audioRenderingEnabled) ??
     parseFencedHtmlDocuments(content, audioRenderingEnabled) ??
     parseGenericChatContentParts(content, audioRenderingEnabled)
   );
@@ -4796,20 +5109,110 @@ function isolateHtmlPreviewParentReferences(content: string) {
     );
 }
 
+function buildHtmlPreviewEmbeddedFramesScript(previewId: string) {
+  const previewIdLiteral = serializeHtmlPreviewValue(previewId);
+  const resizeMessageTypeLiteral = serializeHtmlPreviewValue(
+    HTML_PREVIEW_RESIZE_MESSAGE,
+  );
+  const remeasureMessageTypeLiteral = serializeHtmlPreviewValue(
+    HTML_PREVIEW_REMEASURE_MESSAGE,
+  );
+
+  return [
+    '<script data-renge-html-preview-embedded-frames="true">',
+    "(() => {",
+    `const previewId = ${previewIdLiteral};`,
+    `const resizeMessageType = ${resizeMessageTypeLiteral};`,
+    `const remeasureMessageType = ${remeasureMessageTypeLiteral};`,
+    'const frameSelector = "iframe[data-renge-embedded-html-frame=\\"true\\"]";',
+    "const getFrames = () => Array.from(document.querySelectorAll(frameSelector));",
+    "const getSourceFrame = (source) => getFrames().find((frame) => frame.contentWindow === source);",
+    "const resizeFrame = (frame, height) => {",
+    "  const parsed = Number(height);",
+    "  if (!Number.isFinite(parsed) || parsed <= 0) return;",
+    `  const nextHeight = Math.max(220, Math.min(${HTML_PREVIEW_MAX_HEIGHT}, Math.ceil(parsed)));`,
+    '  frame.style.height = `${nextHeight}px`;',
+    '  frame.dataset.rengeMeasuredHeight = String(nextHeight);',
+    "};",
+    'window.addEventListener("message", (event) => {',
+    "  const payload = event.data;",
+    '  if (!payload || typeof payload !== "object" || payload.id !== previewId) return;',
+    "  const sourceFrame = getSourceFrame(event.source);",
+    "  if (sourceFrame) {",
+    "    if (payload.type === resizeMessageType) { resizeFrame(sourceFrame, payload.height); return; }",
+    '    try { parent.postMessage(payload, "*"); } catch {}',
+    "    return;",
+    "  }",
+    "  if (event.source !== parent) return;",
+    "  getFrames().forEach((frame) => {",
+    '    try { frame.contentWindow?.postMessage(payload, "*"); } catch {}',
+    "  });",
+    "}, true);",
+    "const requestFrameMeasurements = () => getFrames().forEach((frame) => {",
+    '  try { frame.contentWindow?.postMessage({ type: remeasureMessageType, id: previewId }, "*"); } catch {}',
+    "});",
+    'if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", requestFrameMeasurements, { once: true });',
+    "else queueMicrotask(requestFrameMeasurements);",
+    "})();",
+    "</script>",
+  ].join("");
+}
+
+function expandEmbeddedHtmlPreviewDocuments(
+  content: string,
+  previewId: string,
+  context: HtmlPreviewContext,
+  embeddedDepth: number,
+): string {
+  if (embeddedDepth >= 4) return content;
+  let embeddedIndex = 0;
+  return content.replace(
+    /<script\s+type=["']application\/x-renge-embedded-html["']\s*>([A-Za-z0-9+/=\s]+)<\/script>/gi,
+    (_match, encodedContent: string) => {
+      try {
+        const embeddedContent = decodeEmbeddedHtmlDocument(encodedContent);
+        const embeddedDocument: string = buildHtmlPreviewDocument(
+          embeddedContent,
+          previewId,
+          context,
+          embeddedDepth + 1,
+        );
+        const frameIndex = embeddedIndex;
+        embeddedIndex += 1;
+        return `<iframe allow="autoplay; fullscreen; gamepad" data-renge-embedded-html-frame="true" data-renge-embedded-index="${frameIndex}" loading="eager" sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts" srcdoc="${escapeChatHtmlAttribute(embeddedDocument)}" title="嵌套 HTML 预览"></iframe>`;
+      } catch {
+        return "";
+      }
+    },
+  );
+}
+
 function buildHtmlPreviewDocument(
   content: string,
   previewId: string,
   context: HtmlPreviewContext,
-) {
-  const trimmedContent = isolateHtmlPreviewParentReferences(
+  embeddedDepth = 0,
+): string {
+  const isolatedContent = isolateHtmlPreviewParentReferences(
     stabilizeHtmlPreviewViewportUnits(content.trim()),
+  );
+  const trimmedContent: string = expandEmbeddedHtmlPreviewDocuments(
+    isolatedContent,
+    previewId,
+    context,
+    embeddedDepth,
   );
   const heavyContent = trimmedContent.length >= HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD;
   // SillyTavern frontends can replace the complete body through
   // `$("body").load(...)`. Install the resize runtime in the head before card
   // scripts start, so asynchronous body replacement cannot remove the only
   // path that reports the finished layout height to the host.
-  const headInjection = `${htmlPreviewStyle}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${buildHtmlPreviewScript(previewId, heavyContent)}`;
+  const embeddedFramesScript = trimmedContent.includes(
+    'data-renge-embedded-html-frame="true"',
+  )
+    ? buildHtmlPreviewEmbeddedFramesScript(previewId)
+    : "";
+  const headInjection = `${htmlPreviewStyle}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
     return injectHtmlPreviewHead(trimmedContent, headInjection);
   }
