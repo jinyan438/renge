@@ -2823,6 +2823,49 @@ const htmlPreviewBootstrapScript = [
   "})();",
   "</script>",
 ].join("");
+const htmlPreviewJqueryDelegationScript = [
+  '<script data-renge-html-preview-jquery-delegation="true">',
+  "(() => {",
+  "const jquery = window.jQuery || window.$;",
+  "if (typeof jquery !== \"function\" || !jquery.fn || jquery.__rengeDelegationInstalled) return;",
+  "const originalOn = jquery.fn.on;",
+  "if (typeof originalOn !== \"function\") return;",
+  "const getEventTypes = (events) => String(events || \"\").trim().split(/\\s+/).map((token) => token.split(\".\")[0]).filter(Boolean);",
+  "jquery.fn.on = function(events, selector, data, handler) {",
+  "  if (typeof selector !== \"string\") return originalOn.apply(this, arguments);",
+  "  const delegatedHandler = typeof data === \"function\" ? data : handler;",
+  "  if (typeof delegatedHandler !== \"function\") return originalOn.apply(this, arguments);",
+  "  const handledNativeEvents = new WeakSet();",
+  "  const wrappedHandler = function(event, ...args) {",
+  "    const nativeEvent = event?.originalEvent || event;",
+  "    if (nativeEvent && typeof nativeEvent === \"object\") handledNativeEvents.add(nativeEvent);",
+  "    return delegatedHandler.call(this, event, ...args);",
+  "  };",
+  "  const result = typeof data === \"function\"",
+  "    ? originalOn.call(this, events, selector, wrappedHandler)",
+  "    : originalOn.call(this, events, selector, data, wrappedHandler);",
+  "  const eventTypes = getEventTypes(events);",
+  "  this.each(function() {",
+  "    const root = this;",
+  "    if (!root || typeof root.addEventListener !== \"function\") return;",
+  "    eventTypes.forEach((eventType) => {",
+  "      root.addEventListener(eventType, (event) => {",
+  "        if (handledNativeEvents.has(event)) return;",
+  "        const eventTarget = event.target instanceof Element ? event.target : event.target?.parentElement;",
+  "        const matchedTarget = eventTarget?.closest?.(selector);",
+  "        if (!matchedTarget) return;",
+  "        if (root !== document && typeof root.contains === \"function\" && !root.contains(matchedTarget)) return;",
+  "        const handlerResult = delegatedHandler.call(matchedTarget, event);",
+  "        if (handlerResult === false) { event.preventDefault(); event.stopPropagation(); }",
+  "      });",
+  "    });",
+  "  });",
+  "  return result;",
+  "};",
+  "jquery.__rengeDelegationInstalled = true;",
+  "})();",
+  "</script>",
+].join("");
 
 function serializeHtmlPreviewValue(value: unknown) {
   return (JSON.stringify(value) ?? "null")
@@ -5228,7 +5271,7 @@ function buildHtmlPreviewDocument(
   )
     ? buildHtmlPreviewEmbeddedFramesScript(previewId)
     : "";
-  const headInjection = `${htmlPreviewStyle}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
+  const headInjection = `${htmlPreviewStyle}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
     return injectHtmlPreviewHead(trimmedContent, headInjection);
   }
