@@ -341,8 +341,13 @@ export function applyRegexScripts(
   const applicableScripts = scripts.filter((script) => {
     if (script.disabled || !script.findRegex.trim()) return false;
     if (!script.placement.includes(placement)) return false;
-    if (destination === "display" && script.promptOnly) return false;
-    if (destination === "prompt" && script.markdownOnly) return false;
+    const hasExplicitDestination = script.markdownOnly || script.promptOnly;
+    if (destination === "display" && hasExplicitDestination && !script.markdownOnly) {
+      return false;
+    }
+    if (destination === "prompt" && hasExplicitDestination && !script.promptOnly) {
+      return false;
+    }
     if (script.minDepth !== null && depth < script.minDepth) return false;
     if (script.maxDepth !== null && depth > script.maxDepth) return false;
     return true;

@@ -1318,8 +1318,8 @@ function normalizeTavernRegexRecord(
     destination: isRecord(raw.destination)
       ? raw.destination
       : {
-          display: !promptOnly,
-          prompt: !markdownOnly,
+          display: markdownOnly || !promptOnly,
+          prompt: promptOnly || !markdownOnly,
         },
   };
 }

@@ -21091,13 +21091,13 @@ export function App() {
                                 <input type="checkbox" checked={script.promptOnly} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
                                   regexScripts: editingCharacterCard.regexScripts.map((item) => item.id === script.id ? { ...item, promptOnly: event.target.checked } : item),
                                 })} />
-                                <span>仅提示词</span>
+                                <span>应用于提示词</span>
                               </label>
                               <label className="toggle-field compact-toggle">
                                 <input type="checkbox" checked={script.markdownOnly} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
                                   regexScripts: editingCharacterCard.regexScripts.map((item) => item.id === script.id ? { ...item, markdownOnly: event.target.checked } : item),
                                 })} />
-                                <span>仅显示</span>
+                                <span>应用于显示文本</span>
                               </label>
                             </div>
                             {getRegexScriptError(script) && <small className="field-error">{getRegexScriptError(script)}</small>}
@@ -22945,7 +22945,7 @@ export function App() {
                       (script) =>
                         !script.disabled &&
                         script.placement.includes(2) &&
-                        !script.promptOnly,
+                        (script.markdownOnly || !script.promptOnly),
                     ).length}
                   </strong>
                   <span>
@@ -23110,7 +23110,7 @@ export function App() {
                           })
                         }
                       />
-                      仅显示文本
+                      应用于显示文本
                     </label>
                     <label className={`provider-thinking-toggle ${selectedRegexTarget.script.promptOnly ? "active" : ""}`}>
                       <input
@@ -23122,7 +23122,7 @@ export function App() {
                           })
                         }
                       />
-                      仅提示词
+                      应用于提示词
                     </label>
                     <label className={`provider-thinking-toggle ${selectedRegexTarget.script.runOnEdit ? "active" : ""}`}>
                       <input
