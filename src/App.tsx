@@ -2644,11 +2644,11 @@ const htmlPreviewBootstrapScript = [
   '  const existingDollar = typeof window.$ === "function" ? window.$ : null;',
   "  const isolateRemoteParentReferences = (content) => String(content || \"\")",
   "    .replace(",
-  "      /\\b(?:window\\s*\\.\\s*)?(?:parent|top)\\s*(?:\\?\\.|\\.)\\s*(?!postMessage\\b)([A-Za-z_$][\\w$]*)/g,",
+  "      /(?<![\\w$.])(?:window\\s*\\.\\s*)?(?:parent|top)\\s*(?:\\?\\.|\\.)\\s*(?!postMessage\\b)([A-Za-z_$][\\w$]*)/g,",
   '      "window.$1",',
   "    )",
   "    .replace(",
-  "      /\\b(?:window\\s*\\.\\s*)?(?:parent|top)\\s*(?:\\?\\.)?\\s*\\[\\s*([\"'])(?!postMessage\\1)([^\"']+)\\1\\s*\\]/g,",
+  "      /(?<![\\w$.])(?:window\\s*\\.\\s*)?(?:parent|top)\\s*(?:\\?\\.)?\\s*\\[\\s*([\"'])(?!postMessage\\1)([^\"']+)\\1\\s*\\]/g,",
   '      "window[$1$2$1]",',
   "    );",
   "  const getTarget = (selector) => {",
@@ -4546,11 +4546,11 @@ function isolateHtmlPreviewParentReferences(content: string) {
   // real parent because it is the only supported cross-frame transport.
   return content
     .replace(
-      /\b(?:window\s*\.\s*)?(?:parent|top)\s*(?:\?\.|\.)\s*(?!postMessage\b)([A-Za-z_$][\w$]*)/g,
+      /(?<![\w$.])(?:window\s*\.\s*)?(?:parent|top)\s*(?:\?\.|\.)\s*(?!postMessage\b)([A-Za-z_$][\w$]*)/g,
       "window.$1",
     )
     .replace(
-      /\b(?:window\s*\.\s*)?(?:parent|top)\s*(?:\?\.)?\s*\[\s*(["'])(?!postMessage\1)([^"']+)\1\s*\]/g,
+      /(?<![\w$.])(?:window\s*\.\s*)?(?:parent|top)\s*(?:\?\.)?\s*\[\s*(["'])(?!postMessage\1)([^"']+)\1\s*\]/g,
       "window[$1$2$1]",
     );
 }
