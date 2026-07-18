@@ -97,13 +97,13 @@ import {
   type WorldBookEntry,
 } from "./worldbookUtils";
 import {
-  appendSillyTavernStatusPlaceholderToGreeting,
   applyRegexScripts,
   createRegexScript,
   getRegexScriptError,
   importSillyTavernRegexFile,
   loadRegexScriptsFromStorage,
   normalizeRegexScript,
+  placeSillyTavernStatusPlaceholderOnCurrentMessage,
   type RegexScript,
 } from "./regexUtils";
 import {
@@ -14266,8 +14266,13 @@ export function App() {
     [chatHeartbeatReminderVisible, chatMessages],
   );
   const regexProcessedChatMessages = useMemo(
-    () =>
-      visibleChatMessages.map((message, index) => {
+    () => {
+      const latestAssistantMessageIndex = visibleChatMessages.reduce(
+        (latestIndex, message, index) =>
+          message.role === "assistant" ? index : latestIndex,
+        -1,
+      );
+      return visibleChatMessages.map((message, index) => {
         if (message.role !== "assistant" || !message.content) return message;
         const assistantPersona = getAssistantMessagePersona(
           message,
@@ -14287,16 +14292,18 @@ export function App() {
               : assistantPersona?.name ?? activePersona?.name ?? "AI",
         };
         const displaySource =
-          message.source === "roleplay-greeting" && activeSessionRoleplayCard
-            ? appendSillyTavernStatusPlaceholderToGreeting(
+          chatMode === "roleplay" && activeSessionRoleplayCard
+            ? placeSillyTavernStatusPlaceholderOnCurrentMessage(
                 message.content,
                 activeSessionRoleplayCard.regexScripts,
+                index === latestAssistantMessageIndex,
                 regexOptions,
               )
             : message.content;
         const content = applyRegexScripts(displaySource, effectiveRegexScripts, regexOptions);
         return content === message.content ? message : { ...message, content };
-      }),
+      });
+    },
     [activePersona, activeSessionRoleplayCard, chatMode, effectiveRegexScripts, personas, userProfile.nickname, visibleChatMessages],
   );
   const chatMessageMenuMessage = useMemo(
