@@ -5846,6 +5846,16 @@ summary:focus-visible {
   background: #ecfdf3;
 }
 
+.chat-status.info {
+  color: #175cd3;
+  background: #eff8ff;
+}
+
+.chat-status.warning {
+  color: #b54708;
+  background: #fffaeb;
+}
+
 .chat-status.error {
   color: #b42318;
   background: #fee4e2;
