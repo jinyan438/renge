@@ -2464,6 +2464,7 @@ const HTML_PREVIEW_VIEWPORT_MESSAGE = "renge-html-preview-viewport";
 const HTML_PREVIEW_REMEASURE_MESSAGE = "renge-html-preview-remeasure";
 const HTML_PREVIEW_FRAME_INIT_MESSAGE = "renge-html-preview-frame-init";
 const HYPNOOS_APPEND_OPERATION_MESSAGE = "HYPNOOS_APPEND_OPERATION";
+const HTML_PREVIEW_MEASURED_MIN_HEIGHT = 64;
 const HTML_PREVIEW_MAX_HEIGHT = 12000;
 const HTML_PREVIEW_EXPANDED_MIN_HEIGHT = 1200;
 const HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD = 512 * 1024;
@@ -4752,7 +4753,7 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     `const maxHeight = ${HTML_PREVIEW_MAX_HEIGHT};`,
     `const heavyContent = ${heavyContent ? "true" : "false"};`,
     "const defaultHeight = 420;",
-    "const minHeight = 220;",
+    `const minHeight = ${HTML_PREVIEW_MEASURED_MIN_HEIGHT};`,
     "const padding = 12;",
     "let rafId = 0;",
     "let rafFallbackTimer = 0;",
@@ -5145,7 +5146,7 @@ function buildHtmlPreviewEmbeddedFramesScript(previewId: string) {
     "const resizeFrame = (frame, height) => {",
     "  const parsed = Number(height);",
     "  if (!Number.isFinite(parsed) || parsed <= 0) return;",
-    `  const nextHeight = Math.max(220, Math.min(${HTML_PREVIEW_MAX_HEIGHT}, Math.ceil(parsed)));`,
+    `  const nextHeight = Math.max(${HTML_PREVIEW_MEASURED_MIN_HEIGHT}, Math.min(${HTML_PREVIEW_MAX_HEIGHT}, Math.ceil(parsed)));`,
     '  frame.style.height = `${nextHeight}px`;',
     '  frame.dataset.rengeMeasuredHeight = String(nextHeight);',
     "};",
@@ -5591,7 +5592,7 @@ function fitHtmlPreviewFrame(frame: HTMLIFrameElement) {
     // height intact until the child resize bridge reports its real layout.
     if (measuredHeight <= 0) return;
     const height = Math.ceil(measuredHeight + 12);
-    frame.style.height = `${Math.max(220, height)}px`;
+    frame.style.height = `${Math.max(HTML_PREVIEW_MEASURED_MIN_HEIGHT, height)}px`;
   } catch {
     // Preview internals should not break chat rendering.
   }
@@ -9987,7 +9988,7 @@ export function App() {
       const hasExpandedLayout = frame.dataset.expandedLayout === "true";
       frame.style.minHeight = hasExpandedLayout
         ? `${HTML_PREVIEW_EXPANDED_MIN_HEIGHT}px`
-        : "220px";
+        : `${HTML_PREVIEW_MEASURED_MIN_HEIGHT}px`;
       const reportedExpandedHeight = Number(payload.expandedHeight);
       const expandedHeightIsValid =
         hasExpandedLayout &&
@@ -10003,12 +10004,8 @@ export function App() {
             reportedExpandedHeight < frameWidth * 0.72 ? expandedFallbackHeight : 0,
           )
         : expandedFallbackHeight;
-      const intrinsicMinHeight =
-        payload.intrinsic === true && frameWidth > 0
-          ? Math.max(220, Math.min(960, Math.round(frameWidth * 0.72)))
-          : 220;
       const clampedHeight = Math.max(
-        intrinsicMinHeight,
+        HTML_PREVIEW_MEASURED_MIN_HEIGHT,
         expandedMinHeight,
         Math.min(Math.ceil(nextHeight), HTML_PREVIEW_MAX_HEIGHT),
       );
