@@ -24,6 +24,7 @@ export type ApplyRegexScriptsOptions = {
   destination?: "display" | "prompt";
   userName?: string;
   characterName?: string;
+  messageVariables?: Record<string, unknown>;
 };
 
 const SILLY_TAVERN_STATUS_PLACEHOLDER = "<StatusPlaceHolderImpl/>";
@@ -247,6 +248,37 @@ function replaceRegexMacros(value: string, options: ApplyRegexScriptsOptions) {
     .replace(/{{\s*char\s*}}/gi, options.characterName?.trim() || "助手");
 }
 
+function formatMessageVariable(value: unknown) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function replaceMessageVariableMacros(
+  value: string,
+  variables: Record<string, unknown> | undefined,
+) {
+  if (!variables) return value;
+  return value.replace(
+    /{{\s*format_message_variable\s*::\s*([^{}]+?)\s*}}/gi,
+    (_match, rawPath: string) =>
+      formatMessageVariable(
+        getNestedValue(
+          variables,
+          rawPath
+            .split(".")
+            .map((segment) => segment.trim())
+            .filter(Boolean),
+        ),
+      ),
+  );
+}
+
 function compileRegex(findRegex: string) {
   const slashExpression = /^\/([\s\S]*)\/([dgimsuvy]*)$/.exec(findRegex);
   if (slashExpression) {
@@ -306,13 +338,24 @@ export function applyRegexScripts(
   const placement = options.placement ?? 2;
   const depth = Math.max(0, options.depth ?? 0);
   const destination = options.destination ?? "display";
-  return scripts.reduce((result, script) => {
-    if (script.disabled || !script.findRegex.trim()) return result;
-    if (!script.placement.includes(placement)) return result;
-    if (destination === "display" && script.promptOnly) return result;
-    if (destination === "prompt" && script.markdownOnly) return result;
-    if (script.minDepth !== null && depth < script.minDepth) return result;
-    if (script.maxDepth !== null && depth > script.maxDepth) return result;
+  const applicableScripts = scripts.filter((script) => {
+    if (script.disabled || !script.findRegex.trim()) return false;
+    if (!script.placement.includes(placement)) return false;
+    if (destination === "display" && script.promptOnly) return false;
+    if (destination === "prompt" && script.markdownOnly) return false;
+    if (script.minDepth !== null && depth < script.minDepth) return false;
+    if (script.maxDepth !== null && depth > script.maxDepth) return false;
+    return true;
+  });
+  const orderedScripts =
+    destination === "display"
+      ? [
+          ...applicableScripts.filter((script) => !script.markdownOnly),
+          ...applicableScripts.filter((script) => script.markdownOnly),
+        ]
+      : applicableScripts;
+
+  const result = orderedScripts.reduce((currentResult, script) => {
 
     try {
       const findRegex = script.substituteRegex
@@ -321,7 +364,7 @@ export function applyRegexScripts(
       const replaceString = script.substituteRegex
         ? replaceRegexMacros(script.replaceString, options)
         : script.replaceString;
-      let nextResult = result.replace(
+      let nextResult = currentResult.replace(
         compileRegex(findRegex),
         (...replaceArguments: unknown[]) =>
           expandRegexReplacement(replaceString, replaceArguments),
@@ -331,9 +374,13 @@ export function applyRegexScripts(
       });
       return nextResult;
     } catch {
-      return result;
+      return currentResult;
     }
   }, content);
+
+  return destination === "display"
+    ? replaceMessageVariableMacros(result, options.messageVariables)
+    : result;
 }
 
 export function appendSillyTavernStatusPlaceholderToGreeting(
