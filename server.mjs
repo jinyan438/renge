@@ -3190,6 +3190,18 @@ export function startRengeServer(options = {}) {
   const dataFilePath = resolve(dataDir, appDataFileName);
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+    const isHtmlPreviewOrigin = url.hostname.toLowerCase() === "preview.localhost";
+
+    if (
+      isHtmlPreviewOrigin &&
+      (url.pathname === "/csrf-token" ||
+        tavernCompatModulePaths.has(url.pathname) ||
+        url.pathname.startsWith("/scripts/extensions/") ||
+        url.pathname.startsWith("/api/"))
+    ) {
+      sendJson(response, 404, { error: "Not found" });
+      return;
+    }
 
     if (url.pathname === "/csrf-token") {
       if (request.method !== "GET") {

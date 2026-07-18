@@ -2461,6 +2461,7 @@ const HTML_PREVIEW_GENERATION_EVENT_MESSAGE = "renge-html-preview-generation-eve
 const HTML_PREVIEW_INTERACTION_MESSAGE = "renge-html-preview-interaction";
 const HTML_PREVIEW_VIEWPORT_MESSAGE = "renge-html-preview-viewport";
 const HTML_PREVIEW_REMEASURE_MESSAGE = "renge-html-preview-remeasure";
+const HTML_PREVIEW_FRAME_INIT_MESSAGE = "renge-html-preview-frame-init";
 const HYPNOOS_APPEND_OPERATION_MESSAGE = "HYPNOOS_APPEND_OPERATION";
 const HTML_PREVIEW_MAX_HEIGHT = 12000;
 const HTML_PREVIEW_EXPANDED_MIN_HEIGHT = 1200;
@@ -4402,6 +4403,28 @@ function injectHtmlPreviewHead(documentContent: string, headInjection: string) {
   return `<head>${headInjection}</head>${documentContent}`;
 }
 
+function getIsolatedHtmlPreviewFrame(previewId: string) {
+  if (typeof window === "undefined") return null;
+  const { protocol, hostname, port } = window.location;
+  if (protocol !== "http:" && protocol !== "https:") return null;
+
+  const isLoopbackHost =
+    hostname === "127.0.0.1" ||
+    hostname === "0.0.0.0" ||
+    hostname === "localhost" ||
+    hostname === "[::1]" ||
+    hostname === "::1" ||
+    hostname.endsWith(".localhost");
+  if (!isLoopbackHost) return null;
+
+  // A dedicated loopback hostname gives cards a real storage origin for
+  // IndexedDB while the browser still keeps them cross-origin from React.
+  const origin = `${protocol}//preview.localhost${port ? `:${port}` : ""}`;
+  const url = new URL("/html-preview-frame.html", origin);
+  url.hash = encodeURIComponent(previewId);
+  return { origin, url: url.toString() };
+}
+
 function stabilizeHtmlPreviewViewportUnits(content: string) {
   const convertViewportUnits = (value: string) =>
     value.replace(
@@ -4509,6 +4532,7 @@ function ChatHtmlPreview({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const requestHeavyMountRef = useRef<() => void>(() => {});
+  const initializedFrameRef = useRef<HTMLIFrameElement | null>(null);
   const heavyContent = content.trim().length >= HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD;
   const containsExpandedDetails =
     /<details\b(?=[^>]*\bopen(?:\s|=|>))[^>]*>/i.test(content);
@@ -4518,6 +4542,10 @@ function ChatHtmlPreview({
     previewId: string;
     value: string;
   } | null>(null);
+  const isolatedFrame = useMemo(
+    () => getIsolatedHtmlPreviewFrame(previewId),
+    [previewId],
+  );
 
   if (
     mountReady &&
@@ -4694,6 +4722,22 @@ function ChatHtmlPreview({
     (event: SyntheticEvent<HTMLIFrameElement>) => {
       resizeHtmlPreviewFrame(event);
       const loadedFrame = event.currentTarget;
+      if (
+        isolatedFrame &&
+        initializedFrameRef.current !== loadedFrame &&
+        sourceDocumentRef.current
+      ) {
+        initializedFrameRef.current = loadedFrame;
+        loadedFrame.contentWindow?.postMessage(
+          {
+            type: HTML_PREVIEW_FRAME_INIT_MESSAGE,
+            id: previewId,
+            document: sourceDocumentRef.current.value,
+          },
+          isolatedFrame.origin,
+        );
+        return;
+      }
       const remeasureLoadedFrame = () => {
         if (frameRef.current !== loadedFrame) return;
         requestLayoutMeasurement();
@@ -4708,7 +4752,13 @@ function ChatHtmlPreview({
         window.setTimeout(remeasureLoadedFrame, delay);
       });
     },
-    [requestLayoutMeasurement, sendContextUpdate, sendViewportUpdate],
+    [
+      isolatedFrame,
+      previewId,
+      requestLayoutMeasurement,
+      sendContextUpdate,
+      sendViewportUpdate,
+    ],
   );
 
   return (
@@ -4730,8 +4780,13 @@ function ChatHtmlPreview({
           onLoad={handleLoad}
           ref={registerFrame}
           referrerPolicy="no-referrer"
-          sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-scripts"
-          srcDoc={sourceDocumentRef.current.value}
+          sandbox={
+            isolatedFrame
+              ? "allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts"
+              : "allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-scripts"
+          }
+          src={isolatedFrame?.url}
+          srcDoc={isolatedFrame ? undefined : sourceDocumentRef.current.value}
           style={
             containsExpandedDetails
               ? { minHeight: `${HTML_PREVIEW_EXPANDED_MIN_HEIGHT}px` }

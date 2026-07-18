@@ -90,6 +90,14 @@ public class LocalWebServer {
             if (request == null) return;
 
             OutputStream output = closeableSocket.getOutputStream();
+            String requestHost = request.headers.getOrDefault("host", "")
+                    .toLowerCase(Locale.US)
+                    .replaceFirst(":\\d+$", "");
+            if ("preview.localhost".equals(requestHost) && request.path.startsWith("/api/")) {
+                sendJson(output, 404, jsonError("Not found"));
+                output.flush();
+                return;
+            }
             if (request.path.startsWith("/api/")) {
                 handleApi(request, output);
             } else {

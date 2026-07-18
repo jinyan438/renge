@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Renge HTML Preview</title>
+    <script>
+      (() => {
+        const initMessageType = "renge-html-preview-frame-init";
+        const previewId = decodeURIComponent(window.location.hash.slice(1));
+        const initialize = (event) => {
+          const payload = event.data;
+          if (
+            event.source !== window.parent ||
+            !payload ||
+            payload.type !== initMessageType ||
+            payload.id !== previewId ||
+            typeof payload.document !== "string"
+          ) {
+            return;
+          }
+
+          window.removeEventListener("message", initialize);
+          document.open();
+          document.write(payload.document);
+          document.close();
+        };
+
+        window.addEventListener("message", initialize);
+      })();
+    </script>
+  </head>
+  <body></body>
+</html>
