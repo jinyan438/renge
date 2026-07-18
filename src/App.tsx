@@ -2891,6 +2891,20 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "    return current === undefined ? fallback : current;",
     "  };",
     "}",
+    'if (typeof lodashCompat.clamp !== "function") {',
+    "  lodashCompat.clamp = (value, lower, upper) => {",
+    "    let nextLower = lower;",
+    "    let nextUpper = upper;",
+    "    if (nextUpper === undefined) { nextUpper = nextLower; nextLower = 0; }",
+    "    const number = Number(value);",
+    "    const lowerNumber = Number(nextLower ?? 0);",
+    "    const upperNumber = Number(nextUpper ?? 0);",
+    "    const normalizedNumber = Number.isFinite(number) ? number : 0;",
+    "    const normalizedLower = Number.isFinite(lowerNumber) ? lowerNumber : 0;",
+    "    const normalizedUpper = Number.isFinite(upperNumber) ? upperNumber : 0;",
+    "    return Math.min(Math.max(normalizedNumber, normalizedLower), normalizedUpper);",
+    "  };",
+    "}",
     "window._ = lodashCompat;",
     "const bridgeEventHandlers = new Map();",
     "const pendingCommandRequests = new Map();",
@@ -4399,6 +4413,7 @@ function splitEmbeddedHtmlBlocks(content: string): PlainChatHtmlSegment[] {
       blockEnd = trailingBlockEnd;
       trailingCursor = trailingBlockEnd;
     }
+    resumeEnd = Math.max(resumeEnd, blockEnd);
 
     const htmlBlock = `${content.slice(blockStart, blockEnd)}${syntheticClosingTag}`;
     if (!looksLikeRenderableHtml(htmlBlock)) {
