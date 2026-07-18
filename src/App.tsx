@@ -296,6 +296,7 @@ const SETTINGS_TAB_META: Record<
   },
 };
 type ProviderPullState = "idle" | "loading" | "success" | "error";
+type ChatStatusState = ProviderPullState | "info" | "warning";
 type ChatGenerationState = "idle" | "running" | "stopping";
 type ExtensionRuntimeState = {
   status: "idle" | "loading" | "active" | "error";
@@ -2542,6 +2543,13 @@ function enqueueHeavyHtmlPreviewMount(mount: () => void) {
 type ParsedTavernSlashCommand =
   | { type: "set-input"; text: string; append: boolean; submit: boolean }
   | { type: "send-as"; text: string; name: string }
+  | {
+      type: "echo";
+      text: string;
+      title: string;
+      severity: "info" | "success" | "warning" | "error";
+      duration: number;
+    }
   | { type: "trigger" };
 
 function parseTavernSlashCommand(command: string): ParsedTavernSlashCommand | null {
@@ -2550,6 +2558,48 @@ function parseTavernSlashCommand(command: string): ParsedTavernSlashCommand | nu
   const parts = normalized.split(/\s*\|\s*(?=\/)/);
   const primary = parts.shift()?.trim() ?? "";
   const hasTrigger = parts.some((part) => /^\/(?:trigger|gen)\b/i.test(part.trim()));
+
+  const echoMatch = /^\/echo\b(?:\s+([\s\S]*))?$/i.exec(primary);
+  if (echoMatch) {
+    let remainder = (echoMatch[1] ?? "").trim();
+    let severity: "info" | "success" | "warning" | "error" = "info";
+    let title = "";
+    let duration = 0;
+    while (remainder) {
+      const optionMatch =
+        /^(severity|title|duration|timeout)=(?:"([^"]*)"|'([^']*)'|(\S+))(?:\s+|$)/i.exec(
+          remainder,
+        );
+      if (!optionMatch) break;
+      const optionName = optionMatch[1].toLowerCase();
+      const optionValue = optionMatch[2] ?? optionMatch[3] ?? optionMatch[4] ?? "";
+      if (optionName === "severity") {
+        const normalizedSeverity = optionValue.toLowerCase();
+        if (normalizedSeverity === "success" || normalizedSeverity === "positive") {
+          severity = "success";
+        } else if (normalizedSeverity === "warning" || normalizedSeverity === "warn") {
+          severity = "warning";
+        } else if (
+          normalizedSeverity === "error" ||
+          normalizedSeverity === "danger" ||
+          normalizedSeverity === "negative"
+        ) {
+          severity = "error";
+        } else {
+          severity = "info";
+        }
+      } else if (optionName === "title") {
+        title = optionValue;
+      } else {
+        const numericDuration = Number(optionValue);
+        if (Number.isFinite(numericDuration) && numericDuration > 0) {
+          duration = Math.min(Math.round(numericDuration), 60_000);
+        }
+      }
+      remainder = remainder.slice(optionMatch[0].length).trimStart();
+    }
+    return { type: "echo", text: remainder, title, severity, duration };
+  }
 
   const sendAsMatch = /^\/sendas\b\s*([\s\S]*)$/i.exec(primary);
   if (sendAsMatch) {
@@ -8720,7 +8770,7 @@ export function App() {
   const [activeChatSessionId, setActiveChatSessionId] = useState("");
   const [appDataLoaded, setAppDataLoaded] = useState(false);
   const [chatStatus, setChatStatus] = useState<{
-    status: ProviderPullState;
+    status: ChatStatusState;
     message: string;
   }>({ status: "idle", message: "" });
   const [chatGenerationState, setChatGenerationState] =
@@ -8792,6 +8842,7 @@ export function App() {
   >(() => {
     throw new Error("酒馆斜杠命令接口尚未初始化。");
   });
+  const selectRoleplayGreetingRef = useRef<(requestedIndex: number) => void>(() => {});
   const chatAttachmentInputRef = useRef<HTMLInputElement>(null);
   const chatAttachmentFilesRef = useRef<Map<string, File>>(new Map());
   const chatAttachmentMetadataRef = useRef<Map<string, ChatAttachment>>(new Map());
@@ -8932,6 +8983,29 @@ export function App() {
       if (!parsed) throw new Error(`暂不支持该酒馆命令：${command.trim() || "空命令"}`);
       if (parsed.type === "send-as") {
         return appendSendAsMessage(parsed.text, parsed.name);
+      }
+      if (parsed.type === "echo") {
+        const message = parsed.title
+          ? parsed.text
+            ? `${parsed.title}：${parsed.text}`
+            : parsed.title
+          : parsed.text;
+        setChatStatus({ status: parsed.severity, message });
+        if (parsed.duration > 0) {
+          window.setTimeout(() => {
+            setChatStatus((current) =>
+              current.status === parsed.severity && current.message === message
+                ? { status: "idle", message: "" }
+                : current,
+            );
+          }, parsed.duration);
+        }
+        return {
+          displayed: true,
+          duration: parsed.duration,
+          message,
+          severity: parsed.severity,
+        };
       }
       if (parsed.type === "trigger") {
         const input = chatInputRef.current?.value ?? "";
@@ -9227,6 +9301,7 @@ export function App() {
 
         if (payload.operation === "setChatMessages" && Array.isArray(payload.updates)) {
           const nextMessages = messages.map((message) => ({ ...message }));
+          let requestedGreetingIndex: number | null = null;
           payload.updates.forEach((rawUpdate) => {
             if (!isObjectRecord(rawUpdate)) return;
             const messageIndex = normalizeMessageIndex(rawUpdate.message_id, false);
@@ -9237,6 +9312,19 @@ export function App() {
             const swipeIndex = Number.isInteger(Number(rawUpdate.swipe_id))
               ? Math.max(0, Number(rawUpdate.swipe_id))
               : 0;
+            const hasExplicitSwipeContent =
+              typeof rawUpdate.message === "string" ||
+              typeof rawUpdate.content === "string" ||
+              (Array.isArray(rawUpdate.swipes) &&
+                typeof rawUpdate.swipes[swipeIndex] === "string");
+            if (
+              message.source === "roleplay-greeting" &&
+              rawUpdate.swipe_id != null &&
+              !hasExplicitSwipeContent
+            ) {
+              requestedGreetingIndex = swipeIndex;
+              return;
+            }
             if (
               Array.isArray(rawUpdate.swipes) &&
               typeof rawUpdate.swipes[swipeIndex] === "string"
@@ -9270,6 +9358,9 @@ export function App() {
               message.extra = normalizeTavernVariables(rawUpdate.swipes_info[swipeIndex]);
             }
           });
+          if (requestedGreetingIndex !== null) {
+            selectRoleplayGreetingRef.current(requestedGreetingIndex);
+          }
           if (valuesEqual(messages, nextMessages)) return;
           chatMessagesRef.current = nextMessages;
           setChatMessages(nextMessages);
@@ -13548,6 +13639,7 @@ export function App() {
     );
     processRoleplayGreeting(nextSession, activeSessionRoleplayCard, true);
   };
+  selectRoleplayGreetingRef.current = selectRoleplayGreeting;
   const cycleRoleplayGreeting = () => {
     if (activeRoleplayGreetings.length < 2) return;
     selectRoleplayGreeting(
