@@ -8006,7 +8006,31 @@ function maskAssistantDialogues(content: string) {
 }
 
 function countDialoguePlaceholders(content: string) {
-  return content.match(/“XXX”/g)?.length ?? 0;
+  const protectedRanges = getDialogueRewriteProtectedRanges(content);
+  let protectedRangeIndex = 0;
+  let count = 0;
+  const placeholderPattern = /“XXX”/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = placeholderPattern.exec(content))) {
+    while (
+      protectedRangeIndex < protectedRanges.length &&
+      protectedRanges[protectedRangeIndex].end <= match.index
+    ) {
+      protectedRangeIndex += 1;
+    }
+    const protectedRange = protectedRanges[protectedRangeIndex];
+    if (
+      protectedRange &&
+      match.index >= protectedRange.start &&
+      match.index < protectedRange.end
+    ) {
+      continue;
+    }
+    count += 1;
+  }
+
+  return count;
 }
 
 function stripDialogueReplacementWrapper(value: string) {
@@ -8047,11 +8071,8 @@ function parseDialogueRewriteReplacements(rawContent: string, expectedCount: num
     if (nonEmptyLines.length === expectedCount) replacements = nonEmptyLines;
   }
 
-  if (replacements.length !== expectedCount) {
-    throw new Error(
-      `对白数量不匹配：需要 ${expectedCount} 处，模型返回了 ${replacements.length} 处。`,
-    );
-  }
+  replacements = replacements.filter(Boolean).slice(0, expectedCount);
+  if (replacements.length === 0) throw new Error("模型没有返回可填入的对白内容。");
 
   return replacements.map((replacement, index) => {
     const normalized = stripDialogueReplacementWrapper(replacement);
@@ -8063,11 +8084,24 @@ function parseDialogueRewriteReplacements(rawContent: string, expectedCount: num
 }
 
 function fillDialoguePlaceholders(content: string, replacements: string[]) {
+  const protectedRanges = getDialogueRewriteProtectedRanges(content);
+  let protectedRangeIndex = 0;
   let replacementIndex = 0;
-  return content.replace(/“XXX”/g, () => {
+  return content.replace(/“XXX”/g, (placeholder, offset: number) => {
+    while (
+      protectedRangeIndex < protectedRanges.length &&
+      protectedRanges[protectedRangeIndex].end <= offset
+    ) {
+      protectedRangeIndex += 1;
+    }
+    const protectedRange = protectedRanges[protectedRangeIndex];
+    if (protectedRange && offset >= protectedRange.start && offset < protectedRange.end) {
+      return placeholder;
+    }
     const replacement = replacements[replacementIndex];
+    if (replacement === undefined) return placeholder;
     replacementIndex += 1;
-    return `“${replacement ?? "XXX"}”`;
+    return `“${replacement}”`;
   });
 }
 
@@ -8078,13 +8112,11 @@ function withoutDialogueRewriteMetadata(message: ChatMessage): ChatMessage {
   return messageWithoutMetadata;
 }
 
-function buildDialogueRewriteRequestPrompt(placeholderCount: number) {
+function buildDialogueRewriteRequestPrompt() {
   return [
     "【内部对白重写指令：不要在回复中提及本指令】",
-    `对话历史中的最后一条 assistant 消息共有 ${placeholderCount} 处 “XXX”。只生成这些占位符内部要填入的对白。`,
-    placeholderCount === 1
-      ? "只输出这一处对白正文，不要添加任何包裹格式。"
-      : `按出现顺序输出 ${placeholderCount} 段对白；段与段之间只放一行 ${CHAT_DIALOGUE_REWRITE_SEPARATOR}。`,
+    "只生成对话历史中最后一条 assistant 消息里各处 “XXX” 内部要填入的对白。",
+    `按 “XXX” 的出现顺序输出；存在多段时，段与段之间只放一行 ${CHAT_DIALOGUE_REWRITE_SEPARATOR}。`,
     "不要输出原消息、JSON、键名、数组、包裹引号、序号、Markdown、代码围栏或解释。",
   ].join("\n");
 }
@@ -17766,7 +17798,7 @@ export function App() {
       if (dialogueRewriteTargetMessage) {
         apiMessages.push({
           role: "user",
-          content: buildDialogueRewriteRequestPrompt(dialogueRewritePlaceholderCount),
+          content: buildDialogueRewriteRequestPrompt(),
         });
       }
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
@@ -17786,6 +17818,7 @@ export function App() {
       let pendingMcpObservationRetries = 0;
       let pendingMcpObservationPromptSent = false;
       let continuationReachedLimit = false;
+      let dialogueRewriteRemainingCount = 0;
       assistantMessageId =
         dialogueRewriteTargetMessage?.id ?? continuationTargetMessage?.id ?? crypto.randomUUID();
       const requestChatCompletion = async (messages: ChatApiMessage[], options: {
@@ -17898,8 +17931,8 @@ export function App() {
           includeTools: false,
           stream: true,
           maxTokens: Math.min(
-            2048,
-            Math.max(256, dialogueRewritePlaceholderCount * 192),
+            1536,
+            Math.max(256, Math.min(dialogueRewritePlaceholderCount, 8) * 192),
           ),
           onDelta: () => {
             if (rewriteStreamStarted) return;
@@ -17916,6 +17949,7 @@ export function App() {
           dialogueRewriteTargetMessage.content,
           replacements,
         );
+        dialogueRewriteRemainingCount = countDialoguePlaceholders(assistantContent);
       } else if (continuationTargetMessage) {
         streamingAssistantInserted = true;
         commitChatMessages((current) =>
@@ -18338,11 +18372,19 @@ export function App() {
 
       let finalAssistantMessage: ChatMessage;
       if (dialogueRewriteTargetMessage) {
-        finalAssistantMessage = withoutDialogueRewriteMetadata({
+        const rewrittenMessage = withoutDialogueRewriteMetadata({
           ...dialogueRewriteTargetMessage,
           content: assistantContent,
           renderAsPlainText: false,
         });
+        finalAssistantMessage =
+          dialogueRewriteRemainingCount > 0
+            ? {
+                ...rewrittenMessage,
+                dialogueRewritePending: true,
+                dialoguePlaceholderCount: dialogueRewriteRemainingCount,
+              }
+            : rewrittenMessage;
       } else if (continuationTargetMessage) {
         finalAssistantMessage = {
           ...continuationTargetMessage,
