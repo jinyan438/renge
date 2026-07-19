@@ -6,6 +6,7 @@ import {
   Boxes,
   Braces,
   ChevronDown,
+  ChevronRight,
   Check,
   Copy,
   Database,
@@ -303,6 +304,7 @@ type ExtensionRuntimeState = {
   message: string;
 };
 type ChatMode = "ai" | "persona" | "multi" | "roleplay";
+type ComposerModelMenuSection = "provider" | "model" | "reasoning";
 type ChatRole = "user" | "assistant";
 type ChatApiRole = "system" | "user" | "assistant" | "tool";
 type ChatSenderKind = "user" | "persona" | "system";
@@ -9620,6 +9622,8 @@ export function App() {
     Record<string, ExtensionRuntimeState>
   >({});
   const [chatInput, setChatInput] = useState("");
+  const [composerModelMenuSection, setComposerModelMenuSection] =
+    useState<ComposerModelMenuSection | null>(null);
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
   const [chatMessageMenu, setChatMessageMenu] = useState<{
     messageId: string;
@@ -14626,17 +14630,7 @@ export function App() {
   const modelOptions = useMemo(
     () => {
       if (!chatProvider) return [];
-      const hasCustomModel =
-        Boolean(chatProvider.modelId) && !chatProvider.models.includes(chatProvider.modelId);
-      const models = hasCustomModel
-        ? [chatProvider.modelId]
-        : chatProvider.models.length > 0
-          ? chatProvider.models
-          : chatProvider.modelId
-            ? [chatProvider.modelId]
-            : [];
-
-      return models.map((modelId) => ({
+      return getProviderModelIds(chatProvider).map((modelId) => ({
         value: modelId,
         providerName: chatProvider.name || "未命名供应商",
         modelId,
@@ -14646,6 +14640,9 @@ export function App() {
   );
   const selectedModelValue = getEffectiveProviderModelId(chatProvider);
   const selectedModelOption = modelOptions.find((option) => option.value === selectedModelValue);
+  const selectedReasoningEffortLabel = chatProvider
+    ? getProviderReasoningEffortLabel(chatProvider.reasoningEffort)
+    : "中";
 
   const activeTypes = activePersona?.entryTypes ?? [];
   const selectedEntryType =
@@ -26323,36 +26320,175 @@ export function App() {
                     </div>
                   </details>
                   {chatMode !== "multi" && (
-                  <details className="composer-select-menu model">
-                    <summary
-                      className="composer-pill-select model"
-                      title={selectedModelOption?.providerName ?? "选择模型"}
+                    <details
+                      className="composer-select-menu model composer-model-config"
+                      onToggle={(event) => {
+                        if (!event.currentTarget.open) setComposerModelMenuSection(null);
+                      }}
                     >
-                      <span>{selectedModelOption?.modelId ?? "未设置模型"}</span>
-                    </summary>
-                    <div className="composer-menu-options model">
-                      {modelOptions.length === 0 ? (
-                        <button type="button" disabled>
-                          <span>未设置模型</span>
+                      <summary
+                        className="composer-pill-select model composer-model-config-summary"
+                        title={
+                          chatProvider
+                            ? `${chatProvider.name || "未命名供应商"} · ${selectedModelValue || "未设置模型"}`
+                            : "选择供应商和模型"
+                        }
+                      >
+                        <span className="composer-model-summary-text">
+                          <strong>{selectedModelOption?.modelId ?? "未设置模型"}</strong>
+                          <small>
+                            {chatProvider?.reasoningEnabled
+                              ? selectedReasoningEffortLabel
+                              : "思考关"}
+                          </small>
+                        </span>
+                        <ChevronDown size={14} />
+                      </summary>
+                      <div className="composer-model-config-panel">
+                        <button
+                          type="button"
+                          className={composerModelMenuSection === "provider" ? "active" : ""}
+                          aria-expanded={composerModelMenuSection === "provider"}
+                          onClick={() =>
+                            setComposerModelMenuSection((current) =>
+                              current === "provider" ? null : "provider",
+                            )
+                          }
+                        >
+                          <span>供应商</span>
+                          <strong>{chatProvider?.name || "未配置"}</strong>
+                          <ChevronRight size={15} />
                         </button>
-                      ) : (
-                        modelOptions.map((option) => (
-                          <button
-                            type="button"
-                            className={option.value === selectedModelValue ? "active" : ""}
-                            key={option.value}
-                            onClick={(event) => {
-                              if (!chatProvider) return;
-                              updateProvider(chatProvider.id, { modelId: option.value });
-                              event.currentTarget.closest("details")?.removeAttribute("open");
-                            }}
-                          >
-                            <span>{option.modelId}</span>
-                          </button>
-                        ))
-                      )}
-                    </div>
-                  </details>
+                        <button
+                          type="button"
+                          className={composerModelMenuSection === "model" ? "active" : ""}
+                          aria-expanded={composerModelMenuSection === "model"}
+                          onClick={() =>
+                            setComposerModelMenuSection((current) =>
+                              current === "model" ? null : "model",
+                            )
+                          }
+                        >
+                          <span>模型</span>
+                          <strong>{selectedModelValue || "未设置"}</strong>
+                          <ChevronRight size={15} />
+                        </button>
+                        <button
+                          type="button"
+                          className={composerModelMenuSection === "reasoning" ? "active" : ""}
+                          aria-expanded={composerModelMenuSection === "reasoning"}
+                          onClick={() =>
+                            setComposerModelMenuSection((current) =>
+                              current === "reasoning" ? null : "reasoning",
+                            )
+                          }
+                        >
+                          <span>思考强度</span>
+                          <strong>{selectedReasoningEffortLabel}</strong>
+                          <ChevronRight size={15} />
+                        </button>
+                        <button
+                          type="button"
+                          className="composer-model-reasoning-toggle"
+                          aria-pressed={chatProvider?.reasoningEnabled === true}
+                          disabled={!chatProvider}
+                          onClick={() => {
+                            if (!chatProvider) return;
+                            updateProvider(chatProvider.id, {
+                              reasoningEnabled: !chatProvider.reasoningEnabled,
+                            });
+                          }}
+                        >
+                          <span>请求思考</span>
+                          <strong>{chatProvider?.reasoningEnabled ? "开启" : "关闭"}</strong>
+                          <i
+                            aria-hidden="true"
+                            className={chatProvider?.reasoningEnabled ? "active" : ""}
+                          />
+                        </button>
+
+                        {composerModelMenuSection && (
+                          <div className="composer-model-config-submenu">
+                            <header>
+                              {composerModelMenuSection === "provider"
+                                ? "供应商"
+                                : composerModelMenuSection === "model"
+                                  ? "模型"
+                                  : "思考强度"}
+                            </header>
+                            <div>
+                              {composerModelMenuSection === "provider" ? (
+                                providers.length > 0 ? (
+                                  providers.map((provider) => (
+                                    <button
+                                      type="button"
+                                      className={provider.id === chatProvider?.id ? "active" : ""}
+                                      key={provider.id}
+                                      onClick={() => {
+                                        setActiveProviderId(provider.id);
+                                        setProviderPullState({ status: "idle", message: "" });
+                                        setComposerModelMenuSection(null);
+                                      }}
+                                    >
+                                      <span>{provider.name || "未命名供应商"}</span>
+                                      {provider.id === chatProvider?.id && <Check size={16} />}
+                                    </button>
+                                  ))
+                                ) : (
+                                  <button type="button" disabled>
+                                    <span>未配置供应商</span>
+                                  </button>
+                                )
+                              ) : composerModelMenuSection === "model" ? (
+                                modelOptions.length > 0 ? (
+                                  modelOptions.map((option) => (
+                                    <button
+                                      type="button"
+                                      className={option.value === selectedModelValue ? "active" : ""}
+                                      key={option.value}
+                                      onClick={() => {
+                                        if (!chatProvider) return;
+                                        updateProvider(chatProvider.id, { modelId: option.value });
+                                        setComposerModelMenuSection(null);
+                                      }}
+                                    >
+                                      <span>{option.modelId}</span>
+                                      {option.value === selectedModelValue && <Check size={16} />}
+                                    </button>
+                                  ))
+                                ) : (
+                                  <button type="button" disabled>
+                                    <span>当前供应商未设置模型</span>
+                                  </button>
+                                )
+                              ) : (
+                                providerReasoningEffortOptions.map((option) => (
+                                  <button
+                                    type="button"
+                                    className={
+                                      option.value === chatProvider?.reasoningEffort ? "active" : ""
+                                    }
+                                    key={option.value}
+                                    onClick={() => {
+                                      if (!chatProvider) return;
+                                      updateProvider(chatProvider.id, {
+                                        reasoningEffort: option.value,
+                                      });
+                                      setComposerModelMenuSection(null);
+                                    }}
+                                  >
+                                    <span>{option.label}</span>
+                                    {option.value === chatProvider?.reasoningEffort && (
+                                      <Check size={16} />
+                                    )}
+                                  </button>
+                                ))
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </details>
                   )}
                   <details className="composer-sender-menu">
                     <summary
