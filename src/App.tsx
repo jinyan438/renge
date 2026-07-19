@@ -403,6 +403,8 @@ type ChatMessage = {
   attachments?: ChatAttachment[];
   source?: "heartbeat" | "roleplay-greeting";
   choiceRequest?: ChatChoiceRequest;
+  dialogueRewritePending?: boolean;
+  dialoguePlaceholderCount?: number;
   variables?: Record<string, unknown>;
   extra?: Record<string, unknown>;
 };
@@ -462,6 +464,12 @@ const CHAT_CONTINUATION_SYSTEM_PROMPT = [
   "必须从该回复最后一个字符之后直接继续，只输出尚未输出的后续内容。",
   "严禁复述、改写、纠正、概括或引用已经存在的内容，也不要添加“续写”“继续”等说明性前缀。",
   "保持原回复的语言、语气、结构和 Markdown 格式；补完剩余内容后自然结束。",
+].join("\n");
+const CHAT_DIALOGUE_REWRITE_SYSTEM_PROMPT = [
+  "你正在为一条已经生成完成的 assistant 消息补写对白占位符。",
+  "消息中的非对白叙述已经定稿，绝对禁止改写、删减、补充、重排或复述这些内容。",
+  "你只需要根据完整对话上下文，为每个 “XXX” 按出现顺序提供自然、连贯且符合人物身份的对白正文。",
+  "输出必须是严格 JSON：{\"replacements\":[\"第一处对白\",\"第二处对白\"]}。数组数量必须与占位符数量完全一致；数组项只写引号内部的文字，不要包含包裹引号、序号、Markdown 或解释。",
 ].join("\n");
 const MAX_CHAT_CONTINUATION_ROUNDS = 12;
 
@@ -614,6 +622,7 @@ type RengeAppData = {
   chatReasoningVisible?: boolean;
   chatHeartbeatReminderVisible?: boolean;
   chatChoiceToolsEnabled?: boolean;
+  chatDialogueRewriteEnabled?: boolean;
   chatPersonalization?: ChatPersonalizationSettings;
   mcpServers?: McpServerConfig[];
   skills?: SkillProfile[];
@@ -859,6 +868,7 @@ const CHAT_HTML_RENDER_STORAGE_KEY = "renge_chat_html_render_enabled";
 const CHAT_REASONING_VISIBLE_STORAGE_KEY = "renge_chat_reasoning_visible";
 const CHAT_HEARTBEAT_REMINDER_VISIBLE_STORAGE_KEY = "renge_chat_heartbeat_reminder_visible";
 const CHAT_CHOICE_TOOLS_ENABLED_STORAGE_KEY = "renge_chat_choice_tools_enabled";
+const CHAT_DIALOGUE_REWRITE_ENABLED_STORAGE_KEY = "renge_chat_dialogue_rewrite_enabled";
 const CHAT_PERSONALIZATION_STORAGE_KEY = "renge_chat_personalization";
 const MCP_SERVERS_STORAGE_KEY = "renge_mcp_servers";
 const SKILLS_STORAGE_KEY = "renge_skills";
@@ -1702,6 +1712,13 @@ function normalizeChatMessage(rawMessage: Partial<ChatMessage>): ChatMessage {
 
   const normalizedSender = normalizeChatSenderIdentity(rawMessage.sender);
   const choiceRequest = normalizeChatChoiceRequest(rawMessage.choiceRequest);
+  const dialoguePlaceholderCount =
+    role === "assistant" &&
+    rawMessage.dialogueRewritePending === true &&
+    Number.isInteger(rawMessage.dialoguePlaceholderCount) &&
+    Number(rawMessage.dialoguePlaceholderCount) > 0
+      ? countDialoguePlaceholders(rawMessage.content ?? "")
+      : 0;
 
   return {
     id: rawMessage.id ?? crypto.randomUUID(),
@@ -1722,6 +1739,12 @@ function normalizeChatMessage(rawMessage: Partial<ChatMessage>): ChatMessage {
       ? { source: rawMessage.source }
       : {}),
     ...(role === "assistant" && choiceRequest ? { choiceRequest } : {}),
+    ...(dialoguePlaceholderCount > 0
+      ? {
+          dialogueRewritePending: true,
+          dialoguePlaceholderCount,
+        }
+      : {}),
     ...(isObjectRecord(rawMessage.variables)
       ? { variables: normalizeTavernVariables(rawMessage.variables) }
       : {}),
@@ -2122,6 +2145,10 @@ function persistAppDataToLocalStores(data: RengeAppData) {
   setLocalStorageValueSafely(
     CHAT_CHOICE_TOOLS_ENABLED_STORAGE_KEY,
     String(data.chatChoiceToolsEnabled ?? true),
+  );
+  setLocalStorageValueSafely(
+    CHAT_DIALOGUE_REWRITE_ENABLED_STORAGE_KEY,
+    String(data.chatDialogueRewriteEnabled ?? false),
   );
   setLocalStorageJsonSafely(
     CHAT_PERSONALIZATION_STORAGE_KEY,
@@ -7922,6 +7949,154 @@ function buildChatContinuationRequestPrompt(
     .join("\n");
 }
 
+function getDialogueRewriteProtectedRanges(content: string) {
+  const ranges: Array<{ start: number; end: number }> = [];
+  const protectedPatterns = [
+    /```[\s\S]*?(?:```|$)/g,
+    /~~~[\s\S]*?(?:~~~|$)/g,
+    /<(script|style|pre|code)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,
+    /<!--[\s\S]*?-->/g,
+    /`[^`\n]*`/g,
+    /<[^>]*>/g,
+  ];
+
+  protectedPatterns.forEach((protectedPattern) => {
+    let match: RegExpExecArray | null;
+    while ((match = protectedPattern.exec(content))) {
+      ranges.push({ start: match.index, end: match.index + match[0].length });
+    }
+  });
+  ranges.sort((left, right) => left.start - right.start || right.end - left.end);
+
+  const mergedRanges: Array<{ start: number; end: number }> = [];
+  ranges.forEach((range) => {
+    const previousRange = mergedRanges[mergedRanges.length - 1];
+    if (previousRange && range.start <= previousRange.end) {
+      previousRange.end = Math.max(previousRange.end, range.end);
+      return;
+    }
+    mergedRanges.push({ ...range });
+  });
+
+  return mergedRanges;
+}
+
+function maskAssistantDialogues(content: string) {
+  const protectedRanges = getDialogueRewriteProtectedRanges(content);
+  const quotePattern = /"[^"\n]+"|＂[^＂\n]+＂|“[^”\n]+”|〝[^〞\n]+〞|「[^」\n]+」|｢[^｣\n]+｣|『[^』\n]+』/g;
+  let protectedRangeIndex = 0;
+  let count = 0;
+  const maskedContent = content.replace(quotePattern, (quote, offset: number) => {
+    while (
+      protectedRangeIndex < protectedRanges.length &&
+      protectedRanges[protectedRangeIndex].end <= offset
+    ) {
+      protectedRangeIndex += 1;
+    }
+    const protectedRange = protectedRanges[protectedRangeIndex];
+    if (protectedRange && offset >= protectedRange.start && offset < protectedRange.end) {
+      return quote;
+    }
+    count += 1;
+    return "“XXX”";
+  });
+
+  return { content: maskedContent, count };
+}
+
+function countDialoguePlaceholders(content: string) {
+  return content.match(/“XXX”/g)?.length ?? 0;
+}
+
+function stripDialogueReplacementWrapper(value: string) {
+  const normalized = value.trim();
+  const wrappers: Array<[string, string]> = [
+    ['"', '"'],
+    ["＂", "＂"],
+    ["“", "”"],
+    ["〝", "〞"],
+    ["「", "」"],
+    ["｢", "｣"],
+    ["『", "』"],
+  ];
+  const wrapper = wrappers.find(
+    ([opening, closing]) => normalized.startsWith(opening) && normalized.endsWith(closing),
+  );
+  return wrapper && normalized.length >= wrapper[0].length + wrapper[1].length
+    ? normalized.slice(wrapper[0].length, -wrapper[1].length).trim()
+    : normalized;
+}
+
+function parseDialogueRewriteReplacements(rawContent: string, expectedCount: number) {
+  const trimmedContent = rawContent.trim();
+  const unfencedContent = trimmedContent
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(unfencedContent);
+  } catch {
+    const objectStart = unfencedContent.indexOf("{");
+    const objectEnd = unfencedContent.lastIndexOf("}");
+    if (objectStart < 0 || objectEnd <= objectStart) {
+      throw new Error("模型没有返回可解析的对白替换 JSON。");
+    }
+    try {
+      parsed = JSON.parse(unfencedContent.slice(objectStart, objectEnd + 1));
+    } catch {
+      throw new Error("模型返回的对白替换 JSON 格式无效。");
+    }
+  }
+
+  if (!isObjectRecord(parsed) || !Array.isArray(parsed.replacements)) {
+    throw new Error("模型返回内容缺少 replacements 数组。");
+  }
+  if (parsed.replacements.length !== expectedCount) {
+    throw new Error(
+      `对白数量不匹配：需要 ${expectedCount} 处，模型返回了 ${parsed.replacements.length} 处。`,
+    );
+  }
+
+  return parsed.replacements.map((replacement, index) => {
+    if (typeof replacement !== "string") {
+      throw new Error(`第 ${index + 1} 处对白不是文本。`);
+    }
+    const normalized = stripDialogueReplacementWrapper(replacement);
+    if (!normalized || normalized.toUpperCase() === "XXX") {
+      throw new Error(`第 ${index + 1} 处对白为空或仍是占位符。`);
+    }
+    return normalized;
+  });
+}
+
+function fillDialoguePlaceholders(content: string, replacements: string[]) {
+  let replacementIndex = 0;
+  return content.replace(/“XXX”/g, () => {
+    const replacement = replacements[replacementIndex];
+    replacementIndex += 1;
+    return `“${replacement ?? "XXX"}”`;
+  });
+}
+
+function withoutDialogueRewriteMetadata(message: ChatMessage): ChatMessage {
+  const messageWithoutMetadata = { ...message };
+  delete messageWithoutMetadata.dialogueRewritePending;
+  delete messageWithoutMetadata.dialoguePlaceholderCount;
+  return messageWithoutMetadata;
+}
+
+function buildDialogueRewriteRequestPrompt(messageContent: string, placeholderCount: number) {
+  return [
+    "【内部对白重写指令：不要在回复中提及本指令】",
+    `目标 assistant 消息中共有 ${placeholderCount} 处 “XXX”。只为这些占位符生成对白，不要返回或改写原消息。`,
+    "按占位符出现顺序输出严格 JSON，格式必须是：{\"replacements\":[\"第一处对白\",\"第二处对白\"]}。",
+    "数组项只包含引号内部的对白正文，不要包含包裹引号、序号、Markdown、代码围栏或解释。",
+    `目标消息数据：${JSON.stringify({ placeholderCount, content: messageContent })}`,
+  ].join("\n");
+}
+
 function looksLikeChatPresetTimeHeader(line: string) {
   const leadingHeader = line.match(/^[\[【（(][^\]】）)\r\n]{6,240}[\]】）)]/)?.[0] ?? "";
   return /(?:年|月|日|星期|周|\d{1,2}[:：,]\d{2}|天气|地点)/.test(
@@ -9609,6 +9784,9 @@ export function App() {
   const [chatChoiceToolsEnabled, setChatChoiceToolsEnabled] = useState(
     () => localStorage.getItem(CHAT_CHOICE_TOOLS_ENABLED_STORAGE_KEY) !== "false",
   );
+  const [chatDialogueRewriteEnabled, setChatDialogueRewriteEnabled] = useState(
+    () => localStorage.getItem(CHAT_DIALOGUE_REWRITE_ENABLED_STORAGE_KEY) === "true",
+  );
   const [chatPersonalization, setChatPersonalization] =
     useState<ChatPersonalizationSettings>(loadChatPersonalization);
   const [chatSender, setChatSender] = useState<ChatSenderIdentity>(loadChatSender);
@@ -10452,6 +10630,7 @@ export function App() {
       chatReasoningVisible,
       chatHeartbeatReminderVisible,
       chatChoiceToolsEnabled,
+      chatDialogueRewriteEnabled,
       chatPersonalization,
       mcpServers,
       skills,
@@ -10459,7 +10638,7 @@ export function App() {
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     };
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -10583,6 +10762,10 @@ export function App() {
         typeof persistentData?.chatChoiceToolsEnabled === "boolean"
           ? persistentData.chatChoiceToolsEnabled
           : localStorage.getItem(CHAT_CHOICE_TOOLS_ENABLED_STORAGE_KEY) !== "false";
+      const nextChatDialogueRewriteEnabled =
+        typeof persistentData?.chatDialogueRewriteEnabled === "boolean"
+          ? persistentData.chatDialogueRewriteEnabled
+          : localStorage.getItem(CHAT_DIALOGUE_REWRITE_ENABLED_STORAGE_KEY) === "true";
       const nextChatPersonalization = persistentData?.chatPersonalization
         ? normalizeChatPersonalization(persistentData.chatPersonalization)
         : loadChatPersonalization();
@@ -10740,6 +10923,7 @@ export function App() {
       setChatReasoningVisible(nextChatReasoningVisible);
       setChatHeartbeatReminderVisible(nextChatHeartbeatReminderVisible);
       setChatChoiceToolsEnabled(nextChatChoiceToolsEnabled);
+      setChatDialogueRewriteEnabled(nextChatDialogueRewriteEnabled);
       setChatPersonalization(nextChatPersonalization);
       setMcpServers(nextMcpServers);
       setActiveMcpServerId(nextMcpServers[0]?.id ?? "");
@@ -15099,7 +15283,7 @@ export function App() {
     setChatMessageMenu({
       messageId,
       x: clamp(event.clientX, 8, window.innerWidth - 180),
-      y: clamp(event.clientY, 8, Math.max(8, window.innerHeight - 128)),
+      y: clamp(event.clientY, 8, Math.max(8, window.innerHeight - 168)),
     });
   };
 
@@ -17263,8 +17447,13 @@ export function App() {
       multiAgentStopCondition?: string;
       generationAfterCommands?: boolean;
       continuationMessageId?: string;
+      dialogueRewriteMessageId?: string;
     } = {},
   ) => {
+    if (options.continuationMessageId && options.dialogueRewriteMessageId) {
+      setChatStatus({ status: "error", message: "续写和重写对话不能同时执行。" });
+      return null;
+    }
     const continuationTargetMessage = options.continuationMessageId
       ? nextMessages.find(
           (message) =>
@@ -17276,6 +17465,28 @@ export function App() {
       return null;
     }
     const isContinuation = Boolean(continuationTargetMessage);
+    const dialogueRewriteTargetMessage = options.dialogueRewriteMessageId
+      ? nextMessages.find(
+          (message) =>
+            message.id === options.dialogueRewriteMessageId && message.role === "assistant",
+        )
+      : undefined;
+    if (options.dialogueRewriteMessageId && !dialogueRewriteTargetMessage) {
+      setChatStatus({ status: "error", message: "找不到需要重写对白的 AI 消息。" });
+      return null;
+    }
+    const dialogueRewritePlaceholderCount = dialogueRewriteTargetMessage
+      ? countDialoguePlaceholders(dialogueRewriteTargetMessage.content)
+      : 0;
+    if (
+      dialogueRewriteTargetMessage &&
+      (dialogueRewriteTargetMessage.dialogueRewritePending !== true ||
+        dialogueRewritePlaceholderCount <= 0)
+    ) {
+      setChatStatus({ status: "error", message: "这条消息没有可重写的对白占位符。" });
+      return null;
+    }
+    const isDialogueRewrite = Boolean(dialogueRewriteTargetMessage);
     const responseMode =
       options.responseMode ??
       (chatMode === "ai" ? "ai" : chatMode === "roleplay" ? "roleplay" : "persona");
@@ -17304,6 +17515,10 @@ export function App() {
       setChatStatus({ status: "error", message: "图像生成模型不支持续写文本消息。" });
       return null;
     }
+    if (isDialogueRewrite && isImageGenerationRequest) {
+      setChatStatus({ status: "error", message: "图像生成模型不支持重写对白。" });
+      return null;
+    }
 
     const abortController = beginChatGeneration();
     const abortSignal = abortController.signal;
@@ -17319,6 +17534,8 @@ export function App() {
           ? "normal"
           : isContinuation
             ? "normal"
+            : isDialogueRewrite
+              ? "normal"
             : "regenerate";
       await emitTavernEvent(
         TAVERN_EVENTS.GENERATION_STARTED,
@@ -17333,7 +17550,7 @@ export function App() {
       );
       setChatStatus({ status: "loading", message: options.statusMessage ?? "正在重新生成回复..." });
       const requestMcpTools =
-        !isContinuation && enabledMcpServers.length > 0
+        !isContinuation && !isDialogueRewrite && enabledMcpServers.length > 0
           ? await refreshMcpTools({ silent: true })
           : [];
       throwIfChatAborted(abortSignal);
@@ -17356,7 +17573,7 @@ export function App() {
         (!useImageRecognitionMcp && canProviderReceiveImageUrl(requestProvider, requestModelId));
       const availableChatTools = isImageGenerationRequest
         ? []
-        : isContinuation
+        : isContinuation || isDialogueRewrite
           ? []
           : getAvailableChatToolDefinitions(
             requestMcpTools,
@@ -17456,7 +17673,7 @@ export function App() {
             ].join("\n")
           : "";
       const toolSystemPrompt =
-        localToolsEnabled && localWorkspaceHandle
+        !isDialogueRewrite && localToolsEnabled && localWorkspaceHandle
           ? buildLocalToolsSystemPrompt(localWorkspaceHandle)
           : "";
       const mcpToolsSystemPrompt = buildMcpToolsSystemPrompt(requestMcpTools);
@@ -17516,6 +17733,7 @@ export function App() {
         chatChoiceSystemPrompt,
         heartbeatSystemPrompt,
         isContinuation ? CHAT_CONTINUATION_SYSTEM_PROMPT : "",
+        isDialogueRewrite ? CHAT_DIALOGUE_REWRITE_SYSTEM_PROMPT : "",
       ]
         .filter(Boolean)
         .join("\n\n");
@@ -17553,6 +17771,15 @@ export function App() {
       const apiMessages = await applyTavernExtensionPromptFilters(preparedApiMessages, {
         generationAfterCommands: options.generationAfterCommands,
       });
+      if (dialogueRewriteTargetMessage) {
+        apiMessages.push({
+          role: "user",
+          content: buildDialogueRewriteRequestPrompt(
+            dialogueRewriteTargetMessage.content,
+            dialogueRewritePlaceholderCount,
+          ),
+        });
+      }
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);
@@ -17570,7 +17797,8 @@ export function App() {
       let pendingMcpObservationRetries = 0;
       let pendingMcpObservationPromptSent = false;
       let continuationReachedLimit = false;
-      assistantMessageId = continuationTargetMessage?.id ?? crypto.randomUUID();
+      assistantMessageId =
+        dialogueRewriteTargetMessage?.id ?? continuationTargetMessage?.id ?? crypto.randomUUID();
       const requestChatCompletion = async (messages: ChatApiMessage[], options: {
         includeTools: boolean;
         stream: boolean;
@@ -17668,7 +17896,29 @@ export function App() {
         );
       };
 
-      if (continuationTargetMessage) {
+      if (dialogueRewriteTargetMessage) {
+        streamingAssistantInserted = true;
+        setChatStatus({
+          status: "loading",
+          message: options.streamingStatusMessage ?? "正在根据上下文重写对白...",
+        });
+        const { payload } = await requestChatCompletion(apiMessages, {
+          includeTools: false,
+          stream: false,
+        });
+        const rewriteResponse =
+          getChatApiMessageText(payload?.choices?.[0]?.message).trim() ||
+          payload?.output_text?.trim() ||
+          "";
+        const replacements = parseDialogueRewriteReplacements(
+          rewriteResponse,
+          dialogueRewritePlaceholderCount,
+        );
+        assistantContent = fillDialoguePlaceholders(
+          dialogueRewriteTargetMessage.content,
+          replacements,
+        );
+      } else if (continuationTargetMessage) {
         streamingAssistantInserted = true;
         commitChatMessages((current) =>
           current.map((message) =>
@@ -18057,7 +18307,7 @@ export function App() {
       }
 
       throwIfChatAborted(abortSignal);
-      if (assistantContent) {
+      if (assistantContent && !isDialogueRewrite) {
         const templateResult = await applyPromptTemplateToRenderedMessage(
           assistantContent,
           messagesForApi,
@@ -18068,6 +18318,18 @@ export function App() {
         assistantContent = templateResult.content;
         assistantMessageVariables = templateResult.messageVariables;
       }
+      let dialoguePlaceholderCount = 0;
+      if (
+        chatDialogueRewriteEnabled &&
+        !assistantChoiceRequest &&
+        !isContinuation &&
+        !isDialogueRewrite &&
+        assistantContent
+      ) {
+        const maskedDialogues = maskAssistantDialogues(assistantContent);
+        assistantContent = maskedDialogues.content;
+        dialoguePlaceholderCount = maskedDialogues.count;
+      }
       if (!assistantContent) {
         if (hasVisibleToolResult) {
           setChatStatus({ status: "success", message: options.successMessage ?? "工具执行完成。" });
@@ -18076,39 +18338,54 @@ export function App() {
         throw new Error("响应里没有可显示的回复内容。");
       }
 
-      const finalAssistantMessage: ChatMessage = continuationTargetMessage
-        ? {
-            ...continuationTargetMessage,
-            content: `${continuationTargetMessage.content}${assistantContent}`,
-            renderAsPlainText: false,
-            ...(Object.keys(assistantMessageVariables).length > 0
-              ? {
-                  variables: {
-                    ...(continuationTargetMessage.variables ?? {}),
-                    ...assistantMessageVariables,
-                  },
-                }
-              : {}),
-            ...(assistantReasoning.trim()
-              ? {
-                  reasoning: [continuationTargetMessage.reasoning, assistantReasoning.trim()]
-                    .filter(Boolean)
-                    .join("\n\n"),
-                }
-              : {}),
-          }
-        : {
-            id: assistantMessageId,
-            role: "assistant",
-            content: assistantContent,
-            ...(Object.keys(assistantMessageVariables).length > 0
-              ? { variables: assistantMessageVariables }
-              : {}),
-            ...(assistantReasoning.trim() ? { reasoning: assistantReasoning.trim() } : {}),
-            ...(assistantChoiceRequest ? { choiceRequest: assistantChoiceRequest } : {}),
-            ...(assistantSender ? { sender: assistantSender } : {}),
-            createdAt: new Date().toISOString(),
-          };
+      let finalAssistantMessage: ChatMessage;
+      if (dialogueRewriteTargetMessage) {
+        finalAssistantMessage = withoutDialogueRewriteMetadata({
+          ...dialogueRewriteTargetMessage,
+          content: assistantContent,
+          renderAsPlainText: false,
+        });
+      } else if (continuationTargetMessage) {
+        finalAssistantMessage = {
+          ...continuationTargetMessage,
+          content: `${continuationTargetMessage.content}${assistantContent}`,
+          renderAsPlainText: false,
+          ...(Object.keys(assistantMessageVariables).length > 0
+            ? {
+                variables: {
+                  ...(continuationTargetMessage.variables ?? {}),
+                  ...assistantMessageVariables,
+                },
+              }
+            : {}),
+          ...(assistantReasoning.trim()
+            ? {
+                reasoning: [continuationTargetMessage.reasoning, assistantReasoning.trim()]
+                  .filter(Boolean)
+                  .join("\n\n"),
+              }
+            : {}),
+        };
+      } else {
+        finalAssistantMessage = {
+          id: assistantMessageId,
+          role: "assistant",
+          content: assistantContent,
+          ...(Object.keys(assistantMessageVariables).length > 0
+            ? { variables: assistantMessageVariables }
+            : {}),
+          ...(assistantReasoning.trim() ? { reasoning: assistantReasoning.trim() } : {}),
+          ...(assistantChoiceRequest ? { choiceRequest: assistantChoiceRequest } : {}),
+          ...(assistantSender ? { sender: assistantSender } : {}),
+          ...(dialoguePlaceholderCount > 0
+            ? {
+                dialogueRewritePending: true,
+                dialoguePlaceholderCount,
+              }
+            : {}),
+          createdAt: new Date().toISOString(),
+        };
+      }
 
       if (streamingAssistantInserted) {
         commitChatMessages((current) =>
@@ -18141,7 +18418,7 @@ export function App() {
             ? "AI 正在等待你的选择。"
             : options.successMessage ?? "回复已重新生成。",
       });
-      if (continuationTargetMessage) {
+      if (continuationTargetMessage || dialogueRewriteTargetMessage) {
         const messageIndex = chatMessagesRef.current.findIndex(
           (message) => message.id === finalAssistantMessage.id,
         );
@@ -18183,7 +18460,7 @@ export function App() {
       }
 
       const message = error instanceof Error ? error.message : "调用失败。";
-      if (!continuationTargetMessage) {
+      if (!continuationTargetMessage && !dialogueRewriteTargetMessage) {
         commitChatMessages((current) => [
           ...current,
           {
@@ -18197,9 +18474,11 @@ export function App() {
       }
       setChatStatus({
         status: "error",
-        message: continuationTargetMessage
-          ? `续写失败：${message}`
-          : "调用失败。请检查本地服务、供应商地址、密钥、模型 ID 或上游限流状态。",
+        message: dialogueRewriteTargetMessage
+          ? `重写对白失败：${message}`
+          : continuationTargetMessage
+            ? `续写失败：${message}`
+            : "调用失败。请检查本地服务、供应商地址、密钥、模型 ID 或上游限流状态。",
       });
       return null;
     } finally {
@@ -19493,6 +19772,12 @@ export function App() {
         assistantContent = templateResult.content;
         assistantMessageVariables = templateResult.messageVariables;
       }
+      let dialoguePlaceholderCount = 0;
+      if (chatDialogueRewriteEnabled && !assistantChoiceRequest && assistantContent) {
+        const maskedDialogues = maskAssistantDialogues(assistantContent);
+        assistantContent = maskedDialogues.content;
+        dialoguePlaceholderCount = maskedDialogues.count;
+      }
       if (!assistantContent) {
         if (hasVisibleToolResult) {
           setChatStatus({ status: "success", message: "工具执行完成。" });
@@ -19514,6 +19799,12 @@ export function App() {
                     : {}),
                   ...(assistantReasoning.trim() ? { reasoning: assistantReasoning.trim() } : {}),
                   ...(assistantChoiceRequest ? { choiceRequest: assistantChoiceRequest } : {}),
+                  ...(dialoguePlaceholderCount > 0
+                    ? {
+                        dialogueRewritePending: true,
+                        dialoguePlaceholderCount,
+                      }
+                    : {}),
                 }
               : message,
           ),
@@ -19534,6 +19825,12 @@ export function App() {
                 : {}),
               ...(assistantReasoning.trim() ? { reasoning: assistantReasoning.trim() } : {}),
               ...(assistantChoiceRequest ? { choiceRequest: assistantChoiceRequest } : {}),
+              ...(dialoguePlaceholderCount > 0
+                ? {
+                    dialogueRewritePending: true,
+                    dialoguePlaceholderCount,
+                  }
+                : {}),
               createdAt: new Date().toISOString(),
             },
           ];
@@ -19879,6 +20176,61 @@ export function App() {
     });
   };
 
+  const rewriteAssistantDialogues = async (messageId: string) => {
+    if (chatStatus.status === "loading" || !chatDialogueRewriteEnabled) return;
+
+    const messageIndex = chatMessagesRef.current.findIndex(
+      (message) => message.id === messageId,
+    );
+    const message = chatMessagesRef.current[messageIndex];
+    if (
+      !message ||
+      message.role !== "assistant" ||
+      message.dialogueRewritePending !== true ||
+      countDialoguePlaceholders(message.content) <= 0
+    ) {
+      setChatStatus({ status: "error", message: "这条消息没有可重写的对白占位符。" });
+      return;
+    }
+
+    setChatMessageMenu(null);
+    setEditingChatMessage(null);
+    const messagesForRewrite = chatMessagesRef.current.slice(0, messageIndex + 1);
+    const latestUserMessage = [...messagesForRewrite]
+      .reverse()
+      .find((candidate) => candidate.role === "user");
+    const requestSender = normalizeChatSenderIdentity(latestUserMessage?.sender, personas);
+    const responderPersona = getAssistantMessagePersona(
+      message,
+      personas,
+      chatMode === "persona" ? activePersona : undefined,
+    );
+    const responseMode: "ai" | "persona" | "roleplay" = responderPersona
+      ? "persona"
+      : activeSessionRoleplayCard
+        ? "roleplay"
+        : "ai";
+    const multiAgentRequestConfig =
+      chatMode === "multi" && responderPersona
+        ? getMultiAgentRequestConfig(responderPersona.id)
+        : undefined;
+
+    await generateAssistantForMessages(messagesForRewrite, requestSender, {
+      responseMode,
+      ...(responderPersona ? { responderPersona } : {}),
+      ...(multiAgentRequestConfig
+        ? {
+            requestProvider: multiAgentRequestConfig.provider,
+            requestModelId: multiAgentRequestConfig.modelId,
+          }
+        : {}),
+      dialogueRewriteMessageId: message.id,
+      statusMessage: "正在准备重写对白...",
+      streamingStatusMessage: "正在根据上下文重写对白...",
+      successMessage: "对白重写已完成。",
+    });
+  };
+
   const saveEditedAssistantMessage = () => {
     if (!editingChatMessage || chatStatus.status === "loading") return;
 
@@ -19888,9 +20240,18 @@ export function App() {
     const messageId = editingChatMessage.messageId;
     const messageIndex = chatMessagesRef.current.findIndex((message) => message.id === messageId);
     commitChatMessages((current) =>
-      current.map((message) =>
-        message.id === messageId ? { ...message, content } : message,
-      ),
+      current.map((message) => {
+        if (message.id !== messageId) return message;
+        const updatedMessage = { ...message, content };
+        const dialoguePlaceholderCount = countDialoguePlaceholders(content);
+        return chatDialogueRewriteEnabled && dialoguePlaceholderCount > 0
+          ? {
+              ...updatedMessage,
+              dialogueRewritePending: true,
+              dialoguePlaceholderCount,
+            }
+          : withoutDialogueRewriteMetadata(updatedMessage);
+      }),
     );
     setEditingChatMessage(null);
     setChatStatus({ status: "success", message: "AI 消息已保存。" });
@@ -22427,7 +22788,7 @@ export function App() {
               <div className="section-heading compact">
                 <div>
                   <h2>AI 交互能力</h2>
-                  <p>控制语言模型是否可以在聊天中主动提供可点击的回复选项。</p>
+                  <p>控制聊天中可选的语言模型交互增强能力。</p>
                 </div>
               </div>
               <article className="llm-setting-card">
@@ -22456,6 +22817,36 @@ export function App() {
                     {chatChoiceToolsEnabled
                       ? "会向 AI 提供工具权限和使用说明。"
                       : "不会向 AI 提供工具定义、使用说明或内置行动选项指令。"}
+                  </span>
+                </div>
+              </article>
+              <article className="llm-setting-card">
+                <div className="llm-setting-copy">
+                  <h3>重写对话功能</h3>
+                  <p>
+                    开启后，AI 回复生成完成时会把识别到的引用对白替换为
+                    <code>“XXX”</code>。随后可右键该消息并选择“重写对话”，让 AI
+                    根据完整上下文填充对白；非对白叙述保持不变。
+                  </p>
+                </div>
+                <label className="tool-toggle llm-feature-toggle">
+                  <input
+                    type="checkbox"
+                    checked={chatDialogueRewriteEnabled}
+                    onChange={(event) => setChatDialogueRewriteEnabled(event.target.checked)}
+                  />
+                  <span>开启重写对话功能</span>
+                </label>
+                <div
+                  className={`llm-setting-status ${
+                    chatDialogueRewriteEnabled ? "enabled" : "disabled"
+                  }`}
+                >
+                  <strong>{chatDialogueRewriteEnabled ? "已开启" : "已关闭"}</strong>
+                  <span>
+                    {chatDialogueRewriteEnabled
+                      ? "新生成消息的引用对白会变为占位符，可在原气泡内按需重写。"
+                      : "AI 回复将按原始内容保存，不会生成对白占位符或重写入口。"}
                   </span>
                 </div>
               </article>
@@ -26074,6 +26465,21 @@ export function App() {
                       续写
                     </button>
                   )}
+                  {chatDialogueRewriteEnabled &&
+                    chatMessageMenuMessage.role === "assistant" &&
+                    chatMessageMenuMessage.dialogueRewritePending === true &&
+                    countDialoguePlaceholders(chatMessageMenuMessage.content) > 0 && (
+                      <button
+                        type="button"
+                        disabled={chatStatus.status === "loading"}
+                        onClick={() =>
+                          void rewriteAssistantDialogues(chatMessageMenuMessage.id)
+                        }
+                      >
+                        <Languages size={14} />
+                        重写对话
+                      </button>
+                    )}
                   <button
                     type="button"
                     disabled={chatStatus.status === "loading"}

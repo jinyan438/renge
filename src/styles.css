@@ -2115,6 +2115,10 @@ summary:focus-visible {
   background: #f8fafc;
 }
 
+.llm-setting-card + .llm-setting-card {
+  margin-top: 12px;
+}
+
 .llm-setting-copy h3 {
   color: #172033;
   font-size: 15px;
