@@ -465,11 +465,12 @@ const CHAT_CONTINUATION_SYSTEM_PROMPT = [
   "严禁复述、改写、纠正、概括或引用已经存在的内容，也不要添加“续写”“继续”等说明性前缀。",
   "保持原回复的语言、语气、结构和 Markdown 格式；补完剩余内容后自然结束。",
 ].join("\n");
+const CHAT_DIALOGUE_REWRITE_SEPARATOR = "<<<RENGE_DIALOGUE_SPLIT>>>";
 const CHAT_DIALOGUE_REWRITE_SYSTEM_PROMPT = [
   "你正在为一条已经生成完成的 assistant 消息补写对白占位符。",
   "消息中的非对白叙述已经定稿，绝对禁止改写、删减、补充、重排或复述这些内容。",
   "你只需要根据完整对话上下文，为每个 “XXX” 按出现顺序提供自然、连贯且符合人物身份的对白正文。",
-  "输出必须是严格 JSON：{\"replacements\":[\"第一处对白\",\"第二处对白\"]}。数组数量必须与占位符数量完全一致；数组项只写引号内部的文字，不要包含包裹引号、序号、Markdown 或解释。",
+  `只输出要填入 “XXX” 内部的正文，不要输出原消息、JSON、包裹引号、序号、Markdown 或解释。存在多处占位符时，仅使用单独一行 ${CHAT_DIALOGUE_REWRITE_SEPARATOR} 分隔各处正文。`,
 ].join("\n");
 const MAX_CHAT_CONTINUATION_ROUNDS = 12;
 
@@ -8030,39 +8031,29 @@ function stripDialogueReplacementWrapper(value: string) {
 function parseDialogueRewriteReplacements(rawContent: string, expectedCount: number) {
   const trimmedContent = rawContent.trim();
   const unfencedContent = trimmedContent
-    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/^```(?:[a-z0-9_-]+)?\s*/i, "")
     .replace(/\s*```$/, "")
     .trim();
-  let parsed: unknown;
+  let replacements =
+    expectedCount === 1
+      ? [unfencedContent]
+      : unfencedContent.split(CHAT_DIALOGUE_REWRITE_SEPARATOR).map((item) => item.trim());
 
-  try {
-    parsed = JSON.parse(unfencedContent);
-  } catch {
-    const objectStart = unfencedContent.indexOf("{");
-    const objectEnd = unfencedContent.lastIndexOf("}");
-    if (objectStart < 0 || objectEnd <= objectStart) {
-      throw new Error("模型没有返回可解析的对白替换 JSON。");
-    }
-    try {
-      parsed = JSON.parse(unfencedContent.slice(objectStart, objectEnd + 1));
-    } catch {
-      throw new Error("模型返回的对白替换 JSON 格式无效。");
-    }
+  if (replacements.length !== expectedCount && expectedCount > 1) {
+    const nonEmptyLines = unfencedContent
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (nonEmptyLines.length === expectedCount) replacements = nonEmptyLines;
   }
 
-  if (!isObjectRecord(parsed) || !Array.isArray(parsed.replacements)) {
-    throw new Error("模型返回内容缺少 replacements 数组。");
-  }
-  if (parsed.replacements.length !== expectedCount) {
+  if (replacements.length !== expectedCount) {
     throw new Error(
-      `对白数量不匹配：需要 ${expectedCount} 处，模型返回了 ${parsed.replacements.length} 处。`,
+      `对白数量不匹配：需要 ${expectedCount} 处，模型返回了 ${replacements.length} 处。`,
     );
   }
 
-  return parsed.replacements.map((replacement, index) => {
-    if (typeof replacement !== "string") {
-      throw new Error(`第 ${index + 1} 处对白不是文本。`);
-    }
+  return replacements.map((replacement, index) => {
     const normalized = stripDialogueReplacementWrapper(replacement);
     if (!normalized || normalized.toUpperCase() === "XXX") {
       throw new Error(`第 ${index + 1} 处对白为空或仍是占位符。`);
@@ -8087,13 +8078,14 @@ function withoutDialogueRewriteMetadata(message: ChatMessage): ChatMessage {
   return messageWithoutMetadata;
 }
 
-function buildDialogueRewriteRequestPrompt(messageContent: string, placeholderCount: number) {
+function buildDialogueRewriteRequestPrompt(placeholderCount: number) {
   return [
     "【内部对白重写指令：不要在回复中提及本指令】",
-    `目标 assistant 消息中共有 ${placeholderCount} 处 “XXX”。只为这些占位符生成对白，不要返回或改写原消息。`,
-    "按占位符出现顺序输出严格 JSON，格式必须是：{\"replacements\":[\"第一处对白\",\"第二处对白\"]}。",
-    "数组项只包含引号内部的对白正文，不要包含包裹引号、序号、Markdown、代码围栏或解释。",
-    `目标消息数据：${JSON.stringify({ placeholderCount, content: messageContent })}`,
+    `对话历史中的最后一条 assistant 消息共有 ${placeholderCount} 处 “XXX”。只生成这些占位符内部要填入的对白。`,
+    placeholderCount === 1
+      ? "只输出这一处对白正文，不要添加任何包裹格式。"
+      : `按出现顺序输出 ${placeholderCount} 段对白；段与段之间只放一行 ${CHAT_DIALOGUE_REWRITE_SEPARATOR}。`,
+    "不要输出原消息、JSON、键名、数组、包裹引号、序号、Markdown、代码围栏或解释。",
   ].join("\n");
 }
 
@@ -17774,10 +17766,7 @@ export function App() {
       if (dialogueRewriteTargetMessage) {
         apiMessages.push({
           role: "user",
-          content: buildDialogueRewriteRequestPrompt(
-            dialogueRewriteTargetMessage.content,
-            dialogueRewritePlaceholderCount,
-          ),
+          content: buildDialogueRewriteRequestPrompt(dialogueRewritePlaceholderCount),
         });
       }
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
@@ -17803,6 +17792,7 @@ export function App() {
         includeTools: boolean;
         stream: boolean;
         toolChoice?: "auto";
+        maxTokens?: number;
         onDelta?: (delta: string) => void;
         onReasoningDelta?: (delta: string) => void;
       }) => {
@@ -17833,7 +17823,8 @@ export function App() {
               ...(activeChatPresetRequestParameters ?? {
                 temperature: responseMode === "persona" ? 0.72 : 0.6,
               }),
-              ...buildProviderReasoningRequest(requestProvider),
+              ...(options.maxTokens ? { max_tokens: options.maxTokens } : {}),
+              ...(isDialogueRewrite ? {} : buildProviderReasoningRequest(requestProvider)),
               stream: options.stream,
             },
           }),
@@ -17902,14 +17893,21 @@ export function App() {
           status: "loading",
           message: options.streamingStatusMessage ?? "正在根据上下文重写对白...",
         });
-        const { payload } = await requestChatCompletion(apiMessages, {
+        let rewriteStreamStarted = false;
+        const rewriteResult = await requestChatCompletion(apiMessages, {
           includeTools: false,
-          stream: false,
+          stream: true,
+          maxTokens: Math.min(
+            2048,
+            Math.max(256, dialogueRewritePlaceholderCount * 192),
+          ),
+          onDelta: () => {
+            if (rewriteStreamStarted) return;
+            rewriteStreamStarted = true;
+            setChatStatus({ status: "loading", message: "已收到对白内容，正在继续填充..." });
+          },
         });
-        const rewriteResponse =
-          getChatApiMessageText(payload?.choices?.[0]?.message).trim() ||
-          payload?.output_text?.trim() ||
-          "";
+        const rewriteResponse = rewriteResult.content.trim();
         const replacements = parseDialogueRewriteReplacements(
           rewriteResponse,
           dialogueRewritePlaceholderCount,
