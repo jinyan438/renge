@@ -7881,6 +7881,97 @@ function isTruncatedChatFinishReason(finishReason?: string) {
   );
 }
 
+function buildChatContinuationRequestPrompt(
+  existingContent: string,
+  restartRetryCount = 0,
+) {
+  const breakpointTail = existingContent.slice(-600);
+  return [
+    "【内部续写指令：不要在回复中提及本指令】",
+    "上一条 assistant 消息因长度限制尚未写完。本次输出会被程序直接追加到同一条消息末尾，并不是一个新的聊天回合。",
+    "上一条消息已经包含预设要求的日期、时间、地点、标题和其他开头格式；即使预设要求每条回复都输出这些内容，本次也绝对禁止再次输出。",
+    "只写断点之后尚未出现的正文。不要重发时间头，不要从开头重写，不要复述断点前的句子，不要解释你在续写。",
+    "下面是断点前最后一段原文。你的第一个字符必须是紧接其最后一个字符的后续内容：",
+    "<breakpoint_tail>",
+    breakpointTail,
+    "</breakpoint_tail>",
+    restartRetryCount > 0
+      ? `上一次返回被检测为从头重写。这是第 ${restartRetryCount + 1} 次尝试，必须跳过所有已存在内容并严格从断点继续。`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function reconcileChatContinuation(existingContent: string, rawContent: string) {
+  if (!rawContent) return { content: "", restarted: false };
+  if (rawContent.startsWith(existingContent)) {
+    const continuation = rawContent.slice(existingContent.length);
+    return {
+      content: continuation,
+      restarted: !continuation,
+    };
+  }
+
+  const maximumAnchorLength = Math.min(600, existingContent.length);
+  for (
+    let anchorLength = maximumAnchorLength;
+    anchorLength >= 48;
+    anchorLength = Math.floor(anchorLength * 0.75)
+  ) {
+    const breakpointAnchor = existingContent.slice(-anchorLength);
+    const anchorIndex = rawContent.indexOf(breakpointAnchor);
+    if (anchorIndex < 0) continue;
+    const continuation = rawContent.slice(anchorIndex + breakpointAnchor.length);
+    return {
+      content: continuation,
+      restarted: !continuation,
+    };
+  }
+
+  const normalizedExisting = existingContent.trimStart();
+  const normalizedRaw = rawContent.trimStart();
+  let commonPrefixLength = 0;
+  const maximumPrefixLength = Math.min(normalizedExisting.length, normalizedRaw.length);
+  while (
+    commonPrefixLength < maximumPrefixLength &&
+    normalizedExisting[commonPrefixLength] === normalizedRaw[commonPrefixLength]
+  ) {
+    commonPrefixLength += 1;
+  }
+  const commonPrefixThreshold = Math.min(
+    120,
+    Math.max(24, Math.floor(normalizedExisting.length * 0.25)),
+  );
+  const existingFirstLine = normalizedExisting.split(/\r?\n/, 1)[0]?.trim() ?? "";
+  const rawFirstLine = normalizedRaw.split(/\r?\n/, 1)[0]?.trim() ?? "";
+  const looksLikePresetTimeHeader = (line: string) => {
+    const leadingHeader = line.match(/^[\[【（(][^\]】）)\r\n]{6,240}[\]】）)]/)?.[0] ?? "";
+    return /(?:年|月|日|星期|周|\d{1,2}[:：,]\d{2}|天气|地点)/.test(
+      leadingHeader,
+    );
+  };
+  const repeatsExistingFirstLine =
+    existingFirstLine.length >= 12 && normalizedRaw.startsWith(existingFirstLine);
+  const repeatsExistingOpening =
+    normalizedExisting.length >= 48 &&
+    normalizedRaw.indexOf(normalizedExisting.slice(0, Math.min(160, normalizedExisting.length))) >=
+      0;
+  const repeatsPresetTimeHeader =
+    looksLikePresetTimeHeader(existingFirstLine) && looksLikePresetTimeHeader(rawFirstLine);
+
+  if (
+    commonPrefixLength >= commonPrefixThreshold ||
+    repeatsExistingFirstLine ||
+    repeatsExistingOpening ||
+    repeatsPresetTimeHeader
+  ) {
+    return { content: "", restarted: true };
+  }
+
+  return { content: rawContent, restarted: false };
+}
+
 function createChatAbortError() {
   return new DOMException("AI 输出已停止。", "AbortError");
 }
@@ -17456,10 +17547,10 @@ export function App() {
           message: options.streamingStatusMessage ?? "正在续写当前回复...",
         });
         const baseContinuationApiMessages = apiMessages;
-        let continuationApiMessages = baseContinuationApiMessages;
-        let lastFinishReason = "";
-
-        const buildNextContinuationApiMessages = (continuation: string) => {
+        const buildNextContinuationApiMessages = (
+          continuation: string,
+          restartRetryCount = 0,
+        ) => {
           const nextApiMessages = baseContinuationApiMessages.map((message) => ({ ...message }));
           let targetIndex = -1;
           for (let index = nextApiMessages.length - 1; index >= 0; index -= 1) {
@@ -17473,65 +17564,97 @@ export function App() {
             ...targetMessage,
             content: `${getChatApiMessageText(targetMessage)}${continuation}`,
           };
+          nextApiMessages.push({
+            role: "user",
+            content: buildChatContinuationRequestPrompt(
+              `${continuationTargetMessage.content}${continuation}`,
+              restartRetryCount,
+            ),
+          });
           return nextApiMessages;
         };
+        let restartRetryCount = 0;
+        let continuationRound = 0;
+        let continuationApiMessages = buildNextContinuationApiMessages("");
 
-        for (let round = 0; round < MAX_CHAT_CONTINUATION_ROUNDS; round += 1) {
+        while (continuationRound < MAX_CHAT_CONTINUATION_ROUNDS) {
           throwIfChatAborted(abortSignal);
-          let roundContent = "";
+          let rawRoundContent = "";
           let roundReasoning = "";
+          let lastFinishReason = "";
 
           if (chatStreamEnabled) {
-            const assistantWriter = createStreamingWordWriter(
-              appendStreamingAssistant,
-              abortSignal,
-            );
-            const reasoningWriter = createStreamingWordWriter(
-              appendStreamingAssistantReasoning,
-              abortSignal,
-            );
-            try {
-              const streamResult = await requestChatCompletion(continuationApiMessages, {
-                includeTools: false,
-                stream: true,
-                onDelta: assistantWriter.push,
-                onReasoningDelta: reasoningWriter.push,
-              });
-              await Promise.all([assistantWriter.finish(), reasoningWriter.finish()]);
-              throwIfChatAborted(abortSignal);
-              roundContent = streamResult.content;
-              roundReasoning = streamResult.reasoning;
-              lastFinishReason = streamResult.finishReason;
-            } finally {
-              assistantWriter.cancel();
-              reasoningWriter.cancel();
-            }
+            const streamResult = await requestChatCompletion(continuationApiMessages, {
+              includeTools: false,
+              stream: true,
+            });
+            throwIfChatAborted(abortSignal);
+            rawRoundContent = streamResult.content;
+            roundReasoning = streamResult.reasoning;
+            lastFinishReason = streamResult.finishReason;
           } else {
             const result = await requestChatCompletion(continuationApiMessages, {
               includeTools: false,
               stream: false,
             });
             const assistantMessage = result.payload?.choices?.[0]?.message;
-            roundContent =
+            rawRoundContent =
               getChatApiMessageText(assistantMessage) || result.payload?.output_text || "";
             roundReasoning =
               getChatApiMessageReasoning(assistantMessage) || result.reasoning || "";
             lastFinishReason = result.finishReason;
-            if (roundContent) appendStreamingAssistant(roundContent);
-            if (roundReasoning) appendStreamingAssistantReasoning(roundReasoning);
           }
 
+          const currentExistingContent = `${continuationTargetMessage.content}${assistantContent}`;
+          const reconciledContinuation = reconcileChatContinuation(
+            currentExistingContent,
+            rawRoundContent,
+          );
+          if (reconciledContinuation.restarted) {
+            restartRetryCount += 1;
+            if (restartRetryCount >= 3) {
+              throw new Error("模型连续从消息开头重写，已拦截重复内容，未能完成续写。");
+            }
+            setChatStatus({
+              status: "loading",
+              message: "检测到模型从头重写，正在重新校准断点...",
+            });
+            continuationApiMessages = buildNextContinuationApiMessages(
+              assistantContent,
+              restartRetryCount,
+            );
+            continue;
+          }
+
+          const roundContent = reconciledContinuation.content;
           if (!roundContent) break;
+          if (chatStreamEnabled) {
+            const assistantWriter = createStreamingWordWriter(
+              appendStreamingAssistant,
+              abortSignal,
+            );
+            try {
+              assistantWriter.push(roundContent);
+              await assistantWriter.finish();
+              throwIfChatAborted(abortSignal);
+            } finally {
+              assistantWriter.cancel();
+            }
+          } else {
+            appendStreamingAssistant(roundContent);
+          }
+          if (roundReasoning) appendStreamingAssistantReasoning(roundReasoning);
           assistantContent += roundContent;
+          continuationRound += 1;
           if (!isTruncatedChatFinishReason(lastFinishReason)) break;
 
-          if (round === MAX_CHAT_CONTINUATION_ROUNDS - 1) {
+          if (continuationRound === MAX_CHAT_CONTINUATION_ROUNDS) {
             continuationReachedLimit = true;
             break;
           }
           setChatStatus({
             status: "loading",
-            message: `回复仍被截断，正在继续续写（第 ${round + 2} 次）...`,
+            message: `回复仍被截断，正在继续续写（第 ${continuationRound + 1} 次）...`,
           });
           continuationApiMessages = buildNextContinuationApiMessages(assistantContent);
         }
@@ -17932,7 +18055,9 @@ export function App() {
       }
       setChatStatus({
         status: "error",
-        message: "调用失败。请检查本地服务、供应商地址、密钥、模型 ID 或上游限流状态。",
+        message: continuationTargetMessage
+          ? `续写失败：${message}`
+          : "调用失败。请检查本地服务、供应商地址、密钥、模型 ID 或上游限流状态。",
       });
       return null;
     } finally {
