@@ -6860,7 +6860,7 @@ h2 {
   bottom: calc(100% + 8px);
   z-index: 125;
   display: grid;
-  width: 310px;
+  width: min(360px, calc(100vw - 20px));
   padding: 8px;
   border: 1px solid #d9dee8;
   border-radius: 16px;
@@ -6870,10 +6870,11 @@ h2 {
 
 .composer-model-config-panel > button {
   display: grid;
-  grid-template-columns: minmax(88px, auto) minmax(0, 1fr) 18px;
+  grid-template-columns: 72px minmax(0, 1fr) 16px;
+  column-gap: 4px;
   align-items: center;
   min-height: 38px;
-  padding: 0 9px;
+  padding: 6px 8px;
   border: 0;
   border-radius: 10px;
   color: #172033;
@@ -6888,6 +6889,7 @@ h2 {
 }
 
 .composer-model-config-panel > button > span {
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -6898,6 +6900,15 @@ h2 {
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.composer-model-config-panel > button:nth-of-type(-n + 2) > strong {
+  overflow: visible;
+  font-size: 12px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .composer-model-config-panel > button > svg {
@@ -6912,7 +6923,7 @@ h2 {
 }
 
 .composer-model-config-panel > button.composer-model-reasoning-toggle {
-  grid-template-columns: minmax(88px, auto) minmax(0, 1fr) 34px;
+  grid-template-columns: 72px minmax(0, 1fr) 32px;
 }
 
 .composer-model-reasoning-toggle i {
