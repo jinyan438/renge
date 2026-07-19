@@ -220,6 +220,7 @@ type ManagedWindowState = {
 };
 type SettingsTab =
   | "providers"
+  | "llm"
   | "prompts"
   | "presets"
   | "worldbooks"
@@ -239,6 +240,11 @@ const SETTINGS_TAB_META: Record<
     title: "供应商渠道",
     eyebrow: "MODEL CONNECTIONS",
     description: "连接模型服务、管理凭据，并为会话选择默认模型。",
+  },
+  llm: {
+    title: "LLM",
+    eyebrow: "MODEL BEHAVIOR",
+    description: "控制应用向语言模型开放的内置交互能力。",
   },
   prompts: {
     title: "提示词",
@@ -607,6 +613,7 @@ type RengeAppData = {
   chatHtmlRenderEnabled?: boolean;
   chatReasoningVisible?: boolean;
   chatHeartbeatReminderVisible?: boolean;
+  chatChoiceToolsEnabled?: boolean;
   chatPersonalization?: ChatPersonalizationSettings;
   mcpServers?: McpServerConfig[];
   skills?: SkillProfile[];
@@ -851,6 +858,7 @@ const CHAT_MULTI_BUBBLE_STORAGE_KEY = "renge_chat_multi_bubble_enabled";
 const CHAT_HTML_RENDER_STORAGE_KEY = "renge_chat_html_render_enabled";
 const CHAT_REASONING_VISIBLE_STORAGE_KEY = "renge_chat_reasoning_visible";
 const CHAT_HEARTBEAT_REMINDER_VISIBLE_STORAGE_KEY = "renge_chat_heartbeat_reminder_visible";
+const CHAT_CHOICE_TOOLS_ENABLED_STORAGE_KEY = "renge_chat_choice_tools_enabled";
 const CHAT_PERSONALIZATION_STORAGE_KEY = "renge_chat_personalization";
 const MCP_SERVERS_STORAGE_KEY = "renge_mcp_servers";
 const SKILLS_STORAGE_KEY = "renge_skills";
@@ -2110,6 +2118,10 @@ function persistAppDataToLocalStores(data: RengeAppData) {
   setLocalStorageValueSafely(
     CHAT_HEARTBEAT_REMINDER_VISIBLE_STORAGE_KEY,
     String(data.chatHeartbeatReminderVisible ?? true),
+  );
+  setLocalStorageValueSafely(
+    CHAT_CHOICE_TOOLS_ENABLED_STORAGE_KEY,
+    String(data.chatChoiceToolsEnabled ?? true),
   );
   setLocalStorageJsonSafely(
     CHAT_PERSONALIZATION_STORAGE_KEY,
@@ -6895,6 +6907,11 @@ function isChatChoiceToolName(toolName: string) {
   return toolName === "chat_present_options";
 }
 
+function isChatChoiceToolDeclaration(value: unknown) {
+  if (!isObjectRecord(value) || !isObjectRecord(value.function)) return false;
+  return isChatChoiceToolName(String(value.function.name ?? ""));
+}
+
 function hasOnlyChatChoiceTools(tools: Array<{ function: { name: string } }>) {
   return (
     tools.length > 0 &&
@@ -9589,6 +9606,9 @@ export function App() {
   const [chatHeartbeatReminderVisible, setChatHeartbeatReminderVisible] = useState(
     () => localStorage.getItem(CHAT_HEARTBEAT_REMINDER_VISIBLE_STORAGE_KEY) !== "false",
   );
+  const [chatChoiceToolsEnabled, setChatChoiceToolsEnabled] = useState(
+    () => localStorage.getItem(CHAT_CHOICE_TOOLS_ENABLED_STORAGE_KEY) !== "false",
+  );
   const [chatPersonalization, setChatPersonalization] =
     useState<ChatPersonalizationSettings>(loadChatPersonalization);
   const [chatSender, setChatSender] = useState<ChatSenderIdentity>(loadChatSender);
@@ -10431,6 +10451,7 @@ export function App() {
       chatHtmlRenderEnabled,
       chatReasoningVisible,
       chatHeartbeatReminderVisible,
+      chatChoiceToolsEnabled,
       chatPersonalization,
       mcpServers,
       skills,
@@ -10438,7 +10459,7 @@ export function App() {
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     };
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -10558,6 +10579,10 @@ export function App() {
         typeof persistentData?.chatHeartbeatReminderVisible === "boolean"
           ? persistentData.chatHeartbeatReminderVisible
           : localStorage.getItem(CHAT_HEARTBEAT_REMINDER_VISIBLE_STORAGE_KEY) !== "false";
+      const nextChatChoiceToolsEnabled =
+        typeof persistentData?.chatChoiceToolsEnabled === "boolean"
+          ? persistentData.chatChoiceToolsEnabled
+          : localStorage.getItem(CHAT_CHOICE_TOOLS_ENABLED_STORAGE_KEY) !== "false";
       const nextChatPersonalization = persistentData?.chatPersonalization
         ? normalizeChatPersonalization(persistentData.chatPersonalization)
         : loadChatPersonalization();
@@ -10714,6 +10739,7 @@ export function App() {
       setChatHtmlRenderEnabled(nextChatHtmlRenderEnabled);
       setChatReasoningVisible(nextChatReasoningVisible);
       setChatHeartbeatReminderVisible(nextChatHeartbeatReminderVisible);
+      setChatChoiceToolsEnabled(nextChatChoiceToolsEnabled);
       setChatPersonalization(nextChatPersonalization);
       setMcpServers(nextMcpServers);
       setActiveMcpServerId(nextMcpServers[0]?.id ?? "");
@@ -11058,6 +11084,15 @@ export function App() {
         )
         .filter((promptProfile): promptProfile is SystemPromptProfile => Boolean(promptProfile)),
     [activeSystemPromptIds, systemPrompts],
+  );
+  const requestSystemPrompts = useMemo(
+    () =>
+      chatChoiceToolsEnabled
+        ? selectedSystemPrompts
+        : selectedSystemPrompts.filter(
+            (promptProfile) => promptProfile.id !== BUILT_IN_SYSTEM_PROMPT_IDS.actionOptions,
+          ),
+    [chatChoiceToolsEnabled, selectedSystemPrompts],
   );
   const activeChatPreset = useMemo(
     () =>
@@ -16798,7 +16833,7 @@ export function App() {
       function: tool.function,
     }));
     return [
-      ...chatChoiceToolDefinitions,
+      ...(chatChoiceToolsEnabled ? chatChoiceToolDefinitions : []),
       ...localTools,
       ...externalTools,
       ...(includeHeartbeatTools ? heartbeatToolDefinitions : []),
@@ -17348,7 +17383,7 @@ export function App() {
           );
         }
       }
-      const selectedSystemPrompt = selectedSystemPrompts
+      const selectedSystemPrompt = requestSystemPrompts
         .map((promptProfile) => promptProfile.content.trim())
         .filter(Boolean)
         .join("\n\n");
@@ -17804,9 +17839,11 @@ export function App() {
           throwIfChatAborted(abortSignal);
           assistantContent = streamResult.content;
           assistantReasoning = streamResult.reasoning || assistantReasoning;
-          const choiceToolCall = streamResult.toolCalls.find((toolCall) =>
-            isChatChoiceToolName(toolCall.function.name),
-          );
+          const choiceToolCall = chatChoiceToolsEnabled
+            ? streamResult.toolCalls.find((toolCall) =>
+                isChatChoiceToolName(toolCall.function.name),
+              )
+            : undefined;
           if (choiceToolCall) {
             const presentedChoice = createChatChoiceRequestFromToolCall(choiceToolCall);
             assistantChoiceRequest = presentedChoice.choiceRequest;
@@ -17837,16 +17874,19 @@ export function App() {
           throwIfChatAborted(abortSignal);
 
           const assistantMessage = payload?.choices?.[0]?.message;
-          const toolCalls = assistantMessage?.tool_calls ?? [];
+          const toolCalls = (assistantMessage?.tool_calls ?? []).filter(
+            (toolCall) =>
+              chatChoiceToolsEnabled || !isChatChoiceToolName(toolCall.function.name),
+          );
           const hasSilentControlTool = toolCalls.some((toolCall) =>
             isSilentChatControlTool(toolCall.function.name),
           );
           const assistantMessageContent = getChatApiMessageText(assistantMessage).trim();
           const assistantMessageReasoning =
             getChatApiMessageReasoning(assistantMessage) || reasoning || "";
-          const choiceToolCall = toolCalls.find((toolCall) =>
-            isChatChoiceToolName(toolCall.function.name),
-          );
+          const choiceToolCall = chatChoiceToolsEnabled
+            ? toolCalls.find((toolCall) => isChatChoiceToolName(toolCall.function.name))
+            : undefined;
           if (choiceToolCall) {
             const presentedChoice = createChatChoiceRequestFromToolCall(choiceToolCall);
             assistantChoiceRequest = presentedChoice.choiceRequest;
@@ -18484,7 +18524,7 @@ export function App() {
         false,
       );
       setChatStatus({ status: "loading", message: "独立前端正在调用当前会话 API..." });
-      const selectedSystemPrompt = selectedSystemPrompts
+      const selectedSystemPrompt = requestSystemPrompts
         .map((promptProfile) => promptProfile.content.trim())
         .filter(Boolean)
         .join("\n\n");
@@ -18653,6 +18693,15 @@ export function App() {
                 },
               }
             : undefined;
+      const requestedTools = Array.isArray(normalizedConfig.tools)
+        ? normalizedConfig.tools.filter(
+            (tool) => chatChoiceToolsEnabled || !isChatChoiceToolDeclaration(tool),
+          )
+        : [];
+      const requestedToolChoice =
+        !chatChoiceToolsEnabled && isChatChoiceToolDeclaration(normalizedConfig.tool_choice)
+          ? undefined
+          : normalizedConfig.tool_choice;
 
       const requestMessages = substituteUserNicknameInApiMessages(
         apiMessages,
@@ -18729,11 +18778,9 @@ export function App() {
             ...(Number.isFinite(Number(customApi.seed))
               ? { seed: Number(customApi.seed) }
               : {}),
-            ...(Array.isArray(normalizedConfig.tools)
-              ? { tools: normalizedConfig.tools }
-              : {}),
-            ...(normalizedConfig.tool_choice !== undefined
-              ? { tool_choice: normalizedConfig.tool_choice }
+            ...(requestedTools.length > 0 ? { tools: requestedTools } : {}),
+            ...(requestedToolChoice !== undefined
+              ? { tool_choice: requestedToolChoice }
               : {}),
             ...(requestedResponseFormat
               ? { response_format: requestedResponseFormat }
@@ -18925,7 +18972,7 @@ export function App() {
             exposeHeartbeatTools,
             suppressAttachmentTransferTool,
           );
-      const selectedSystemPrompt = selectedSystemPrompts
+      const selectedSystemPrompt = requestSystemPrompts
         .map((promptProfile) => promptProfile.content.trim())
         .filter(Boolean)
         .join("\n\n");
@@ -19227,9 +19274,11 @@ export function App() {
           throwIfChatAborted(abortSignal);
           assistantContent = streamResult.content;
           assistantReasoning = streamResult.reasoning || assistantReasoning;
-          const choiceToolCall = streamResult.toolCalls.find((toolCall) =>
-            isChatChoiceToolName(toolCall.function.name),
-          );
+          const choiceToolCall = chatChoiceToolsEnabled
+            ? streamResult.toolCalls.find((toolCall) =>
+                isChatChoiceToolName(toolCall.function.name),
+              )
+            : undefined;
           if (choiceToolCall) {
             const presentedChoice = createChatChoiceRequestFromToolCall(choiceToolCall);
             assistantChoiceRequest = presentedChoice.choiceRequest;
@@ -19260,16 +19309,19 @@ export function App() {
           throwIfChatAborted(abortSignal);
 
           const assistantMessage = payload?.choices?.[0]?.message;
-          const toolCalls = assistantMessage?.tool_calls ?? [];
+          const toolCalls = (assistantMessage?.tool_calls ?? []).filter(
+            (toolCall) =>
+              chatChoiceToolsEnabled || !isChatChoiceToolName(toolCall.function.name),
+          );
           const hasSilentControlTool = toolCalls.some((toolCall) =>
             isSilentChatControlTool(toolCall.function.name),
           );
           const assistantMessageContent = getChatApiMessageText(assistantMessage).trim();
           const assistantMessageReasoning =
             getChatApiMessageReasoning(assistantMessage) || reasoning || "";
-          const choiceToolCall = toolCalls.find((toolCall) =>
-            isChatChoiceToolName(toolCall.function.name),
-          );
+          const choiceToolCall = chatChoiceToolsEnabled
+            ? toolCalls.find((toolCall) => isChatChoiceToolName(toolCall.function.name))
+            : undefined;
           if (choiceToolCall) {
             const presentedChoice = createChatChoiceRequestFromToolCall(choiceToolCall);
             assistantChoiceRequest = presentedChoice.choiceRequest;
@@ -22028,6 +22080,17 @@ export function App() {
           </button>
           <button
             type="button"
+            className={`settings-tab ${settingsTab === "llm" ? "active" : ""}`}
+            onClick={() => {
+              setSettingsTab("llm");
+              closeMobileSidebar();
+            }}
+          >
+            <Bot size={16} />
+            LLM
+          </button>
+          <button
+            type="button"
             className={`settings-tab ${settingsTab === "prompts" ? "active" : ""}`}
             onClick={() => {
               setSettingsTab("prompts");
@@ -22358,6 +22421,46 @@ export function App() {
               </div>
             )}
           </header>
+
+          {settingsTab === "llm" && (
+            <section className="section-block llm-settings">
+              <div className="section-heading compact">
+                <div>
+                  <h2>AI 交互能力</h2>
+                  <p>控制语言模型是否可以在聊天中主动提供可点击的回复选项。</p>
+                </div>
+              </div>
+              <article className="llm-setting-card">
+                <div className="llm-setting-copy">
+                  <h3>AI 选项功能</h3>
+                  <p>
+                    开启后，AI 可以调用 <code>chat_present_options</code>
+                    展示结构化选项和自定义回复输入框。
+                  </p>
+                </div>
+                <label className="tool-toggle llm-feature-toggle">
+                  <input
+                    type="checkbox"
+                    checked={chatChoiceToolsEnabled}
+                    onChange={(event) => setChatChoiceToolsEnabled(event.target.checked)}
+                  />
+                  <span>开启AI选项功能</span>
+                </label>
+                <div
+                  className={`llm-setting-status ${
+                    chatChoiceToolsEnabled ? "enabled" : "disabled"
+                  }`}
+                >
+                  <strong>{chatChoiceToolsEnabled ? "已开启" : "已关闭"}</strong>
+                  <span>
+                    {chatChoiceToolsEnabled
+                      ? "会向 AI 提供工具权限和使用说明。"
+                      : "不会向 AI 提供工具定义、使用说明或内置行动选项指令。"}
+                  </span>
+                </div>
+              </article>
+            </section>
+          )}
 
           {settingsTab === "providers" && activeProvider && (
             <div className="settings-grid">

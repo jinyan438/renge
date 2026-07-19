@@ -2100,6 +2100,91 @@ summary:focus-visible {
   color: #334155;
 }
 
+.llm-settings {
+  max-width: 820px;
+}
+
+.llm-setting-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  padding: 16px;
+  border: 1px solid #dfe4ec;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.llm-setting-copy h3 {
+  color: #172033;
+  font-size: 15px;
+}
+
+.llm-setting-copy p {
+  margin-top: 6px;
+  color: #667085;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.llm-setting-copy code {
+  color: #067647;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.llm-feature-toggle,
+.llm-feature-toggle span {
+  color: #334155;
+  font-weight: 800;
+}
+
+.llm-feature-toggle input {
+  border-color: #cbd5e1;
+  background: #e2e8f0;
+}
+
+.llm-feature-toggle input::after {
+  background: #ffffff;
+}
+
+.llm-setting-status {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.llm-setting-status.enabled {
+  color: #067647;
+  background: #ecfdf3;
+}
+
+.llm-setting-status.disabled {
+  color: #667085;
+  background: #eef1f5;
+}
+
+.llm-setting-status strong {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 720px) {
+  .llm-setting-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .llm-setting-status {
+    grid-column: 1;
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 .preset-settings-grid {
   grid-template-columns: 280px minmax(0, 1fr);
 }
