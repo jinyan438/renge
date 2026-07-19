@@ -5804,6 +5804,11 @@ summary:focus-visible {
   background: #f1f5f9;
 }
 
+.chat-message-menu button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .chat-message-menu button.danger {
   color: #b42318;
 }
