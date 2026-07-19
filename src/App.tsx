@@ -17853,9 +17853,14 @@ export function App() {
                     tool_choice: options.toolChoice ?? "auto",
                   }
                 : {}),
-              ...(activeChatPresetRequestParameters ?? {
-                temperature: responseMode === "persona" ? 0.72 : 0.6,
-              }),
+              ...(isDialogueRewrite
+                ? {
+                    temperature: 0.7,
+                    top_p: 1,
+                  }
+                : activeChatPresetRequestParameters ?? {
+                    temperature: responseMode === "persona" ? 0.72 : 0.6,
+                  }),
               ...(options.maxTokens ? { max_tokens: options.maxTokens } : {}),
               ...(isDialogueRewrite ? {} : buildProviderReasoningRequest(requestProvider)),
               stream: options.stream,
