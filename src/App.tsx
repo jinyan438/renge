@@ -7903,6 +7903,13 @@ function buildChatContinuationRequestPrompt(
     .join("\n");
 }
 
+function looksLikeChatPresetTimeHeader(line: string) {
+  const leadingHeader = line.match(/^[\[【（(][^\]】）)\r\n]{6,240}[\]】）)]/)?.[0] ?? "";
+  return /(?:年|月|日|星期|周|\d{1,2}[:：,]\d{2}|天气|地点)/.test(
+    leadingHeader,
+  );
+}
+
 function reconcileChatContinuation(existingContent: string, rawContent: string) {
   if (!rawContent) return { content: "", restarted: false };
   if (rawContent.startsWith(existingContent)) {
@@ -7945,12 +7952,6 @@ function reconcileChatContinuation(existingContent: string, rawContent: string) 
   );
   const existingFirstLine = normalizedExisting.split(/\r?\n/, 1)[0]?.trim() ?? "";
   const rawFirstLine = normalizedRaw.split(/\r?\n/, 1)[0]?.trim() ?? "";
-  const looksLikePresetTimeHeader = (line: string) => {
-    const leadingHeader = line.match(/^[\[【（(][^\]】）)\r\n]{6,240}[\]】）)]/)?.[0] ?? "";
-    return /(?:年|月|日|星期|周|\d{1,2}[:：,]\d{2}|天气|地点)/.test(
-      leadingHeader,
-    );
-  };
   const repeatsExistingFirstLine =
     existingFirstLine.length >= 12 && normalizedRaw.startsWith(existingFirstLine);
   const repeatsExistingOpening =
@@ -7958,7 +7959,8 @@ function reconcileChatContinuation(existingContent: string, rawContent: string) 
     normalizedRaw.indexOf(normalizedExisting.slice(0, Math.min(160, normalizedExisting.length))) >=
       0;
   const repeatsPresetTimeHeader =
-    looksLikePresetTimeHeader(existingFirstLine) && looksLikePresetTimeHeader(rawFirstLine);
+    looksLikeChatPresetTimeHeader(existingFirstLine) &&
+    looksLikeChatPresetTimeHeader(rawFirstLine);
 
   if (
     commonPrefixLength >= commonPrefixThreshold ||
@@ -7970,6 +7972,100 @@ function reconcileChatContinuation(existingContent: string, rawContent: string) 
   }
 
   return { content: rawContent, restarted: false };
+}
+
+function createChatContinuationStreamGate(
+  existingContent: string,
+  onAcceptedDelta: (delta: string) => void,
+) {
+  const normalizedExisting = existingContent.trimStart();
+  const existingFirstLine = normalizedExisting.split(/\r?\n/, 1)[0]?.trim() ?? "";
+  const commonPrefixThreshold = Math.min(
+    120,
+    Math.max(24, Math.floor(normalizedExisting.length * 0.25)),
+  );
+  let state: "pending" | "streaming" | "restarted" = "pending";
+  let bufferedContent = "";
+  let acceptedContent = "";
+
+  const accept = (content: string) => {
+    if (!content) return;
+    acceptedContent += content;
+    onAcceptedDelta(content);
+  };
+
+  const evaluateBufferedContent = () => {
+    const normalizedBuffered = bufferedContent.trimStart();
+    if (!normalizedBuffered) return;
+
+    if (/^[\[【（(]/.test(normalizedBuffered)) {
+      const rawFirstLine = normalizedBuffered.split(/\r?\n/, 1)[0]?.trim() ?? "";
+      const hasClosedLeadingHeader = /^[\[【（(][^\]】）)\r\n]{0,240}[\]】）)]/.test(
+        rawFirstLine,
+      );
+      if (!hasClosedLeadingHeader && normalizedBuffered.length < 240) return;
+      if (
+        looksLikeChatPresetTimeHeader(existingFirstLine) &&
+        looksLikeChatPresetTimeHeader(rawFirstLine)
+      ) {
+        state = "restarted";
+        return;
+      }
+    }
+
+    if (normalizedExisting.startsWith(normalizedBuffered)) return;
+    if (normalizedBuffered.startsWith(normalizedExisting)) {
+      state = "streaming";
+      const continuation = normalizedBuffered.slice(normalizedExisting.length);
+      bufferedContent = "";
+      accept(continuation);
+      return;
+    }
+
+    let commonPrefixLength = 0;
+    const maximumPrefixLength = Math.min(
+      normalizedExisting.length,
+      normalizedBuffered.length,
+    );
+    while (
+      commonPrefixLength < maximumPrefixLength &&
+      normalizedExisting[commonPrefixLength] === normalizedBuffered[commonPrefixLength]
+    ) {
+      commonPrefixLength += 1;
+    }
+    if (commonPrefixLength >= commonPrefixThreshold) {
+      state = "restarted";
+      return;
+    }
+
+    state = "streaming";
+    const initialContent = bufferedContent;
+    bufferedContent = "";
+    accept(initialContent);
+  };
+
+  return {
+    push(delta: string) {
+      if (!delta || state === "restarted") return;
+      if (state === "streaming") {
+        accept(delta);
+        return;
+      }
+      bufferedContent += delta;
+      evaluateBufferedContent();
+    },
+    finish(rawContent: string) {
+      if (state === "streaming") {
+        return { content: acceptedContent, restarted: false };
+      }
+      const reconciled = reconcileChatContinuation(existingContent, rawContent);
+      if (!reconciled.restarted && reconciled.content) accept(reconciled.content);
+      return {
+        content: acceptedContent,
+        restarted: reconciled.restarted,
+      };
+    },
+  };
 }
 
 function createChatAbortError() {
@@ -17542,6 +17638,13 @@ export function App() {
 
       if (continuationTargetMessage) {
         streamingAssistantInserted = true;
+        commitChatMessages((current) =>
+          current.map((message) =>
+            message.id === continuationTargetMessage.id
+              ? { ...message, renderAsPlainText: true }
+              : message,
+          ),
+        );
         setChatStatus({
           status: "loading",
           message: options.streamingStatusMessage ?? "正在续写当前回复...",
@@ -17579,17 +17682,23 @@ export function App() {
 
         while (continuationRound < MAX_CHAT_CONTINUATION_ROUNDS) {
           throwIfChatAborted(abortSignal);
-          let rawRoundContent = "";
+          const currentExistingContent = `${continuationTargetMessage.content}${assistantContent}`;
+          let reconciledContinuation = { content: "", restarted: false };
           let roundReasoning = "";
           let lastFinishReason = "";
 
           if (chatStreamEnabled) {
+            const streamGate = createChatContinuationStreamGate(
+              currentExistingContent,
+              appendStreamingAssistant,
+            );
             const streamResult = await requestChatCompletion(continuationApiMessages, {
               includeTools: false,
               stream: true,
+              onDelta: streamGate.push,
             });
             throwIfChatAborted(abortSignal);
-            rawRoundContent = streamResult.content;
+            reconciledContinuation = streamGate.finish(streamResult.content);
             roundReasoning = streamResult.reasoning;
             lastFinishReason = streamResult.finishReason;
           } else {
@@ -17598,18 +17707,20 @@ export function App() {
               stream: false,
             });
             const assistantMessage = result.payload?.choices?.[0]?.message;
-            rawRoundContent =
+            const rawRoundContent =
               getChatApiMessageText(assistantMessage) || result.payload?.output_text || "";
             roundReasoning =
               getChatApiMessageReasoning(assistantMessage) || result.reasoning || "";
             lastFinishReason = result.finishReason;
+            reconciledContinuation = reconcileChatContinuation(
+              currentExistingContent,
+              rawRoundContent,
+            );
+            if (!reconciledContinuation.restarted && reconciledContinuation.content) {
+              appendStreamingAssistant(reconciledContinuation.content);
+            }
           }
 
-          const currentExistingContent = `${continuationTargetMessage.content}${assistantContent}`;
-          const reconciledContinuation = reconcileChatContinuation(
-            currentExistingContent,
-            rawRoundContent,
-          );
           if (reconciledContinuation.restarted) {
             restartRetryCount += 1;
             if (restartRetryCount >= 3) {
@@ -17628,21 +17739,6 @@ export function App() {
 
           const roundContent = reconciledContinuation.content;
           if (!roundContent) break;
-          if (chatStreamEnabled) {
-            const assistantWriter = createStreamingWordWriter(
-              appendStreamingAssistant,
-              abortSignal,
-            );
-            try {
-              assistantWriter.push(roundContent);
-              await assistantWriter.finish();
-              throwIfChatAborted(abortSignal);
-            } finally {
-              assistantWriter.cancel();
-            }
-          } else {
-            appendStreamingAssistant(roundContent);
-          }
           if (roundReasoning) appendStreamingAssistantReasoning(roundReasoning);
           assistantContent += roundContent;
           continuationRound += 1;
@@ -18028,6 +18124,15 @@ export function App() {
       }
       return finalAssistantMessage;
     } catch (error) {
+      if (continuationTargetMessage) {
+        commitChatMessages((current) =>
+          current.map((message) =>
+            message.id === continuationTargetMessage.id
+              ? { ...message, renderAsPlainText: false }
+              : message,
+          ),
+        );
+      }
       if (isChatAbortError(error)) {
         if (streamingAssistantInserted && assistantMessageId) {
           commitChatMessages((current) =>
