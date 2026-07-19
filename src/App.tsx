@@ -449,6 +449,14 @@ const BUILT_IN_SYSTEM_PROMPT_IDS = {
   actionOptions: "8c9d9112-9007-4ebd-a3a8-7fb4f23557da",
 } as const;
 
+const CHAT_CONTINUATION_SYSTEM_PROMPT = [
+  "你正在续写对话中最后一条因输出长度限制而被截断的 assistant 回复。",
+  "必须从该回复最后一个字符之后直接继续，只输出尚未输出的后续内容。",
+  "严禁复述、改写、纠正、概括或引用已经存在的内容，也不要添加“续写”“继续”等说明性前缀。",
+  "保持原回复的语言、语气、结构和 Markdown 格式；补完剩余内容后自然结束。",
+].join("\n");
+const MAX_CHAT_CONTINUATION_ROUNDS = 12;
+
 const BUILT_IN_SYSTEM_PROMPTS: SystemPromptProfile[] = [
   {
     id: BUILT_IN_SYSTEM_PROMPT_IDS.wechat,
@@ -7796,6 +7804,7 @@ function extractStreamContent(payload: unknown): {
   content: string;
   reasoning: string;
   mode: "delta" | "cumulative";
+  finishReason?: string;
   toolCallDeltas?: ChatToolCallDelta[];
   toolCalls?: ChatToolCall[];
 } {
@@ -7810,9 +7819,13 @@ function extractStreamContent(payload: unknown): {
         tool_calls?: ChatToolCallDelta[];
       };
       message?: ChatApiMessage;
+      finish_reason?: unknown;
     }>;
     output_text?: string;
   };
+  const rawFinishReason = streamPayload.choices?.[0]?.finish_reason;
+  const finishReason =
+    typeof rawFinishReason === "string" ? rawFinishReason.trim() : "";
 
   const deltaContent = streamPayload.choices?.[0]?.delta?.content;
   const deltaToolCalls = streamPayload.choices?.[0]?.delta?.tool_calls ?? [];
@@ -7831,6 +7844,7 @@ function extractStreamContent(payload: unknown): {
       content: deltaContent ?? "",
       reasoning: deltaReasoning,
       mode: "delta",
+      ...(finishReason ? { finishReason } : {}),
       ...(deltaToolCalls.length > 0 ? { toolCallDeltas: deltaToolCalls } : {}),
     };
   }
@@ -7848,11 +7862,23 @@ function extractStreamContent(payload: unknown): {
       content: cumulativeContent ?? "",
       reasoning: cumulativeReasoning,
       mode: "cumulative",
+      ...(finishReason ? { finishReason } : {}),
       ...(message?.tool_calls?.length ? { toolCalls: message.tool_calls } : {}),
     };
   }
 
-  return { content: "", reasoning: "", mode: "delta" };
+  return {
+    content: "",
+    reasoning: "",
+    mode: "delta",
+    ...(finishReason ? { finishReason } : {}),
+  };
+}
+
+function isTruncatedChatFinishReason(finishReason?: string) {
+  return /^(length|max_tokens|max_output_tokens|token_limit)$/i.test(
+    finishReason?.trim() ?? "",
+  );
 }
 
 function createChatAbortError() {
@@ -8038,6 +8064,7 @@ async function readChatStream(
       content: streamContent.content,
       reasoning: streamContent.reasoning,
       toolCalls: streamContent.toolCalls ?? [],
+      finishReason: streamContent.finishReason ?? "",
     };
   }
 
@@ -8048,6 +8075,7 @@ async function readChatStream(
   let buffer = "";
   let fullContent = "";
   let fullReasoning = "";
+  let finishReason = "";
   const toolCallsByIndex = new Map<number, ChatToolCall>();
 
   const applyToolCallDeltas = (deltas: ChatToolCallDelta[]) => {
@@ -8098,6 +8126,7 @@ async function readChatStream(
 
         try {
           const streamContent = extractStreamContent(JSON.parse(data));
+          if (streamContent.finishReason) finishReason = streamContent.finishReason;
           if (streamContent.toolCallDeltas) {
             applyToolCallDeltas(streamContent.toolCallDeltas);
           }
@@ -8141,6 +8170,7 @@ async function readChatStream(
   return {
     content: fullContent,
     reasoning: fullReasoning,
+    finishReason,
     toolCalls: Array.from(toolCallsByIndex.entries())
       .sort(([left], [right]) => left - right)
       .map(([, toolCall]) => toolCall)
@@ -14850,7 +14880,7 @@ export function App() {
     setChatMessageMenu({
       messageId,
       x: clamp(event.clientX, 8, window.innerWidth - 180),
-      y: clamp(event.clientY, 8, window.innerHeight - 92),
+      y: clamp(event.clientY, 8, Math.max(8, window.innerHeight - 128)),
     });
   };
 
@@ -17013,8 +17043,20 @@ export function App() {
       multiAgentAutoStopEnabled?: boolean;
       multiAgentStopCondition?: string;
       generationAfterCommands?: boolean;
+      continuationMessageId?: string;
     } = {},
   ) => {
+    const continuationTargetMessage = options.continuationMessageId
+      ? nextMessages.find(
+          (message) =>
+            message.id === options.continuationMessageId && message.role === "assistant",
+        )
+      : undefined;
+    if (options.continuationMessageId && !continuationTargetMessage) {
+      setChatStatus({ status: "error", message: "找不到需要续写的 AI 消息。" });
+      return null;
+    }
+    const isContinuation = Boolean(continuationTargetMessage);
     const responseMode =
       options.responseMode ??
       (chatMode === "ai" ? "ai" : chatMode === "roleplay" ? "roleplay" : "persona");
@@ -17039,6 +17081,10 @@ export function App() {
       });
       return null;
     }
+    if (isContinuation && isImageGenerationRequest) {
+      setChatStatus({ status: "error", message: "图像生成模型不支持续写文本消息。" });
+      return null;
+    }
 
     const abortController = beginChatGeneration();
     const abortSignal = abortController.signal;
@@ -17052,7 +17098,9 @@ export function App() {
         ? "quiet"
         : options.multiAgentIndex !== undefined
           ? "normal"
-          : "regenerate";
+          : isContinuation
+            ? "normal"
+            : "regenerate";
       await emitTavernEvent(
         TAVERN_EVENTS.GENERATION_STARTED,
         generationType,
@@ -17066,7 +17114,9 @@ export function App() {
       );
       setChatStatus({ status: "loading", message: options.statusMessage ?? "正在重新生成回复..." });
       const requestMcpTools =
-        enabledMcpServers.length > 0 ? await refreshMcpTools({ silent: true }) : [];
+        !isContinuation && enabledMcpServers.length > 0
+          ? await refreshMcpTools({ silent: true })
+          : [];
       throwIfChatAborted(abortSignal);
       const imageRecognitionMcpTool = findImageRecognitionMcpTool(requestMcpTools);
       const hasImageRecognitionMcp = Boolean(imageRecognitionMcpTool);
@@ -17087,7 +17137,9 @@ export function App() {
         (!useImageRecognitionMcp && canProviderReceiveImageUrl(requestProvider, requestModelId));
       const availableChatTools = isImageGenerationRequest
         ? []
-        : getAvailableChatToolDefinitions(
+        : isContinuation
+          ? []
+          : getAvailableChatToolDefinitions(
             requestMcpTools,
             options.exposeHeartbeatTools,
             false,
@@ -17244,6 +17296,7 @@ export function App() {
         mcpToolsSystemPrompt,
         chatChoiceSystemPrompt,
         heartbeatSystemPrompt,
+        isContinuation ? CHAT_CONTINUATION_SYSTEM_PROMPT : "",
       ]
         .filter(Boolean)
         .join("\n\n");
@@ -17297,7 +17350,8 @@ export function App() {
       let pendingMcpObservationPrompt = "";
       let pendingMcpObservationRetries = 0;
       let pendingMcpObservationPromptSent = false;
-      assistantMessageId = crypto.randomUUID();
+      let continuationReachedLimit = false;
+      assistantMessageId = continuationTargetMessage?.id ?? crypto.randomUUID();
       const requestChatCompletion = async (messages: ChatApiMessage[], options: {
         includeTools: boolean;
         stream: boolean;
@@ -17350,13 +17404,14 @@ export function App() {
             content: streamResult.content,
             reasoning: streamResult.reasoning,
             toolCalls: streamResult.toolCalls,
+            finishReason: streamResult.finishReason,
           };
         }
 
         throwIfChatAborted(abortSignal);
         const payload = (await response.json()) as {
           error?: string | { message?: string };
-          choices?: Array<{ message?: ChatApiMessage }>;
+          choices?: Array<{ message?: ChatApiMessage; finish_reason?: string }>;
           output_text?: string;
         };
         throwIfChatAborted(abortSignal);
@@ -17371,6 +17426,7 @@ export function App() {
           content: "",
           reasoning: getChatCompletionPayloadReasoning(payload),
           toolCalls: [] as ChatToolCall[],
+          finishReason: payload.choices?.[0]?.finish_reason ?? "",
         };
       };
       const appendStreamingAssistant = (delta: string) => {
@@ -17393,7 +17449,93 @@ export function App() {
         );
       };
 
-      if (isImageGenerationRequest) {
+      if (continuationTargetMessage) {
+        streamingAssistantInserted = true;
+        setChatStatus({
+          status: "loading",
+          message: options.streamingStatusMessage ?? "正在续写当前回复...",
+        });
+        const baseContinuationApiMessages = apiMessages;
+        let continuationApiMessages = baseContinuationApiMessages;
+        let lastFinishReason = "";
+
+        const buildNextContinuationApiMessages = (continuation: string) => {
+          const nextApiMessages = baseContinuationApiMessages.map((message) => ({ ...message }));
+          let targetIndex = -1;
+          for (let index = nextApiMessages.length - 1; index >= 0; index -= 1) {
+            if (nextApiMessages[index].role !== "assistant") continue;
+            targetIndex = index;
+            break;
+          }
+          if (targetIndex < 0) return nextApiMessages;
+          const targetMessage = nextApiMessages[targetIndex];
+          nextApiMessages[targetIndex] = {
+            ...targetMessage,
+            content: `${getChatApiMessageText(targetMessage)}${continuation}`,
+          };
+          return nextApiMessages;
+        };
+
+        for (let round = 0; round < MAX_CHAT_CONTINUATION_ROUNDS; round += 1) {
+          throwIfChatAborted(abortSignal);
+          let roundContent = "";
+          let roundReasoning = "";
+
+          if (chatStreamEnabled) {
+            const assistantWriter = createStreamingWordWriter(
+              appendStreamingAssistant,
+              abortSignal,
+            );
+            const reasoningWriter = createStreamingWordWriter(
+              appendStreamingAssistantReasoning,
+              abortSignal,
+            );
+            try {
+              const streamResult = await requestChatCompletion(continuationApiMessages, {
+                includeTools: false,
+                stream: true,
+                onDelta: assistantWriter.push,
+                onReasoningDelta: reasoningWriter.push,
+              });
+              await Promise.all([assistantWriter.finish(), reasoningWriter.finish()]);
+              throwIfChatAborted(abortSignal);
+              roundContent = streamResult.content;
+              roundReasoning = streamResult.reasoning;
+              lastFinishReason = streamResult.finishReason;
+            } finally {
+              assistantWriter.cancel();
+              reasoningWriter.cancel();
+            }
+          } else {
+            const result = await requestChatCompletion(continuationApiMessages, {
+              includeTools: false,
+              stream: false,
+            });
+            const assistantMessage = result.payload?.choices?.[0]?.message;
+            roundContent =
+              getChatApiMessageText(assistantMessage) || result.payload?.output_text || "";
+            roundReasoning =
+              getChatApiMessageReasoning(assistantMessage) || result.reasoning || "";
+            lastFinishReason = result.finishReason;
+            if (roundContent) appendStreamingAssistant(roundContent);
+            if (roundReasoning) appendStreamingAssistantReasoning(roundReasoning);
+          }
+
+          if (!roundContent) break;
+          assistantContent += roundContent;
+          if (!isTruncatedChatFinishReason(lastFinishReason)) break;
+
+          if (round === MAX_CHAT_CONTINUATION_ROUNDS - 1) {
+            continuationReachedLimit = true;
+            break;
+          }
+          setChatStatus({
+            status: "loading",
+            message: `回复仍被截断，正在继续续写（第 ${round + 2} 次）...`,
+          });
+          continuationApiMessages = buildNextContinuationApiMessages(assistantContent);
+        }
+      } else if (isImageGenerationRequest) {
         setChatStatus({
           status: "loading",
           message: "正在生成图片...",
@@ -17678,18 +17820,39 @@ export function App() {
         throw new Error("响应里没有可显示的回复内容。");
       }
 
-      const finalAssistantMessage: ChatMessage = {
-        id: assistantMessageId,
-        role: "assistant",
-        content: assistantContent,
-        ...(Object.keys(assistantMessageVariables).length > 0
-          ? { variables: assistantMessageVariables }
-          : {}),
-        ...(assistantReasoning.trim() ? { reasoning: assistantReasoning.trim() } : {}),
-        ...(assistantChoiceRequest ? { choiceRequest: assistantChoiceRequest } : {}),
-        ...(assistantSender ? { sender: assistantSender } : {}),
-        createdAt: new Date().toISOString(),
-      };
+      const finalAssistantMessage: ChatMessage = continuationTargetMessage
+        ? {
+            ...continuationTargetMessage,
+            content: `${continuationTargetMessage.content}${assistantContent}`,
+            renderAsPlainText: false,
+            ...(Object.keys(assistantMessageVariables).length > 0
+              ? {
+                  variables: {
+                    ...(continuationTargetMessage.variables ?? {}),
+                    ...assistantMessageVariables,
+                  },
+                }
+              : {}),
+            ...(assistantReasoning.trim()
+              ? {
+                  reasoning: [continuationTargetMessage.reasoning, assistantReasoning.trim()]
+                    .filter(Boolean)
+                    .join("\n\n"),
+                }
+              : {}),
+          }
+        : {
+            id: assistantMessageId,
+            role: "assistant",
+            content: assistantContent,
+            ...(Object.keys(assistantMessageVariables).length > 0
+              ? { variables: assistantMessageVariables }
+              : {}),
+            ...(assistantReasoning.trim() ? { reasoning: assistantReasoning.trim() } : {}),
+            ...(assistantChoiceRequest ? { choiceRequest: assistantChoiceRequest } : {}),
+            ...(assistantSender ? { sender: assistantSender } : {}),
+            createdAt: new Date().toISOString(),
+          };
 
       if (streamingAssistantInserted) {
         commitChatMessages((current) =>
@@ -17715,15 +17878,31 @@ export function App() {
         });
       }
       setChatStatus({
-        status: "success",
-        message: assistantChoiceRequest
-          ? "AI 正在等待你的选择。"
-          : options.successMessage ?? "回复已重新生成。",
+        status: continuationReachedLimit ? "warning" : "success",
+        message: continuationReachedLimit
+          ? `已连续续写 ${MAX_CHAT_CONTINUATION_ROUNDS} 次，但上游仍报告长度截断。`
+          : assistantChoiceRequest
+            ? "AI 正在等待你的选择。"
+            : options.successMessage ?? "回复已重新生成。",
       });
-      await emitTavernMessageEventNow(
-        TAVERN_EVENTS.MESSAGE_RECEIVED,
-        finalAssistantMessage.id,
-      );
+      if (continuationTargetMessage) {
+        const messageIndex = chatMessagesRef.current.findIndex(
+          (message) => message.id === finalAssistantMessage.id,
+        );
+        if (messageIndex >= 0) {
+          await emitTavernEvent(TAVERN_EVENTS.MESSAGE_UPDATED, messageIndex);
+          await emitTavernEvent(TAVERN_EVENTS.MESSAGE_RENDERED, messageIndex);
+          await emitTavernEvent(
+            TAVERN_EVENTS.CHAT_CHANGED,
+            activeChatSessionIdRef.current,
+          );
+        }
+      } else {
+        await emitTavernMessageEventNow(
+          TAVERN_EVENTS.MESSAGE_RECEIVED,
+          finalAssistantMessage.id,
+        );
+      }
       return finalAssistantMessage;
     } catch (error) {
       if (isChatAbortError(error)) {
@@ -17739,16 +17918,18 @@ export function App() {
       }
 
       const message = error instanceof Error ? error.message : "调用失败。";
-      commitChatMessages((current) => [
-        ...current,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: `调用失败：${message}`,
-          ...(assistantSender ? { sender: assistantSender } : {}),
-          createdAt: new Date().toISOString(),
-        },
-      ]);
+      if (!continuationTargetMessage) {
+        commitChatMessages((current) => [
+          ...current,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: `调用失败：${message}`,
+            ...(assistantSender ? { sender: assistantSender } : {}),
+            createdAt: new Date().toISOString(),
+          },
+        ]);
+      }
       setChatStatus({
         status: "error",
         message: "调用失败。请检查本地服务、供应商地址、密钥、模型 ID 或上游限流状态。",
@@ -19370,6 +19551,53 @@ export function App() {
   const cancelEditingChatMessage = () => {
     setEditingChatMessage(null);
     setChatStatus({ status: "idle", message: "" });
+  };
+
+  const continueAssistantMessage = async (messageId: string) => {
+    if (chatStatus.status === "loading") return;
+
+    const messageIndex = chatMessagesRef.current.findIndex(
+      (message) => message.id === messageId,
+    );
+    const message = chatMessagesRef.current[messageIndex];
+    if (!message || message.role !== "assistant" || !message.content) return;
+
+    setChatMessageMenu(null);
+    setEditingChatMessage(null);
+    const messagesForContinuation = chatMessagesRef.current.slice(0, messageIndex + 1);
+    const latestUserMessage = [...messagesForContinuation]
+      .reverse()
+      .find((candidate) => candidate.role === "user");
+    const requestSender = normalizeChatSenderIdentity(latestUserMessage?.sender, personas);
+    const responderPersona = getAssistantMessagePersona(
+      message,
+      personas,
+      chatMode === "persona" ? activePersona : undefined,
+    );
+    const responseMode: "ai" | "persona" | "roleplay" = responderPersona
+      ? "persona"
+      : activeSessionRoleplayCard
+        ? "roleplay"
+        : "ai";
+    const multiAgentRequestConfig =
+      chatMode === "multi" && responderPersona
+        ? getMultiAgentRequestConfig(responderPersona.id)
+        : undefined;
+
+    await generateAssistantForMessages(messagesForContinuation, requestSender, {
+      responseMode,
+      ...(responderPersona ? { responderPersona } : {}),
+      ...(multiAgentRequestConfig
+        ? {
+            requestProvider: multiAgentRequestConfig.provider,
+            requestModelId: multiAgentRequestConfig.modelId,
+          }
+        : {}),
+      continuationMessageId: message.id,
+      statusMessage: "正在准备续写当前回复...",
+      streamingStatusMessage: "正在续写当前回复...",
+      successMessage: "续写已完成。",
+    });
   };
 
   const saveEditedAssistantMessage = () => {
@@ -25506,6 +25734,16 @@ export function App() {
                   onClick={(event) => event.stopPropagation()}
                   onContextMenu={(event) => event.preventDefault()}
                 >
+                  {chatMessageMenuMessage.role === "assistant" && (
+                    <button
+                      type="button"
+                      disabled={chatStatus.status === "loading"}
+                      onClick={() => void continueAssistantMessage(chatMessageMenuMessage.id)}
+                    >
+                      <RefreshCw size={14} />
+                      续写
+                    </button>
+                  )}
                   <button
                     type="button"
                     disabled={chatStatus.status === "loading"}
