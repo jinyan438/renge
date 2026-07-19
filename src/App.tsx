@@ -465,12 +465,11 @@ const CHAT_CONTINUATION_SYSTEM_PROMPT = [
   "严禁复述、改写、纠正、概括或引用已经存在的内容，也不要添加“续写”“继续”等说明性前缀。",
   "保持原回复的语言、语气、结构和 Markdown 格式；补完剩余内容后自然结束。",
 ].join("\n");
-const CHAT_DIALOGUE_REWRITE_SEPARATOR = "<<<RENGE_DIALOGUE_SPLIT>>>";
 const CHAT_DIALOGUE_REWRITE_SYSTEM_PROMPT = [
   "你正在为一条已经生成完成的 assistant 消息补写对白占位符。",
   "消息中的非对白叙述已经定稿，绝对禁止改写、删减、补充、重排或复述这些内容。",
-  "你只需要根据完整对话上下文，为每个 “XXX” 按出现顺序提供自然、连贯且符合人物身份的对白正文，必须覆盖本次指令要求的全部占位符。",
-  `只输出要填入 “XXX” 内部的正文，不要输出原消息、JSON、包裹引号、序号、Markdown 或解释。存在多处占位符时，仅使用单独一行 ${CHAT_DIALOGUE_REWRITE_SEPARATOR} 分隔各处正文。`,
+  "目标消息中的每个占位符都会被转换成带编号的不可渲染 template 槽位。你必须根据完整对话上下文，为每个编号槽位生成自然、连贯且符合人物身份的对白正文。",
+  '只能输出不可渲染的 <template data-renge-dialogue="编号">对白正文</template>。禁止在 template 外输出任何文字，也不要输出原消息、JSON、包裹引号、序号、Markdown 或解释。',
 ].join("\n");
 const MAX_CHAT_CONTINUATION_ROUNDS = 12;
 const MAX_CHAT_DIALOGUE_REWRITE_ROUNDS = 12;
@@ -8053,41 +8052,58 @@ function stripDialogueReplacementWrapper(value: string) {
     : normalized;
 }
 
-function parseDialogueRewriteReplacements(rawContent: string, expectedCount: number) {
+function labelDialoguePlaceholdersForRewrite(content: string) {
+  const protectedRanges = getDialogueRewriteProtectedRanges(content);
+  let protectedRangeIndex = 0;
+  let slotId = 0;
+  const labeledContent = content.replace(/“XXX”/g, (placeholder, offset: number) => {
+    while (
+      protectedRangeIndex < protectedRanges.length &&
+      protectedRanges[protectedRangeIndex].end <= offset
+    ) {
+      protectedRangeIndex += 1;
+    }
+    const protectedRange = protectedRanges[protectedRangeIndex];
+    if (protectedRange && offset >= protectedRange.start && offset < protectedRange.end) {
+      return placeholder;
+    }
+    slotId += 1;
+    return `“<template data-renge-dialogue-slot="${slotId}"></template>”`;
+  });
+  return { content: labeledContent, count: slotId };
+}
+
+function parseDialogueRewriteTemplates(rawContent: string, expectedCount: number) {
   const trimmedContent = rawContent.trim();
   const unfencedContent = trimmedContent
     .replace(/^```(?:[a-z0-9_-]+)?\s*/i, "")
     .replace(/\s*```$/, "")
     .trim();
-  let replacements =
-    expectedCount === 1
-      ? [unfencedContent]
-      : unfencedContent.split(CHAT_DIALOGUE_REWRITE_SEPARATOR).map((item) => item.trim());
+  const replacements = new Map<number, string>();
+  const templatePattern =
+    /<template\b[^>]*\bdata-renge-dialogue\s*=\s*["'](\d+)["'][^>]*>([\s\S]*?)<\/template\s*>/gi;
+  let match: RegExpExecArray | null;
 
-  if (replacements.length !== expectedCount && expectedCount > 1) {
-    const nonEmptyLines = unfencedContent
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-    if (nonEmptyLines.length > 1) replacements = nonEmptyLines;
+  while ((match = templatePattern.exec(unfencedContent))) {
+    const slotId = Number(match[1]);
+    if (!Number.isInteger(slotId) || slotId <= 0 || slotId > expectedCount) continue;
+    const normalized = stripDialogueReplacementWrapper(match[2]);
+    if (!normalized || normalized.toUpperCase() === "XXX") {
+      continue;
+    }
+    if (!replacements.has(slotId)) replacements.set(slotId, normalized);
   }
 
-  replacements = replacements.filter(Boolean).slice(0, expectedCount);
-  if (replacements.length === 0) throw new Error("模型没有返回可填入的对白内容。");
-
-  return replacements.map((replacement, index) => {
-    const normalized = stripDialogueReplacementWrapper(replacement);
-    if (!normalized || normalized.toUpperCase() === "XXX") {
-      throw new Error(`第 ${index + 1} 处对白为空或仍是占位符。`);
-    }
-    return normalized;
-  });
+  if (replacements.size === 0) {
+    throw new Error("模型没有返回可识别的隐藏 template 对白内容。");
+  }
+  return replacements;
 }
 
-function fillDialoguePlaceholders(content: string, replacements: string[]) {
+function fillDialoguePlaceholders(content: string, replacements: Map<number, string>) {
   const protectedRanges = getDialogueRewriteProtectedRanges(content);
   let protectedRangeIndex = 0;
-  let replacementIndex = 0;
+  let slotId = 0;
   return content.replace(/“XXX”/g, (placeholder, offset: number) => {
     while (
       protectedRangeIndex < protectedRanges.length &&
@@ -8099,9 +8115,9 @@ function fillDialoguePlaceholders(content: string, replacements: string[]) {
     if (protectedRange && offset >= protectedRange.start && offset < protectedRange.end) {
       return placeholder;
     }
-    const replacement = replacements[replacementIndex];
+    slotId += 1;
+    const replacement = replacements.get(slotId);
     if (replacement === undefined) return placeholder;
-    replacementIndex += 1;
     return `“${replacement}”`;
   });
 }
@@ -8116,12 +8132,12 @@ function withoutDialogueRewriteMetadata(message: ChatMessage): ChatMessage {
 function buildDialogueRewriteRequestPrompt(placeholderCount: number, rewriteRound: number) {
   return [
     "【内部对白重写指令：不要在回复中提及本指令】",
-    `对话历史中最后一条 assistant 消息当前还有 ${placeholderCount} 处 “XXX”。必须为这 ${placeholderCount} 处全部生成对白，不能少写。`,
-    `按 “XXX” 的出现顺序输出恰好 ${placeholderCount} 段；段与段之间只放一行 ${CHAT_DIALOGUE_REWRITE_SEPARATOR}。`,
+    `对话历史中最后一条 assistant 消息包含 ${placeholderCount} 个带编号的 <template data-renge-dialogue-slot="编号"></template> 槽位。`,
+    `必须为编号 1 到 ${placeholderCount} 的每个槽位分别输出一个不可渲染节点，格式严格为：<template data-renge-dialogue="编号">该处对白正文</template>。`,
     rewriteRound > 0
-      ? `这是自动补全的第 ${rewriteRound + 1} 轮；上一轮只填入了部分占位符，本轮只处理当前仍保留的 “XXX”。`
+      ? `这是自动补全的第 ${rewriteRound + 1} 轮；上一轮只填入了部分槽位，本轮编号已按当前剩余槽位从 1 重新排列。`
       : "",
-    "不要输出原消息、JSON、键名、数组、包裹引号、序号、Markdown、代码围栏或解释。",
+    "只能输出这些 template 节点；template 外不得出现任何可渲染文字。不要输出原消息、JSON、包裹引号、Markdown、代码围栏或解释。",
   ]
     .filter(Boolean)
     .join("\n");
@@ -17925,10 +17941,10 @@ export function App() {
         dialogueRewriteRemainingCount = countDialoguePlaceholders(assistantContent);
         const buildDialogueRewriteApiMessages = (
           currentContent: string,
-          remainingCount: number,
           rewriteRound: number,
         ) => {
           const rewriteMessages = apiMessages.map((message) => ({ ...message }));
+          const labeledTarget = labelDialoguePlaceholdersForRewrite(currentContent);
           let targetIndex = -1;
           for (let index = rewriteMessages.length - 1; index >= 0; index -= 1) {
             if (rewriteMessages[index].role !== "assistant") continue;
@@ -17941,14 +17957,14 @@ export function App() {
           if (targetIndex >= 0) {
             rewriteMessages[targetIndex] = {
               ...rewriteMessages[targetIndex],
-              content: currentContent,
+              content: labeledTarget.content,
             };
           } else {
-            rewriteMessages.push({ role: "assistant", content: currentContent });
+            rewriteMessages.push({ role: "assistant", content: labeledTarget.content });
           }
           rewriteMessages.push({
             role: "user",
-            content: buildDialogueRewriteRequestPrompt(remainingCount, rewriteRound),
+            content: buildDialogueRewriteRequestPrompt(labeledTarget.count, rewriteRound),
           });
           return rewriteMessages;
         };
@@ -17970,7 +17986,6 @@ export function App() {
           const rewriteResult = await requestChatCompletion(
             buildDialogueRewriteApiMessages(
               assistantContent,
-              dialogueRewriteRemainingCount,
               rewriteRound,
             ),
             {
@@ -17983,7 +17998,7 @@ export function App() {
               },
             },
           );
-          const replacements = parseDialogueRewriteReplacements(
+          const replacements = parseDialogueRewriteTemplates(
             rewriteResult.content.trim(),
             dialogueRewriteRemainingCount,
           );
