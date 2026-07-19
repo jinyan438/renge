@@ -26413,7 +26413,7 @@ export function App() {
                               {composerModelMenuSection === "provider"
                                 ? "供应商"
                                 : composerModelMenuSection === "model"
-                                  ? "模型"
+                                  ? `模型 · ${modelOptions.length}`
                                   : "思考强度"}
                             </header>
                             <div>
