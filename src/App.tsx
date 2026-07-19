@@ -8342,6 +8342,7 @@ function createStreamingWordWriter(
   let cancelled = false;
   let finishPromise: Promise<void> | null = null;
   let resolveFinish: (() => void) | null = null;
+  let removeActivityListeners: () => void = () => undefined;
 
   const segmentText = (text: string): StreamingWordSegment[] => {
     if (segmenter) {
@@ -8361,13 +8362,33 @@ function createStreamingWordWriter(
 
   const resolveWhenIdle = () => {
     if (!finished || timerId !== undefined || queuedWords.length > 0 || pendingText) return;
+    removeActivityListeners();
+    signal?.removeEventListener("abort", cancel);
     resolveFinish?.();
     resolveFinish = null;
+  };
+
+  const shouldAnimateWords = () =>
+    typeof document === "undefined" ||
+    (document.visibilityState === "visible" && document.hasFocus());
+
+  const flushImmediately = () => {
+    if (timerId !== undefined) window.clearTimeout(timerId);
+    timerId = undefined;
+    const content = `${queuedWords.join("")}${pendingText}`;
+    queuedWords = [];
+    pendingText = "";
+    if (content) onWord(content);
+    resolveWhenIdle();
   };
 
   const scheduleNextWord = () => {
     if (cancelled || timerId !== undefined || queuedWords.length === 0) {
       resolveWhenIdle();
+      return;
+    }
+    if (!shouldAnimateWords()) {
+      flushImmediately();
       return;
     }
 
@@ -8382,6 +8403,10 @@ function createStreamingWordWriter(
 
   const enqueueStableWords = (flushAll: boolean) => {
     if (!pendingText) return;
+    if (!shouldAnimateWords()) {
+      flushImmediately();
+      return;
+    }
     const segments = segmentText(pendingText);
     const lastSegment = segments.at(-1);
     const stableEnd =
@@ -8408,6 +8433,23 @@ function createStreamingWordWriter(
     scheduleNextWord();
   };
 
+  if (typeof document !== "undefined") {
+    const handleActivityChange = () => {
+      if (cancelled) return;
+      if (shouldAnimateWords()) scheduleNextWord();
+      else flushImmediately();
+    };
+    document.addEventListener("visibilitychange", handleActivityChange);
+    window.addEventListener("focus", handleActivityChange);
+    window.addEventListener("blur", handleActivityChange);
+    removeActivityListeners = () => {
+      document.removeEventListener("visibilitychange", handleActivityChange);
+      window.removeEventListener("focus", handleActivityChange);
+      window.removeEventListener("blur", handleActivityChange);
+      removeActivityListeners = () => undefined;
+    };
+  }
+
   const cancel = () => {
     if (cancelled) return;
     cancelled = true;
@@ -8415,6 +8457,7 @@ function createStreamingWordWriter(
     timerId = undefined;
     queuedWords = [];
     pendingText = "";
+    removeActivityListeners();
     resolveFinish?.();
     resolveFinish = null;
     signal?.removeEventListener("abort", cancel);
@@ -8435,6 +8478,7 @@ function createStreamingWordWriter(
         enqueueStableWords(true);
       }
       if (timerId === undefined && queuedWords.length === 0 && !pendingText) {
+        removeActivityListeners();
         signal?.removeEventListener("abort", cancel);
         return Promise.resolve();
       }
