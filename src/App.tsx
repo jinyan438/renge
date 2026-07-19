@@ -469,10 +469,11 @@ const CHAT_DIALOGUE_REWRITE_SEPARATOR = "<<<RENGE_DIALOGUE_SPLIT>>>";
 const CHAT_DIALOGUE_REWRITE_SYSTEM_PROMPT = [
   "你正在为一条已经生成完成的 assistant 消息补写对白占位符。",
   "消息中的非对白叙述已经定稿，绝对禁止改写、删减、补充、重排或复述这些内容。",
-  "你只需要根据完整对话上下文，为每个 “XXX” 按出现顺序提供自然、连贯且符合人物身份的对白正文。",
+  "你只需要根据完整对话上下文，为每个 “XXX” 按出现顺序提供自然、连贯且符合人物身份的对白正文，必须覆盖本次指令要求的全部占位符。",
   `只输出要填入 “XXX” 内部的正文，不要输出原消息、JSON、包裹引号、序号、Markdown 或解释。存在多处占位符时，仅使用单独一行 ${CHAT_DIALOGUE_REWRITE_SEPARATOR} 分隔各处正文。`,
 ].join("\n");
 const MAX_CHAT_CONTINUATION_ROUNDS = 12;
+const MAX_CHAT_DIALOGUE_REWRITE_ROUNDS = 12;
 
 const BUILT_IN_SYSTEM_PROMPTS: SystemPromptProfile[] = [
   {
@@ -8068,7 +8069,7 @@ function parseDialogueRewriteReplacements(rawContent: string, expectedCount: num
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean);
-    if (nonEmptyLines.length === expectedCount) replacements = nonEmptyLines;
+    if (nonEmptyLines.length > 1) replacements = nonEmptyLines;
   }
 
   replacements = replacements.filter(Boolean).slice(0, expectedCount);
@@ -8112,13 +8113,18 @@ function withoutDialogueRewriteMetadata(message: ChatMessage): ChatMessage {
   return messageWithoutMetadata;
 }
 
-function buildDialogueRewriteRequestPrompt() {
+function buildDialogueRewriteRequestPrompt(placeholderCount: number, rewriteRound: number) {
   return [
     "【内部对白重写指令：不要在回复中提及本指令】",
-    "只生成对话历史中最后一条 assistant 消息里各处 “XXX” 内部要填入的对白。",
-    `按 “XXX” 的出现顺序输出；存在多段时，段与段之间只放一行 ${CHAT_DIALOGUE_REWRITE_SEPARATOR}。`,
+    `对话历史中最后一条 assistant 消息当前还有 ${placeholderCount} 处 “XXX”。必须为这 ${placeholderCount} 处全部生成对白，不能少写。`,
+    `按 “XXX” 的出现顺序输出恰好 ${placeholderCount} 段；段与段之间只放一行 ${CHAT_DIALOGUE_REWRITE_SEPARATOR}。`,
+    rewriteRound > 0
+      ? `这是自动补全的第 ${rewriteRound + 1} 轮；上一轮只填入了部分占位符，本轮只处理当前仍保留的 “XXX”。`
+      : "",
     "不要输出原消息、JSON、键名、数组、包裹引号、序号、Markdown、代码围栏或解释。",
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function looksLikeChatPresetTimeHeader(line: string) {
@@ -17795,12 +17801,6 @@ export function App() {
       const apiMessages = await applyTavernExtensionPromptFilters(preparedApiMessages, {
         generationAfterCommands: options.generationAfterCommands,
       });
-      if (dialogueRewriteTargetMessage) {
-        apiMessages.push({
-          role: "user",
-          content: buildDialogueRewriteRequestPrompt(),
-        });
-      }
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);
@@ -17819,13 +17819,13 @@ export function App() {
       let pendingMcpObservationPromptSent = false;
       let continuationReachedLimit = false;
       let dialogueRewriteRemainingCount = 0;
+      let dialogueRewriteReachedLimit = false;
       assistantMessageId =
         dialogueRewriteTargetMessage?.id ?? continuationTargetMessage?.id ?? crypto.randomUUID();
       const requestChatCompletion = async (messages: ChatApiMessage[], options: {
         includeTools: boolean;
         stream: boolean;
         toolChoice?: "auto";
-        maxTokens?: number;
         onDelta?: (delta: string) => void;
         onReasoningDelta?: (delta: string) => void;
       }) => {
@@ -17853,16 +17853,10 @@ export function App() {
                     tool_choice: options.toolChoice ?? "auto",
                   }
                 : {}),
-              ...(isDialogueRewrite
-                ? {
-                    temperature: 0.7,
-                    top_p: 1,
-                  }
-                : activeChatPresetRequestParameters ?? {
-                    temperature: responseMode === "persona" ? 0.72 : 0.6,
-                  }),
-              ...(options.maxTokens ? { max_tokens: options.maxTokens } : {}),
-              ...(isDialogueRewrite ? {} : buildProviderReasoningRequest(requestProvider)),
+              ...(activeChatPresetRequestParameters ?? {
+                temperature: responseMode === "persona" ? 0.72 : 0.6,
+              }),
+              ...buildProviderReasoningRequest(requestProvider),
               stream: options.stream,
             },
           }),
@@ -17927,34 +17921,80 @@ export function App() {
 
       if (dialogueRewriteTargetMessage) {
         streamingAssistantInserted = true;
-        setChatStatus({
-          status: "loading",
-          message: options.streamingStatusMessage ?? "正在根据上下文重写对白...",
-        });
-        let rewriteStreamStarted = false;
-        const rewriteResult = await requestChatCompletion(apiMessages, {
-          includeTools: false,
-          stream: true,
-          maxTokens: Math.min(
-            1536,
-            Math.max(256, Math.min(dialogueRewritePlaceholderCount, 8) * 192),
-          ),
-          onDelta: () => {
-            if (rewriteStreamStarted) return;
-            rewriteStreamStarted = true;
-            setChatStatus({ status: "loading", message: "已收到对白内容，正在继续填充..." });
-          },
-        });
-        const rewriteResponse = rewriteResult.content.trim();
-        const replacements = parseDialogueRewriteReplacements(
-          rewriteResponse,
-          dialogueRewritePlaceholderCount,
-        );
-        assistantContent = fillDialoguePlaceholders(
-          dialogueRewriteTargetMessage.content,
-          replacements,
-        );
+        assistantContent = dialogueRewriteTargetMessage.content;
         dialogueRewriteRemainingCount = countDialoguePlaceholders(assistantContent);
+        const buildDialogueRewriteApiMessages = (
+          currentContent: string,
+          remainingCount: number,
+          rewriteRound: number,
+        ) => {
+          const rewriteMessages = apiMessages.map((message) => ({ ...message }));
+          let targetIndex = -1;
+          for (let index = rewriteMessages.length - 1; index >= 0; index -= 1) {
+            if (rewriteMessages[index].role !== "assistant") continue;
+            if (countDialoguePlaceholders(getChatApiMessageText(rewriteMessages[index])) <= 0) {
+              continue;
+            }
+            targetIndex = index;
+            break;
+          }
+          if (targetIndex >= 0) {
+            rewriteMessages[targetIndex] = {
+              ...rewriteMessages[targetIndex],
+              content: currentContent,
+            };
+          } else {
+            rewriteMessages.push({ role: "assistant", content: currentContent });
+          }
+          rewriteMessages.push({
+            role: "user",
+            content: buildDialogueRewriteRequestPrompt(remainingCount, rewriteRound),
+          });
+          return rewriteMessages;
+        };
+
+        for (
+          let rewriteRound = 0;
+          rewriteRound < MAX_CHAT_DIALOGUE_REWRITE_ROUNDS &&
+          dialogueRewriteRemainingCount > 0;
+          rewriteRound += 1
+        ) {
+          setChatStatus({
+            status: "loading",
+            message:
+              rewriteRound === 0
+                ? options.streamingStatusMessage ?? "正在根据上下文重写对白..."
+                : `仍有 ${dialogueRewriteRemainingCount} 处对白待填充，正在继续请求（第 ${rewriteRound + 1} 轮）...`,
+          });
+          let rewriteStreamStarted = false;
+          const rewriteResult = await requestChatCompletion(
+            buildDialogueRewriteApiMessages(
+              assistantContent,
+              dialogueRewriteRemainingCount,
+              rewriteRound,
+            ),
+            {
+              includeTools: false,
+              stream: true,
+              onDelta: () => {
+                if (rewriteStreamStarted) return;
+                rewriteStreamStarted = true;
+                setChatStatus({ status: "loading", message: "已收到对白内容，正在填充..." });
+              },
+            },
+          );
+          const replacements = parseDialogueRewriteReplacements(
+            rewriteResult.content.trim(),
+            dialogueRewriteRemainingCount,
+          );
+          const previousRemainingCount = dialogueRewriteRemainingCount;
+          assistantContent = fillDialoguePlaceholders(assistantContent, replacements);
+          dialogueRewriteRemainingCount = countDialoguePlaceholders(assistantContent);
+          if (dialogueRewriteRemainingCount >= previousRemainingCount) {
+            throw new Error("模型没有填入任何新的对白内容。");
+          }
+        }
+        dialogueRewriteReachedLimit = dialogueRewriteRemainingCount > 0;
       } else if (continuationTargetMessage) {
         streamingAssistantInserted = true;
         commitChatMessages((current) =>
@@ -18456,12 +18496,15 @@ export function App() {
         });
       }
       setChatStatus({
-        status: continuationReachedLimit ? "warning" : "success",
+        status:
+          continuationReachedLimit || dialogueRewriteReachedLimit ? "warning" : "success",
         message: continuationReachedLimit
           ? `已连续续写 ${MAX_CHAT_CONTINUATION_ROUNDS} 次，但上游仍报告长度截断。`
-          : assistantChoiceRequest
-            ? "AI 正在等待你的选择。"
-            : options.successMessage ?? "回复已重新生成。",
+          : dialogueRewriteReachedLimit
+            ? `已自动重写 ${MAX_CHAT_DIALOGUE_REWRITE_ROUNDS} 轮，仍有 ${dialogueRewriteRemainingCount} 处对白待填充，可再次右键重写。`
+            : assistantChoiceRequest
+              ? "AI 正在等待你的选择。"
+              : options.successMessage ?? "回复已重新生成。",
       });
       if (continuationTargetMessage || dialogueRewriteTargetMessage) {
         const messageIndex = chatMessagesRef.current.findIndex(
