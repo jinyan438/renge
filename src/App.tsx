@@ -1038,6 +1038,43 @@ function buildProviderReasoningRequest(provider?: ModelProviderChannel) {
   };
 }
 
+function normalizeLocalChatTemplateMessages(
+  messages: ChatApiMessage[],
+  apiBaseUrl: string,
+  providerName = "",
+) {
+  let hostname = "";
+  try {
+    hostname = new URL(apiBaseUrl).hostname.toLowerCase();
+  } catch {
+    // Invalid URLs are handled by the provider request path.
+  }
+  const isLocalProvider =
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    /(?:^|\s)(?:local|本地)(?:\s|$)/i.test(providerName) ||
+    /lm[\s_-]*studio/i.test(`${providerName} ${apiBaseUrl}`);
+  if (!isLocalProvider) return messages;
+
+  const systemMessages = messages.filter((message) => message.role === "system");
+  if (
+    systemMessages.length === 0 ||
+    (systemMessages.length === 1 && messages[0]?.role === "system")
+  ) {
+    return messages;
+  }
+
+  const systemContent = systemMessages
+    .map((message) => getChatApiMessageText(message).trim())
+    .filter(Boolean)
+    .join("\n\n");
+  const nonSystemMessages = messages.filter((message) => message.role !== "system");
+  return systemContent
+    ? [{ role: "system" as const, content: systemContent }, ...nonSystemMessages]
+    : nonSystemMessages;
+}
+
 function createProviderChannel(name = "OpenAI Compatible"): ModelProviderChannel {
   const timestamp = new Date().toISOString();
   return {
@@ -18718,9 +18755,10 @@ export function App() {
         onReasoningDelta?: (delta: string) => void;
       }) => {
         throwIfChatAborted(abortSignal);
-        const requestMessages = substituteUserNicknameInApiMessages(
-          messages,
-          userProfile.nickname,
+        const requestMessages = normalizeLocalChatTemplateMessages(
+          substituteUserNicknameInApiMessages(messages, userProfile.nickname),
+          requestProvider.apiBaseUrl,
+          requestProvider.name,
         );
         const response = await fetch("/api/chat/completions", {
           method: "POST",
@@ -20045,9 +20083,10 @@ export function App() {
           ? undefined
           : normalizedConfig.tool_choice;
 
-      const requestMessages = substituteUserNicknameInApiMessages(
-        apiMessages,
-        userProfile.nickname,
+      const requestMessages = normalizeLocalChatTemplateMessages(
+        substituteUserNicknameInApiMessages(apiMessages, userProfile.nickname),
+        requestApiBaseUrl,
+        chatProvider?.name,
       );
       const response = await fetch("/api/chat/completions", {
         method: "POST",
@@ -20479,9 +20518,10 @@ export function App() {
         onReasoningDelta?: (delta: string) => void;
       }) => {
         throwIfChatAborted(abortSignal);
-        const requestMessages = substituteUserNicknameInApiMessages(
-          messages,
-          userProfile.nickname,
+        const requestMessages = normalizeLocalChatTemplateMessages(
+          substituteUserNicknameInApiMessages(messages, userProfile.nickname),
+          chatProvider.apiBaseUrl,
+          chatProvider.name,
         );
         const response = await fetch("/api/chat/completions", {
           method: "POST",
