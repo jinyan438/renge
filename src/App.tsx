@@ -60,6 +60,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { strFromU8, strToU8, unzip, zip } from "fflate";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
 import {
@@ -641,16 +642,20 @@ type RengeAppData = {
 };
 
 const COMPLETE_BACKUP_FORMAT = "renge-agent-complete-backup" as const;
-const COMPLETE_BACKUP_VERSION = 1 as const;
+const LEGACY_COMPLETE_BACKUP_VERSION = 1 as const;
+const COMPLETE_BACKUP_VERSION = 2 as const;
+const COMPLETE_BACKUP_MANIFEST_FILE = "backup.json";
+const COMPLETE_BACKUP_ASSET_PREFIX = "renge-backup-asset:";
 const RENGE_STORAGE_PREFIX = "renge";
 const APP_DATA_SAVE_DEBOUNCE_MS = 800;
 
 type RengeCompleteBackup = {
   format: typeof COMPLETE_BACKUP_FORMAT;
-  version: typeof COMPLETE_BACKUP_VERSION;
+  version: typeof LEGACY_COMPLETE_BACKUP_VERSION | typeof COMPLETE_BACKUP_VERSION;
   exportedAt: string;
   appData: RengeAppData;
   localStorage: Record<string, string>;
+  assets?: Record<string, { mimeType: string }>;
   desktopProjectPositions?: unknown;
 };
 
@@ -2024,11 +2029,11 @@ function compactAppDataForPersistentStore(
 ): RengeAppData {
   if (!window.rengeAndroid?.isAndroid || !characterCardsStored) return data;
   const characterCards = data.characterCards ?? [];
-  if (!characterCards.some((card) => Boolean(card.avatarDataUrl))) return data;
+  if (!characterCards.some((card) => card.avatarDataUrl.startsWith("data:image/"))) return data;
   return {
     ...data,
     characterCards: characterCards.map((card) =>
-      card.avatarDataUrl ? { ...card, avatarDataUrl: "" } : card,
+      card.avatarDataUrl.startsWith("data:image/") ? { ...card, avatarDataUrl: "" } : card,
     ),
   };
 }
@@ -2225,7 +2230,10 @@ function parseCompleteBackup(value: unknown): RengeCompleteBackup {
   if (value.format !== COMPLETE_BACKUP_FORMAT) {
     throw new Error("这不是 Renge Agent 完整备份文件。");
   }
-  if (value.version !== COMPLETE_BACKUP_VERSION) {
+  if (
+    value.version !== LEGACY_COMPLETE_BACKUP_VERSION &&
+    value.version !== COMPLETE_BACKUP_VERSION
+  ) {
     throw new Error(`暂不支持此备份版本：${String(value.version ?? "未知")}。`);
   }
   if (typeof value.exportedAt !== "string" || !isObjectRecord(value.appData)) {
@@ -2262,6 +2270,21 @@ function parseCompleteBackup(value: unknown): RengeCompleteBackup {
     }
     storageEntries[key] = entryValue;
   }
+  const assets: Record<string, { mimeType: string }> = {};
+  if (value.assets !== undefined) {
+    if (!isObjectRecord(value.assets)) throw new Error("备份中的图片资源索引无效。");
+    for (const [path, metadata] of Object.entries(value.assets)) {
+      if (
+        !path.startsWith("assets/") ||
+        !isObjectRecord(metadata) ||
+        typeof metadata.mimeType !== "string" ||
+        !metadata.mimeType.startsWith("image/")
+      ) {
+        throw new Error("备份中的图片资源索引无效。");
+      }
+      assets[path] = { mimeType: metadata.mimeType };
+    }
+  }
   if (
     value.desktopProjectPositions !== undefined &&
     value.desktopProjectPositions !== null &&
@@ -2272,13 +2295,231 @@ function parseCompleteBackup(value: unknown): RengeCompleteBackup {
 
   return {
     format: COMPLETE_BACKUP_FORMAT,
-    version: COMPLETE_BACKUP_VERSION,
+    version: value.version,
     exportedAt: value.exportedAt,
     appData: value.appData as RengeAppData,
     localStorage: storageEntries,
+    ...(Object.keys(assets).length > 0 ? { assets } : {}),
     ...(isObjectRecord(value.desktopProjectPositions)
       ? { desktopProjectPositions: value.desktopProjectPositions }
       : {}),
+  };
+}
+
+type CompleteBackupAsset = {
+  path: string;
+  mimeType: string;
+  bytes: Uint8Array;
+};
+
+function isBackupImageSource(value: string) {
+  return value.startsWith("data:image/") || value.startsWith("/api/app-data/assets/");
+}
+
+function getBackupImageExtension(mimeType: string) {
+  const normalized = mimeType.toLowerCase().split(";", 1)[0];
+  if (normalized === "image/jpeg") return "jpg";
+  if (normalized === "image/svg+xml") return "svg";
+  if (normalized === "image/x-icon" || normalized === "image/vnd.microsoft.icon") return "ico";
+  const subtype = normalized.slice("image/".length).replace(/[^a-z0-9]+/g, "");
+  return subtype || "bin";
+}
+
+function collectCompleteBackupImageSources(
+  value: unknown,
+  sources: Set<string>,
+  seen = new WeakSet<object>(),
+) {
+  if (typeof value === "string") {
+    if (isBackupImageSource(value)) sources.add(value);
+    return;
+  }
+  if (!value || typeof value !== "object" || seen.has(value)) return;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    value.forEach((entry) => collectCompleteBackupImageSources(entry, sources, seen));
+    return;
+  }
+  Object.values(value).forEach((entry) =>
+    collectCompleteBackupImageSources(entry, sources, seen),
+  );
+}
+
+async function readCompleteBackupImageSource(source: string, index: number) {
+  let mimeType = "image/png";
+  let bytes: Uint8Array;
+  if (source.startsWith("data:image/")) {
+    const commaIndex = source.indexOf(",");
+    if (commaIndex < 0) throw new Error("图片 Data URL 格式无效。");
+    const metadata = source.slice(5, commaIndex);
+    mimeType = metadata.split(";", 1)[0] || mimeType;
+    const encoded = source.slice(commaIndex + 1);
+    bytes = metadata.toLowerCase().includes(";base64")
+      ? new Uint8Array(base64ToArrayBuffer(encoded))
+      : new TextEncoder().encode(decodeURIComponent(encoded));
+  } else {
+    const response = await fetch(source, { cache: "no-store" });
+    if (!response.ok) throw new Error(`无法读取备份图片资源：${response.status}`);
+    const blob = await response.blob();
+    mimeType = blob.type.startsWith("image/") ? blob.type : mimeType;
+    bytes = new Uint8Array(await blob.arrayBuffer());
+  }
+  const path = `assets/image-${String(index + 1).padStart(4, "0")}.${getBackupImageExtension(mimeType)}`;
+  return { path, mimeType, bytes } satisfies CompleteBackupAsset;
+}
+
+function replaceCompleteBackupImageSources(
+  value: unknown,
+  replacements: Map<string, string>,
+  seen = new WeakMap<object, unknown>(),
+): unknown {
+  if (typeof value === "string") return replacements.get(value) ?? value;
+  if (!value || typeof value !== "object") return value;
+  const existing = seen.get(value);
+  if (existing !== undefined) return existing;
+  if (Array.isArray(value)) {
+    const next: unknown[] = [];
+    seen.set(value, next);
+    value.forEach((entry) => next.push(replaceCompleteBackupImageSources(entry, replacements, seen)));
+    return next;
+  }
+  const next: Record<string, unknown> = {};
+  seen.set(value, next);
+  Object.entries(value).forEach(([key, entry]) => {
+    next[key] = replaceCompleteBackupImageSources(entry, replacements, seen);
+  });
+  return next;
+}
+
+function uint8ArrayToBase64(bytes: Uint8Array) {
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function restoreCompleteBackupImageAssets(
+  value: unknown,
+  assets: Record<string, { mimeType: string }>,
+  archiveEntries: Record<string, Uint8Array>,
+  seen = new WeakMap<object, unknown>(),
+): unknown {
+  if (typeof value === "string" && value.startsWith(COMPLETE_BACKUP_ASSET_PREFIX)) {
+    const path = value.slice(COMPLETE_BACKUP_ASSET_PREFIX.length);
+    const metadata = assets[path];
+    const bytes = archiveEntries[path];
+    if (!metadata || !bytes) throw new Error(`备份缺少图片资源：${path}`);
+    return `data:${metadata.mimeType};base64,${uint8ArrayToBase64(bytes)}`;
+  }
+  if (!value || typeof value !== "object") return value;
+  const existing = seen.get(value);
+  if (existing !== undefined) return existing;
+  if (Array.isArray(value)) {
+    const next: unknown[] = [];
+    seen.set(value, next);
+    value.forEach((entry) =>
+      next.push(restoreCompleteBackupImageAssets(entry, assets, archiveEntries, seen)),
+    );
+    return next;
+  }
+  const next: Record<string, unknown> = {};
+  seen.set(value, next);
+  Object.entries(value).forEach(([key, entry]) => {
+    next[key] = restoreCompleteBackupImageAssets(entry, assets, archiveEntries, seen);
+  });
+  return next;
+}
+
+async function createCompleteBackupZip(
+  appData: RengeAppData,
+  exportedAt: Date,
+  desktopProjectPositions?: unknown,
+) {
+  const imageSources = new Set<string>();
+  collectCompleteBackupImageSources(appData, imageSources);
+  const assets: CompleteBackupAsset[] = [];
+  let assetIndex = 0;
+  for (const source of imageSources) {
+    assets.push(await readCompleteBackupImageSource(source, assetIndex));
+    assetIndex += 1;
+  }
+  const replacements = new Map(
+    Array.from(imageSources).map((source, index) => [
+      source,
+      `${COMPLETE_BACKUP_ASSET_PREFIX}${assets[index].path}`,
+    ]),
+  );
+  const backup: RengeCompleteBackup = {
+    format: COMPLETE_BACKUP_FORMAT,
+    version: COMPLETE_BACKUP_VERSION,
+    exportedAt: exportedAt.toISOString(),
+    appData: replaceCompleteBackupImageSources(appData, replacements) as RengeAppData,
+    localStorage: {},
+    assets: Object.fromEntries(
+      assets.map((asset) => [asset.path, { mimeType: asset.mimeType }]),
+    ),
+    ...(desktopProjectPositions && isObjectRecord(desktopProjectPositions)
+      ? { desktopProjectPositions }
+      : {}),
+  };
+  const archiveFiles: Record<
+    string,
+    Uint8Array | [Uint8Array, { level: 0 | 6 }]
+  > = {
+    [COMPLETE_BACKUP_MANIFEST_FILE]: [
+      strToU8(JSON.stringify(backup, null, 2)),
+      { level: 6 },
+    ],
+  };
+  assets.forEach((asset) => {
+    archiveFiles[asset.path] = [asset.bytes, { level: 0 }];
+  });
+  const bytes = await new Promise<Uint8Array>((resolve, reject) => {
+    zip(archiveFiles, (error, data) => {
+      if (error) reject(error);
+      else resolve(data);
+    });
+  });
+  return {
+    blob: new Blob([bytes.slice().buffer as ArrayBuffer], { type: "application/zip" }),
+    assetCount: assets.length,
+  };
+}
+
+async function readCompleteBackupFile(file: File) {
+  const signature = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  const isZipFile =
+    file.name.toLowerCase().endsWith(".zip") ||
+    (signature[0] === 0x50 && signature[1] === 0x4b && signature[2] === 0x03 && signature[3] === 0x04);
+  if (!isZipFile) {
+    return parseCompleteBackup(JSON.parse(await file.text()) as unknown);
+  }
+  const archiveEntries = await new Promise<Record<string, Uint8Array>>((resolve, reject) => {
+    file
+      .arrayBuffer()
+      .then((buffer) => {
+        unzip(new Uint8Array(buffer), (error, entries) => {
+          if (error) reject(error);
+          else resolve(entries);
+        });
+      })
+      .catch(reject);
+  });
+  const manifestBytes = archiveEntries[COMPLETE_BACKUP_MANIFEST_FILE];
+  if (!manifestBytes) throw new Error("ZIP 备份缺少 backup.json。");
+  const backup = parseCompleteBackup(JSON.parse(strFromU8(manifestBytes)) as unknown);
+  if (backup.version !== COMPLETE_BACKUP_VERSION) {
+    throw new Error(`ZIP 备份版本无效：${backup.version}。`);
+  }
+  return {
+    ...backup,
+    appData: restoreCompleteBackupImageAssets(
+      backup.appData,
+      backup.assets ?? {},
+      archiveEntries,
+    ) as RengeAppData,
   };
 }
 
@@ -6365,7 +6606,10 @@ function uploadCompleteBackupWithProgress(
     const request = new XMLHttpRequest();
     request.open("PUT", "/api/app-data/import-complete");
     request.timeout = 10 * 60 * 1000;
-    request.setRequestHeader("Content-Type", "application/json");
+    request.setRequestHeader(
+      "Content-Type",
+      file.name.toLowerCase().endsWith(".zip") ? "application/zip" : "application/json",
+    );
     request.upload.onprogress = (event) => {
       const total = event.lengthComputable && event.total > 0 ? event.total : file.size;
       onProgress(event.loaded, total);
@@ -12285,30 +12529,23 @@ export function App() {
         typeof window.rengeDesktop?.loadDesktopProjectPositions === "function"
           ? await window.rengeDesktop.loadDesktopProjectPositions()
           : undefined;
-      const backup: RengeCompleteBackup = {
-        format: COMPLETE_BACKUP_FORMAT,
-        version: COMPLETE_BACKUP_VERSION,
-        exportedAt: exportedAt.toISOString(),
-        appData: buildCurrentAppData(),
-        localStorage: collectRengeLocalStorage(),
-        ...(desktopProjectPositions && isObjectRecord(desktopProjectPositions)
-          ? { desktopProjectPositions }
-          : {}),
-      };
-      const blob = new Blob([JSON.stringify(backup, null, 2)], {
-        type: "application/json;charset=utf-8",
-      });
+      setDataBackupState({ status: "loading", message: "正在拆分图片资源并生成 ZIP..." });
+      const { blob, assetCount } = await createCompleteBackupZip(
+        buildCurrentAppData(),
+        exportedAt,
+        desktopProjectPositions,
+      );
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `Renge-Agent-complete-backup-${getCompleteBackupFileTimestamp(exportedAt)}.json`;
+      anchor.download = `Renge-Agent-complete-backup-${getCompleteBackupFileTimestamp(exportedAt)}.zip`;
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
       setDataBackupState({
         status: "success",
-        message: `完整备份已导出（${formatFileSize(blob.size)}）。请将文件保存在可信位置。`,
+        message: `完整 ZIP 备份已导出（${formatFileSize(blob.size)}，${assetCount} 个图片资源）。请将文件保存在可信位置。`,
       });
     } catch (error) {
       setDataBackupState({
@@ -12357,12 +12594,12 @@ export function App() {
           () => {
             setDataBackupState({
               status: "loading",
-              message: "备份上传完成，正在校验并写入应用数据...",
+              message: "备份上传完成，正在校验、释放图片资源并写入应用数据...",
             });
             setDataBackupProgress({
               active: true,
               value: null,
-              label: "阶段 2/3：正在校验备份并原子写入数据",
+              label: "阶段 2/3：正在校验备份、释放资源并写入数据",
             });
           },
         );
@@ -12392,7 +12629,7 @@ export function App() {
     let previousLocalStorage: Record<string, string> | null = null;
     let restoreStarted = false;
     try {
-      const backup = parseCompleteBackup(JSON.parse(await file.text()) as unknown);
+      const backup = await readCompleteBackupFile(file);
       const exportedDate = new Date(backup.exportedAt);
       const exportedLabel = Number.isNaN(exportedDate.getTime())
         ? backup.exportedAt
@@ -26295,7 +26532,7 @@ export function App() {
                     </span>
                     <div>
                       <h2>导出完整备份</h2>
-                      <p>生成一个可离线保存的 JSON 快照。</p>
+                      <p>生成图片资源与主数据分离的 ZIP 快照。</p>
                     </div>
                   </div>
                   <ul className="data-backup-list">
@@ -26332,7 +26569,7 @@ export function App() {
                     导入会覆盖当前全部应用数据。开始前建议先导出一次当前数据，以便需要时恢复。
                   </div>
                   <p className="data-backup-import-note">
-                    仅支持由本页面导出的 Renge Agent 完整备份 JSON 文件。导入成功后应用会自动重新载入。
+                    支持新版 ZIP 完整备份及旧版 JSON 备份。导入成功后应用会自动重新载入。
                   </p>
                   {dataBackupProgress.active && (
                     <div className="data-backup-progress-panel">
@@ -26372,7 +26609,7 @@ export function App() {
                     ref={completeBackupImportInputRef}
                     className="hidden-input"
                     type="file"
-                    accept=".json,application/json"
+                    accept=".zip,.json,application/zip,application/x-zip-compressed,application/json"
                     onChange={(event) => void importCompleteAppData(event.target.files?.[0])}
                   />
                   <button
@@ -26395,7 +26632,7 @@ export function App() {
                   <div>
                     <h2>清除所有数据</h2>
                     <p>
-                      删除应用内部的全部数据和自动备份并恢复出厂状态。手动导出的 JSON 备份以及电脑、手机上的外部工作区文件不会被删除。
+                      删除应用内部的全部数据和自动备份并恢复出厂状态。手动导出的 ZIP/JSON 备份以及电脑、手机上的外部工作区文件不会被删除。
                     </p>
                   </div>
                 </div>

@@ -64,6 +64,10 @@ const EMPTY_PNG_DATA_URL =
 const CHARACTER_CARD_DATABASE_NAME = "renge-character-cards";
 const CHARACTER_CARD_STORE_NAME = "cards";
 
+function isStoredImageSource(value: string) {
+  return value.startsWith("data:image/") || value.startsWith("/api/app-data/assets/");
+}
+
 function isRecord(value: unknown): value is UnknownRecord {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -320,7 +324,7 @@ export function normalizeCharacterCard(
     tags: uniqueStrings(stringArray(data.tags)),
     creator: stringValue(data.creator),
     characterVersion: stringValue(data.character_version ?? data.characterVersion),
-    avatarDataUrl: importedAvatar.startsWith("data:image/") ? importedAvatar : "",
+    avatarDataUrl: isStoredImageSource(importedAvatar) ? importedAvatar : "",
     sourceFileName,
     sourceFormat:
       options.sourceFormat ??
@@ -443,7 +447,7 @@ export async function loadCharacterCardAvatarsFromDatabase() {
           isRecord(card) &&
           typeof card.id === "string" &&
           typeof card.avatarDataUrl === "string" &&
-          card.avatarDataUrl.startsWith("data:image/")
+          isStoredImageSource(card.avatarDataUrl)
         ) {
           avatars.set(card.id, card.avatarDataUrl);
         }
