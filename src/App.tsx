@@ -2980,13 +2980,16 @@ function parseTavernSlashCommand(command: string): ParsedTavernSlashCommand | nu
 }
 const htmlPreviewStyle = [
   '<style data-renge-html-preview="true">',
-  ":root{--TH-viewport-height:100vh;--renge-parent-viewport-height:100vh;--renge-chat-quote-color:#E18A24;}",
+  ":root{--TH-viewport-height:100vh;--renge-parent-viewport-height:100vh;--renge-parent-viewport-width:100vw;--renge-chat-quote-color:#E18A24;}",
   "html,body{overflow:hidden!important;}",
-  "body{box-sizing:border-box;}",
+  "html{width:100%;max-width:100%;}",
+  "body{box-sizing:border-box;transform-origin:top left;}",
   'iframe[data-renge-embedded-html-frame="true"]{display:block;width:100%;min-height:420px;margin:18px 0;border:0;background:transparent;box-sizing:border-box;}',
   "html[data-renge-quote-style] .renge-personalized-quote{color:var(--renge-chat-quote-color,#E18A24)!important;}",
   "</style>",
 ].join("");
+const htmlPreviewViewportMeta =
+  '<meta data-renge-html-preview-viewport="true" name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover" />';
 const htmlPreviewJqueryScript = [
   '<script data-renge-html-preview-jquery="true">',
   jquerySource.replace(/<\/script/gi, "<\\/script"),
@@ -3284,13 +3287,20 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "const bridgeEventHandlers = new Map();",
     "const pendingCommandRequests = new Map();",
     "let commandRequestSequence = 0;",
-    "const updateParentViewportHeight = (height) => {",
-    "  const parsed = Number(height);",
-    "  if (!Number.isFinite(parsed) || parsed <= 0) return;",
-    "  document.documentElement.style.setProperty(\"--TH-viewport-height\", `${Math.round(parsed)}px`);",
-    "  document.documentElement.style.setProperty(\"--renge-parent-viewport-height\", `${Math.round(parsed)}px`);",
+    "const updateParentViewport = (width, height) => {",
+    "  const parsedWidth = Number(width);",
+    "  const parsedHeight = Number(height);",
+    "  if (Number.isFinite(parsedWidth) && parsedWidth > 0) {",
+    "    window.__rengeParentViewportWidth = parsedWidth;",
+    "    document.documentElement.style.setProperty(\"--renge-parent-viewport-width\", `${Math.round(parsedWidth)}px`);",
+    "  }",
+    "  if (Number.isFinite(parsedHeight) && parsedHeight > 0) {",
+    "    document.documentElement.style.setProperty(\"--TH-viewport-height\", `${Math.round(parsedHeight)}px`);",
+    "    document.documentElement.style.setProperty(\"--renge-parent-viewport-height\", `${Math.round(parsedHeight)}px`);",
+    "  }",
+    "  try { window.dispatchEvent(new CustomEvent(\"renge-html-preview-viewport-updated\")); } catch {}",
     "};",
-    "try { updateParentViewportHeight(window.parent.innerHeight); } catch {}",
+    "try { updateParentViewport(window.parent.innerWidth, window.parent.innerHeight); } catch {}",
     "const eventOn = (eventName, callback) => {",
     "  if (typeof callback !== \"function\") return callback;",
     "  const key = String(eventName);",
@@ -3321,7 +3331,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "window.addEventListener(\"message\", (event) => {",
     "  if (event.source !== parent || !isRecord(event.data)) return;",
     "  if (event.data.type === viewportMessageType && event.data.id === previewId) {",
-    "    updateParentViewportHeight(event.data.height);",
+    "    updateParentViewport(event.data.width, event.data.height);",
     "    return;",
     "  }",
     "  if (event.data.type === commandResultMessageType && event.data.id === previewId) {",
@@ -5251,7 +5261,8 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     '    numberFromStyle(bodyStyle, "margin-left") + numberFromStyle(bodyStyle, "margin-right");',
     "  const verticalMargin =",
     '    numberFromStyle(bodyStyle, "margin-top") + numberFromStyle(bodyStyle, "margin-bottom");',
-    "  const viewportWidth = Math.max(1, window.innerWidth || document.documentElement.clientWidth || defaultHeight);",
+    "  const reportedViewportWidth = Number(window.__rengeParentViewportWidth);",
+    "  const viewportWidth = Math.max(1, Number.isFinite(reportedViewportWidth) && reportedViewportWidth > 0 ? reportedViewportWidth : (window.innerWidth || document.documentElement.clientWidth || defaultHeight));",
     "  const viewportHeight = window.innerHeight || defaultHeight;",
     "  const availableWidth = Math.max(1, viewportWidth - horizontalMargin);",
     "  if (Math.abs(viewportWidth - lastViewportWidth) > 1) naturalLayoutDirty = true;",
@@ -5369,6 +5380,7 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     'window.addEventListener("load", () => { watchLayoutAssets(); requestMeasurementReport(); });',
     'window.addEventListener("resize", schedulePost);',
     'window.addEventListener("orientationchange", schedulePost);',
+    'window.addEventListener("renge-html-preview-viewport-updated", requestMeasurementReport);',
     "try {",
     "  const resizeObserver = new ResizeObserver(schedulePost);",
     "  resizeObserver.observe(document.documentElement);",
@@ -5418,13 +5430,20 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
 }
 
 function injectHtmlPreviewHead(documentContent: string, headInjection: string) {
-  if (/<head[\s>]/i.test(documentContent)) {
-    return documentContent.replace(/<head([^>]*)>/i, `<head$1>${headInjection}`);
+  const normalizedContent = documentContent.replace(
+    /<meta\b(?=[^>]*\bname\s*=\s*["']?viewport\b)[^>]*>/gi,
+    "",
+  );
+  if (/<head[\s>]/i.test(normalizedContent)) {
+    return normalizedContent.replace(/<head([^>]*)>/i, `<head$1>${headInjection}`);
   }
-  if (/<html[\s>]/i.test(documentContent)) {
-    return documentContent.replace(/<html([^>]*)>/i, `<html$1><head>${headInjection}</head>`);
+  if (/<html[\s>]/i.test(normalizedContent)) {
+    return normalizedContent.replace(
+      /<html([^>]*)>/i,
+      `<html$1><head>${headInjection}</head>`,
+    );
   }
-  return `<head>${headInjection}</head>${documentContent}`;
+  return `<head>${headInjection}</head>${normalizedContent}`;
 }
 
 function getIsolatedHtmlPreviewFrame(previewId: string) {
@@ -5602,7 +5621,7 @@ function buildHtmlPreviewDocument(
   )
     ? buildHtmlPreviewEmbeddedFramesScript(previewId)
     : "";
-  const headInjection = `${htmlPreviewStyle}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
+  const headInjection = `${htmlPreviewViewportMeta}${htmlPreviewStyle}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
     return injectHtmlPreviewHead(trimmedContent, headInjection);
   }
@@ -5615,7 +5634,6 @@ function buildHtmlPreviewDocument(
     '<html lang="zh-CN">',
     "<head>",
     '<meta charset="utf-8" />',
-    '<meta name="viewport" content="width=device-width, initial-scale=1" />',
     "<style>html,body{min-height:100%;}body{margin:0;}</style>",
     headInjection,
     "</head>",
@@ -5776,10 +5794,13 @@ function ChatHtmlPreview({
   }, [context, previewId]);
 
   const sendViewportUpdate = useCallback(() => {
+    const frame = frameRef.current;
+    const frameWidth = frame?.getBoundingClientRect().width || frame?.clientWidth || 0;
     frameRef.current?.contentWindow?.postMessage(
       {
         type: HTML_PREVIEW_VIEWPORT_MESSAGE,
         id: previewId,
+        width: frameWidth || window.visualViewport?.width || window.innerWidth,
         height: window.visualViewport?.height ?? window.innerHeight,
       },
       "*",
@@ -5806,12 +5827,26 @@ function ChatHtmlPreview({
     window.addEventListener("resize", update);
     window.addEventListener("orientationchange", update);
     window.visualViewport?.addEventListener("resize", update);
+    const container = containerRef.current;
+    let lastObservedWidth = container?.getBoundingClientRect().width ?? 0;
+    const resizeObserver =
+      container && typeof ResizeObserver === "function"
+        ? new ResizeObserver((entries) => {
+            const nextWidth = entries[0]?.contentRect.width ?? 0;
+            if (Math.abs(nextWidth - lastObservedWidth) <= 1) return;
+            lastObservedWidth = nextWidth;
+            sendViewportUpdate();
+            requestLayoutMeasurement();
+          })
+        : null;
+    if (container) resizeObserver?.observe(container);
     return () => {
       window.removeEventListener("resize", update);
       window.removeEventListener("orientationchange", update);
       window.visualViewport?.removeEventListener("resize", update);
+      resizeObserver?.disconnect();
     };
-  }, [sendViewportUpdate]);
+  }, [requestLayoutMeasurement, sendViewportUpdate]);
 
   const registerFrame = useCallback(
     (frame: HTMLIFrameElement | null) => {
