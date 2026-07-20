@@ -19541,7 +19541,7 @@ export function App() {
             ? `重写对白失败：${message}`
             : continuationTargetMessage
               ? `续写失败：${message}`
-              : "调用失败。请检查本地服务、供应商地址、密钥、模型 ID 或上游限流状态。",
+              : `调用失败：${message}`,
       });
       return null;
     } finally {
@@ -20928,7 +20928,7 @@ export function App() {
       ]);
       setChatStatus({
         status: "error",
-        message: "调用失败。请检查本地服务、供应商地址、密钥、模型 ID 或上游限流状态。",
+        message: `调用失败：${message}`,
       });
     } finally {
       if (abortController) {
