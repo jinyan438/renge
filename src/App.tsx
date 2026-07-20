@@ -10205,6 +10205,7 @@ export function App() {
   const appDataClearingRef = useRef(false);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatSendButtonRef = useRef<HTMLButtonElement>(null);
+  const renderedEditingDraftRef = useRef<{ messageId: string; content: string } | null>(null);
   const sendChatMessageRef = useRef<
     (contentOverride?: string, attachmentsOverride?: ChatAttachment[]) => Promise<void>
   >(async () => {});
@@ -15636,6 +15637,9 @@ export function App() {
     const renderedEditingAvailable =
       chatRenderedEditingEnabled &&
       canEditChatMessageAsRendered(message.content, chatHtmlRenderEnabled);
+    renderedEditingDraftRef.current = renderedEditingAvailable
+      ? { messageId, content: message.content }
+      : null;
     setEditingChatMessage({
       messageId,
       content: message.content,
@@ -20633,8 +20637,20 @@ export function App() {
   ]);
 
   const cancelEditingChatMessage = () => {
+    renderedEditingDraftRef.current = null;
     setEditingChatMessage(null);
     setChatStatus({ status: "idle", message: "" });
+  };
+
+  const getEditingChatMessageContent = () => {
+    if (!editingChatMessage) return "";
+    if (
+      editingChatMessage.mode === "rendered" &&
+      renderedEditingDraftRef.current?.messageId === editingChatMessage.messageId
+    ) {
+      return renderedEditingDraftRef.current.content;
+    }
+    return editingChatMessage.content;
   };
 
   const continueAssistantMessage = async (messageId: string) => {
@@ -20796,7 +20812,7 @@ export function App() {
   const saveEditedAssistantMessage = () => {
     if (!editingChatMessage || chatStatus.status === "loading") return;
 
-    const content = editingChatMessage.content.trim();
+    const content = getEditingChatMessageContent().trim();
     if (!content) return;
 
     const messageId = editingChatMessage.messageId;
@@ -20815,6 +20831,7 @@ export function App() {
           : withoutDialogueRewriteMetadata(updatedMessage);
       }),
     );
+    renderedEditingDraftRef.current = null;
     setEditingChatMessage(null);
     setChatStatus({ status: "success", message: "AI 消息已保存。" });
     if (messageIndex >= 0) {
@@ -20830,7 +20847,7 @@ export function App() {
   const saveEditedUserMessage = () => {
     if (!editingChatMessage || chatStatus.status === "loading") return;
 
-    const content = editingChatMessage.content.trim();
+    const content = getEditingChatMessageContent().trim();
     if (!content) return;
 
     const messageId = editingChatMessage.messageId;
@@ -20840,6 +20857,7 @@ export function App() {
         message.id === messageId ? { ...message, content } : message,
       ),
     );
+    renderedEditingDraftRef.current = null;
     setEditingChatMessage(null);
     setChatStatus({ status: "success", message: "用户消息已保存，后续对话未改变。" });
     if (messageIndex >= 0) {
@@ -20855,7 +20873,7 @@ export function App() {
   const resendEditedUserMessage = async () => {
     if (!editingChatMessage || chatStatus.status === "loading") return;
 
-    const content = editingChatMessage.content.trim();
+    const content = getEditingChatMessageContent().trim();
     if (!content) return;
 
     const messageIndex = chatMessages.findIndex(
@@ -20881,6 +20899,7 @@ export function App() {
 
     setChatSender(requestSender);
     commitChatMessages(nextMessages);
+    renderedEditingDraftRef.current = null;
     setEditingChatMessage(null);
     emitTavernEvent(TAVERN_EVENTS.MESSAGE_EDITED, messageIndex);
     emitTavernEvent(
@@ -26931,11 +26950,10 @@ export function App() {
                                   contentEditable
                                   onInput={(event) => {
                                     const content = serializeRenderedChatEditor(event.currentTarget);
-                                    setEditingChatMessage((current) =>
-                                      current?.messageId === message.id
-                                        ? { ...current, content }
-                                        : current,
-                                    );
+                                    renderedEditingDraftRef.current = {
+                                      messageId: message.id,
+                                      content,
+                                    };
                                   }}
                                   onKeyDown={(event) => {
                                     if (event.key === "Escape") {
