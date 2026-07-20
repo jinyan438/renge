@@ -6110,6 +6110,69 @@ function serializeRenderedChatEditor(editor: HTMLElement) {
     .trim();
 }
 
+function getTextOffsetAtPoint(container: HTMLElement, x: number, y: number) {
+  const documentWithCaret = document as Document & {
+    caretRangeFromPoint?: (clientX: number, clientY: number) => Range | null;
+    caretPositionFromPoint?: (
+      clientX: number,
+      clientY: number,
+    ) => { offsetNode: Node; offset: number } | null;
+  };
+  const caretRange = documentWithCaret.caretRangeFromPoint?.(x, y) ?? null;
+  const caretPosition = caretRange
+    ? { node: caretRange.startContainer, offset: caretRange.startOffset }
+    : (() => {
+        const position = documentWithCaret.caretPositionFromPoint?.(x, y);
+        return position ? { node: position.offsetNode, offset: position.offset } : null;
+      })();
+  if (!caretPosition) return null;
+  const caretElement =
+    caretPosition.node.nodeType === Node.ELEMENT_NODE
+      ? (caretPosition.node as Element)
+      : caretPosition.node.parentElement;
+  if (!caretElement || !container.contains(caretElement)) return null;
+
+  try {
+    const precedingRange = document.createRange();
+    precedingRange.selectNodeContents(container);
+    precedingRange.setEnd(caretPosition.node, caretPosition.offset);
+    return precedingRange.toString().length;
+  } catch {
+    return null;
+  }
+}
+
+function placeCaretAtTextOffset(container: HTMLElement, requestedOffset: number | null) {
+  const selection = window.getSelection();
+  if (!selection) return;
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  let remainingOffset = Math.max(0, requestedOffset ?? Number.POSITIVE_INFINITY);
+  let lastTextNode: Text | null = null;
+  let currentNode = walker.nextNode();
+
+  while (currentNode) {
+    const textNode = currentNode as Text;
+    lastTextNode = textNode;
+    if (remainingOffset <= textNode.data.length) {
+      const range = document.createRange();
+      range.setStart(textNode, remainingOffset);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return;
+    }
+    remainingOffset -= textNode.data.length;
+    currentNode = walker.nextNode();
+  }
+
+  const range = document.createRange();
+  if (lastTextNode) range.setStart(lastTextNode, lastTextNode.data.length);
+  else range.selectNodeContents(container);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
 function ChatLiveStreamPanel({ stream }: { stream: ChatLiveStreamEmbed }) {
   const renderLaneItems = (
     items: ChatLiveStreamTextItem[],
@@ -10206,6 +10269,14 @@ export function App() {
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatSendButtonRef = useRef<HTMLButtonElement>(null);
   const renderedEditingDraftRef = useRef<{ messageId: string; content: string } | null>(null);
+  const renderedEditingFocusRef = useRef<{
+    messageId: string;
+    textOffset: number | null;
+    threadScrollLeft: number;
+    threadScrollTop: number;
+    windowScrollX: number;
+    windowScrollY: number;
+  } | null>(null);
   const sendChatMessageRef = useRef<
     (contentOverride?: string, attachmentsOverride?: ChatAttachment[]) => Promise<void>
   >(async () => {});
@@ -15593,6 +15664,20 @@ export function App() {
     event.preventDefault();
     event.stopPropagation();
 
+    const bubble = event.currentTarget.closest<HTMLElement>(".chat-bubble");
+    const messageText = bubble?.querySelector<HTMLElement>(".mes_text") ?? null;
+    const chatThread = document.getElementById("chat-messages");
+    renderedEditingFocusRef.current = {
+      messageId,
+      textOffset: messageText
+        ? getTextOffsetAtPoint(messageText, event.clientX, event.clientY)
+        : null,
+      threadScrollLeft: chatThread?.scrollLeft ?? 0,
+      threadScrollTop: chatThread?.scrollTop ?? 0,
+      windowScrollX: window.scrollX,
+      windowScrollY: window.scrollY,
+    };
+
     setChatMessageMenu({
       messageId,
       x: clamp(event.clientX, 8, window.innerWidth - 180),
@@ -15640,6 +15725,7 @@ export function App() {
     renderedEditingDraftRef.current = renderedEditingAvailable
       ? { messageId, content: message.content }
       : null;
+    if (!renderedEditingAvailable) renderedEditingFocusRef.current = null;
     setEditingChatMessage({
       messageId,
       content: message.content,
@@ -20638,6 +20724,7 @@ export function App() {
 
   const cancelEditingChatMessage = () => {
     renderedEditingDraftRef.current = null;
+    renderedEditingFocusRef.current = null;
     setEditingChatMessage(null);
     setChatStatus({ status: "idle", message: "" });
   };
@@ -26965,14 +27052,24 @@ export function App() {
                                     if (!editor || editor.dataset.rengeEditorReady === "true") return;
                                     editor.dataset.rengeEditorReady = "true";
                                     window.requestAnimationFrame(() => {
-                                      editor.focus();
-                                      const selection = window.getSelection();
-                                      if (!selection) return;
-                                      const range = document.createRange();
-                                      range.selectNodeContents(editor);
-                                      range.collapse(false);
-                                      selection.removeAllRanges();
-                                      selection.addRange(range);
+                                      const focusState =
+                                        renderedEditingFocusRef.current?.messageId === message.id
+                                          ? renderedEditingFocusRef.current
+                                          : null;
+                                      editor.focus({ preventScroll: true });
+                                      placeCaretAtTextOffset(editor, focusState?.textOffset ?? null);
+                                      if (focusState) {
+                                        const chatThread = document.getElementById("chat-messages");
+                                        if (chatThread) {
+                                          chatThread.scrollLeft = focusState.threadScrollLeft;
+                                          chatThread.scrollTop = focusState.threadScrollTop;
+                                        }
+                                        window.scrollTo(
+                                          focusState.windowScrollX,
+                                          focusState.windowScrollY,
+                                        );
+                                      }
+                                      renderedEditingFocusRef.current = null;
                                     });
                                   }}
                                   role="textbox"
