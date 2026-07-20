@@ -20061,10 +20061,6 @@ export function App() {
             customApi.custom_include_body ?? normalizedConfig.custom_include_body,
           customExcludeBody:
             customApi.custom_exclude_body ?? normalizedConfig.custom_exclude_body,
-          customIncludeHeaders:
-            customApi.custom_include_headers ??
-            customApi.headers ??
-            normalizedConfig.custom_include_headers,
           request: {
             model: requestModelId,
             messages: requestMessages,

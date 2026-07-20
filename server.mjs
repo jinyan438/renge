@@ -1854,18 +1854,6 @@ function getProviderTarget(body) {
 }
 
 const unsafeObjectKeys = new Set(["__proto__", "constructor", "prototype"]);
-const forbiddenProxyHeaders = new Set([
-  "connection",
-  "content-length",
-  "host",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-]);
 const openAiRequestKeys = new Set([
   "audio",
   "frequency_penalty",
@@ -1986,18 +1974,6 @@ function deleteRequestPath(target, path) {
   if (isObjectRecord(parent) || Array.isArray(parent)) delete parent[segments.at(-1)];
 }
 
-function parseTavernProxyHeaders(value) {
-  const parsed = parseTavernObject(value, "附加请求头");
-  const headers = {};
-  for (const [name, rawValue] of Object.entries(parsed)) {
-    const normalizedName = name.trim();
-    if (!normalizedName || forbiddenProxyHeaders.has(normalizedName.toLowerCase())) continue;
-    if (!["string", "number", "boolean"].includes(typeof rawValue)) continue;
-    headers[normalizedName] = String(rawValue);
-  }
-  return headers;
-}
-
 function normalizeCompatibleApiBaseUrl(value) {
   const normalized = String(value ?? "").trim().replace(/\/+$/, "");
   if (!normalized) return "";
@@ -2065,13 +2041,6 @@ function applyTavernRequestOverrides(requestBody, body, source = requestBody) {
   return prepared;
 }
 
-function getTavernProxyHeaders(body) {
-  const source = isObjectRecord(body.request) ? body.request : body;
-  return parseTavernProxyHeaders(
-    body.customIncludeHeaders ?? body.custom_include_headers ?? source.custom_include_headers,
-  );
-}
-
 function getCompatibleApiEndpoint(apiBaseUrl, endpoint) {
   const suffix = String(endpoint).replace(/^\/+/, "");
   return `${String(apiBaseUrl).replace(/\/+$/, "")}/${suffix}`;
@@ -2130,7 +2099,7 @@ function shouldRetryImageGenerationWithSmallerSize(upstream, imageRequestBody, r
   return /timeout/i.test(message);
 }
 
-async function proxyJson({ url, apiKey, method = "GET", body, timeoutMs, headers = {} }) {
+async function proxyJson({ url, apiKey, method = "GET", body, timeoutMs }) {
   const ac = new AbortController();
   const timer = timeoutMs ? setTimeout(() => ac.abort(new Error(`upstream timeout after ${timeoutMs}ms`)), timeoutMs) : null;
   let upstreamResponse;
@@ -2141,7 +2110,6 @@ async function proxyJson({ url, apiKey, method = "GET", body, timeoutMs, headers
         Accept: "application/json",
         ...(body ? { "Content-Type": "application/json" } : {}),
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-        ...headers,
       },
       body: body ? JSON.stringify(body) : undefined,
       signal: ac.signal,
@@ -2427,7 +2395,7 @@ function getNextModelsUrl(payload, currentUrl, collectedCount) {
   return "";
 }
 
-async function listProviderModels({ apiBaseUrl, apiKey, headers = {} }) {
+async function listProviderModels({ apiBaseUrl, apiKey }) {
   const maxPages = 30;
   const maxModels = 10000;
   const seenUrls = new Set();
@@ -2442,7 +2410,7 @@ async function listProviderModels({ apiBaseUrl, apiKey, headers = {} }) {
     if (seenUrls.has(nextUrl)) break;
     seenUrls.add(nextUrl);
 
-    const upstream = await proxyJson({ url: nextUrl, apiKey, headers });
+    const upstream = await proxyJson({ url: nextUrl, apiKey });
     lastPayload = upstream.payload;
     lastStatus = upstream.status;
     if (!upstream.ok) return upstream;
@@ -2489,7 +2457,7 @@ async function listProviderModels({ apiBaseUrl, apiKey, headers = {} }) {
   };
 }
 
-async function proxyStream({ url, apiKey, body, response, headers = {} }) {
+async function proxyStream({ url, apiKey, body, response }) {
   const ac = new AbortController();
   const abortUpstream = () => {
     if (!ac.signal.aborted) ac.abort(new Error("client aborted"));
@@ -2504,7 +2472,6 @@ async function proxyStream({ url, apiKey, body, response, headers = {} }) {
         Accept: "text/event-stream",
         "Content-Type": "application/json",
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-        ...headers,
       },
       body: JSON.stringify(body),
       signal: ac.signal,
@@ -2575,8 +2542,7 @@ async function handleApi(request, response, pathname, dataFilePath) {
       }
       const body = await readJsonBody(request);
       const { apiBaseUrl, apiKey } = getTavernProviderTarget(body);
-      const headers = getTavernProxyHeaders(body);
-      const upstream = await listProviderModels({ apiBaseUrl, apiKey, headers });
+      const upstream = await listProviderModels({ apiBaseUrl, apiKey });
       sendJson(response, upstream.ok ? 200 : upstream.status, upstream.payload);
       return;
     }
@@ -2588,7 +2554,6 @@ async function handleApi(request, response, pathname, dataFilePath) {
       }
       const body = await readJsonBody(request);
       const { apiBaseUrl, apiKey } = getTavernProviderTarget(body);
-      const headers = getTavernProxyHeaders(body);
       const requestBody = buildTavernChatCompletionRequest(body);
       if (!requestBody.model || !Array.isArray(requestBody.messages)) {
         sendJson(response, 400, { error: "第三方生成请求缺少 model 或 messages" });
@@ -2596,7 +2561,7 @@ async function handleApi(request, response, pathname, dataFilePath) {
       }
       const url = getCompatibleApiEndpoint(apiBaseUrl, "chat/completions");
       if (requestBody.stream === true) {
-        await proxyStream({ url, apiKey, body: requestBody, response, headers });
+        await proxyStream({ url, apiKey, body: requestBody, response });
         return;
       }
       const upstream = await proxyJson({
@@ -2604,7 +2569,6 @@ async function handleApi(request, response, pathname, dataFilePath) {
         apiKey,
         method: "POST",
         body: requestBody,
-        headers,
       });
       sendJson(response, upstream.ok ? 200 : upstream.status, upstream.payload);
       return;
@@ -2782,13 +2746,11 @@ async function handleApi(request, response, pathname, dataFilePath) {
     }
 
     const { apiBaseUrl, apiKey } = getProviderTarget(body);
-    const providerHeaders = getTavernProxyHeaders(body);
 
     if (pathname === "/api/providers/models") {
       const upstream = await listProviderModels({
         apiBaseUrl,
         apiKey,
-        headers: providerHeaders,
       });
       sendJson(response, upstream.ok ? 200 : upstream.status, upstream.payload);
       return;
@@ -3123,7 +3085,6 @@ async function handleApi(request, response, pathname, dataFilePath) {
           apiKey,
           body: requestBody,
           response,
-          headers: providerHeaders,
         });
         return;
       }
@@ -3133,7 +3094,6 @@ async function handleApi(request, response, pathname, dataFilePath) {
         apiKey,
         method: "POST",
         body: requestBody,
-        headers: providerHeaders,
       });
       sendJson(response, upstream.ok ? 200 : upstream.status, upstream.payload);
       return;
