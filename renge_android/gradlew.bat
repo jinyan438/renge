@@ -16,6 +16,30 @@
 @rem SPDX-License-Identifier: Apache-2.0
 @rem
 
+@rem Renge convenience mode: double-clicking the wrapper without arguments
+@rem builds the debug APK and keeps the console open so errors stay visible.
+@if not "%~1"=="" @goto rengeGradleStart
+@echo off
+@setlocal
+echo Renge Android debug build
+echo Running: gradlew.bat :app:assembleDebug
+echo.
+call "%~f0" :app:assembleDebug --console=plain
+set "RENGE_EXIT_CODE=%ERRORLEVEL%"
+echo.
+if "%RENGE_EXIT_CODE%"=="0" (
+    echo Build succeeded.
+    echo APK: %~dp0app\build\outputs\apk\debug\app-debug.apk
+) else (
+    echo Build failed with exit code %RENGE_EXIT_CODE%.
+    echo Review the error output above.
+)
+echo.
+pause
+endlocal & exit /b %RENGE_EXIT_CODE%
+
+:rengeGradleStart
+
 @if "%DEBUG%"=="" @echo off
 @rem ##########################################################################
 @rem
