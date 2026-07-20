@@ -630,6 +630,7 @@ type RengeAppData = {
   chatHeartbeatReminderVisible?: boolean;
   chatChoiceToolsEnabled?: boolean;
   chatDialogueRewriteEnabled?: boolean;
+  chatRenderedEditingEnabled?: boolean;
   chatPersonalization?: ChatPersonalizationSettings;
   mcpServers?: McpServerConfig[];
   skills?: SkillProfile[];
@@ -876,6 +877,7 @@ const CHAT_REASONING_VISIBLE_STORAGE_KEY = "renge_chat_reasoning_visible";
 const CHAT_HEARTBEAT_REMINDER_VISIBLE_STORAGE_KEY = "renge_chat_heartbeat_reminder_visible";
 const CHAT_CHOICE_TOOLS_ENABLED_STORAGE_KEY = "renge_chat_choice_tools_enabled";
 const CHAT_DIALOGUE_REWRITE_ENABLED_STORAGE_KEY = "renge_chat_dialogue_rewrite_enabled";
+const CHAT_RENDERED_EDITING_ENABLED_STORAGE_KEY = "renge_chat_rendered_editing_enabled";
 const CHAT_PERSONALIZATION_STORAGE_KEY = "renge_chat_personalization";
 const MCP_SERVERS_STORAGE_KEY = "renge_mcp_servers";
 const SKILLS_STORAGE_KEY = "renge_skills";
@@ -2156,6 +2158,10 @@ function persistAppDataToLocalStores(data: RengeAppData) {
   setLocalStorageValueSafely(
     CHAT_DIALOGUE_REWRITE_ENABLED_STORAGE_KEY,
     String(data.chatDialogueRewriteEnabled ?? false),
+  );
+  setLocalStorageValueSafely(
+    CHAT_RENDERED_EDITING_ENABLED_STORAGE_KEY,
+    String(data.chatRenderedEditingEnabled ?? false),
   );
   setLocalStorageJsonSafely(
     CHAT_PERSONALIZATION_STORAGE_KEY,
@@ -6012,6 +6018,96 @@ function renderMarkdownBlocks(content: string, keyPrefix: string) {
   }
 
   return nodes;
+}
+
+function canEditChatMessageAsRendered(content: string, htmlRenderEnabled: boolean) {
+  const parts = parseChatContentParts(content, htmlRenderEnabled);
+  return parts.every(
+    (part) =>
+      part.type === "text" &&
+      !(htmlRenderEnabled && looksLikeStandaloneRenderableHtml(part.content)),
+  );
+}
+
+function serializeRenderedEditorInline(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
+  if (!(node instanceof HTMLElement)) return "";
+
+  const tagName = node.tagName.toLowerCase();
+  if (tagName === "br") return "\n";
+  if (tagName === "img") {
+    return `![${node.getAttribute("alt") ?? ""}](${node.getAttribute("src") ?? ""})`;
+  }
+
+  const content = Array.from(node.childNodes).map(serializeRenderedEditorInline).join("");
+  if (tagName === "strong" || tagName === "b") return `**${content}**`;
+  if (tagName === "em" || tagName === "i") return `*${content}*`;
+  if (tagName === "del" || tagName === "s") return `~~${content}~~`;
+  if (tagName === "code") return `\`${content}\``;
+  if (tagName === "a") return `[${content}](${node.getAttribute("href") ?? ""})`;
+  if (tagName === "div" || tagName === "p") return `${content}\n`;
+  return content;
+}
+
+function serializeRenderedEditorBlock(element: HTMLElement): string {
+  const tagName = element.tagName.toLowerCase();
+  if (/^h[1-6]$/.test(tagName)) {
+    return `${"#".repeat(Number(tagName.slice(1)))} ${serializeRenderedEditorInline(element).trim()}`;
+  }
+  if (tagName === "p") return serializeRenderedEditorInline(element).replace(/\n$/, "");
+  if (tagName === "hr") return "---";
+  if (tagName === "blockquote") {
+    return Array.from(element.children)
+      .map((child) => serializeRenderedEditorBlock(child as HTMLElement))
+      .join("\n\n")
+      .split("\n")
+      .map((line) => `> ${line}`)
+      .join("\n");
+  }
+  if (tagName === "ul" || tagName === "ol") {
+    return Array.from(element.children)
+      .filter((child) => child.tagName.toLowerCase() === "li")
+      .map((child, index) => {
+        const listItem = child as HTMLElement;
+        const checkbox = listItem.querySelector<HTMLInputElement>('input[type="checkbox"]');
+        const contentElement = listItem.querySelector<HTMLElement>(":scope > span") ?? listItem;
+        const marker = tagName === "ol" ? `${index + 1}.` : "-";
+        const taskMarker = checkbox ? ` [${checkbox.checked ? "x" : " "}]` : "";
+        return `${marker}${taskMarker} ${serializeRenderedEditorInline(contentElement).trim()}`;
+      })
+      .join("\n");
+  }
+  if (element.classList.contains("chat-markdown-table-wrap")) {
+    const rows = Array.from(element.querySelectorAll("tr")).map((row) =>
+      Array.from(row.querySelectorAll("th, td")).map((cell) =>
+        serializeRenderedEditorInline(cell).trim(),
+      ),
+    );
+    if (rows.length === 0) return "";
+    const columnCount = Math.max(...rows.map((row) => row.length));
+    const normalizedRows = rows.map((row) => [
+      ...row,
+      ...Array.from({ length: Math.max(0, columnCount - row.length) }, () => ""),
+    ]);
+    return [
+      `| ${normalizedRows[0].join(" | ")} |`,
+      `| ${Array.from({ length: columnCount }, () => "---").join(" | ")} |`,
+      ...normalizedRows.slice(1).map((row) => `| ${row.join(" | ")} |`),
+    ].join("\n");
+  }
+  return serializeRenderedEditorInline(element).trimEnd();
+}
+
+function serializeRenderedChatEditor(editor: HTMLElement) {
+  const markdownRoots = Array.from(editor.querySelectorAll<HTMLElement>(":scope .chat-markdown"));
+  const roots = markdownRoots.length > 0 ? markdownRoots : [editor];
+  return roots
+    .flatMap((root) => Array.from(root.children) as HTMLElement[])
+    .map(serializeRenderedEditorBlock)
+    .filter((content) => content.trim())
+    .join("\n\n")
+    .replace(/\u00a0/g, " ")
+    .trim();
 }
 
 function ChatLiveStreamPanel({ stream }: { stream: ChatLiveStreamEmbed }) {
@@ -9993,6 +10089,9 @@ export function App() {
   const [chatDialogueRewriteEnabled, setChatDialogueRewriteEnabled] = useState(
     () => localStorage.getItem(CHAT_DIALOGUE_REWRITE_ENABLED_STORAGE_KEY) === "true",
   );
+  const [chatRenderedEditingEnabled, setChatRenderedEditingEnabled] = useState(
+    () => localStorage.getItem(CHAT_RENDERED_EDITING_ENABLED_STORAGE_KEY) === "true",
+  );
   const [chatPersonalization, setChatPersonalization] =
     useState<ChatPersonalizationSettings>(loadChatPersonalization);
   const [chatSender, setChatSender] = useState<ChatSenderIdentity>(loadChatSender);
@@ -10039,6 +10138,7 @@ export function App() {
   const [editingChatMessage, setEditingChatMessage] = useState<{
     messageId: string;
     content: string;
+    mode: "source" | "rendered";
   } | null>(null);
   const [chatChoiceDrafts, setChatChoiceDrafts] = useState<Record<string, string>>({});
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -10837,6 +10937,7 @@ export function App() {
       chatHeartbeatReminderVisible,
       chatChoiceToolsEnabled,
       chatDialogueRewriteEnabled,
+      chatRenderedEditingEnabled,
       chatPersonalization,
       mcpServers,
       skills,
@@ -10844,7 +10945,7 @@ export function App() {
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     };
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -10972,6 +11073,10 @@ export function App() {
         typeof persistentData?.chatDialogueRewriteEnabled === "boolean"
           ? persistentData.chatDialogueRewriteEnabled
           : localStorage.getItem(CHAT_DIALOGUE_REWRITE_ENABLED_STORAGE_KEY) === "true";
+      const nextChatRenderedEditingEnabled =
+        typeof persistentData?.chatRenderedEditingEnabled === "boolean"
+          ? persistentData.chatRenderedEditingEnabled
+          : localStorage.getItem(CHAT_RENDERED_EDITING_ENABLED_STORAGE_KEY) === "true";
       const nextChatPersonalization = persistentData?.chatPersonalization
         ? normalizeChatPersonalization(persistentData.chatPersonalization)
         : loadChatPersonalization();
@@ -11130,6 +11235,7 @@ export function App() {
       setChatHeartbeatReminderVisible(nextChatHeartbeatReminderVisible);
       setChatChoiceToolsEnabled(nextChatChoiceToolsEnabled);
       setChatDialogueRewriteEnabled(nextChatDialogueRewriteEnabled);
+      setChatRenderedEditingEnabled(nextChatRenderedEditingEnabled);
       setChatPersonalization(nextChatPersonalization);
       setMcpServers(nextMcpServers);
       setActiveMcpServerId(nextMcpServers[0]?.id ?? "");
@@ -15527,9 +15633,23 @@ export function App() {
     const message = chatMessages.find((item) => item.id === messageId);
     if (!message) return;
 
-    setEditingChatMessage({ messageId, content: message.content });
+    const renderedEditingAvailable =
+      chatRenderedEditingEnabled &&
+      canEditChatMessageAsRendered(message.content, chatHtmlRenderEnabled);
+    setEditingChatMessage({
+      messageId,
+      content: message.content,
+      mode: renderedEditingAvailable ? "rendered" : "source",
+    });
     setChatMessageMenu(null);
-    setChatStatus({ status: "idle", message: "正在编辑消息，可取消或保存。" });
+    setChatStatus({
+      status: "idle",
+      message: renderedEditingAvailable
+        ? "正在直接编辑渲染后的消息气泡，可取消或保存。"
+        : chatRenderedEditingEnabled
+          ? "这条消息包含独立 HTML、代码或媒体内容，已切换到源码编辑。"
+          : "正在编辑消息，可取消或保存。",
+    });
   };
 
   const restoreElectronWorkspaceFromSession = async (session: ChatSession) => {
@@ -23293,6 +23413,35 @@ export function App() {
                   </span>
                 </div>
               </article>
+              <article className="llm-setting-card">
+                <div className="llm-setting-copy">
+                  <h3>渲染编辑</h3>
+                  <p>
+                    开启后，右键消息选择“编辑”会直接在当前渲染气泡中修改文字并保存。
+                    独立 HTML、代码块或媒体消息无法安全反向转换时，会自动使用源码编辑。
+                  </p>
+                </div>
+                <label className="tool-toggle llm-feature-toggle">
+                  <input
+                    type="checkbox"
+                    checked={chatRenderedEditingEnabled}
+                    onChange={(event) => setChatRenderedEditingEnabled(event.target.checked)}
+                  />
+                  <span>开启渲染编辑</span>
+                </label>
+                <div
+                  className={`llm-setting-status ${
+                    chatRenderedEditingEnabled ? "enabled" : "disabled"
+                  }`}
+                >
+                  <strong>{chatRenderedEditingEnabled ? "已开启" : "已关闭"}</strong>
+                  <span>
+                    {chatRenderedEditingEnabled
+                      ? "可在渲染后的消息气泡中直接编辑，保存时转换回消息内容。"
+                      : "右键编辑仍使用原始消息文本框。"}
+                  </span>
+                </div>
+              </article>
             </section>
           )}
 
@@ -26663,6 +26812,8 @@ export function App() {
                   renderedSegmentIndex,
                 ) => {
                 const isEditingMessage = editingChatMessage?.messageId === message.id;
+                const isRenderedEditingMessage =
+                  isEditingMessage && editingChatMessage.mode === "rendered";
                 if (isEditingMessage && segmentIndex > 0) return null;
                 const messageSegmentCount =
                   message.role === "assistant"
@@ -26736,11 +26887,17 @@ export function App() {
                       </div>
                       <div className="chat-message-bubble-stack">
                         <div
-                          className={`chat-bubble ${isEditingMessage ? "editing" : ""} ${
+                          className={`chat-bubble ${
+                            isEditingMessage
+                              ? isRenderedEditingMessage
+                                ? "rendered-editing"
+                                : "editing"
+                              : ""
+                          } ${
                             showGreetingSwitch ? "roleplay-greeting-bubble" : ""
                           }`}
                           style={
-                            isEditingMessage
+                            isEditingMessage && !isRenderedEditingMessage
                               ? undefined
                               : message.role === "user"
                                 ? CHAT_USER_BUBBLE_OPACITY_STYLE
@@ -26761,24 +26918,76 @@ export function App() {
                             <span className="chat-bubble-context-edge left" />
                           </div>
                           {isEditingMessage ? (
-                            <div className="chat-inline-editor">
-                              <textarea
-                                value={editingChatMessage.content}
-                                rows={Math.min(10, Math.max(3, editingChatMessage.content.split("\n").length + 1))}
-                                onChange={(event) =>
-                                  setEditingChatMessage((current) =>
-                                    current?.messageId === message.id
-                                      ? { ...current, content: event.target.value }
-                                      : current,
-                                  )
-                                }
-                                onKeyDown={(event) => {
-                                  if (event.key === "Escape") {
-                                    event.preventDefault();
-                                    cancelEditingChatMessage();
+                            <div
+                              className={`chat-inline-editor ${
+                                isRenderedEditingMessage ? "rendered" : ""
+                              }`}
+                            >
+                              {isRenderedEditingMessage ? (
+                                <div
+                                  aria-label="直接编辑渲染后的消息"
+                                  aria-multiline="true"
+                                  className="chat-rendered-message-editor"
+                                  contentEditable
+                                  onInput={(event) => {
+                                    const content = serializeRenderedChatEditor(event.currentTarget);
+                                    setEditingChatMessage((current) =>
+                                      current?.messageId === message.id
+                                        ? { ...current, content }
+                                        : current,
+                                    );
+                                  }}
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Escape") {
+                                      event.preventDefault();
+                                      cancelEditingChatMessage();
+                                    }
+                                  }}
+                                  ref={(editor) => {
+                                    if (!editor || editor.dataset.rengeEditorReady === "true") return;
+                                    editor.dataset.rengeEditorReady = "true";
+                                    window.requestAnimationFrame(() => {
+                                      editor.focus();
+                                      const selection = window.getSelection();
+                                      if (!selection) return;
+                                      const range = document.createRange();
+                                      range.selectNodeContents(editor);
+                                      range.collapse(false);
+                                      selection.removeAllRanges();
+                                      selection.addRange(range);
+                                    });
+                                  }}
+                                  role="textbox"
+                                  suppressContentEditableWarning
+                                >
+                                  <div className="mes_text">
+                                    {renderChatContent(
+                                      message.content,
+                                      `${id}-rendered-editor`,
+                                      message.id,
+                                      false,
+                                    )}
+                                  </div>
+                                </div>
+                              ) : (
+                                <textarea
+                                  value={editingChatMessage.content}
+                                  rows={Math.min(10, Math.max(3, editingChatMessage.content.split("\n").length + 1))}
+                                  onChange={(event) =>
+                                    setEditingChatMessage((current) =>
+                                      current?.messageId === message.id
+                                        ? { ...current, content: event.target.value }
+                                        : current,
+                                    )
                                   }
-                                }}
-                              />
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Escape") {
+                                      event.preventDefault();
+                                      cancelEditingChatMessage();
+                                    }
+                                  }}
+                                />
+                              )}
                               <div className="chat-inline-editor-actions">
                                 <button type="button" onClick={cancelEditingChatMessage}>
                                   取消
