@@ -471,6 +471,12 @@ const CHAT_DIALOGUE_REWRITE_SYSTEM_PROMPT = [
   "目标消息中的每个占位符都会被转换成带编号的不可渲染 template 槽位。你必须根据完整对话上下文，为每个编号槽位生成自然、连贯且符合人物身份的对白正文。",
   '只能输出不可渲染的 <template data-renge-dialogue="编号">对白正文</template>。禁止在 template 外输出任何文字，也不要输出原消息、JSON、包裹引号、序号、Markdown 或解释。',
 ].join("\n");
+const CHAT_LOCAL_REWRITE_SYSTEM_PROMPT = [
+  "你正在为一条已经生成完成的 assistant 消息局部补写 YYYY 占位符。",
+  "消息中的其他内容已经定稿，绝对禁止改写、删减、补充、重排或复述任何非 YYYY 内容。",
+  "目标消息中的每个 YYYY 都会被转换成带编号的不可渲染 template 槽位。你必须根据完整对话上下文，为每个编号槽位生成适合该位置的正文。",
+  '只能输出不可渲染的 <template data-renge-local-rewrite="编号">局部正文</template>。禁止在 template 外输出任何文字，也不要输出原消息、JSON、包裹引号、序号、Markdown 或解释。',
+].join("\n");
 const MAX_CHAT_CONTINUATION_ROUNDS = 12;
 const MAX_CHAT_DIALOGUE_REWRITE_ROUNDS = 12;
 
@@ -7998,6 +8004,7 @@ function maskAssistantDialogues(content: string) {
     if (protectedRange && offset >= protectedRange.start && offset < protectedRange.end) {
       return quote;
     }
+    if (stripDialogueReplacementWrapper(quote).toUpperCase() === "YYYY") return quote;
     count += 1;
     return "“XXX”";
   });
@@ -8122,6 +8129,101 @@ function fillDialoguePlaceholders(content: string, replacements: Map<number, str
   });
 }
 
+function countLocalRewritePlaceholders(content: string) {
+  const protectedRanges = getDialogueRewriteProtectedRanges(content);
+  let protectedRangeIndex = 0;
+  let count = 0;
+  const placeholderPattern = /YYYY/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = placeholderPattern.exec(content))) {
+    while (
+      protectedRangeIndex < protectedRanges.length &&
+      protectedRanges[protectedRangeIndex].end <= match.index
+    ) {
+      protectedRangeIndex += 1;
+    }
+    const protectedRange = protectedRanges[protectedRangeIndex];
+    if (
+      protectedRange &&
+      match.index >= protectedRange.start &&
+      match.index < protectedRange.end
+    ) {
+      continue;
+    }
+    count += 1;
+  }
+
+  return count;
+}
+
+function labelLocalRewritePlaceholders(content: string) {
+  const protectedRanges = getDialogueRewriteProtectedRanges(content);
+  let protectedRangeIndex = 0;
+  let slotId = 0;
+  const labeledContent = content.replace(/YYYY/g, (placeholder, offset: number) => {
+    while (
+      protectedRangeIndex < protectedRanges.length &&
+      protectedRanges[protectedRangeIndex].end <= offset
+    ) {
+      protectedRangeIndex += 1;
+    }
+    const protectedRange = protectedRanges[protectedRangeIndex];
+    if (protectedRange && offset >= protectedRange.start && offset < protectedRange.end) {
+      return placeholder;
+    }
+    slotId += 1;
+    return `<template data-renge-local-rewrite-slot="${slotId}"></template>`;
+  });
+  return { content: labeledContent, count: slotId };
+}
+
+function parseLocalRewriteTemplates(rawContent: string, expectedCount: number) {
+  const trimmedContent = rawContent.trim();
+  const unfencedContent = trimmedContent
+    .replace(/^```(?:[a-z0-9_-]+)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+  const replacements = new Map<number, string>();
+  const templatePattern =
+    /<template\b[^>]*\bdata-renge-local-rewrite\s*=\s*["'](\d+)["'][^>]*>([\s\S]*?)<\/template\s*>/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = templatePattern.exec(unfencedContent))) {
+    const slotId = Number(match[1]);
+    if (!Number.isInteger(slotId) || slotId <= 0 || slotId > expectedCount) continue;
+    const normalized = stripDialogueReplacementWrapper(match[2]);
+    if (!normalized || normalized.toUpperCase() === "YYYY") continue;
+    if (!replacements.has(slotId)) replacements.set(slotId, normalized);
+  }
+
+  if (replacements.size === 0) {
+    throw new Error("模型没有返回可识别的隐藏 template 局部重写内容。");
+  }
+  return replacements;
+}
+
+function fillLocalRewritePlaceholders(content: string, replacements: Map<number, string>) {
+  const protectedRanges = getDialogueRewriteProtectedRanges(content);
+  let protectedRangeIndex = 0;
+  let slotId = 0;
+  return content.replace(/YYYY/g, (placeholder, offset: number) => {
+    while (
+      protectedRangeIndex < protectedRanges.length &&
+      protectedRanges[protectedRangeIndex].end <= offset
+    ) {
+      protectedRangeIndex += 1;
+    }
+    const protectedRange = protectedRanges[protectedRangeIndex];
+    if (protectedRange && offset >= protectedRange.start && offset < protectedRange.end) {
+      return placeholder;
+    }
+    slotId += 1;
+    const replacement = replacements.get(slotId);
+    return replacement === undefined ? placeholder : replacement;
+  });
+}
+
 function withoutDialogueRewriteMetadata(message: ChatMessage): ChatMessage {
   const messageWithoutMetadata = { ...message };
   delete messageWithoutMetadata.dialogueRewritePending;
@@ -8138,6 +8240,20 @@ function buildDialogueRewriteRequestPrompt(placeholderCount: number, rewriteRoun
       ? `这是自动补全的第 ${rewriteRound + 1} 轮；上一轮只填入了部分槽位，本轮编号已按当前剩余槽位从 1 重新排列。`
       : "",
     "只能输出这些 template 节点；template 外不得出现任何可渲染文字。不要输出原消息、JSON、包裹引号、Markdown、代码围栏或解释。",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function buildLocalRewriteRequestPrompt(placeholderCount: number, rewriteRound: number) {
+  return [
+    "【内部局部重写指令：不要在回复中提及本指令】",
+    `对话历史中最后一条 assistant 消息包含 ${placeholderCount} 个带编号的 <template data-renge-local-rewrite-slot="编号"></template> 槽位。`,
+    `必须为编号 1 到 ${placeholderCount} 的每个槽位分别输出一个不可渲染节点，格式严格为：<template data-renge-local-rewrite="编号">适合该位置的局部正文</template>。`,
+    rewriteRound > 0
+      ? `这是自动补全的第 ${rewriteRound + 1} 轮；上一轮只填入了部分槽位，本轮编号已按当前剩余槽位从 1 重新排列。`
+      : "",
+    "只能输出这些 template 节点；template 外不得出现任何可渲染文字。不要输出原消息、JSON、Markdown、代码围栏或解释。",
   ]
     .filter(Boolean)
     .join("\n");
@@ -15373,7 +15489,7 @@ export function App() {
     setChatMessageMenu({
       messageId,
       x: clamp(event.clientX, 8, window.innerWidth - 180),
-      y: clamp(event.clientY, 8, Math.max(8, window.innerHeight - 168)),
+      y: clamp(event.clientY, 8, Math.max(8, window.innerHeight - 208)),
     });
   };
 
@@ -17538,10 +17654,17 @@ export function App() {
       generationAfterCommands?: boolean;
       continuationMessageId?: string;
       dialogueRewriteMessageId?: string;
+      localRewriteMessageId?: string;
     } = {},
   ) => {
-    if (options.continuationMessageId && options.dialogueRewriteMessageId) {
-      setChatStatus({ status: "error", message: "续写和重写对话不能同时执行。" });
+    if (
+      [
+        options.continuationMessageId,
+        options.dialogueRewriteMessageId,
+        options.localRewriteMessageId,
+      ].filter(Boolean).length > 1
+    ) {
+      setChatStatus({ status: "error", message: "续写、重写对话和局部重写不能同时执行。" });
       return null;
     }
     const continuationTargetMessage = options.continuationMessageId
@@ -17577,6 +17700,24 @@ export function App() {
       return null;
     }
     const isDialogueRewrite = Boolean(dialogueRewriteTargetMessage);
+    const localRewriteTargetMessage = options.localRewriteMessageId
+      ? nextMessages.find(
+          (message) =>
+            message.id === options.localRewriteMessageId && message.role === "assistant",
+        )
+      : undefined;
+    if (options.localRewriteMessageId && !localRewriteTargetMessage) {
+      setChatStatus({ status: "error", message: "找不到需要局部重写的 AI 消息。" });
+      return null;
+    }
+    const localRewritePlaceholderCount = localRewriteTargetMessage
+      ? countLocalRewritePlaceholders(localRewriteTargetMessage.content)
+      : 0;
+    if (localRewriteTargetMessage && localRewritePlaceholderCount <= 0) {
+      setChatStatus({ status: "error", message: "这条消息没有可局部重写的 YYYY 占位符。" });
+      return null;
+    }
+    const isLocalRewrite = Boolean(localRewriteTargetMessage);
     const responseMode =
       options.responseMode ??
       (chatMode === "ai" ? "ai" : chatMode === "roleplay" ? "roleplay" : "persona");
@@ -17609,6 +17750,10 @@ export function App() {
       setChatStatus({ status: "error", message: "图像生成模型不支持重写对白。" });
       return null;
     }
+    if (isLocalRewrite && isImageGenerationRequest) {
+      setChatStatus({ status: "error", message: "图像生成模型不支持局部重写。" });
+      return null;
+    }
 
     const abortController = beginChatGeneration();
     const abortSignal = abortController.signal;
@@ -17620,13 +17765,12 @@ export function App() {
         [...nextMessages].reverse().find((message) => message.role === "user")?.content ?? "";
       const generationType = options.exposeHeartbeatTools
         ? "quiet"
-        : options.multiAgentIndex !== undefined
+        : options.multiAgentIndex !== undefined ||
+            isContinuation ||
+            isDialogueRewrite ||
+            isLocalRewrite
           ? "normal"
-          : isContinuation
-            ? "normal"
-            : isDialogueRewrite
-              ? "normal"
-            : "regenerate";
+          : "regenerate";
       await emitTavernEvent(
         TAVERN_EVENTS.GENERATION_STARTED,
         generationType,
@@ -17640,7 +17784,10 @@ export function App() {
       );
       setChatStatus({ status: "loading", message: options.statusMessage ?? "正在重新生成回复..." });
       const requestMcpTools =
-        !isContinuation && !isDialogueRewrite && enabledMcpServers.length > 0
+        !isContinuation &&
+        !isDialogueRewrite &&
+        !isLocalRewrite &&
+        enabledMcpServers.length > 0
           ? await refreshMcpTools({ silent: true })
           : [];
       throwIfChatAborted(abortSignal);
@@ -17663,7 +17810,7 @@ export function App() {
         (!useImageRecognitionMcp && canProviderReceiveImageUrl(requestProvider, requestModelId));
       const availableChatTools = isImageGenerationRequest
         ? []
-        : isContinuation || isDialogueRewrite
+        : isContinuation || isDialogueRewrite || isLocalRewrite
           ? []
           : getAvailableChatToolDefinitions(
             requestMcpTools,
@@ -17763,7 +17910,7 @@ export function App() {
             ].join("\n")
           : "";
       const toolSystemPrompt =
-        !isDialogueRewrite && localToolsEnabled && localWorkspaceHandle
+        !isDialogueRewrite && !isLocalRewrite && localToolsEnabled && localWorkspaceHandle
           ? buildLocalToolsSystemPrompt(localWorkspaceHandle)
           : "";
       const mcpToolsSystemPrompt = buildMcpToolsSystemPrompt(requestMcpTools);
@@ -17824,6 +17971,7 @@ export function App() {
         heartbeatSystemPrompt,
         isContinuation ? CHAT_CONTINUATION_SYSTEM_PROMPT : "",
         isDialogueRewrite ? CHAT_DIALOGUE_REWRITE_SYSTEM_PROMPT : "",
+        isLocalRewrite ? CHAT_LOCAL_REWRITE_SYSTEM_PROMPT : "",
       ]
         .filter(Boolean)
         .join("\n\n");
@@ -17880,8 +18028,13 @@ export function App() {
       let continuationReachedLimit = false;
       let dialogueRewriteRemainingCount = 0;
       let dialogueRewriteReachedLimit = false;
+      let localRewriteRemainingCount = 0;
+      let localRewriteReachedLimit = false;
       assistantMessageId =
-        dialogueRewriteTargetMessage?.id ?? continuationTargetMessage?.id ?? crypto.randomUUID();
+        localRewriteTargetMessage?.id ??
+        dialogueRewriteTargetMessage?.id ??
+        continuationTargetMessage?.id ??
+        crypto.randomUUID();
       const requestChatCompletion = async (messages: ChatApiMessage[], options: {
         includeTools: boolean;
         stream: boolean;
@@ -18054,6 +18207,77 @@ export function App() {
           }
         }
         dialogueRewriteReachedLimit = dialogueRewriteRemainingCount > 0;
+      } else if (localRewriteTargetMessage) {
+        streamingAssistantInserted = true;
+        assistantContent = localRewriteTargetMessage.content;
+        localRewriteRemainingCount = countLocalRewritePlaceholders(assistantContent);
+        const buildLocalRewriteApiMessages = (
+          currentContent: string,
+          rewriteRound: number,
+        ) => {
+          const rewriteMessages = apiMessages.map((message) => ({ ...message }));
+          const labeledTarget = labelLocalRewritePlaceholders(currentContent);
+          let targetIndex = -1;
+          for (let index = rewriteMessages.length - 1; index >= 0; index -= 1) {
+            if (rewriteMessages[index].role !== "assistant") continue;
+            if (countLocalRewritePlaceholders(getChatApiMessageText(rewriteMessages[index])) <= 0) {
+              continue;
+            }
+            targetIndex = index;
+            break;
+          }
+          if (targetIndex >= 0) {
+            rewriteMessages[targetIndex] = {
+              ...rewriteMessages[targetIndex],
+              content: labeledTarget.content,
+            };
+          } else {
+            rewriteMessages.push({ role: "assistant", content: labeledTarget.content });
+          }
+          rewriteMessages.push({
+            role: "user",
+            content: buildLocalRewriteRequestPrompt(labeledTarget.count, rewriteRound),
+          });
+          return rewriteMessages;
+        };
+
+        for (
+          let rewriteRound = 0;
+          rewriteRound < MAX_CHAT_DIALOGUE_REWRITE_ROUNDS && localRewriteRemainingCount > 0;
+          rewriteRound += 1
+        ) {
+          setChatStatus({
+            status: "loading",
+            message:
+              rewriteRound === 0
+                ? options.streamingStatusMessage ?? "正在根据上下文局部重写..."
+                : `仍有 ${localRewriteRemainingCount} 处 YYYY 待填充，正在继续请求（第 ${rewriteRound + 1} 轮）...`,
+          });
+          let rewriteStreamStarted = false;
+          const rewriteResult = await requestChatCompletion(
+            buildLocalRewriteApiMessages(assistantContent, rewriteRound),
+            {
+              includeTools: false,
+              stream: true,
+              onDelta: () => {
+                if (rewriteStreamStarted) return;
+                rewriteStreamStarted = true;
+                setChatStatus({ status: "loading", message: "已收到局部重写内容，正在填充..." });
+              },
+            },
+          );
+          const replacements = parseLocalRewriteTemplates(
+            rewriteResult.content.trim(),
+            localRewriteRemainingCount,
+          );
+          const previousRemainingCount = localRewriteRemainingCount;
+          assistantContent = fillLocalRewritePlaceholders(assistantContent, replacements);
+          localRewriteRemainingCount = countLocalRewritePlaceholders(assistantContent);
+          if (localRewriteRemainingCount >= previousRemainingCount) {
+            throw new Error("模型没有填入任何新的局部重写内容。");
+          }
+        }
+        localRewriteReachedLimit = localRewriteRemainingCount > 0;
       } else if (continuationTargetMessage) {
         streamingAssistantInserted = true;
         commitChatMessages((current) =>
@@ -18443,7 +18667,7 @@ export function App() {
       }
 
       throwIfChatAborted(abortSignal);
-      if (assistantContent && !isDialogueRewrite) {
+      if (assistantContent && !isDialogueRewrite && !isLocalRewrite) {
         const templateResult = await applyPromptTemplateToRenderedMessage(
           assistantContent,
           messagesForApi,
@@ -18460,6 +18684,7 @@ export function App() {
         !assistantChoiceRequest &&
         !isContinuation &&
         !isDialogueRewrite &&
+        !isLocalRewrite &&
         assistantContent
       ) {
         const maskedDialogues = maskAssistantDialogues(assistantContent);
@@ -18475,7 +18700,13 @@ export function App() {
       }
 
       let finalAssistantMessage: ChatMessage;
-      if (dialogueRewriteTargetMessage) {
+      if (localRewriteTargetMessage) {
+        finalAssistantMessage = {
+          ...localRewriteTargetMessage,
+          content: assistantContent,
+          renderAsPlainText: false,
+        };
+      } else if (dialogueRewriteTargetMessage) {
         const rewrittenMessage = withoutDialogueRewriteMetadata({
           ...dialogueRewriteTargetMessage,
           content: assistantContent,
@@ -18556,16 +18787,20 @@ export function App() {
       }
       setChatStatus({
         status:
-          continuationReachedLimit || dialogueRewriteReachedLimit ? "warning" : "success",
+          continuationReachedLimit || dialogueRewriteReachedLimit || localRewriteReachedLimit
+            ? "warning"
+            : "success",
         message: continuationReachedLimit
           ? `已连续续写 ${MAX_CHAT_CONTINUATION_ROUNDS} 次，但上游仍报告长度截断。`
           : dialogueRewriteReachedLimit
             ? `已自动重写 ${MAX_CHAT_DIALOGUE_REWRITE_ROUNDS} 轮，仍有 ${dialogueRewriteRemainingCount} 处对白待填充，可再次右键重写。`
-            : assistantChoiceRequest
-              ? "AI 正在等待你的选择。"
-              : options.successMessage ?? "回复已重新生成。",
+            : localRewriteReachedLimit
+              ? `已自动局部重写 ${MAX_CHAT_DIALOGUE_REWRITE_ROUNDS} 轮，仍有 ${localRewriteRemainingCount} 处 YYYY 待填充，可再次右键重写。`
+              : assistantChoiceRequest
+                ? "AI 正在等待你的选择。"
+                : options.successMessage ?? "回复已重新生成。",
       });
-      if (continuationTargetMessage || dialogueRewriteTargetMessage) {
+      if (continuationTargetMessage || dialogueRewriteTargetMessage || localRewriteTargetMessage) {
         const messageIndex = chatMessagesRef.current.findIndex(
           (message) => message.id === finalAssistantMessage.id,
         );
@@ -18607,7 +18842,11 @@ export function App() {
       }
 
       const message = error instanceof Error ? error.message : "调用失败。";
-      if (!continuationTargetMessage && !dialogueRewriteTargetMessage) {
+      if (
+        !continuationTargetMessage &&
+        !dialogueRewriteTargetMessage &&
+        !localRewriteTargetMessage
+      ) {
         commitChatMessages((current) => [
           ...current,
           {
@@ -18621,11 +18860,13 @@ export function App() {
       }
       setChatStatus({
         status: "error",
-        message: dialogueRewriteTargetMessage
-          ? `重写对白失败：${message}`
-          : continuationTargetMessage
-            ? `续写失败：${message}`
-            : "调用失败。请检查本地服务、供应商地址、密钥、模型 ID 或上游限流状态。",
+        message: localRewriteTargetMessage
+          ? `局部重写失败：${message}`
+          : dialogueRewriteTargetMessage
+            ? `重写对白失败：${message}`
+            : continuationTargetMessage
+              ? `续写失败：${message}`
+              : "调用失败。请检查本地服务、供应商地址、密钥、模型 ID 或上游限流状态。",
       });
       return null;
     } finally {
@@ -20375,6 +20616,60 @@ export function App() {
       statusMessage: "正在准备重写对白...",
       streamingStatusMessage: "正在根据上下文重写对白...",
       successMessage: "对白重写已完成。",
+    });
+  };
+
+  const rewriteAssistantLocally = async (messageId: string) => {
+    if (chatStatus.status === "loading" || !chatDialogueRewriteEnabled) return;
+
+    const messageIndex = chatMessagesRef.current.findIndex(
+      (message) => message.id === messageId,
+    );
+    const message = chatMessagesRef.current[messageIndex];
+    if (
+      !message ||
+      message.role !== "assistant" ||
+      countLocalRewritePlaceholders(message.content) <= 0
+    ) {
+      setChatStatus({ status: "error", message: "这条消息没有可局部重写的 YYYY 占位符。" });
+      return;
+    }
+
+    setChatMessageMenu(null);
+    setEditingChatMessage(null);
+    const messagesForRewrite = chatMessagesRef.current.slice(0, messageIndex + 1);
+    const latestUserMessage = [...messagesForRewrite]
+      .reverse()
+      .find((candidate) => candidate.role === "user");
+    const requestSender = normalizeChatSenderIdentity(latestUserMessage?.sender, personas);
+    const responderPersona = getAssistantMessagePersona(
+      message,
+      personas,
+      chatMode === "persona" ? activePersona : undefined,
+    );
+    const responseMode: "ai" | "persona" | "roleplay" = responderPersona
+      ? "persona"
+      : activeSessionRoleplayCard
+        ? "roleplay"
+        : "ai";
+    const multiAgentRequestConfig =
+      chatMode === "multi" && responderPersona
+        ? getMultiAgentRequestConfig(responderPersona.id)
+        : undefined;
+
+    await generateAssistantForMessages(messagesForRewrite, requestSender, {
+      responseMode,
+      ...(responderPersona ? { responderPersona } : {}),
+      ...(multiAgentRequestConfig
+        ? {
+            requestProvider: multiAgentRequestConfig.provider,
+            requestModelId: multiAgentRequestConfig.modelId,
+          }
+        : {}),
+      localRewriteMessageId: message.id,
+      statusMessage: "正在准备局部重写...",
+      streamingStatusMessage: "正在根据上下文局部重写...",
+      successMessage: "局部重写已完成。",
     });
   };
 
@@ -22973,7 +23268,8 @@ export function App() {
                   <p>
                     开启后，AI 回复生成完成时会把识别到的引用对白替换为
                     <code>“XXX”</code>。随后可右键该消息并选择“重写对话”，让 AI
-                    根据完整上下文填充对白；非对白叙述保持不变。
+                    根据完整上下文填充对白；消息中存在 <code>YYYY</code> 时，也可右键选择
+                    “局部重写”。未被占位符标记的内容保持不变。
                   </p>
                 </div>
                 <label className="tool-toggle llm-feature-toggle">
@@ -22992,7 +23288,7 @@ export function App() {
                   <strong>{chatDialogueRewriteEnabled ? "已开启" : "已关闭"}</strong>
                   <span>
                     {chatDialogueRewriteEnabled
-                      ? "新生成消息的引用对白会变为占位符，可在原气泡内按需重写。"
+                      ? "支持在原气泡内重写 “XXX” 对白，或局部填充 YYYY 占位符。"
                       : "AI 回复将按原始内容保存，不会生成对白占位符或重写入口。"}
                   </span>
                 </div>
@@ -26625,6 +26921,18 @@ export function App() {
                       >
                         <Languages size={14} />
                         重写对话
+                      </button>
+                    )}
+                  {chatDialogueRewriteEnabled &&
+                    chatMessageMenuMessage.role === "assistant" &&
+                    countLocalRewritePlaceholders(chatMessageMenuMessage.content) > 0 && (
+                      <button
+                        type="button"
+                        disabled={chatStatus.status === "loading"}
+                        onClick={() => void rewriteAssistantLocally(chatMessageMenuMessage.id)}
+                      >
+                        <Sparkles size={14} />
+                        局部重写
                       </button>
                     )}
                   <button
