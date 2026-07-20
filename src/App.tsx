@@ -116,9 +116,10 @@ import {
   exportCharacterCardPng,
   getCharacterCardGreetings,
   importCharacterCardFile,
+  loadCharacterCardAvatarsFromDatabase,
   loadCharacterCardsFromDatabase,
   loadCharacterCardsFromStorage,
-  normalizeCharacterCard,
+  normalizeStoredCharacterCard,
   saveCharacterCardsToDatabase,
   type CharacterCard,
 } from "./characterCardUtils";
@@ -2017,13 +2018,32 @@ async function loadPersistentAppData(): Promise<PersistentAppDataLoadResult> {
 
 let persistentAppDataSaveQueue: Promise<void> = Promise.resolve();
 
-async function savePersistentAppData(data: RengeAppData): Promise<boolean> {
+function compactAppDataForPersistentStore(
+  data: RengeAppData,
+  characterCardsStored: boolean,
+): RengeAppData {
+  if (!window.rengeAndroid?.isAndroid || !characterCardsStored) return data;
+  const characterCards = data.characterCards ?? [];
+  if (!characterCards.some((card) => Boolean(card.avatarDataUrl))) return data;
+  return {
+    ...data,
+    characterCards: characterCards.map((card) =>
+      card.avatarDataUrl ? { ...card, avatarDataUrl: "" } : card,
+    ),
+  };
+}
+
+async function savePersistentAppData(
+  data: RengeAppData,
+  characterCardsStored = false,
+): Promise<boolean> {
   const operation = persistentAppDataSaveQueue.then(async () => {
     try {
+      const persistentData = compactAppDataForPersistentStore(data, characterCardsStored);
       const response = await fetch("/api/app-data", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data }),
+        body: JSON.stringify({ data: persistentData }),
       });
       return response.ok;
     } catch {
@@ -2070,7 +2090,10 @@ function setLocalStorageJsonSafely(key: string, value: unknown) {
   }
 }
 
-function persistAppDataToLocalStores(data: RengeAppData) {
+function persistAppDataToLocalStores(
+  data: RengeAppData,
+  characterCardsAlreadyStored = false,
+) {
   const personas = data.personas ?? [];
   if (personas.length > 0) {
     void personaStore.save(personas).catch(() => undefined);
@@ -2116,11 +2139,15 @@ function persistAppDataToLocalStores(data: RengeAppData) {
   );
 
   const characterCards = data.characterCards ?? [];
-  void saveCharacterCardsToDatabase(characterCards);
-  setLocalStorageJsonSafely(
-    CHARACTER_CARDS_STORAGE_KEY,
-    characterCards.map((card) => ({ ...card, avatarDataUrl: "" })),
-  );
+  const characterCardsStored = characterCardsAlreadyStored
+    ? Promise.resolve(true)
+    : saveCharacterCardsToDatabase(characterCards);
+  if (!window.rengeAndroid?.isAndroid) {
+    setLocalStorageJsonSafely(
+      CHARACTER_CARDS_STORAGE_KEY,
+      characterCards.map((card) => ({ ...card, avatarDataUrl: "" })),
+    );
+  }
   setLocalStorageValueSafely(
     ACTIVE_CHARACTER_CARD_STORAGE_KEY,
     data.activeCharacterCardId ?? "",
@@ -2170,6 +2197,7 @@ function persistAppDataToLocalStores(data: RengeAppData) {
   setLocalStorageJsonSafely(MCP_SERVERS_STORAGE_KEY, data.mcpServers ?? []);
   setLocalStorageJsonSafely(SKILLS_STORAGE_KEY, data.skills ?? []);
   setLocalStorageJsonSafely(EXTENSIONS_STORAGE_KEY, data.extensions ?? []);
+  return characterCardsStored;
 }
 
 function collectRengeLocalStorage() {
@@ -11023,13 +11051,28 @@ export function App() {
     let cancelled = false;
 
     async function loadInitialAppData() {
-      const [persistentResult, localPersonas, databaseCharacterCards] = await Promise.all([
+      const [persistentResult, localPersonas] = await Promise.all([
         loadPersistentAppData(),
         personaStore.list(),
-        loadCharacterCardsFromDatabase(),
       ]);
       if (cancelled) return;
       const persistentData = persistentResult.data;
+      const persistentCharacterCards = Array.isArray(persistentData?.characterCards)
+        ? persistentData.characterCards
+        : [];
+      const hasPersistentCharacterCards = persistentCharacterCards.length > 0;
+      const databaseCharacterCards = hasPersistentCharacterCards
+        ? []
+        : await loadCharacterCardsFromDatabase();
+      const databaseCharacterCardAvatars =
+        hasPersistentCharacterCards &&
+        window.rengeAndroid?.isAndroid &&
+        persistentCharacterCards.some(
+          (card) => isObjectRecord(card) && !String(card.avatarDataUrl ?? ""),
+        )
+          ? await loadCharacterCardAvatarsFromDatabase()
+          : new Map<string, string>();
+      if (cancelled) return;
       persistentStoreReadyRef.current = persistentResult.available;
 
       const normalizedPersonas = mergeBuiltInPersonas(
@@ -11079,10 +11122,16 @@ export function App() {
         })(),
       );
       const normalizedCharacterCards =
-        Array.isArray(persistentData?.characterCards) && persistentData.characterCards.length > 0
-        ? persistentData.characterCards.map((card, index) =>
-            normalizeCharacterCard(card, index),
-          )
+        hasPersistentCharacterCards
+        ? persistentCharacterCards
+            .map((card, index) => normalizeStoredCharacterCard(card, index))
+            .map((card) => {
+              if (card.avatarDataUrl || !window.rengeAndroid?.isAndroid) return card;
+              const databaseAvatar = databaseCharacterCardAvatars.get(card.id);
+              return databaseAvatar
+                ? { ...card, avatarDataUrl: databaseAvatar }
+                : card;
+            })
         : databaseCharacterCards.length > 0
           ? databaseCharacterCards
           : loadCharacterCardsFromStorage(CHARACTER_CARDS_STORAGE_KEY);
@@ -11334,9 +11383,13 @@ export function App() {
     const timer = window.setTimeout(() => {
       if (appDataClearingRef.current) return;
       const snapshot = buildCurrentAppData();
-      persistAppDataToLocalStores(snapshot);
+      const characterCardsStored = persistAppDataToLocalStores(snapshot);
       if (persistentStoreReadyRef.current) {
-        void savePersistentAppData(snapshot);
+        if (window.rengeAndroid?.isAndroid) {
+          void characterCardsStored.then((stored) => savePersistentAppData(snapshot, stored));
+        } else {
+          void savePersistentAppData(snapshot);
+        }
       }
     }, APP_DATA_SAVE_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
@@ -11347,9 +11400,13 @@ export function App() {
     const flushLatestSnapshot = () => {
       if (appDataClearingRef.current) return;
       const snapshot = buildCurrentAppData();
-      persistAppDataToLocalStores(snapshot);
+      const characterCardsStored = persistAppDataToLocalStores(snapshot);
       if (persistentStoreReadyRef.current) {
-        void savePersistentAppData(snapshot);
+        if (window.rengeAndroid?.isAndroid) {
+          void characterCardsStored.then((stored) => savePersistentAppData(snapshot, stored));
+        } else {
+          void savePersistentAppData(snapshot);
+        }
       }
     };
     window.addEventListener("pagehide", flushLatestSnapshot);
@@ -12216,6 +12273,53 @@ export function App() {
 
   const importCompleteAppData = async (file?: File) => {
     if (!file || dataBackupState.status === "loading") return;
+    if (window.rengeAndroid?.isAndroid) {
+      const confirmed = window.confirm(
+        `即将导入 ${file.name}（${formatFileSize(file.size)}）的完整备份。\n\n这会替换当前全部应用数据，包括人格、角色卡、聊天、API Key、脚本、扩展和界面设置。此操作不可直接撤销，是否继续？`,
+      );
+      if (!confirmed) {
+        setDataBackupState({ status: "idle", message: "已取消导入，当前数据未发生变化。" });
+        if (completeBackupImportInputRef.current) {
+          completeBackupImportInputRef.current.value = "";
+        }
+        return;
+      }
+
+      setDataBackupState({
+        status: "loading",
+        message: "正在以低内存模式恢复完整备份，请勿关闭应用...",
+      });
+      try {
+        const response = await fetch("/api/app-data/import-complete", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: file,
+        });
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+          exportedAt?: string;
+        };
+        if (!response.ok) {
+          throw new Error(payload.error || `本地数据服务返回 ${response.status}`);
+        }
+        setDataBackupState({
+          status: "success",
+          message: "完整数据已恢复，正在重新载入应用...",
+        });
+        window.setTimeout(() => window.location.reload(), 450);
+      } catch (error) {
+        setDataBackupState({
+          status: "error",
+          message: error instanceof Error ? `导入失败：${error.message}` : "完整备份导入失败。",
+        });
+      } finally {
+        if (completeBackupImportInputRef.current) {
+          completeBackupImportInputRef.current.value = "";
+        }
+      }
+      return;
+    }
+
     setDataBackupState({ status: "loading", message: "正在校验完整备份..." });
     let previousAppData: RengeAppData | null = null;
     let previousLocalStorage: Record<string, string> | null = null;
@@ -12242,7 +12346,7 @@ export function App() {
 
       const restoredPersonas = (backup.appData.personas ?? []).map(normalizePersona);
       const restoredCharacterCards = (backup.appData.characterCards ?? []).map(
-        (card, index) => normalizeCharacterCard(card, index),
+        (card, index) => normalizeStoredCharacterCard(card, index),
       );
       const restoredAppData: RengeAppData = {
         ...backup.appData,
@@ -12256,7 +12360,8 @@ export function App() {
       if (!appDataSaved) {
         throw new Error("无法写入应用主数据，请确认本地数据服务正在运行。");
       }
-      replaceRengeLocalStorage(backup.localStorage);
+      replaceRengeLocalStorage({});
+      void persistAppDataToLocalStores(restoredAppData, true);
       await personaStore.save(restoredPersonas);
 
       if (

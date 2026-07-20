@@ -3,6 +3,8 @@ package com.renge.agentlab;
 import android.content.Context;
 import android.content.res.AssetManager;
 import android.util.AtomicFile;
+import android.util.JsonReader;
+import android.util.JsonToken;
 import android.webkit.WebStorage;
 
 import org.json.JSONException;
@@ -14,7 +16,11 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.PushbackInputStream;
+import java.io.Writer;
 import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.ServerSocket;
@@ -24,14 +30,33 @@ import java.net.URI;
 import java.net.URL;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class LocalWebServer {
     private static final int PREFERRED_PORT = 5191;
+    private static final long MAX_COMPLETE_BACKUP_BYTES = 512L * 1024L * 1024L;
+    private static final Set<String> REQUIRED_APP_DATA_ARRAY_FIELDS = new HashSet<>(Arrays.asList(
+            "personas",
+            "providers",
+            "chatSessions",
+            "systemPrompts",
+            "chatPresets",
+            "worldBooks",
+            "regexScripts",
+            "tavernScripts",
+            "characterCards",
+            "mcpServers",
+            "skills",
+            "extensions"
+    ));
     private final Context context;
     private final ExecutorService executor = Executors.newCachedThreadPool();
     private final File appDataFile;
@@ -86,7 +111,8 @@ public class LocalWebServer {
     private void handleSocket(Socket socket) {
         try (Socket closeableSocket = socket) {
             closeableSocket.setSoTimeout(30000);
-            Request request = readRequest(new BufferedInputStream(closeableSocket.getInputStream()));
+            BufferedInputStream input = new BufferedInputStream(closeableSocket.getInputStream());
+            Request request = readRequestHeaders(input);
             if (request == null) return;
 
             OutputStream output = closeableSocket.getOutputStream();
@@ -98,6 +124,14 @@ public class LocalWebServer {
                 output.flush();
                 return;
             }
+            if ("/api/app-data/import-complete".equals(request.path)) {
+                closeableSocket.setSoTimeout(120000);
+                handleCompleteBackupImport(request, input, output);
+                output.flush();
+                return;
+            }
+
+            request = request.withBody(readRequestBody(input, request.contentLength));
             if (request.path.startsWith("/api/")) {
                 handleApi(request, output);
             } else {
@@ -113,7 +147,7 @@ public class LocalWebServer {
         }
     }
 
-    private Request readRequest(BufferedInputStream input) throws IOException {
+    private Request readRequestHeaders(BufferedInputStream input) throws IOException {
         ByteArrayOutputStream headerBytes = new ByteArrayOutputStream();
         int matched = 0;
         int value;
@@ -151,25 +185,37 @@ public class LocalWebServer {
             headers.put(name, body);
         }
 
-        int contentLength = 0;
+        long contentLength = 0;
         if (headers.containsKey("content-length")) {
-            contentLength = Integer.parseInt(headers.get("content-length"));
-        }
-
-        byte[] body = new byte[contentLength];
-        int offset = 0;
-        while (offset < contentLength) {
-            int count = input.read(body, offset, contentLength - offset);
-            if (count < 0) break;
-            offset += count;
+            try {
+                contentLength = Long.parseLong(headers.get("content-length"));
+            } catch (NumberFormatException error) {
+                throw new IOException("Invalid Content-Length", error);
+            }
+            if (contentLength < 0) throw new IOException("Invalid Content-Length");
         }
 
         return new Request(
                 requestLine[0].toUpperCase(Locale.US),
                 normalizePath(requestLine[1]),
                 headers,
-                body
+                contentLength,
+                null
         );
+    }
+
+    private byte[] readRequestBody(InputStream input, long contentLength) throws IOException {
+        if (contentLength > Integer.MAX_VALUE) {
+            throw new IOException("Request body is too large");
+        }
+        byte[] body = new byte[(int) contentLength];
+        int offset = 0;
+        while (offset < body.length) {
+            int count = input.read(body, offset, body.length - offset);
+            if (count < 0) throw new IOException("Unexpected end of request body");
+            offset += count;
+        }
+        return body;
     }
 
     private String normalizePath(String target) {
@@ -180,6 +226,328 @@ public class LocalWebServer {
             return URLDecoder.decode(rawPath, StandardCharsets.UTF_8.name());
         } catch (Exception ignored) {
             return "/";
+        }
+    }
+
+    private void handleCompleteBackupImport(
+            Request request,
+            InputStream input,
+            OutputStream output
+    ) throws IOException {
+        if (!("PUT".equals(request.method) || "POST".equals(request.method))) {
+            sendJson(output, 405, jsonError("Method not allowed"));
+            return;
+        }
+        if (request.contentLength <= 0) {
+            sendJson(output, 400, jsonError("备份文件为空或无法确定文件大小。"));
+            return;
+        }
+        if (request.contentLength > MAX_COMPLETE_BACKUP_BYTES) {
+            sendJson(output, 400, jsonError("备份文件超过 512MB，无法导入。"));
+            return;
+        }
+
+        File uploadedBackup = File.createTempFile("renge-complete-backup-", ".json", context.getCacheDir());
+        try {
+            copyFixedLength(input, uploadedBackup, request.contentLength);
+            CompleteBackupMetadata metadata = installCompleteBackup(uploadedBackup);
+            JSONObject payload = new JSONObject();
+            payload.put("ok", true);
+            payload.put("exportedAt", metadata.exportedAt);
+            payload.put("bytes", request.contentLength);
+            sendJson(output, 200, payload);
+        } catch (Exception error) {
+            sendJson(
+                    output,
+                    400,
+                    jsonError(error.getMessage() == null ? "完整备份格式无效。" : error.getMessage())
+            );
+        } finally {
+            if (!uploadedBackup.delete() && uploadedBackup.exists()) {
+                uploadedBackup.deleteOnExit();
+            }
+        }
+    }
+
+    private void copyFixedLength(InputStream input, File target, long contentLength) throws IOException {
+        try (OutputStream output = new FileOutputStream(target)) {
+            byte[] buffer = new byte[64 * 1024];
+            long remaining = contentLength;
+            while (remaining > 0) {
+                int count = input.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+                if (count < 0) throw new IOException("备份文件上传不完整。请重新选择文件。");
+                output.write(buffer, 0, count);
+                remaining -= count;
+            }
+            output.flush();
+        }
+    }
+
+    private CompleteBackupMetadata installCompleteBackup(File completeBackup) throws IOException {
+        File stagedAppData = File.createTempFile("renge-app-data-import-", ".json", context.getCacheDir());
+        try {
+            CompleteBackupMetadata metadata = extractCompleteBackupAppData(completeBackup, stagedAppData);
+            validateImportedAppData(stagedAppData);
+            synchronized (this) {
+                if (appDataFile.isFile() && appDataFile.length() > 0) {
+                    copyFileAtomically(appDataFile, appDataBackupFile);
+                }
+                copyFileAtomically(stagedAppData, appDataFile);
+            }
+            return metadata;
+        } finally {
+            if (!stagedAppData.delete() && stagedAppData.exists()) {
+                stagedAppData.deleteOnExit();
+            }
+        }
+    }
+
+    private CompleteBackupMetadata extractCompleteBackupAppData(
+            File completeBackup,
+            File stagedAppData
+    ) throws IOException {
+        String format = null;
+        String version = null;
+        String exportedAt = null;
+        boolean appDataFound = false;
+        boolean localStorageFound = false;
+
+        try (PushbackInputStream input = new PushbackInputStream(
+                new BufferedInputStream(new java.io.FileInputStream(completeBackup)),
+                1
+        )) {
+            int rootStart = readNonWhitespace(input);
+            if (rootStart != '{') throw new IOException("备份文件不是有效的 JSON 对象。");
+
+            while (true) {
+                int next = readNonWhitespace(input);
+                if (next == '}') break;
+                if (next != '"') throw new IOException("备份文件顶层字段格式无效。");
+                String key = readJsonString(input);
+                if (readNonWhitespace(input) != ':') {
+                    throw new IOException("备份文件字段缺少冒号：" + key);
+                }
+                int valueStart = readNonWhitespace(input);
+                if (valueStart < 0) throw new IOException("备份文件意外结束。");
+
+                if ("format".equals(key)) {
+                    if (valueStart != '"') throw new IOException("备份格式标识无效。");
+                    format = readJsonString(input);
+                } else if ("version".equals(key)) {
+                    version = readJsonPrimitive(input, valueStart);
+                } else if ("exportedAt".equals(key)) {
+                    if (valueStart != '"') throw new IOException("备份导出时间无效。");
+                    exportedAt = readJsonString(input);
+                } else if ("appData".equals(key)) {
+                    if (appDataFound || valueStart != '{') {
+                        throw new IOException("备份中的应用主数据无效。");
+                    }
+                    try (OutputStream appDataOutput = new FileOutputStream(stagedAppData)) {
+                        copyJsonComposite(input, valueStart, appDataOutput);
+                    }
+                    appDataFound = true;
+                } else if ("localStorage".equals(key)) {
+                    if (valueStart != '{') throw new IOException("备份中的本地设置格式无效。");
+                    copyJsonComposite(input, valueStart, null);
+                    localStorageFound = true;
+                } else {
+                    skipJsonValue(input, valueStart);
+                }
+
+                int separator = readNonWhitespace(input);
+                if (separator == '}') break;
+                if (separator != ',') throw new IOException("备份文件顶层 JSON 格式无效。");
+            }
+
+            if (readNonWhitespace(input) >= 0) {
+                throw new IOException("备份文件包含多余内容。");
+            }
+        }
+
+        if (!"renge-agent-complete-backup".equals(format)) {
+            throw new IOException("这不是 Renge Agent 完整备份文件。");
+        }
+        if (!"1".equals(version)) {
+            throw new IOException("暂不支持此备份版本：" + (version == null ? "未知" : version) + "。");
+        }
+        if (exportedAt == null || exportedAt.trim().isEmpty()) {
+            throw new IOException("备份缺少导出时间。");
+        }
+        if (!appDataFound || stagedAppData.length() == 0) {
+            throw new IOException("备份缺少应用主数据。");
+        }
+        if (!localStorageFound) {
+            throw new IOException("备份缺少本地设置数据。");
+        }
+        return new CompleteBackupMetadata(exportedAt);
+    }
+
+    private void validateImportedAppData(File stagedAppData) throws IOException {
+        Set<String> missingFields = new HashSet<>(REQUIRED_APP_DATA_ARRAY_FIELDS);
+        try (JsonReader reader = new JsonReader(new InputStreamReader(
+                new java.io.FileInputStream(stagedAppData),
+                StandardCharsets.UTF_8
+        ))) {
+            reader.beginObject();
+            while (reader.hasNext()) {
+                String name = reader.nextName();
+                if (missingFields.contains(name)) {
+                    if (reader.peek() != JsonToken.BEGIN_ARRAY) {
+                        throw new IOException("备份缺少完整数据字段：" + name + "。");
+                    }
+                    missingFields.remove(name);
+                }
+                reader.skipValue();
+            }
+            reader.endObject();
+            if (reader.peek() != JsonToken.END_DOCUMENT) {
+                throw new IOException("应用主数据包含多余内容。");
+            }
+        } catch (IllegalStateException error) {
+            throw new IOException("应用主数据 JSON 格式无效。", error);
+        }
+        if (!missingFields.isEmpty()) {
+            throw new IOException("备份缺少完整数据字段：" + missingFields.iterator().next() + "。");
+        }
+    }
+
+    private void copyFileAtomically(File source, File target) throws IOException {
+        File parent = target.getParentFile();
+        if (parent != null) parent.mkdirs();
+        AtomicFile atomicFile = new AtomicFile(target);
+        FileOutputStream output = null;
+        try (InputStream input = new BufferedInputStream(new java.io.FileInputStream(source))) {
+            output = atomicFile.startWrite();
+            byte[] buffer = new byte[64 * 1024];
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                output.write(buffer, 0, count);
+            }
+            output.getFD().sync();
+            atomicFile.finishWrite(output);
+        } catch (IOException error) {
+            if (output != null) atomicFile.failWrite(output);
+            throw error;
+        }
+    }
+
+    private int readNonWhitespace(InputStream input) throws IOException {
+        int value;
+        do {
+            value = input.read();
+        } while (value == ' ' || value == '\t' || value == '\r' || value == '\n');
+        return value;
+    }
+
+    private String readJsonString(InputStream input) throws IOException {
+        StringBuilder value = new StringBuilder();
+        boolean escaped = false;
+        while (true) {
+            int next = input.read();
+            if (next < 0) throw new IOException("JSON 字符串意外结束。");
+            if (!escaped && next == '"') return value.toString();
+            if (!escaped && next == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (escaped) {
+                switch (next) {
+                    case '"': value.append('"'); break;
+                    case '\\': value.append('\\'); break;
+                    case '/': value.append('/'); break;
+                    case 'b': value.append('\b'); break;
+                    case 'f': value.append('\f'); break;
+                    case 'n': value.append('\n'); break;
+                    case 'r': value.append('\r'); break;
+                    case 't': value.append('\t'); break;
+                    case 'u':
+                        int codePoint = 0;
+                        for (int index = 0; index < 4; index++) {
+                            int digit = Character.digit(input.read(), 16);
+                            if (digit < 0) throw new IOException("JSON Unicode 转义无效。");
+                            codePoint = (codePoint << 4) | digit;
+                        }
+                        value.append((char) codePoint);
+                        break;
+                    default:
+                        throw new IOException("JSON 转义字符无效。");
+                }
+                escaped = false;
+            } else {
+                if (next < 0x20) throw new IOException("JSON 字符串包含无效控制字符。");
+                value.append((char) next);
+            }
+            if (value.length() > 16384) throw new IOException("备份字段名称或元数据过长。");
+        }
+    }
+
+    private String readJsonPrimitive(PushbackInputStream input, int first) throws IOException {
+        StringBuilder value = new StringBuilder();
+        int next = first;
+        while (next >= 0) {
+            if (next == ',' || next == '}' || next == ']') {
+                input.unread(next);
+                break;
+            }
+            if (next == ' ' || next == '\t' || next == '\r' || next == '\n') break;
+            value.append((char) next);
+            if (value.length() > 128) throw new IOException("JSON 基本值过长。");
+            next = input.read();
+        }
+        if (value.length() == 0) throw new IOException("JSON 基本值为空。");
+        return value.toString();
+    }
+
+    private void skipJsonValue(PushbackInputStream input, int first) throws IOException {
+        if (first == '{' || first == '[') {
+            copyJsonComposite(input, first, null);
+        } else if (first == '"') {
+            readJsonString(input);
+        } else {
+            readJsonPrimitive(input, first);
+        }
+    }
+
+    private void copyJsonComposite(
+            InputStream input,
+            int first,
+            OutputStream output
+    ) throws IOException {
+        ArrayDeque<Integer> expectedClosings = new ArrayDeque<>();
+        expectedClosings.push(first == '{' ? (int) '}' : (int) ']');
+        if (output != null) output.write(first);
+        boolean inString = false;
+        boolean escaped = false;
+
+        while (!expectedClosings.isEmpty()) {
+            int next = input.read();
+            if (next < 0) throw new IOException("JSON 对象或数组意外结束。");
+            if (output != null) output.write(next);
+
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                } else if (next == '\\') {
+                    escaped = true;
+                } else if (next == '"') {
+                    inString = false;
+                } else if (next < 0x20) {
+                    throw new IOException("JSON 字符串包含无效控制字符。");
+                }
+                continue;
+            }
+
+            if (next == '"') {
+                inString = true;
+            } else if (next == '{') {
+                expectedClosings.push((int) '}');
+            } else if (next == '[') {
+                expectedClosings.push((int) ']');
+            } else if (next == '}' || next == ']') {
+                if (expectedClosings.isEmpty() || expectedClosings.pop() != next) {
+                    throw new IOException("JSON 对象与数组括号不匹配。");
+                }
+            }
         }
     }
 
@@ -222,11 +590,7 @@ public class LocalWebServer {
 
     private void handleAppData(Request request, OutputStream output) throws IOException, JSONException {
         if ("GET".equals(request.method)) {
-            JSONObject payload = new JSONObject();
-            payload.put("dataDir", context.getFilesDir().getAbsolutePath());
-            payload.put("dataFile", appDataFile.getAbsolutePath());
-            payload.put("data", readAppData());
-            sendJson(output, 200, payload);
+            sendAppData(output);
             return;
         }
 
@@ -256,16 +620,6 @@ public class LocalWebServer {
         sendJson(output, 405, jsonError("Method not allowed"));
     }
 
-    private JSONObject readJsonObject(File file) {
-        try (InputStream input = new AtomicFile(file).openRead()) {
-            byte[] bytes = readAll(input);
-            String text = new String(bytes, StandardCharsets.UTF_8);
-            return text.trim().isEmpty() ? null : new JSONObject(text);
-        } catch (Exception ignored) {
-            return null;
-        }
-    }
-
     private void writeJsonAtomically(File file, String content) throws IOException {
         File parent = file.getParentFile();
         if (parent != null) parent.mkdirs();
@@ -273,7 +627,9 @@ public class LocalWebServer {
         FileOutputStream output = null;
         try {
             output = atomicFile.startWrite();
-            output.write(content.getBytes(StandardCharsets.UTF_8));
+            Writer writer = new OutputStreamWriter(output, StandardCharsets.UTF_8);
+            writer.write(content);
+            writer.flush();
             output.getFD().sync();
             atomicFile.finishWrite(output);
         } catch (IOException error) {
@@ -282,19 +638,43 @@ public class LocalWebServer {
         }
     }
 
-    private synchronized JSONObject readAppData() {
-        JSONObject primary = readJsonObject(appDataFile);
-        if (primary != null) return primary;
-
-        JSONObject backup = readJsonObject(appDataBackupFile);
-        if (backup != null) {
-            try {
-                writeJsonAtomically(appDataFile, backup.toString(2));
-            } catch (Exception ignored) {
-            }
-            return backup;
+    private synchronized void sendAppData(OutputStream output) throws IOException {
+        File source = null;
+        if (appDataFile.isFile() && appDataFile.length() > 0) {
+            source = appDataFile;
+        } else if (appDataBackupFile.isFile() && appDataBackupFile.length() > 0) {
+            copyFileAtomically(appDataBackupFile, appDataFile);
+            source = appDataFile;
         }
-        return new JSONObject();
+
+        String prefix = "{\"dataDir\":"
+                + JSONObject.quote(context.getFilesDir().getAbsolutePath())
+                + ",\"dataFile\":"
+                + JSONObject.quote(appDataFile.getAbsolutePath())
+                + ",\"data\":";
+        byte[] prefixBytes = prefix.getBytes(StandardCharsets.UTF_8);
+        byte[] emptyDataBytes = "{}".getBytes(StandardCharsets.UTF_8);
+        byte[] suffixBytes = "}".getBytes(StandardCharsets.UTF_8);
+        long dataLength = source == null ? emptyDataBytes.length : source.length();
+        writeHead(
+                output,
+                200,
+                "application/json;charset=utf-8",
+                prefixBytes.length + dataLength + suffixBytes.length
+        );
+        output.write(prefixBytes);
+        if (source == null) {
+            output.write(emptyDataBytes);
+        } else {
+            try (InputStream input = new BufferedInputStream(new java.io.FileInputStream(source))) {
+                byte[] buffer = new byte[64 * 1024];
+                int count;
+                while ((count = input.read(buffer)) != -1) {
+                    output.write(buffer, 0, count);
+                }
+            }
+        }
+        output.write(suffixBytes);
     }
 
     private synchronized void writeAppData(Object data) throws IOException {
@@ -302,11 +682,10 @@ public class LocalWebServer {
             JSONObject normalized = data instanceof JSONObject
                     ? (JSONObject) data
                     : new JSONObject(String.valueOf(data));
-            JSONObject current = readJsonObject(appDataFile);
-            if (current != null) {
-                writeJsonAtomically(appDataBackupFile, current.toString(2));
+            if (appDataFile.isFile() && appDataFile.length() > 0) {
+                copyFileAtomically(appDataFile, appDataBackupFile);
             }
-            writeJsonAtomically(appDataFile, normalized.toString(2));
+            writeJsonAtomically(appDataFile, normalized.toString());
         } catch (JSONException error) {
             throw new IOException(error);
         }
@@ -505,7 +884,7 @@ public class LocalWebServer {
         output.write(body);
     }
 
-    private void writeHead(OutputStream output, int status, String contentType, int contentLength) throws IOException {
+    private void writeHead(OutputStream output, int status, String contentType, long contentLength) throws IOException {
         StringBuilder headers = new StringBuilder();
         headers.append("HTTP/1.1 ").append(status).append(' ').append(reason(status)).append("\r\n");
         headers.append("Content-Type: ").append(contentType).append("\r\n");
@@ -549,13 +928,33 @@ public class LocalWebServer {
         final String method;
         final String path;
         final Map<String, String> headers;
+        final long contentLength;
         final byte[] body;
 
-        Request(String method, String path, Map<String, String> headers, byte[] body) {
+        Request(
+                String method,
+                String path,
+                Map<String, String> headers,
+                long contentLength,
+                byte[] body
+        ) {
             this.method = method;
             this.path = path;
             this.headers = headers;
+            this.contentLength = contentLength;
             this.body = body;
+        }
+
+        Request withBody(byte[] nextBody) {
+            return new Request(method, path, headers, contentLength, nextBody);
+        }
+    }
+
+    private static final class CompleteBackupMetadata {
+        final String exportedAt;
+
+        CompleteBackupMetadata(String exportedAt) {
+            this.exportedAt = exportedAt;
         }
     }
 

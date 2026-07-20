@@ -340,11 +340,51 @@ export function normalizeCharacterCard(
   };
 }
 
+export function normalizeStoredCharacterCard(rawValue: unknown, index = 0): CharacterCard {
+  if (
+    isRecord(rawValue) &&
+    typeof rawValue.id === "string" &&
+    (rawValue.spec === "chara_card_v2" || rawValue.spec === "chara_card_v3") &&
+    typeof rawValue.specVersion === "string" &&
+    typeof rawValue.name === "string" &&
+    typeof rawValue.nickname === "string" &&
+    typeof rawValue.description === "string" &&
+    typeof rawValue.personality === "string" &&
+    typeof rawValue.scenario === "string" &&
+    typeof rawValue.firstMessage === "string" &&
+    typeof rawValue.messageExample === "string" &&
+    typeof rawValue.creatorNotes === "string" &&
+    typeof rawValue.systemPrompt === "string" &&
+    typeof rawValue.postHistoryInstructions === "string" &&
+    Array.isArray(rawValue.alternateGreetings) &&
+    Array.isArray(rawValue.groupOnlyGreetings) &&
+    Array.isArray(rawValue.tags) &&
+    typeof rawValue.creator === "string" &&
+    typeof rawValue.characterVersion === "string" &&
+    typeof rawValue.avatarDataUrl === "string" &&
+    typeof rawValue.sourceFileName === "string" &&
+    (rawValue.sourceFormat === "renge" ||
+      rawValue.sourceFormat === "sillytavern-json" ||
+      rawValue.sourceFormat === "sillytavern-png") &&
+    (rawValue.characterBook === null || isRecord(rawValue.characterBook)) &&
+    Array.isArray(rawValue.regexScripts) &&
+    Array.isArray(rawValue.tavernScripts) &&
+    isRecord(rawValue.tavernVariables) &&
+    isRecord(rawValue.extensions) &&
+    isRecord(rawValue.extraData) &&
+    typeof rawValue.createdAt === "string" &&
+    typeof rawValue.updatedAt === "string"
+  ) {
+    return rawValue as CharacterCard;
+  }
+  return normalizeCharacterCard(rawValue, index);
+}
+
 export function loadCharacterCardsFromStorage(storageKey: string) {
   try {
     const parsed = JSON.parse(localStorage.getItem(storageKey) ?? "[]") as unknown;
     return Array.isArray(parsed)
-      ? parsed.map((card, index) => normalizeCharacterCard(card, index))
+      ? parsed.map((card, index) => normalizeStoredCharacterCard(card, index))
       : [];
   } catch {
     return [];
@@ -379,30 +419,90 @@ export async function loadCharacterCardsFromDatabase() {
       request.onerror = () => reject(request.error ?? new Error("角色卡数据库读取失败。"));
     });
     database.close();
-    return values.map((card, index) => normalizeCharacterCard(card, index));
+    return values.map((card, index) => normalizeStoredCharacterCard(card, index));
   } catch {
     return [];
   }
 }
 
-export async function saveCharacterCardsToDatabase(cards: CharacterCard[]) {
+export async function loadCharacterCardAvatarsFromDatabase() {
+  const avatars = new Map<string, string>();
+  try {
+    const database = await openCharacterCardDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction(CHARACTER_CARD_STORE_NAME, "readonly");
+      const request = transaction.objectStore(CHARACTER_CARD_STORE_NAME).openCursor();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) {
+          resolve();
+          return;
+        }
+        const card = cursor.value as unknown;
+        if (
+          isRecord(card) &&
+          typeof card.id === "string" &&
+          typeof card.avatarDataUrl === "string" &&
+          card.avatarDataUrl.startsWith("data:image/")
+        ) {
+          avatars.set(card.id, card.avatarDataUrl);
+        }
+        cursor.continue();
+      };
+      request.onerror = () =>
+        reject(request.error ?? new Error("角色卡封面数据库读取失败。"));
+      transaction.onabort = () =>
+        reject(transaction.error ?? new Error("角色卡封面数据库读取已中止。"));
+    });
+    database.close();
+  } catch {
+    avatars.clear();
+  }
+  return avatars;
+}
+
+let characterCardDatabaseSaveQueue: Promise<void> = Promise.resolve();
+
+async function saveCharacterCardsToDatabaseImmediately(cards: CharacterCard[]) {
   try {
     const database = await openCharacterCardDatabase();
     await new Promise<void>((resolve, reject) => {
       const transaction = database.transaction(CHARACTER_CARD_STORE_NAME, "readwrite");
-      const store = transaction.objectStore(CHARACTER_CARD_STORE_NAME);
-      store.clear();
-      cards.forEach((card) => store.put(card));
+      transaction.objectStore(CHARACTER_CARD_STORE_NAME).clear();
       transaction.oncomplete = () => resolve();
       transaction.onerror = () =>
         reject(transaction.error ?? new Error("角色卡数据库保存失败。"));
       transaction.onabort = () =>
         reject(transaction.error ?? new Error("角色卡数据库保存已中止。"));
     });
+    for (const card of cards) {
+      await new Promise<void>((resolve, reject) => {
+        const transaction = database.transaction(CHARACTER_CARD_STORE_NAME, "readwrite");
+        transaction.objectStore(CHARACTER_CARD_STORE_NAME).put(card);
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () =>
+          reject(transaction.error ?? new Error("角色卡数据库保存失败。"));
+        transaction.onabort = () =>
+          reject(transaction.error ?? new Error("角色卡数据库保存已中止。"));
+      });
+    }
     database.close();
+    return true;
   } catch {
     // The server-side app-data store and compact localStorage copy remain as fallbacks.
+    return false;
   }
+}
+
+export async function saveCharacterCardsToDatabase(cards: CharacterCard[]) {
+  const operation = characterCardDatabaseSaveQueue.then(() =>
+    saveCharacterCardsToDatabaseImmediately(cards),
+  );
+  characterCardDatabaseSaveQueue = operation.then(
+    () => undefined,
+    () => undefined,
+  );
+  return operation;
 }
 
 function bytesToLatin1(bytes: Uint8Array) {
