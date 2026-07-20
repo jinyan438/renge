@@ -6356,6 +6356,47 @@ function formatFileSize(size: number) {
   return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
 }
 
+function uploadCompleteBackupWithProgress(
+  file: File,
+  onProgress: (loaded: number, total: number) => void,
+  onUploadComplete: () => void,
+) {
+  return new Promise<{ exportedAt?: string }>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("PUT", "/api/app-data/import-complete");
+    request.timeout = 10 * 60 * 1000;
+    request.setRequestHeader("Content-Type", "application/json");
+    request.upload.onprogress = (event) => {
+      const total = event.lengthComputable && event.total > 0 ? event.total : file.size;
+      onProgress(event.loaded, total);
+    };
+    request.upload.onload = () => onUploadComplete();
+    request.onload = () => {
+      let payload: { error?: string; exportedAt?: string } = {};
+      try {
+        const parsed = JSON.parse(request.responseText) as unknown;
+        if (isObjectRecord(parsed)) {
+          payload = {
+            error: typeof parsed.error === "string" ? parsed.error : undefined,
+            exportedAt: typeof parsed.exportedAt === "string" ? parsed.exportedAt : undefined,
+          };
+        }
+      } catch {
+        // The status code below still provides a useful fallback error.
+      }
+      if (request.status >= 200 && request.status < 300) {
+        resolve(payload);
+      } else {
+        reject(new Error(payload.error || `本地数据服务返回 ${request.status || "未知状态"}`));
+      }
+    };
+    request.onerror = () => reject(new Error("无法连接手机本地数据服务。"));
+    request.ontimeout = () => reject(new Error("导入超时，请确认手机剩余存储空间后重试。"));
+    request.onabort = () => reject(new Error("导入已中止。"));
+    request.send(file);
+  });
+}
+
 function isTextLikeFile(fileName: string, mimeType: string) {
   const lowerName = fileName.toLowerCase();
   if (mimeType.startsWith("text/")) return true;
@@ -10003,6 +10044,11 @@ export function App() {
     status: ProviderPullState;
     message: string;
   }>({ status: "idle", message: "" });
+  const [dataBackupProgress, setDataBackupProgress] = useState<{
+    active: boolean;
+    value: number | null;
+    label: string;
+  }>({ active: false, value: null, label: "" });
   const [dataClearConfirmationOpen, setDataClearConfirmationOpen] = useState(false);
   const [dataClearConfirmationText, setDataClearConfirmationText] = useState("");
   const [providers, setProviders] = useState<ModelProviderChannel[]>(loadProviderChannels);
@@ -12230,6 +12276,7 @@ export function App() {
 
   const exportCompleteAppData = async () => {
     if (!appDataLoaded || dataBackupState.status === "loading") return;
+    setDataBackupProgress({ active: false, value: null, label: "" });
     setDataBackupState({ status: "loading", message: "正在整理全部应用数据..." });
     try {
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
@@ -12278,6 +12325,7 @@ export function App() {
         `即将导入 ${file.name}（${formatFileSize(file.size)}）的完整备份。\n\n这会替换当前全部应用数据，包括人格、角色卡、聊天、API Key、脚本、扩展和界面设置。此操作不可直接撤销，是否继续？`,
       );
       if (!confirmed) {
+        setDataBackupProgress({ active: false, value: null, label: "" });
         setDataBackupState({ status: "idle", message: "已取消导入，当前数据未发生变化。" });
         if (completeBackupImportInputRef.current) {
           completeBackupImportInputRef.current.value = "";
@@ -12287,27 +12335,45 @@ export function App() {
 
       setDataBackupState({
         status: "loading",
-        message: "正在以低内存模式恢复完整备份，请勿关闭应用...",
+        message: "正在上传完整备份，请勿关闭应用...",
+      });
+      setDataBackupProgress({
+        active: true,
+        value: 0,
+        label: `阶段 1/3：正在上传 ${formatFileSize(file.size)} 的备份文件`,
       });
       try {
-        const response = await fetch("/api/app-data/import-complete", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: file,
-        });
-        const payload = (await response.json().catch(() => ({}))) as {
-          error?: string;
-          exportedAt?: string;
-        };
-        if (!response.ok) {
-          throw new Error(payload.error || `本地数据服务返回 ${response.status}`);
-        }
+        await uploadCompleteBackupWithProgress(
+          file,
+          (loaded, total) => {
+            const safeTotal = total > 0 ? total : file.size;
+            const percent = safeTotal > 0 ? Math.min(100, (loaded / safeTotal) * 100) : 0;
+            setDataBackupProgress({
+              active: true,
+              value: percent,
+              label: `阶段 1/3：正在上传 ${formatFileSize(loaded)} / ${formatFileSize(safeTotal)}`,
+            });
+          },
+          () => {
+            setDataBackupState({
+              status: "loading",
+              message: "备份上传完成，正在校验并写入应用数据...",
+            });
+            setDataBackupProgress({
+              active: true,
+              value: null,
+              label: "阶段 2/3：正在校验备份并原子写入数据",
+            });
+          },
+        );
+        setDataBackupProgress({ active: true, value: 100, label: "阶段 3/3：导入完成" });
         setDataBackupState({
           status: "success",
           message: "完整数据已恢复，正在重新载入应用...",
         });
         window.setTimeout(() => window.location.reload(), 450);
       } catch (error) {
+        setDataBackupProgress({ active: false, value: null, label: "" });
         setDataBackupState({
           status: "error",
           message: error instanceof Error ? `导入失败：${error.message}` : "完整备份导入失败。",
@@ -12320,6 +12386,7 @@ export function App() {
       return;
     }
 
+    setDataBackupProgress({ active: true, value: null, label: "阶段 1/3：正在读取并校验备份" });
     setDataBackupState({ status: "loading", message: "正在校验完整备份..." });
     let previousAppData: RengeAppData | null = null;
     let previousLocalStorage: Record<string, string> | null = null;
@@ -12334,11 +12401,17 @@ export function App() {
         `即将导入 ${exportedLabel} 的完整备份。\n\n这会替换当前全部应用数据，包括人格、角色卡、聊天、API Key、脚本、扩展和界面设置。此操作不可直接撤销，是否继续？`,
       );
       if (!confirmed) {
+        setDataBackupProgress({ active: false, value: null, label: "" });
         setDataBackupState({ status: "idle", message: "已取消导入，当前数据未发生变化。" });
         return;
       }
 
       setDataBackupState({ status: "loading", message: "正在恢复全部应用数据，请勿关闭应用..." });
+      setDataBackupProgress({
+        active: true,
+        value: null,
+        label: "阶段 2/3：正在写入应用数据",
+      });
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
       previousAppData = buildCurrentAppData();
       previousLocalStorage = collectRengeLocalStorage();
@@ -12378,6 +12451,7 @@ export function App() {
         status: "success",
         message: "完整数据已恢复，正在重新载入应用...",
       });
+      setDataBackupProgress({ active: true, value: 100, label: "阶段 3/3：导入完成" });
       window.setTimeout(() => window.location.reload(), 450);
     } catch (error) {
       if (restoreStarted && previousAppData && previousLocalStorage) {
@@ -12392,6 +12466,7 @@ export function App() {
           // Keep the original restore error visible even if a local rollback also fails.
         }
       }
+      setDataBackupProgress({ active: false, value: null, label: "" });
       setDataBackupState({
         status: "error",
         message: error instanceof Error ? `导入失败：${error.message}` : "完整备份导入失败。",
@@ -12425,6 +12500,7 @@ export function App() {
     }
     setDataClearConfirmationOpen(false);
     appDataClearingRef.current = true;
+    setDataBackupProgress({ active: false, value: null, label: "" });
     setDataBackupState({ status: "loading", message: "正在清除全部应用数据，请勿关闭应用..." });
     const persistentDataCleared = await clearPersistentAppData();
     if (!persistentDataCleared) {
@@ -26258,6 +26334,40 @@ export function App() {
                   <p className="data-backup-import-note">
                     仅支持由本页面导出的 Renge Agent 完整备份 JSON 文件。导入成功后应用会自动重新载入。
                   </p>
+                  {dataBackupProgress.active && (
+                    <div className="data-backup-progress-panel">
+                      <div className="data-backup-progress-copy">
+                        <span>{dataBackupProgress.label}</span>
+                        <strong>
+                          {dataBackupProgress.value === null
+                            ? "处理中"
+                            : `${Math.round(dataBackupProgress.value)}%`}
+                        </strong>
+                      </div>
+                      <div
+                        className={`data-backup-progress-track${dataBackupProgress.value === null ? " indeterminate" : ""}`}
+                        role="progressbar"
+                        aria-label={dataBackupProgress.label}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={
+                          dataBackupProgress.value === null
+                            ? undefined
+                            : Math.round(dataBackupProgress.value)
+                        }
+                      >
+                        <span
+                          style={
+                            dataBackupProgress.value === null
+                              ? undefined
+                              : {
+                                  width: `${Math.min(100, Math.max(0, dataBackupProgress.value))}%`,
+                                }
+                          }
+                        />
+                      </div>
+                    </div>
+                  )}
                   <input
                     ref={completeBackupImportInputRef}
                     className="hidden-input"
