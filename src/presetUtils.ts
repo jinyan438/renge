@@ -1,11 +1,13 @@
 import {
   extractSillyTavernPresetRegexScripts,
   normalizeRegexScript,
+  serializeSillyTavernRegexScript,
   type RegexScript,
 } from "./regexUtils";
 import {
   extractPresetTavernScripts,
   normalizeTavernScript,
+  serializeTavernScript,
   type TavernScript,
 } from "./tavernScriptUtils";
 
@@ -501,4 +503,66 @@ export function buildChatPresetRequestParameters(preset: ChatPreset) {
     ...(preset.topA > 0 ? { top_a: preset.topA } : {}),
     ...(preset.minP > 0 ? { min_p: preset.minP } : {}),
   };
+}
+
+function serializeChatPresetPrompt(prompt: ChatPresetPrompt) {
+  return {
+    identifier: prompt.identifier,
+    name: prompt.name,
+    role: prompt.role,
+    content: prompt.content,
+    enabled: prompt.enabled,
+    marker: prompt.marker,
+    system_prompt: prompt.systemPrompt,
+    injection_position: prompt.injectionPosition,
+    injection_depth: prompt.injectionDepth,
+    injection_order: prompt.injectionOrder,
+  };
+}
+
+export function exportSillyTavernPresetJson(preset: ChatPreset) {
+  const extensions: Record<string, unknown> = {};
+  if (preset.regexScripts.length > 0) {
+    extensions.SPreset = {
+      RegexBinding: {
+        regexes: preset.regexScripts.map(serializeSillyTavernRegexScript),
+      },
+    };
+  }
+  if (preset.tavernScripts.length > 0 || Object.keys(preset.tavernVariables).length > 0) {
+    extensions.tavern_helper = {
+      scripts: preset.tavernScripts.map(serializeTavernScript),
+      variables: cloneRecord(preset.tavernVariables),
+    };
+  }
+
+  return JSON.stringify(
+    {
+      name: preset.name,
+      temperature: preset.temperature,
+      top_p: preset.topP,
+      top_k: preset.topK,
+      top_a: preset.topA,
+      min_p: preset.minP,
+      repetition_penalty: preset.repetitionPenalty,
+      frequency_penalty: preset.frequencyPenalty,
+      presence_penalty: preset.presencePenalty,
+      openai_max_tokens: preset.maxTokens,
+      openai_max_context: preset.maxContext,
+      squash_system_messages: preset.squashSystemMessages,
+      prompts: [...preset.prompts, ...preset.backupPrompts].map(serializeChatPresetPrompt),
+      prompt_order: [
+        {
+          character_id: 100001,
+          order: preset.prompts.map((prompt) => ({
+            identifier: prompt.identifier,
+            enabled: prompt.enabled,
+          })),
+        },
+      ],
+      extensions,
+    },
+    null,
+    2,
+  );
 }

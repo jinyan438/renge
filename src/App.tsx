@@ -81,6 +81,7 @@ import {
   applyChatPresetToMessages,
   buildChatPresetRequestParameters,
   createDefaultChatPreset,
+  exportSillyTavernPresetJson,
   importSillyTavernPreset,
   loadChatPresetsFromStorage,
   normalizeChatPreset,
@@ -12820,8 +12821,8 @@ export function App() {
     window.setTimeout(() => window.location.reload(), 500);
   };
 
-  const downloadTavernScriptJson = (content: string, name: string) => {
-    const safeName = (name.trim() || "tavern-script").replace(/[\\/:*?"<>|]/g, "_");
+  const downloadJsonFile = (content: string, name: string, fallbackName = "export") => {
+    const safeName = (name.trim() || fallbackName).replace(/[\\/:*?"<>|]/g, "_");
     const url = URL.createObjectURL(
       new Blob([content], { type: "application/json;charset=utf-8" }),
     );
@@ -23816,9 +23817,10 @@ export function App() {
                     type="button"
                     className="ghost-action"
                     onClick={() =>
-                      downloadTavernScriptJson(
+                      downloadJsonFile(
                         exportTavernScriptCollectionJson(tavernScripts),
                         "Renge-酒馆脚本",
+                        "tavern-scripts",
                       )
                     }
                   >
@@ -24337,6 +24339,20 @@ export function App() {
                       </p>
                     </div>
                     <div className="topbar-actions">
+                      <button
+                        type="button"
+                        className="ghost-action"
+                        onClick={() =>
+                          downloadJsonFile(
+                            exportSillyTavernPresetJson(activeChatPreset),
+                            activeChatPreset.name,
+                            "chat-preset",
+                          )
+                        }
+                      >
+                        <Download size={15} />
+                        导出预设
+                      </button>
                       <button type="button" className="ghost-action" onClick={duplicateChatPreset}>
                         <Copy size={15} />
                         另存副本
@@ -25539,9 +25555,10 @@ export function App() {
                         type="button"
                         className="ghost-action"
                         onClick={() =>
-                          downloadTavernScriptJson(
+                          downloadJsonFile(
                             exportTavernScriptJson(selectedTavernScriptTarget.script),
                             selectedTavernScriptTarget.script.name,
+                            "tavern-script",
                           )
                         }
                       >
