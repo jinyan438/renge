@@ -2196,10 +2196,27 @@ summary:focus-visible {
 .preset-list-panel {
   position: sticky;
   top: 24px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .preset-list-panel .provider-thinking-toggle {
   width: 100%;
+}
+
+.preset-list-panel .provider-item {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.preset-list-panel .provider-item strong,
+.preset-list-panel .provider-item span {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .preset-editor {
