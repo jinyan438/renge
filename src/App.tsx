@@ -18369,8 +18369,7 @@ export function App() {
       : 0;
     if (
       dialogueRewriteTargetMessage &&
-      (dialogueRewriteTargetMessage.dialogueRewritePending !== true ||
-        dialogueRewritePlaceholderCount <= 0)
+      dialogueRewritePlaceholderCount <= 0
     ) {
       setChatStatus({ status: "error", message: "这条消息没有可重写的对白占位符。" });
       return null;
@@ -21254,7 +21253,7 @@ export function App() {
   };
 
   const rewriteAssistantDialogues = async (messageId: string) => {
-    if (chatStatus.status === "loading" || !chatDialogueRewriteEnabled) return;
+    if (chatStatus.status === "loading") return;
 
     const messageIndex = chatMessagesRef.current.findIndex(
       (message) => message.id === messageId,
@@ -21263,7 +21262,6 @@ export function App() {
     if (
       !message ||
       message.role !== "assistant" ||
-      message.dialogueRewritePending !== true ||
       countDialoguePlaceholders(message.content) <= 0
     ) {
       setChatStatus({ status: "error", message: "这条消息没有可重写的对白占位符。" });
@@ -21309,7 +21307,7 @@ export function App() {
   };
 
   const rewriteAssistantLocally = async (messageId: string) => {
-    if (chatStatus.status === "loading" || !chatDialogueRewriteEnabled) return;
+    if (chatStatus.status === "loading") return;
 
     const messageIndex = chatMessagesRef.current.findIndex(
       (message) => message.id === messageId,
@@ -21375,7 +21373,7 @@ export function App() {
         if (message.id !== messageId) return message;
         const updatedMessage = { ...message, content };
         const dialoguePlaceholderCount = countDialoguePlaceholders(content);
-        return chatDialogueRewriteEnabled && dialoguePlaceholderCount > 0
+        return dialoguePlaceholderCount > 0
           ? {
               ...updatedMessage,
               dialogueRewritePending: true,
@@ -23958,10 +23956,10 @@ export function App() {
                 <div className="llm-setting-copy">
                   <h3>重写对话功能</h3>
                   <p>
-                    开启后，AI 回复生成完成时会把识别到的引用对白替换为
-                    <code>“XXX”</code>。随后可右键该消息并选择“重写对话”，让 AI
-                    根据完整上下文填充对白；消息中存在 <code>YYYY</code> 时，也可右键选择
-                    “局部重写”。未被占位符标记的内容保持不变。
+                    开启后，仅在 AI 回复生成完成时把识别到的引用对白自动替换为
+                    <code>“XXX”</code>。无论是否开启，只要消息中已有 <code>“XXX”</code>
+                    或 <code>YYYY</code>，都可以通过右键菜单执行“重写对话”或“局部重写”。
+                    未被占位符标记的内容保持不变。
                   </p>
                 </div>
                 <label className="tool-toggle llm-feature-toggle">
@@ -23980,8 +23978,8 @@ export function App() {
                   <strong>{chatDialogueRewriteEnabled ? "已开启" : "已关闭"}</strong>
                   <span>
                     {chatDialogueRewriteEnabled
-                      ? "支持在原气泡内重写 “XXX” 对白，或局部填充 YYYY 占位符。"
-                      : "AI 回复将按原始内容保存，不会生成对白占位符或重写入口。"}
+                      ? "新回复会自动把引用对白替换为 “XXX”；右键重写功能始终可用。"
+                      : "新回复保留原始对白；已有 “XXX” 或 YYYY 时仍可右键重写。"}
                   </span>
                 </div>
               </article>
@@ -27739,9 +27737,7 @@ export function App() {
                       续写
                     </button>
                   )}
-                  {chatDialogueRewriteEnabled &&
-                    chatMessageMenuMessage.role === "assistant" &&
-                    chatMessageMenuMessage.dialogueRewritePending === true &&
+                  {chatMessageMenuMessage.role === "assistant" &&
                     countDialoguePlaceholders(chatMessageMenuMessage.content) > 0 && (
                       <button
                         type="button"
@@ -27754,8 +27750,7 @@ export function App() {
                         重写对话
                       </button>
                     )}
-                  {chatDialogueRewriteEnabled &&
-                    chatMessageMenuMessage.role === "assistant" &&
+                  {chatMessageMenuMessage.role === "assistant" &&
                     countLocalRewritePlaceholders(chatMessageMenuMessage.content) > 0 && (
                       <button
                         type="button"
