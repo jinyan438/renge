@@ -3300,7 +3300,15 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  }",
     "  try { window.dispatchEvent(new CustomEvent(\"renge-html-preview-viewport-updated\")); } catch {}",
     "};",
-    "try { updateParentViewport(window.parent.innerWidth, window.parent.innerHeight); } catch {}",
+    "const getInitialViewportWidth = () => {",
+    "  try {",
+    "    const frame = window.frameElement;",
+    "    const frameWidth = frame?.getBoundingClientRect?.().width || frame?.clientWidth || 0;",
+    "    if (Number.isFinite(frameWidth) && frameWidth > 0) return frameWidth;",
+    "  } catch {}",
+    "  return window.innerWidth || document.documentElement.clientWidth || 0;",
+    "};",
+    "try { updateParentViewport(getInitialViewportWidth(), window.parent.innerHeight); } catch { updateParentViewport(getInitialViewportWidth(), window.innerHeight); }",
     "const eventOn = (eventName, callback) => {",
     "  if (typeof callback !== \"function\") return callback;",
     "  const key = String(eventName);",
@@ -5796,11 +5804,18 @@ function ChatHtmlPreview({
   const sendViewportUpdate = useCallback(() => {
     const frame = frameRef.current;
     const frameWidth = frame?.getBoundingClientRect().width || frame?.clientWidth || 0;
+    const container = containerRef.current;
+    const containerWidth =
+      container?.getBoundingClientRect().width || container?.clientWidth || 0;
     frameRef.current?.contentWindow?.postMessage(
       {
         type: HTML_PREVIEW_VIEWPORT_MESSAGE,
         id: previewId,
-        width: frameWidth || window.visualViewport?.width || window.innerWidth,
+        width:
+          frameWidth ||
+          containerWidth ||
+          window.visualViewport?.width ||
+          window.innerWidth,
         height: window.visualViewport?.height ?? window.innerHeight,
       },
       "*",
@@ -5885,20 +5900,18 @@ function ChatHtmlPreview({
           },
           isolatedFrame.origin,
         );
-        return;
       }
-      const remeasureLoadedFrame = () => {
-        if (frameRef.current !== loadedFrame) return;
-        requestLayoutMeasurement();
-      };
-      window.requestAnimationFrame(() => {
+      const synchronizeLoadedFrame = () => {
         if (frameRef.current !== loadedFrame) return;
         sendContextUpdate();
         sendViewportUpdate();
         requestLayoutMeasurement();
+      };
+      window.requestAnimationFrame(() => {
+        synchronizeLoadedFrame();
       });
       [80, 240, 600, 1200, 2400].forEach((delay) => {
-        window.setTimeout(remeasureLoadedFrame, delay);
+        window.setTimeout(synchronizeLoadedFrame, delay);
       });
     },
     [
@@ -27446,6 +27459,11 @@ export function App() {
                 const messageIndex = chatMessages.findIndex(
                   (candidate) => candidate.id === message.id,
                 );
+                const bubbleContent = isEditingMessage ? message.content : segment;
+                const containsRenderedHtml =
+                  chatHtmlRenderEnabled &&
+                  message.renderAsPlainText !== true &&
+                  looksLikeRenderableHtml(bubbleContent);
 
                 return (
                   <article
@@ -27488,6 +27506,8 @@ export function App() {
                               : ""
                           } ${
                             showGreetingSwitch ? "roleplay-greeting-bubble" : ""
+                          } ${
+                            containsRenderedHtml ? "html-preview-bubble" : ""
                           }`}
                           style={
                             isEditingMessage && !isRenderedEditingMessage
