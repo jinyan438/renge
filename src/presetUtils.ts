@@ -392,26 +392,29 @@ function expandPromptContent(
     .trim();
 }
 
-function mergeConsecutiveSystemMessages<T extends PresetCompatibleMessage>(
+function mergeSystemMessagesAtBeginning<T extends PresetCompatibleMessage>(
   messages: Array<T | PresetInjectedMessage>,
 ) {
-  return messages.reduce<Array<T | PresetInjectedMessage>>((merged, message) => {
-    const previous = merged.at(-1);
-    if (
-      previous?.role === "system" &&
-      message.role === "system" &&
-      typeof previous.content === "string" &&
-      typeof message.content === "string"
-    ) {
-      merged[merged.length - 1] = {
-        role: "system",
-        content: [previous.content, message.content].filter(Boolean).join("\n\n"),
-      };
-      return merged;
-    }
-    merged.push(message);
-    return merged;
-  }, []);
+  const systemContent = messages
+    .filter((message) => message.role === "system")
+    .map((message) => {
+      if (typeof message.content === "string") return message.content.trim();
+      if (!Array.isArray(message.content)) return "";
+      return message.content
+        .map((part) => {
+          if (!part || typeof part !== "object") return "";
+          const text = (part as { text?: unknown }).text;
+          return typeof text === "string" ? text.trim() : "";
+        })
+        .filter(Boolean)
+        .join("\n");
+    })
+    .filter(Boolean)
+    .join("\n\n");
+  const nonSystemMessages = messages.filter((message) => message.role !== "system");
+  return systemContent
+    ? [{ role: "system" as const, content: systemContent }, ...nonSystemMessages]
+    : nonSystemMessages;
 }
 
 export function applyChatPresetToMessages<T extends PresetCompatibleMessage>(
@@ -480,7 +483,7 @@ export function applyChatPresetToMessages<T extends PresetCompatibleMessage>(
     });
 
   return preset.squashSystemMessages
-    ? mergeConsecutiveSystemMessages(messages)
+    ? mergeSystemMessagesAtBeginning(messages)
     : messages;
 }
 
