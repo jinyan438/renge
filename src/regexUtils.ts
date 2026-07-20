@@ -244,6 +244,24 @@ export function loadRegexScriptsFromStorage(storageKey: string) {
   }
 }
 
+export function serializeSillyTavernRegexScript(script: RegexScript) {
+  return {
+    id: script.id,
+    script_name: script.scriptName,
+    find_regex: script.findRegex,
+    replace_string: script.replaceString,
+    trim_strings: [...script.trimStrings],
+    placement: [...script.placement],
+    disabled: script.disabled,
+    markdown_only: script.markdownOnly,
+    prompt_only: script.promptOnly,
+    run_on_edit: script.runOnEdit,
+    substitute_regex: script.substituteRegex,
+    min_depth: script.minDepth,
+    max_depth: script.maxDepth,
+  };
+}
+
 function replaceRegexMacros(value: string, options: ApplyRegexScriptsOptions) {
   return value
     .replace(/{{\s*user\s*}}/gi, options.userName?.trim() || "用户")
