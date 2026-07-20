@@ -4815,6 +4815,11 @@ summary:focus-visible {
   background: #ffffff;
 }
 
+.chat-bubble.rendered-editing {
+  outline: 2px solid rgba(7, 193, 96, 0.42);
+  outline-offset: 2px;
+}
+
 .chat-bubble.tool-run-bubble {
   width: fit-content;
   max-width: calc(100% - 60px);
@@ -5824,6 +5829,11 @@ summary:focus-visible {
   min-width: min(520px, 70vw);
 }
 
+.chat-inline-editor.rendered {
+  width: 100%;
+  min-width: 0;
+}
+
 .chat-inline-editor textarea {
   width: 100%;
   min-height: 86px;
@@ -5836,6 +5846,18 @@ summary:focus-visible {
   resize: vertical;
   font-size: 14px;
   line-height: 1.65;
+}
+
+.chat-rendered-message-editor {
+  min-width: min(240px, 50vw);
+  min-height: 42px;
+  border: 0;
+  outline: 0;
+  cursor: text;
+}
+
+.chat-rendered-message-editor:focus-visible {
+  outline: 0;
 }
 
 .chat-inline-editor-actions {
