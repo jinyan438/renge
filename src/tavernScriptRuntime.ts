@@ -3011,11 +3011,13 @@ export class TavernScriptRuntime {
           top_k: chatCompletionSettings.top_k,
           custom_include_body: chatCompletionSettings.custom_include_body,
           custom_exclude_body: chatCompletionSettings.custom_exclude_body,
-          custom_include_headers: chatCompletionSettings.custom_include_headers,
         };
       }
       if (isRecord(normalizedConfig.custom_api)) {
         const customApi = normalizedConfig.custom_api;
+        delete customApi.custom_include_headers;
+        delete customApi.customIncludeHeaders;
+        delete customApi.headers;
         if (
           configuredApiUrl &&
           ![
@@ -3051,13 +3053,14 @@ export class TavernScriptRuntime {
         [
           "custom_include_body",
           "custom_exclude_body",
-          "custom_include_headers",
         ].forEach((key) => {
           if (customApi[key] === undefined && chatCompletionSettings[key] !== undefined) {
             customApi[key] = cloneValue(chatCompletionSettings[key]);
           }
         });
       }
+      delete normalizedConfig.custom_include_headers;
+      delete normalizedConfig.customIncludeHeaders;
       const promptInjections = Array.from(injectedPrompts.values());
       if (promptInjections.length > 0) {
         const orderedPrompts = Array.isArray(normalizedConfig.ordered_prompts)
