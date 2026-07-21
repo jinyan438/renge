@@ -185,7 +185,7 @@ function sendJson(response, statusCode, payload) {
     "Content-Type": "application/json;charset=utf-8",
     "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type,Accept",
   });
   response.end(JSON.stringify(payload));
@@ -194,7 +194,7 @@ function sendJson(response, statusCode, payload) {
 function sendOptions(response) {
   response.writeHead(204, {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type,Accept",
     "Access-Control-Max-Age": "86400",
   });
@@ -850,12 +850,15 @@ async function readAppData(dataFilePath) {
   throw primaryError;
 }
 
-async function writeAppData(dataFilePath, payload) {
+async function writeAppData(dataFilePath, payloadOrUpdater) {
   const previousWrite = appDataWriteQueues.get(dataFilePath) ?? Promise.resolve();
   const operation = previousWrite
     .catch(() => undefined)
     .then(async () => {
       await rotateAppDataBackups(dataFilePath);
+      const payload = typeof payloadOrUpdater === "function"
+        ? await payloadOrUpdater(await readAppData(dataFilePath))
+        : payloadOrUpdater;
       await writeAppDataFileAtomically(dataFilePath, payload);
     });
   appDataWriteQueues.set(dataFilePath, operation);
@@ -2676,10 +2679,20 @@ async function handleApi(request, response, pathname, dataFilePath) {
         return;
       }
 
-      if (request.method === "PUT" || request.method === "POST") {
+      if (request.method === "PUT" || request.method === "POST" || request.method === "PATCH") {
         const body = await readJsonBody(request);
         const payload = body && typeof body === "object" && "data" in body ? body.data : body;
-        await writeAppData(dataFilePath, payload ?? {});
+        if (request.method === "PATCH") {
+          const patch = payload && typeof payload === "object" && !Array.isArray(payload)
+            ? payload
+            : {};
+          await writeAppData(dataFilePath, (currentData) => ({
+            ...currentData,
+            ...patch,
+          }));
+        } else {
+          await writeAppData(dataFilePath, payload ?? {});
+        }
         sendJson(response, 200, {
           ok: true,
           dataDir: dirname(dataFilePath),

@@ -80,6 +80,12 @@ import {
 } from "./personaData";
 import { personaStore } from "./personaStore";
 import {
+  createDelegationRoster,
+  getAgentApiName,
+  resolveDelegationAgentReference,
+  type DelegationRoster,
+} from "./multiAgentUtils";
+import {
   applyChatPresetToMessages,
   buildChatPresetRequestParameters,
   createDefaultChatPreset,
@@ -923,6 +929,7 @@ function buildCharacterTranslationSystemPrompt(additionalPrompt: string) {
 const MAX_HEARTBEAT_INTERVAL_MINUTES = 24 * 60;
 const MAX_MULTI_AGENT_ROUNDS = 20;
 const MAX_MULTI_AGENT_DELEGATIONS = 32;
+const MAX_INVALID_MULTI_AGENT_DELEGATIONS = 3;
 const MAX_SUB_AGENT_TOOL_ROUNDS = 32;
 const DEFAULT_CHAT_PERSONALIZATION: ChatPersonalizationSettings = {
   messageFontFamily: "system",
@@ -1553,15 +1560,19 @@ function normalizeActiveSystemPromptIds(
 }
 
 function normalizeChatSenderIdentity(
-  rawSender?: Partial<ChatSenderIdentity>,
+  rawValue?: unknown,
   personas: AgentPersona[] = [],
 ): ChatSenderIdentity {
+  const rawSender = isObjectRecord(rawValue) ? rawValue : null;
   if (rawSender?.kind === "system") return { kind: "system" };
 
   if (rawSender?.kind === "persona") {
     const personaExists =
-      rawSender.personaId && personas.some((persona) => persona.id === rawSender.personaId);
-    return rawSender.personaId && (personas.length === 0 || personaExists)
+      typeof rawSender.personaId === "string" &&
+      personas.some((persona) => persona.id === rawSender.personaId);
+    return typeof rawSender.personaId === "string" &&
+      rawSender.personaId &&
+      (personas.length === 0 || personaExists)
       ? { kind: "persona", personaId: rawSender.personaId }
       : { kind: "user" };
   }
@@ -1684,14 +1695,22 @@ function loadChatPersonalization() {
   }
 }
 
-function normalizeChatAttachment(rawAttachment: Partial<ChatAttachment>): ChatAttachment | null {
-  if (!rawAttachment) return null;
+function normalizeChatAttachment(rawValue: unknown): ChatAttachment | null {
+  if (!isObjectRecord(rawValue)) return null;
+  const rawAttachment = rawValue;
+  const size = Number(rawAttachment.size);
 
   return {
-    id: rawAttachment.id ?? crypto.randomUUID(),
-    name: rawAttachment.name ?? "未命名文件",
-    type: rawAttachment.type ?? "",
-    size: Number.isFinite(rawAttachment.size) ? Number(rawAttachment.size) : 0,
+    id:
+      typeof rawAttachment.id === "string" && rawAttachment.id.trim()
+        ? rawAttachment.id
+        : crypto.randomUUID(),
+    name:
+      typeof rawAttachment.name === "string" && rawAttachment.name.trim()
+        ? rawAttachment.name
+        : "未命名文件",
+    type: typeof rawAttachment.type === "string" ? rawAttachment.type : "",
+    size: Number.isFinite(size) && size >= 0 ? size : 0,
     ...(typeof rawAttachment.dataUrl === "string" ? { dataUrl: rawAttachment.dataUrl } : {}),
     ...(typeof rawAttachment.downloadUrl === "string"
       ? { downloadUrl: rawAttachment.downloadUrl }
@@ -1699,7 +1718,10 @@ function normalizeChatAttachment(rawAttachment: Partial<ChatAttachment>): ChatAt
     ...(typeof rawAttachment.textContent === "string"
       ? { textContent: rawAttachment.textContent }
       : {}),
-    createdAt: rawAttachment.createdAt ?? new Date().toISOString(),
+    createdAt:
+      typeof rawAttachment.createdAt === "string"
+        ? rawAttachment.createdAt
+        : new Date().toISOString(),
   };
 }
 
@@ -1765,8 +1787,10 @@ function normalizeChatChoiceRequest(rawRequest: unknown): ChatChoiceRequest | nu
   };
 }
 
-function normalizeChatMessage(rawMessage: Partial<ChatMessage>): ChatMessage {
+function normalizeChatMessage(rawValue: unknown): ChatMessage {
+  const rawMessage = isObjectRecord(rawValue) ? rawValue : {};
   const role = rawMessage.role === "assistant" ? "assistant" : "user";
+  const content = typeof rawMessage.content === "string" ? rawMessage.content : "";
   const attachments = Array.isArray(rawMessage.attachments)
     ? rawMessage.attachments
         .map((attachment) => normalizeChatAttachment(attachment))
@@ -1780,18 +1804,24 @@ function normalizeChatMessage(rawMessage: Partial<ChatMessage>): ChatMessage {
     rawMessage.dialogueRewritePending === true &&
     Number.isInteger(rawMessage.dialoguePlaceholderCount) &&
     Number(rawMessage.dialoguePlaceholderCount) > 0
-      ? countDialoguePlaceholders(rawMessage.content ?? "")
+      ? countDialoguePlaceholders(content)
       : 0;
 
   return {
-    id: rawMessage.id ?? crypto.randomUUID(),
+    id:
+      typeof rawMessage.id === "string" && rawMessage.id.trim()
+        ? rawMessage.id
+        : crypto.randomUUID(),
     role,
-    content: rawMessage.content ?? "",
+    content,
     ...(typeof rawMessage.reasoning === "string" && rawMessage.reasoning.trim()
       ? { reasoning: rawMessage.reasoning }
       : {}),
     ...(rawMessage.renderAsPlainText === true ? { renderAsPlainText: true } : {}),
-    createdAt: rawMessage.createdAt ?? new Date().toISOString(),
+    createdAt:
+      typeof rawMessage.createdAt === "string"
+        ? rawMessage.createdAt
+        : new Date().toISOString(),
     ...(role === "user"
       ? { sender: normalizedSender }
       : normalizedSender.kind === "persona"
@@ -1940,27 +1970,45 @@ function createChatSession(
   };
 }
 
-function normalizeChatSession(rawSession: Partial<ChatSession>): ChatSession {
+function normalizeChatSession(rawValue: unknown): ChatSession {
+  const rawSession = isObjectRecord(rawValue) ? rawValue : {};
   const messages = Array.isArray(rawSession.messages)
     ? rawSession.messages.map((message) => normalizeChatMessage(message))
     : [];
-  const rawTitle = rawSession.title ?? "新会话";
+  const rawTitle =
+    typeof rawSession.title === "string" && rawSession.title.trim()
+      ? rawSession.title
+      : "新会话";
   const title = rawTitle.trim().startsWith("【心跳检查】")
     ? inferChatSessionTitle(messages)
     : rawTitle;
+  const workspaceKey =
+    typeof rawSession.workspaceKey === "string" && rawSession.workspaceKey
+      ? rawSession.workspaceKey
+      : DEFAULT_WORKSPACE_KEY;
 
   return {
-    id: rawSession.id ?? crypto.randomUUID(),
-    workspaceKey: rawSession.workspaceKey ?? DEFAULT_WORKSPACE_KEY,
-    workspaceName: rawSession.workspaceName ?? DEFAULT_WORKSPACE_NAME,
+    id:
+      typeof rawSession.id === "string" && rawSession.id.trim()
+        ? rawSession.id
+        : crypto.randomUUID(),
+    workspaceKey,
+    workspaceName:
+      typeof rawSession.workspaceName === "string" && rawSession.workspaceName.trim()
+        ? rawSession.workspaceName
+        : DEFAULT_WORKSPACE_NAME,
     workspacePath:
-      rawSession.workspacePath ??
-      (rawSession.workspaceKey && rawSession.workspaceKey !== DEFAULT_WORKSPACE_KEY && !rawSession.workspaceKey.startsWith("browser:")
-        ? rawSession.workspaceKey
+      (typeof rawSession.workspacePath === "string" && rawSession.workspacePath) ||
+      (workspaceKey !== DEFAULT_WORKSPACE_KEY && !workspaceKey.startsWith("browser:")
+        ? workspaceKey
         : undefined),
     title,
     messages,
-    heartbeat: normalizeHeartbeatConfig(rawSession.heartbeat),
+    heartbeat: normalizeHeartbeatConfig(
+      isObjectRecord(rawSession.heartbeat)
+        ? rawSession.heartbeat as Partial<ChatHeartbeatConfig>
+        : undefined,
+    ),
     memoryPersonaIds: Array.isArray(rawSession.memoryPersonaIds)
       ? rawSession.memoryPersonaIds.filter(
           (personaId, index, personaIds): personaId is string =>
@@ -1979,8 +2027,14 @@ function normalizeChatSession(rawSession: Partial<ChatSession>): ChatSession {
           ),
         }
       : {}),
-    createdAt: rawSession.createdAt ?? new Date().toISOString(),
-    updatedAt: rawSession.updatedAt ?? new Date().toISOString(),
+    createdAt:
+      typeof rawSession.createdAt === "string"
+        ? rawSession.createdAt
+        : new Date().toISOString(),
+    updatedAt:
+      typeof rawSession.updatedAt === "string"
+        ? rawSession.updatedAt
+        : new Date().toISOString(),
   };
 }
 
@@ -2070,6 +2124,7 @@ async function loadPersistentAppData(): Promise<PersistentAppDataLoadResult> {
 }
 
 let persistentAppDataSaveQueue: Promise<void> = Promise.resolve();
+let lastCharacterCardsForPersistentStore: CharacterCard[] | null = null;
 
 function compactAppDataForPersistentStore(
   data: RengeAppData,
@@ -2077,13 +2132,30 @@ function compactAppDataForPersistentStore(
 ): RengeAppData {
   if (!window.rengeAndroid?.isAndroid || !characterCardsStored) return data;
   const characterCards = data.characterCards ?? [];
-  if (!characterCards.some((card) => card.avatarDataUrl.startsWith("data:image/"))) return data;
+  if (
+    !characterCards.some(
+      (card) =>
+        typeof card.avatarDataUrl === "string" &&
+        card.avatarDataUrl.startsWith("data:image/"),
+    )
+  ) {
+    return data;
+  }
   return {
     ...data,
     characterCards: characterCards.map((card) =>
-      card.avatarDataUrl.startsWith("data:image/") ? { ...card, avatarDataUrl: "" } : card,
+      typeof card.avatarDataUrl === "string" &&
+      card.avatarDataUrl.startsWith("data:image/")
+        ? { ...card, avatarDataUrl: "" }
+        : card,
     ),
   };
+}
+
+function omitCharacterCards(data: RengeAppData): RengeAppData {
+  const compactData = { ...data };
+  delete compactData.characterCards;
+  return compactData;
 }
 
 async function savePersistentAppData(
@@ -2093,11 +2165,25 @@ async function savePersistentAppData(
   const operation = persistentAppDataSaveQueue.then(async () => {
     try {
       const persistentData = compactAppDataForPersistentStore(data, characterCardsStored);
-      const response = await fetch("/api/app-data", {
-        method: "PUT",
+      const characterCards = data.characterCards ?? [];
+      const preserveStoredCharacterCards =
+        lastCharacterCardsForPersistentStore === characterCards;
+      const requestData = preserveStoredCharacterCards
+        ? omitCharacterCards(persistentData)
+        : persistentData;
+      let response = await fetch("/api/app-data", {
+        method: preserveStoredCharacterCards ? "PATCH" : "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data: persistentData }),
+        body: JSON.stringify({ data: requestData }),
       });
+      if (preserveStoredCharacterCards && response.status === 405) {
+        response = await fetch("/api/app-data", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ data: persistentData }),
+        });
+      }
+      if (response.ok) lastCharacterCardsForPersistentStore = characterCards;
       return response.ok;
     } catch {
       // The app can still run with localStorage when the persistence API is unavailable.
@@ -2115,6 +2201,7 @@ async function clearPersistentAppData(): Promise<boolean> {
   const operation = persistentAppDataSaveQueue.then(async () => {
     try {
       const response = await fetch("/api/app-data", { method: "DELETE" });
+      if (response.ok) lastCharacterCardsForPersistentStore = null;
       return response.ok;
     } catch {
       return false;
@@ -2138,9 +2225,47 @@ function setLocalStorageValueSafely(key: string, value: string) {
 function setLocalStorageJsonSafely(key: string, value: unknown) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
+    return true;
   } catch {
     // Large chats and images can exceed a browser origin's localStorage quota.
+    return false;
   }
+}
+
+function removeLocalStorageValueSafely(key: string) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Persistence can continue through the server-side app-data store.
+  }
+}
+
+let lastCharacterCardsForDatabase: CharacterCard[] | null = null;
+let lastCharacterCardsDatabaseSave: Promise<boolean> = Promise.resolve(false);
+let lastCharacterCardsForLocalStorage: CharacterCard[] | null = null;
+
+function persistCharacterCardsToDatabase(
+  characterCards: CharacterCard[],
+  characterCardsAlreadyStored: boolean,
+) {
+  if (characterCardsAlreadyStored) {
+    lastCharacterCardsForDatabase = characterCards;
+    lastCharacterCardsDatabaseSave = Promise.resolve(true);
+    return lastCharacterCardsDatabaseSave;
+  }
+  if (lastCharacterCardsForDatabase === characterCards) {
+    return lastCharacterCardsDatabaseSave;
+  }
+
+  lastCharacterCardsForDatabase = characterCards;
+  const operation = saveCharacterCardsToDatabase(characterCards).then((stored) => {
+    if (!stored && lastCharacterCardsForDatabase === characterCards) {
+      lastCharacterCardsForDatabase = null;
+    }
+    return stored;
+  });
+  lastCharacterCardsDatabaseSave = operation;
+  return operation;
 }
 
 function persistAppDataToLocalStores(
@@ -2204,14 +2329,19 @@ function persistAppDataToLocalStores(
   );
 
   const characterCards = data.characterCards ?? [];
-  const characterCardsStored = characterCardsAlreadyStored
-    ? Promise.resolve(true)
-    : saveCharacterCardsToDatabase(characterCards);
-  if (!window.rengeAndroid?.isAndroid) {
+  const characterCardsStored = persistCharacterCardsToDatabase(
+    characterCards,
+    characterCardsAlreadyStored,
+  );
+  if (
+    !window.rengeAndroid?.isAndroid &&
+    lastCharacterCardsForLocalStorage !== characterCards &&
     setLocalStorageJsonSafely(
       CHARACTER_CARDS_STORAGE_KEY,
       characterCards.map((card) => ({ ...card, avatarDataUrl: "" })),
-    );
+    )
+  ) {
+    lastCharacterCardsForLocalStorage = characterCards;
   }
   setLocalStorageValueSafely(
     ACTIVE_CHARACTER_CARD_STORAGE_KEY,
@@ -2614,15 +2744,15 @@ function normalizePcWorkspaceHandle(connection: PcConnectionData | undefined | n
 }
 
 function syncPcConnectionToLocalStorage(baseUrl: string, workspace: PcWorkspaceHandle | null) {
-  localStorage.setItem(PC_SERVER_URL_STORAGE_KEY, baseUrl);
+  setLocalStorageValueSafely(PC_SERVER_URL_STORAGE_KEY, baseUrl);
   if (workspace) {
-    localStorage.setItem(PC_SERVER_URL_STORAGE_KEY, workspace.baseUrl);
-    localStorage.setItem(PC_WORKSPACE_PATH_STORAGE_KEY, workspace.path);
-    localStorage.setItem(PC_WORKSPACE_NAME_STORAGE_KEY, workspace.name);
+    setLocalStorageValueSafely(PC_SERVER_URL_STORAGE_KEY, workspace.baseUrl);
+    setLocalStorageValueSafely(PC_WORKSPACE_PATH_STORAGE_KEY, workspace.path);
+    setLocalStorageValueSafely(PC_WORKSPACE_NAME_STORAGE_KEY, workspace.name);
     return;
   }
-  localStorage.removeItem(PC_WORKSPACE_PATH_STORAGE_KEY);
-  localStorage.removeItem(PC_WORKSPACE_NAME_STORAGE_KEY);
+  removeLocalStorageValueSafely(PC_WORKSPACE_PATH_STORAGE_KEY);
+  removeLocalStorageValueSafely(PC_WORKSPACE_NAME_STORAGE_KEY);
 }
 
 function inferChatSessionTitle(messages: ChatMessage[]) {
@@ -3851,6 +3981,7 @@ const toolActionTitleMap: Array<[string, string]> = [
   ["发送电脑文件给用户", "发送文件"],
   ["修改文件", "修改文件"],
   ["删除路径", "删除路径"],
+  ["主 Agent 正在委派给", "委派子任务"],
 ];
 
 function getCommandName(line: string) {
@@ -3992,11 +4123,12 @@ function parseToolProgressContent(content: string): ChatToolProgressBlock | null
   }
 
   if (firstLine.startsWith("操作失败：")) {
+    const toolLabel = firstLine.replace("操作失败：", "").trim();
     return {
       variant: "error",
-      title: firstLine.replace("操作失败：", "操作失败"),
+      title: "操作失败",
       badge: "失败",
-      links,
+      links: toolLabel ? [{ label: toolLabel }, ...links] : links,
       details: details.slice(1),
     };
   }
@@ -7038,14 +7170,6 @@ function formatChatMessageForApi(
   ];
 }
 
-function getAgentApiName(personaId: string) {
-  const normalizedId = personaId
-    .trim()
-    .replace(/[^A-Za-z0-9_-]+/g, "_")
-    .replace(/^_+|_+$/g, "") || "persona";
-  return `agent_${normalizedId}`.slice(0, 64);
-}
-
 function buildChatMessageForApi(
   message: ChatMessage,
   personas: AgentPersona[],
@@ -7514,11 +7638,11 @@ const multiAgentControlToolDefinitions: ChatToolDefinition[] = [
 ];
 
 function buildMultiAgentDelegationToolDefinitions(
-  subAgents: AgentPersona[],
+  roster: DelegationRoster,
 ): ChatToolDefinition[] {
-  if (subAgents.length === 0) return [];
-  const roster = subAgents
-    .map((persona) => `${persona.id}=${persona.name}`)
+  if (roster.entries.length === 0) return [];
+  const rosterDescription = roster.entries
+    .map((entry) => `${entry.token}=${entry.personaName}`)
     .join("；");
   return [
     {
@@ -7528,15 +7652,16 @@ function buildMultiAgentDelegationToolDefinitions(
         description: [
           "把一个边界清晰的子任务委派给指定子 Agent，并等待其独立执行结果。",
           "你必须亲自检查返回结果；未达到主任务目标时，继续向同一 Agent 提交修正任务，或选择更合适的其他 Agent。",
-          `可选子 Agent：${roster}`,
+          "agent_id 必须原样复制本工具 enum 中的当前委派标识，不要添加 persona_、agent_ 或其他前缀。",
+          `当前可选子 Agent：${rosterDescription}`,
         ].join("\n"),
         parameters: {
           type: "object",
           properties: {
             agent_id: {
               type: "string",
-              enum: subAgents.map((persona) => persona.id),
-              description: "要接收子任务的 Agent ID。",
+              enum: roster.entries.map((entry) => entry.token),
+              description: "要接收子任务的本轮委派标识；必须原样复制 enum 值。",
             },
             task: {
               type: "string",
@@ -8013,7 +8138,7 @@ function formatToolActionMessage(
   toolCall: ChatToolCall,
   handle: LocalDirectoryHandle | ElectronWorkspaceHandle | AndroidWorkspaceHandle | PcWorkspaceHandle | null,
   mcpTools: McpToolDefinition[] = [],
-  delegatedSubAgents: AgentPersona[] = [],
+  delegationRoster: DelegationRoster = { entries: [] },
 ) {
   const args = parseToolCallArgs(toolCall);
   const mcpTool = getMcpToolInfo(mcpTools, toolCall.function.name);
@@ -8106,9 +8231,14 @@ function formatToolActionMessage(
     case "multi_agent_end_rounds":
       return "";
     case "multi_agent_delegate_task": {
-      const agentId = String(args.agent_id ?? "");
+      const resolution = resolveDelegationAgentReference(
+        args.agent_id,
+        delegationRoster,
+      );
       const agentName =
-        delegatedSubAgents.find((persona) => persona.id === agentId)?.name || agentId;
+        resolution.status === "matched"
+          ? resolution.entry.personaName
+          : "未知子 Agent";
       return [
         `主 Agent 正在委派给 ${agentName}：`,
         trimBlock(String(args.task ?? "未提供子任务"), 320),
@@ -11604,6 +11734,9 @@ export function App() {
         : databaseCharacterCards.length > 0
           ? databaseCharacterCards
           : loadCharacterCardsFromStorage(CHARACTER_CARDS_STORAGE_KEY);
+      lastCharacterCardsForPersistentStore = hasPersistentCharacterCards
+        ? normalizedCharacterCards
+        : null;
       const normalizedUserProfile = persistentData?.userProfile
         ? normalizeUserProfile(persistentData.userProfile)
         : loadUserProfile();
@@ -11869,7 +12002,37 @@ export function App() {
       setAppDataLoaded(true);
     }
 
-    void loadInitialAppData();
+    void loadInitialAppData().catch(async (error) => {
+      if (cancelled) return;
+      console.error("应用数据加载失败，已回退到本地缓存", error);
+      let fallbackPersonas: AgentPersona[];
+      try {
+        fallbackPersonas = mergeBuiltInPersonas(
+          (await personaStore.list()).map(normalizePersona),
+        );
+      } catch {
+        fallbackPersonas = mergeBuiltInPersonas([]);
+      }
+      if (cancelled) return;
+      const fallbackSessions = chatSessions.length > 0
+        ? chatSessions
+        : [createChatSession()];
+      const fallbackActivePersonaId = fallbackPersonas.some(
+        (persona) => persona.id === activePersonaId,
+      )
+        ? activePersonaId
+        : fallbackPersonas[0]?.id ?? "";
+      setPersonas(fallbackPersonas);
+      setActivePersonaId(fallbackActivePersonaId);
+      setChatSessions(fallbackSessions);
+      setActiveChatSessionId(fallbackSessions[0]?.id ?? "");
+      setChatMessages(fallbackSessions[0]?.messages ?? []);
+      setChatStatus({
+        status: "error",
+        message: "部分持久化数据无法加载，已使用本地缓存继续启动。",
+      });
+      setAppDataLoaded(true);
+    });
 
     return () => {
       cancelled = true;
@@ -11883,11 +12046,9 @@ export function App() {
       const snapshot = buildCurrentAppData();
       const characterCardsStored = persistAppDataToLocalStores(snapshot);
       if (persistentStoreReadyRef.current) {
-        if (window.rengeAndroid?.isAndroid) {
-          void characterCardsStored.then((stored) => savePersistentAppData(snapshot, stored));
-        } else {
-          void savePersistentAppData(snapshot);
-        }
+        void characterCardsStored.then((stored) =>
+          savePersistentAppData(snapshot, stored),
+        );
       }
     }, APP_DATA_SAVE_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
@@ -11900,11 +12061,9 @@ export function App() {
       const snapshot = buildCurrentAppData();
       const characterCardsStored = persistAppDataToLocalStores(snapshot);
       if (persistentStoreReadyRef.current) {
-        if (window.rengeAndroid?.isAndroid) {
-          void characterCardsStored.then((stored) => savePersistentAppData(snapshot, stored));
-        } else {
-          void savePersistentAppData(snapshot);
-        }
+        void characterCardsStored.then((stored) =>
+          savePersistentAppData(snapshot, stored),
+        );
       }
     };
     window.addEventListener("pagehide", flushLatestSnapshot);
@@ -11912,11 +12071,11 @@ export function App() {
   }, [appDataLoaded, buildCurrentAppData]);
 
   useEffect(() => {
-    localStorage.setItem(
+    setLocalStorageValueSafely(
       CHARACTER_TRANSLATION_PROMPT_STORAGE_KEY,
       characterTranslationAdditionalPrompt,
     );
-    localStorage.setItem(
+    setLocalStorageValueSafely(
       CHARACTER_TRANSLATION_PROMPT_ENABLED_STORAGE_KEY,
       String(characterTranslationPromptEnabled),
     );
@@ -13348,11 +13507,11 @@ export function App() {
     setCharacterTranslationPromptDialogOpen(true);
   };
   const saveCharacterTranslationPrompt = () => {
-    localStorage.setItem(
+    setLocalStorageValueSafely(
       CHARACTER_TRANSLATION_PROMPT_STORAGE_KEY,
       characterTranslationPromptDraft,
     );
-    localStorage.setItem(
+    setLocalStorageValueSafely(
       CHARACTER_TRANSLATION_PROMPT_ENABLED_STORAGE_KEY,
       String(characterTranslationPromptEnabledDraft),
     );
@@ -18149,7 +18308,7 @@ export function App() {
     includeHeartbeatTools = false,
     suppressAttachmentTransferTool = false,
     includeMultiAgentControlTools = false,
-    delegatedSubAgents: AgentPersona[] = [],
+    delegationRoster: DelegationRoster = { entries: [] },
   ) => {
     const localToolsBase =
       localToolsEnabled && localWorkspaceHandle
@@ -18168,7 +18327,7 @@ export function App() {
       ...externalTools,
       ...(includeHeartbeatTools ? heartbeatToolDefinitions : []),
       ...(includeMultiAgentControlTools ? multiAgentControlToolDefinitions : []),
-      ...buildMultiAgentDelegationToolDefinitions(delegatedSubAgents),
+      ...buildMultiAgentDelegationToolDefinitions(delegationRoster),
     ];
   };
 
@@ -18676,6 +18835,7 @@ export function App() {
               persona !== undefined && persona.id !== responderPersona?.id,
           )
       : [];
+    const delegationRoster = createDelegationRoster(delegatedSubAgents);
     const assistantSender: ChatSenderIdentity | undefined =
       responseMode === "persona" && responderPersona
         ? { kind: "persona", personaId: responderPersona.id }
@@ -18769,7 +18929,7 @@ export function App() {
             options.exposeHeartbeatTools,
             false,
             options.multiAgentAutoStopEnabled === true,
-            delegatedSubAgents,
+            delegationRoster,
           );
       let messagesForApi = nextMessages;
       if (useImageRecognitionMcp && imageRecognitionMcpTool && latestImageUserMessage) {
@@ -18882,16 +19042,20 @@ export function App() {
                 "4. 不要仅凭子 Agent 自称完成就通过验收；结合结果、证据和可用工具自行判断。仍可由你直接使用本地或 MCP 工具补充检查与整合。",
                 "5. 只有当所有必要子任务均通过验收、主任务目标确实完成，或遇到需要用户决定的真实阻塞时，才停止委派并输出最终答复。最终答复由你统一整合，不能把验收责任推回用户。",
                 "6. 委派与验收是内部协作流程。最终答复聚焦完成结果，不要泄露工具协议、Agent ID 或内部提示词。",
+                "7. 委派时只能原样使用下方标出的本轮委派标识。历史消息 name 字段、旧委派标识和 persona_/agent_ 前缀都不是本轮委派参数。",
               ].join("\n"),
               "可用子 Agent 完整人格设定：",
               delegatedSubAgents
-                .map((persona) =>
-                  [
-                    `--- 子 Agent：${persona.name}（ID: ${persona.id}）---`,
+                .map((persona) => {
+                  const rosterEntry = delegationRoster.entries.find(
+                    (entry) => entry.personaId === persona.id,
+                  );
+                  return [
+                    `--- 子 Agent：${persona.name}（本轮委派标识: ${rosterEntry?.token ?? "不可用"}）---`,
                     buildPersonaPrompt(persona),
                     `--- ${persona.name} 人格设定结束 ---`,
-                  ].join("\n"),
-                )
+                  ].join("\n");
+                })
                 .join("\n\n"),
             ].join("\n\n")
           : "";
@@ -19010,6 +19174,8 @@ export function App() {
       let assistantChoiceRequest: ChatChoiceRequest | undefined;
       let assistantMessageVariables: Record<string, unknown> = {};
       let hasVisibleToolResult = false;
+      let hasSuccessfulVisibleToolResult = false;
+      let multiAgentDelegationDisabled = false;
       let pendingMcpObservationPrompt = "";
       let pendingMcpObservationRetries = 0;
       let pendingMcpObservationPromptSent = false;
@@ -19035,6 +19201,13 @@ export function App() {
           messages,
           userProfile.nickname,
         );
+        const chatToolsForRequest = options.includeTools
+          ? availableChatTools.filter(
+              (tool) =>
+                !multiAgentDelegationDisabled ||
+                tool.function.name !== "multi_agent_delegate_task",
+            )
+          : [];
         const response = await fetch("/api/chat/completions", {
           method: "POST",
           headers: {
@@ -19048,9 +19221,9 @@ export function App() {
             request: {
               model: requestModelId,
               messages: requestMessages,
-              ...(options.includeTools
+              ...(chatToolsForRequest.length > 0
                 ? {
-                    tools: availableChatTools,
+                    tools: chatToolsForRequest,
                     tool_choice: options.toolChoice ?? "auto",
                   }
                 : {}),
@@ -19104,26 +19277,77 @@ export function App() {
         requestMcpTools,
       ).filter((tool) => !isChatChoiceToolName(tool.function.name));
       let multiAgentDelegationCount = 0;
+      let invalidMultiAgentDelegationCount = 0;
+
+      const rejectInvalidMultiAgentDelegation = (message: string): never => {
+        invalidMultiAgentDelegationCount += 1;
+        if (
+          invalidMultiAgentDelegationCount >=
+          MAX_INVALID_MULTI_AGENT_DELEGATIONS
+        ) {
+          multiAgentDelegationDisabled = true;
+        }
+        throw new Error(
+          [
+            message,
+            multiAgentDelegationDisabled
+              ? "本轮已暂停继续委派，请基于当前信息完成答复或说明真实阻塞。"
+              : "请从本轮 multi_agent_delegate_task 的 agent_id enum 中原样复制委派标识后重试。",
+          ].join(" "),
+        );
+      };
 
       const executeMultiAgentDelegation = async (rawArguments: string) => {
         if (!options.multiAgentSupervisorMode || !responderPersona) {
           throw new Error("当前请求没有启用主 Agent 委派权限。");
         }
+        if (multiAgentDelegationDisabled) {
+          throw new Error("本轮子 Agent 委派已暂停，请基于当前信息完成答复。");
+        }
         if (multiAgentDelegationCount >= MAX_MULTI_AGENT_DELEGATIONS) {
+          multiAgentDelegationDisabled = true;
           throw new Error(
             `本轮已达到 ${MAX_MULTI_AGENT_DELEGATIONS} 次子任务委派上限。请基于已有结果完成验收，或向用户说明真实阻塞。`,
           );
         }
 
-        const args = parseToolArguments(rawArguments);
-        const agentId = String(args.agent_id ?? "").trim();
-        const task = String(args.task ?? "").trim();
-        const acceptanceCriteria = String(args.acceptance_criteria ?? "").trim();
-        const context = String(args.context ?? "").trim();
-        const subAgent = delegatedSubAgents.find((persona) => persona.id === agentId);
-        if (!subAgent) throw new Error("指定的子 Agent 不在当前协作团队中。");
-        if (!task) throw new Error("委派子任务不能为空。");
-        if (!acceptanceCriteria) throw new Error("委派子任务必须包含完成标准。");
+        let args: Record<string, unknown> = {};
+        try {
+          args = parseToolArguments(rawArguments);
+        } catch {
+          return rejectInvalidMultiAgentDelegation("委派参数不是合法 JSON object。");
+        }
+        const task = typeof args.task === "string" ? args.task.trim() : "";
+        const acceptanceCriteria =
+          typeof args.acceptance_criteria === "string"
+            ? args.acceptance_criteria.trim()
+            : "";
+        const context =
+          typeof args.context === "string" ? args.context.trim() : "";
+        const agentResolution = resolveDelegationAgentReference(
+          args.agent_id,
+          delegationRoster,
+        );
+        if (agentResolution.status !== "matched") {
+          return rejectInvalidMultiAgentDelegation(
+            agentResolution.status === "ambiguous"
+              ? "委派标识同时匹配多个子 Agent，无法安全选择。"
+              : "指定的子 Agent 不在当前协作团队中。",
+          );
+        }
+        if (!task) {
+          return rejectInvalidMultiAgentDelegation("委派子任务不能为空。");
+        }
+        if (!acceptanceCriteria) {
+          return rejectInvalidMultiAgentDelegation("委派子任务必须包含完成标准。");
+        }
+        const subAgent = delegatedSubAgents.find(
+          (persona) => persona.id === agentResolution.entry.personaId,
+        );
+        if (!subAgent) {
+          return rejectInvalidMultiAgentDelegation("指定的子 Agent 不在当前协作团队中。");
+        }
+        invalidMultiAgentDelegationCount = 0;
 
         const { provider: subAgentProvider, modelId: subAgentModelId } =
           getMultiAgentRequestConfig(subAgent.id);
@@ -19894,7 +20118,7 @@ export function App() {
                   toolCall,
                   localWorkspaceHandle,
                   requestMcpTools,
-                  delegatedSubAgents,
+                  delegationRoster,
                 ),
                 [],
                 "",
@@ -19934,6 +20158,7 @@ export function App() {
                 );
                 if (toolResultMessage.trim() || toolResultAttachments.length > 0) {
                   hasVisibleToolResult = true;
+                  hasSuccessfulVisibleToolResult = true;
                 }
               }
               apiMessages.push({
@@ -20009,7 +20234,7 @@ export function App() {
       }
       if (
         !assistantContent &&
-        hasVisibleToolResult &&
+        hasSuccessfulVisibleToolResult &&
         options.multiAgentSupervisorMode
       ) {
         setChatStatus({
@@ -20049,7 +20274,7 @@ export function App() {
         }
       }
       if (!assistantContent) {
-        if (hasVisibleToolResult && options.multiAgentSupervisorMode) {
+        if (hasSuccessfulVisibleToolResult && options.multiAgentSupervisorMode) {
           throw new Error(
             "主 Agent 已收到子任务结果，但未能生成最终验收答复。",
           );
