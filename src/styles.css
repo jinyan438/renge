@@ -6298,6 +6298,32 @@ summary:focus-visible {
   gap: 5px;
 }
 
+.multi-agent-workflow-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid #d9dee8;
+  border-radius: 7px;
+  background: #f1f5f9;
+}
+
+.composer-menu-options .multi-agent-workflow-switch button {
+  display: flex;
+  min-width: 0;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: #64748b;
+}
+
+.composer-menu-options .multi-agent-workflow-switch button.active {
+  color: #172033;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
+}
+
 .multi-agent-sequence {
   display: grid;
   gap: 5px;
@@ -6311,6 +6337,10 @@ summary:focus-visible {
 .multi-agent-sequence strong {
   color: #172033;
   font-size: 12px;
+}
+
+.multi-agent-sequence.supervisor-summary {
+  border-left: 3px solid #07c160;
 }
 
 .multi-agent-rounds-field {
@@ -6430,7 +6460,7 @@ summary:focus-visible {
 
 .multi-agent-config-row {
   display: grid;
-  grid-template-columns: minmax(120px, 0.72fr) minmax(260px, 1.55fr);
+  grid-template-columns: minmax(180px, 0.82fr) minmax(260px, 1.4fr);
   gap: 7px;
   align-items: center;
   min-height: 42px;
@@ -6443,6 +6473,61 @@ summary:focus-visible {
 .multi-agent-config-row.active {
   border-color: #a8ebcb;
   background: #edfdf5;
+}
+
+.multi-agent-role-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px;
+  align-items: center;
+  min-width: 0;
+  padding-left: 6px;
+}
+
+.multi-agent-role-picker > strong {
+  overflow: hidden;
+  color: #334155;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.multi-agent-role-picker > div {
+  display: grid;
+  grid-template-columns: repeat(2, 42px);
+  gap: 3px;
+}
+
+.composer-menu-options button.multi-agent-role-button {
+  display: flex;
+  min-width: 0;
+  min-height: 27px;
+  padding: 0 5px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  border: 1px solid #d9dee8;
+  color: #64748b;
+  background: #ffffff;
+  font-size: 10px;
+}
+
+.composer-menu-options button.multi-agent-role-button.active:first-child {
+  border-color: #d7a733;
+  color: #7a4d00;
+  background: #fff8e6;
+}
+
+.composer-menu-options button.multi-agent-role-button.active:last-child {
+  border-color: #73dca9;
+  color: #067647;
+  background: #edfdf5;
+}
+
+.composer-menu-options button.multi-agent-role-button:disabled {
+  border-color: #e2e8f0;
+  color: #a0a8b5;
+  background: #f1f5f9;
 }
 
 .composer-menu-options button.multi-agent-option {

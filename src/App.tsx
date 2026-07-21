@@ -9,6 +9,7 @@ import {
   ChevronRight,
   Check,
   Copy,
+  Crown,
   Database,
   Download,
   ExternalLink,
@@ -42,6 +43,7 @@ import {
   Trash2,
   Upload,
   UserRound,
+  Users,
   Wrench,
   X,
 } from "lucide-react";
@@ -364,6 +366,7 @@ type MultiAgentModelConfig = {
 };
 
 type MultiAgentModelConfigs = Record<string, MultiAgentModelConfig>;
+type MultiAgentWorkflow = "sequence" | "supervisor";
 
 type ChatAttachment = {
   id: string;
@@ -605,7 +608,10 @@ type RengeAppData = {
   activeProviderId?: string;
   chatSessions?: ChatSession[];
   chatMode?: ChatMode;
+  multiAgentWorkflow?: MultiAgentWorkflow;
   multiAgentPersonaIds?: string[];
+  multiAgentPrimaryPersonaId?: string;
+  multiAgentSubPersonaIds?: string[];
   multiAgentRounds?: number;
   multiAgentModelConfigs?: MultiAgentModelConfigs;
   multiAgentAutoStopEnabled?: boolean;
@@ -854,7 +860,10 @@ const PROVIDER_STORAGE_KEY = "renge_provider_channels";
 const ACTIVE_PROVIDER_STORAGE_KEY = "renge_active_provider";
 const CHAT_SESSIONS_STORAGE_KEY = "renge_chat_sessions";
 const CHAT_MODE_STORAGE_KEY = "renge_chat_mode";
+const MULTI_AGENT_WORKFLOW_STORAGE_KEY = "renge_multi_agent_workflow";
 const MULTI_AGENT_PERSONAS_STORAGE_KEY = "renge_multi_agent_personas";
+const MULTI_AGENT_PRIMARY_PERSONA_STORAGE_KEY = "renge_multi_agent_primary_persona";
+const MULTI_AGENT_SUB_PERSONAS_STORAGE_KEY = "renge_multi_agent_sub_personas";
 const MULTI_AGENT_ROUNDS_STORAGE_KEY = "renge_multi_agent_rounds";
 const MULTI_AGENT_MODELS_STORAGE_KEY = "renge_multi_agent_models";
 const MULTI_AGENT_AUTO_STOP_STORAGE_KEY = "renge_multi_agent_auto_stop";
@@ -913,6 +922,8 @@ function buildCharacterTranslationSystemPrompt(additionalPrompt: string) {
 }
 const MAX_HEARTBEAT_INTERVAL_MINUTES = 24 * 60;
 const MAX_MULTI_AGENT_ROUNDS = 20;
+const MAX_MULTI_AGENT_DELEGATIONS = 32;
+const MAX_SUB_AGENT_TOOL_ROUNDS = 32;
 const DEFAULT_CHAT_PERSONALIZATION: ChatPersonalizationSettings = {
   messageFontFamily: "system",
   messageFontSize: 16,
@@ -1388,6 +1399,16 @@ function loadChatMode() {
   return normalizeChatMode(localStorage.getItem(CHAT_MODE_STORAGE_KEY));
 }
 
+function normalizeMultiAgentWorkflow(value: unknown): MultiAgentWorkflow {
+  return value === "supervisor" ? "supervisor" : "sequence";
+}
+
+function loadMultiAgentWorkflow() {
+  return normalizeMultiAgentWorkflow(
+    localStorage.getItem(MULTI_AGENT_WORKFLOW_STORAGE_KEY),
+  );
+}
+
 function normalizeMultiAgentPersonaIds(
   rawPersonaIds: unknown,
   personas: AgentPersona[] = [],
@@ -1405,6 +1426,32 @@ function normalizeMultiAgentPersonaIds(
 function loadMultiAgentPersonaIds() {
   try {
     const rawValue = localStorage.getItem(MULTI_AGENT_PERSONAS_STORAGE_KEY);
+    return rawValue ? normalizeMultiAgentPersonaIds(JSON.parse(rawValue)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeMultiAgentPrimaryPersonaId(
+  value: unknown,
+  personas: AgentPersona[] = [],
+) {
+  const personaId = typeof value === "string" ? value : "";
+  if (personas.length === 0) return personaId;
+  return personas.some((persona) => persona.id === personaId)
+    ? personaId
+    : personas[0]?.id ?? "";
+}
+
+function loadMultiAgentPrimaryPersonaId() {
+  return normalizeMultiAgentPrimaryPersonaId(
+    localStorage.getItem(MULTI_AGENT_PRIMARY_PERSONA_STORAGE_KEY),
+  );
+}
+
+function loadMultiAgentSubPersonaIds() {
+  try {
+    const rawValue = localStorage.getItem(MULTI_AGENT_SUB_PERSONAS_STORAGE_KEY);
     return rawValue ? normalizeMultiAgentPersonaIds(JSON.parse(rawValue)) : [];
   } catch {
     return [];
@@ -2108,7 +2155,19 @@ function persistAppDataToLocalStores(
   setLocalStorageValueSafely(ACTIVE_PROVIDER_STORAGE_KEY, data.activeProviderId ?? "");
   setLocalStorageJsonSafely(CHAT_SESSIONS_STORAGE_KEY, data.chatSessions ?? []);
   setLocalStorageValueSafely(CHAT_MODE_STORAGE_KEY, data.chatMode ?? "ai");
+  setLocalStorageValueSafely(
+    MULTI_AGENT_WORKFLOW_STORAGE_KEY,
+    data.multiAgentWorkflow ?? "sequence",
+  );
   setLocalStorageJsonSafely(MULTI_AGENT_PERSONAS_STORAGE_KEY, data.multiAgentPersonaIds ?? []);
+  setLocalStorageValueSafely(
+    MULTI_AGENT_PRIMARY_PERSONA_STORAGE_KEY,
+    data.multiAgentPrimaryPersonaId ?? "",
+  );
+  setLocalStorageJsonSafely(
+    MULTI_AGENT_SUB_PERSONAS_STORAGE_KEY,
+    data.multiAgentSubPersonaIds ?? [],
+  );
   setLocalStorageValueSafely(MULTI_AGENT_ROUNDS_STORAGE_KEY, String(data.multiAgentRounds ?? 1));
   setLocalStorageJsonSafely(MULTI_AGENT_MODELS_STORAGE_KEY, data.multiAgentModelConfigs ?? {});
   setLocalStorageValueSafely(
@@ -7454,6 +7513,51 @@ const multiAgentControlToolDefinitions: ChatToolDefinition[] = [
   },
 ];
 
+function buildMultiAgentDelegationToolDefinitions(
+  subAgents: AgentPersona[],
+): ChatToolDefinition[] {
+  if (subAgents.length === 0) return [];
+  const roster = subAgents
+    .map((persona) => `${persona.id}=${persona.name}`)
+    .join("；");
+  return [
+    {
+      type: "function",
+      function: {
+        name: "multi_agent_delegate_task",
+        description: [
+          "把一个边界清晰的子任务委派给指定子 Agent，并等待其独立执行结果。",
+          "你必须亲自检查返回结果；未达到主任务目标时，继续向同一 Agent 提交修正任务，或选择更合适的其他 Agent。",
+          `可选子 Agent：${roster}`,
+        ].join("\n"),
+        parameters: {
+          type: "object",
+          properties: {
+            agent_id: {
+              type: "string",
+              enum: subAgents.map((persona) => persona.id),
+              description: "要接收子任务的 Agent ID。",
+            },
+            task: {
+              type: "string",
+              description: "可独立执行、结果可验收的具体子任务。",
+            },
+            acceptance_criteria: {
+              type: "string",
+              description: "主 Agent 用于验收该子任务的明确完成标准。",
+            },
+            context: {
+              type: "string",
+              description: "可选。完成子任务所需的背景、约束、前序结果或返工反馈。",
+            },
+          },
+          required: ["agent_id", "task", "acceptance_criteria"],
+        },
+      },
+    },
+  ];
+}
+
 function isSilentChatControlTool(toolName: string) {
   return toolName === "multi_agent_end_rounds";
 }
@@ -7909,6 +8013,7 @@ function formatToolActionMessage(
   toolCall: ChatToolCall,
   handle: LocalDirectoryHandle | ElectronWorkspaceHandle | AndroidWorkspaceHandle | PcWorkspaceHandle | null,
   mcpTools: McpToolDefinition[] = [],
+  delegatedSubAgents: AgentPersona[] = [],
 ) {
   const args = parseToolCallArgs(toolCall);
   const mcpTool = getMcpToolInfo(mcpTools, toolCall.function.name);
@@ -8000,6 +8105,15 @@ function formatToolActionMessage(
       return "更新当前会话心跳设置。";
     case "multi_agent_end_rounds":
       return "";
+    case "multi_agent_delegate_task": {
+      const agentId = String(args.agent_id ?? "");
+      const agentName =
+        delegatedSubAgents.find((persona) => persona.id === agentId)?.name || agentId;
+      return [
+        `主 Agent 正在委派给 ${agentName}：`,
+        trimBlock(String(args.task ?? "未提供子任务"), 320),
+      ].join("\n");
+    }
     default:
       return `执行本地工具：${toolCall.function.name}`;
   }
@@ -8246,6 +8360,11 @@ function formatToolResultMessage(toolCall: ChatToolCall, result: unknown) {
       }，已执行 ${String(result.runCount ?? 0)} 次。`;
     case "multi_agent_end_rounds":
       return "";
+    case "multi_agent_delegate_task":
+      return [
+        `${String(result.agentName ?? "子 Agent")} 已返回执行结果。`,
+        typeof result.result === "string" ? trimBlock(result.result, 700) : "",
+      ].filter(Boolean).join("\n");
     case "local_run_script":
       return formatCommandResult(result, `脚本执行完成：npm run ${String(result.script ?? args.script ?? "")}`);
     case "local_run_command": {
@@ -10488,8 +10607,16 @@ export function App() {
   }>({ status: "idle", message: "" });
   const [providerApiKeyVisible, setProviderApiKeyVisible] = useState(false);
   const [chatMode, setChatMode] = useState<ChatMode>(loadChatMode);
+  const [multiAgentWorkflow, setMultiAgentWorkflow] =
+    useState<MultiAgentWorkflow>(loadMultiAgentWorkflow);
   const [multiAgentPersonaIds, setMultiAgentPersonaIds] = useState<string[]>(
     loadMultiAgentPersonaIds,
+  );
+  const [multiAgentPrimaryPersonaId, setMultiAgentPrimaryPersonaId] = useState(
+    loadMultiAgentPrimaryPersonaId,
+  );
+  const [multiAgentSubPersonaIds, setMultiAgentSubPersonaIds] = useState<string[]>(
+    loadMultiAgentSubPersonaIds,
   );
   const [multiAgentRounds, setMultiAgentRounds] = useState(loadMultiAgentRounds);
   const [multiAgentModelConfigs, setMultiAgentModelConfigs] =
@@ -11348,7 +11475,10 @@ export function App() {
       activeProviderId,
       chatSessions,
       chatMode,
+      multiAgentWorkflow,
       multiAgentPersonaIds,
+      multiAgentPrimaryPersonaId,
+      multiAgentSubPersonaIds,
       multiAgentRounds,
       multiAgentModelConfigs,
       multiAgentAutoStopEnabled,
@@ -11384,7 +11514,7 @@ export function App() {
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     };
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentRounds, multiAgentStopCondition, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -11482,6 +11612,9 @@ export function App() {
         normalizedPersonas,
       );
       const nextChatMode = normalizeChatMode(persistentData?.chatMode ?? loadChatMode());
+      const nextMultiAgentWorkflow = normalizeMultiAgentWorkflow(
+        persistentData?.multiAgentWorkflow ?? loadMultiAgentWorkflow(),
+      );
       const storedActiveCharacterCardId =
         persistentData?.activeCharacterCardId ??
         localStorage.getItem(ACTIVE_CHARACTER_CARD_STORAGE_KEY) ??
@@ -11499,6 +11632,29 @@ export function App() {
         storedMultiAgentPersonaIds.length > 0
           ? storedMultiAgentPersonaIds
           : normalizedPersonas.slice(0, 2).map((persona) => persona.id);
+      const nextMultiAgentPrimaryPersonaId = normalizeMultiAgentPrimaryPersonaId(
+        persistentData?.multiAgentPrimaryPersonaId ??
+          (loadMultiAgentPrimaryPersonaId() || nextMultiAgentPersonaIds[0]),
+        normalizedPersonas,
+      );
+      const storedMultiAgentSubPersonaIds = normalizeMultiAgentPersonaIds(
+        persistentData?.multiAgentSubPersonaIds ?? loadMultiAgentSubPersonaIds(),
+        normalizedPersonas,
+      ).filter((personaId) => personaId !== nextMultiAgentPrimaryPersonaId);
+      const hasStoredMultiAgentSubPersonaIds =
+        Array.isArray(persistentData?.multiAgentSubPersonaIds) ||
+        localStorage.getItem(MULTI_AGENT_SUB_PERSONAS_STORAGE_KEY) !== null;
+      const legacyMultiAgentSubPersonaIds = nextMultiAgentPersonaIds.filter(
+        (personaId) => personaId !== nextMultiAgentPrimaryPersonaId,
+      );
+      const nextMultiAgentSubPersonaIds = hasStoredMultiAgentSubPersonaIds
+        ? storedMultiAgentSubPersonaIds
+        : legacyMultiAgentSubPersonaIds.length > 0
+          ? legacyMultiAgentSubPersonaIds
+          : normalizedPersonas
+              .map((persona) => persona.id)
+              .filter((personaId) => personaId !== nextMultiAgentPrimaryPersonaId)
+              .slice(0, 1);
       const nextMultiAgentRounds = normalizeMultiAgentRounds(
         persistentData?.multiAgentRounds ?? loadMultiAgentRounds(),
       );
@@ -11684,7 +11840,10 @@ export function App() {
       setUserProfile(normalizedUserProfile);
       setChatSender(nextChatSender);
       setChatMode(nextChatMode);
+      setMultiAgentWorkflow(nextMultiAgentWorkflow);
       setMultiAgentPersonaIds(nextMultiAgentPersonaIds);
+      setMultiAgentPrimaryPersonaId(nextMultiAgentPrimaryPersonaId);
+      setMultiAgentSubPersonaIds(nextMultiAgentSubPersonaIds);
       setMultiAgentRounds(nextMultiAgentRounds);
       setMultiAgentModelConfigs(nextMultiAgentModelConfigs);
       setMultiAgentAutoStopEnabled(nextMultiAgentAutoStopEnabled);
@@ -11839,6 +11998,20 @@ export function App() {
   }, [personas]);
 
   useEffect(() => {
+    setMultiAgentPrimaryPersonaId((current) =>
+      normalizeMultiAgentPrimaryPersonaId(current, personas),
+    );
+  }, [personas]);
+
+  useEffect(() => {
+    setMultiAgentSubPersonaIds((current) =>
+      normalizeMultiAgentPersonaIds(current, personas).filter(
+        (personaId) => personaId !== multiAgentPrimaryPersonaId,
+      ),
+    );
+  }, [multiAgentPrimaryPersonaId, personas]);
+
+  useEffect(() => {
     if (characterCards.some((card) => card.id === activeCharacterCardId)) return;
     setActiveCharacterCardId(characterCards[0]?.id ?? "");
   }, [activeCharacterCardId, characterCards]);
@@ -11964,8 +12137,51 @@ export function App() {
         .filter((persona): persona is AgentPersona => Boolean(persona)),
     [multiAgentPersonaIds, personas],
   );
+  const multiAgentPrimaryPersona = useMemo(
+    () =>
+      personas.find((persona) => persona.id === multiAgentPrimaryPersonaId),
+    [multiAgentPrimaryPersonaId, personas],
+  );
+  const multiAgentSubPersonas = useMemo(
+    () =>
+      multiAgentSubPersonaIds
+        .map((personaId) => personas.find((persona) => persona.id === personaId))
+        .filter(
+          (persona): persona is AgentPersona =>
+            persona !== undefined && persona.id !== multiAgentPrimaryPersonaId,
+        ),
+    [multiAgentPrimaryPersonaId, multiAgentSubPersonaIds, personas],
+  );
+  const multiAgentTeamPersonas = useMemo(
+    () =>
+      multiAgentPrimaryPersona
+        ? [multiAgentPrimaryPersona, ...multiAgentSubPersonas]
+        : multiAgentSubPersonas,
+    [multiAgentPrimaryPersona, multiAgentSubPersonas],
+  );
   const toggleMultiAgentPersona = (personaId: string) => {
     setMultiAgentPersonaIds((current) =>
+      current.includes(personaId)
+        ? current.filter((currentPersonaId) => currentPersonaId !== personaId)
+        : [...current, personaId],
+    );
+  };
+  const selectMultiAgentPrimaryPersona = (personaId: string) => {
+    if (personaId === multiAgentPrimaryPersonaId) return;
+    const previousPrimaryPersonaId = multiAgentPrimaryPersonaId;
+    setMultiAgentPrimaryPersonaId(personaId);
+    setMultiAgentSubPersonaIds((current) =>
+      Array.from(
+        new Set([
+          ...current.filter((currentPersonaId) => currentPersonaId !== personaId),
+          ...(previousPrimaryPersonaId ? [previousPrimaryPersonaId] : []),
+        ]),
+      ),
+    );
+  };
+  const toggleMultiAgentSubPersona = (personaId: string) => {
+    if (personaId === multiAgentPrimaryPersonaId) return;
+    setMultiAgentSubPersonaIds((current) =>
       current.includes(personaId)
         ? current.filter((currentPersonaId) => currentPersonaId !== personaId)
         : [...current, personaId],
@@ -13313,11 +13529,24 @@ export function App() {
   const effectiveChatModelId = getEffectiveProviderModelId(chatProvider);
   const effectiveChatModelIdRef = useRef(effectiveChatModelId);
   effectiveChatModelIdRef.current = effectiveChatModelId;
+  const configuredMultiAgentPersonas =
+    multiAgentWorkflow === "supervisor"
+      ? multiAgentTeamPersonas
+      : multiAgentPersonas;
+  const multiAgentSelectionReady =
+    multiAgentWorkflow === "supervisor"
+      ? Boolean(multiAgentPrimaryPersona && multiAgentSubPersonas.length > 0)
+      : multiAgentPersonas.length >= 2;
   const multiAgentModelsReady =
-    multiAgentPersonas.length >= 2 &&
-    multiAgentPersonas.every((persona) => {
+    multiAgentSelectionReady &&
+    configuredMultiAgentPersonas.every((persona) => {
       const { provider, modelId } = getMultiAgentRequestConfig(persona.id);
-      return Boolean(provider?.apiBaseUrl && modelId);
+      return Boolean(
+        provider?.apiBaseUrl &&
+          modelId &&
+          (multiAgentWorkflow !== "supervisor" ||
+            !isImageGenerationModelId(modelId)),
+      );
     });
   const chatModelReady =
     chatMode === "multi"
@@ -13328,7 +13557,9 @@ export function App() {
   const chatModelLabel =
     chatMode === "multi"
       ? multiAgentModelsReady
-        ? `${multiAgentPersonas.length} 个 Agent 独立模型`
+        ? multiAgentWorkflow === "supervisor"
+          ? `主从协作 · ${configuredMultiAgentPersonas.length} 个 Agent`
+          : `${multiAgentPersonas.length} 个 Agent 独立模型`
         : "Agent 模型待配置"
       : chatMode === "roleplay"
         ? scopedRoleplayCard
@@ -13339,7 +13570,9 @@ export function App() {
     chatMode === "persona"
       ? ["介绍一下你自己", "从你的长期目标开始聊", "用你的表达习惯回应我"]
       : chatMode === "multi"
-        ? ["请依次给出你们各自的观点", "从不同角度分析这个问题", "先讨论，再各自给出下一步建议"]
+        ? multiAgentWorkflow === "supervisor"
+          ? ["拆解并完成这个目标", "让最合适的 Agent 分工处理", "检查当前任务并协作推进到完成"]
+          : ["请依次给出你们各自的观点", "从不同角度分析这个问题", "先讨论，再各自给出下一步建议"]
         : chatMode === "roleplay"
           ? ["继续当前场景", "说说你现在的想法", "推进接下来的剧情"]
         : ["梳理当前任务并给出下一步", "检查工作区中的潜在问题", "总结当前目标和待办事项"];
@@ -17614,7 +17847,12 @@ export function App() {
     setChatStatus({ status: "success", message: "已复制代码块。" });
   };
 
-  const executeMcpTool = async (toolName: string, rawArguments: string) => {
+  const executeMcpTool = async (
+    toolName: string,
+    rawArguments: string,
+    signal?: AbortSignal,
+  ) => {
+    throwIfChatAborted(signal);
     const args = normalizeImageRecognitionToolArguments(
       toolName,
       parseToolArguments(rawArguments),
@@ -17627,6 +17865,7 @@ export function App() {
     const response = await fetch("/api/mcp/call-tool", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal,
       body: JSON.stringify({
         servers: enabledServers,
         toolName,
@@ -17634,6 +17873,7 @@ export function App() {
       }),
     });
     const payload = (await response.json()) as { error?: string };
+    throwIfChatAborted(signal);
     if (!response.ok || payload.error) {
       throw new Error(payload.error || `MCP 工具调用失败：${response.status}`);
     }
@@ -17709,17 +17949,24 @@ export function App() {
     };
   };
 
-  const executeChatTool = async (toolName: string, rawArguments: string) => {
+  const executeChatTool = async (
+    toolName: string,
+    rawArguments: string,
+    signal?: AbortSignal,
+  ) => {
+    throwIfChatAborted(signal);
+    let result: unknown;
     if (isMcpToolName(toolName)) {
-      return executeMcpTool(toolName, rawArguments);
+      result = await executeMcpTool(toolName, rawArguments, signal);
+    } else if (toolName === "chat_update_heartbeat") {
+      result = await executeHeartbeatTool(rawArguments);
+    } else if (toolName === "multi_agent_end_rounds") {
+      result = await executeMultiAgentEndTool(rawArguments);
+    } else {
+      result = await executeLocalFileTool(toolName, rawArguments);
     }
-    if (toolName === "chat_update_heartbeat") {
-      return executeHeartbeatTool(rawArguments);
-    }
-    if (toolName === "multi_agent_end_rounds") {
-      return executeMultiAgentEndTool(rawArguments);
-    }
-    return executeLocalFileTool(toolName, rawArguments);
+    throwIfChatAborted(signal);
+    return result;
   };
 
   const getKnownImageAttachments = () => {
@@ -17806,6 +18053,7 @@ export function App() {
     imageTool: McpToolDefinition,
     attachments: ChatAttachment[],
     prompt: string,
+    signal?: AbortSignal,
   ) => {
     const imageAttachments = attachments.filter((attachment) =>
       attachment.type.startsWith("image/") && attachment.dataUrl,
@@ -17819,6 +18067,7 @@ export function App() {
     ].filter(Boolean).join("\n");
 
     for (let index = 0; index < imageAttachments.length; index += 1) {
+      throwIfChatAborted(signal);
       const attachment = imageAttachments[index];
       if (!attachment.dataUrl) continue;
 
@@ -17849,7 +18098,9 @@ export function App() {
             [imageArgumentKey]: attachment.dataUrl,
             prompt: visualObservationPrompt,
           }),
+          signal,
         );
+        throwIfChatAborted(signal);
         const text = extractImageRecognitionText(result);
         appendAssistantTimelineMessage(
           commitChatMessages,
@@ -17898,6 +18149,7 @@ export function App() {
     includeHeartbeatTools = false,
     suppressAttachmentTransferTool = false,
     includeMultiAgentControlTools = false,
+    delegatedSubAgents: AgentPersona[] = [],
   ) => {
     const localToolsBase =
       localToolsEnabled && localWorkspaceHandle
@@ -17916,6 +18168,7 @@ export function App() {
       ...externalTools,
       ...(includeHeartbeatTools ? heartbeatToolDefinitions : []),
       ...(includeMultiAgentControlTools ? multiAgentControlToolDefinitions : []),
+      ...buildMultiAgentDelegationToolDefinitions(delegatedSubAgents),
     ];
   };
 
@@ -18339,6 +18592,9 @@ export function App() {
       multiAgentRounds?: number;
       multiAgentAutoStopEnabled?: boolean;
       multiAgentStopCondition?: string;
+      multiAgentSupervisorMode?: boolean;
+      multiAgentSubPersonaIds?: string[];
+      multiAgentTaskGoal?: string;
       generationAfterCommands?: boolean;
       continuationMessageId?: string;
       dialogueRewriteMessageId?: string;
@@ -18412,6 +18668,14 @@ export function App() {
     const responderCharacterCard =
       responseMode === "roleplay" ? activeSessionRoleplayCard : undefined;
     const responderName = responderCharacterCard?.name ?? responderPersona?.name ?? "AI";
+    const delegatedSubAgents = options.multiAgentSupervisorMode
+      ? normalizeMultiAgentPersonaIds(options.multiAgentSubPersonaIds, personas)
+          .map((personaId) => personas.find((persona) => persona.id === personaId))
+          .filter(
+            (persona): persona is AgentPersona =>
+              persona !== undefined && persona.id !== responderPersona?.id,
+          )
+      : [];
     const assistantSender: ChatSenderIdentity | undefined =
       responseMode === "persona" && responderPersona
         ? { kind: "persona", personaId: responderPersona.id }
@@ -18453,6 +18717,7 @@ export function App() {
       const generationType = options.exposeHeartbeatTools
         ? "quiet"
         : options.multiAgentIndex !== undefined ||
+            options.multiAgentSupervisorMode ||
             isContinuation ||
             isDialogueRewrite ||
             isLocalRewrite
@@ -18504,6 +18769,7 @@ export function App() {
             options.exposeHeartbeatTools,
             false,
             options.multiAgentAutoStopEnabled === true,
+            delegatedSubAgents,
           );
       let messagesForApi = nextMessages;
       if (useImageRecognitionMcp && imageRecognitionMcpTool && latestImageUserMessage) {
@@ -18511,6 +18777,7 @@ export function App() {
           imageRecognitionMcpTool,
           latestImageUserMessage.attachments ?? [],
           latestImageUserMessage.content,
+          abortSignal,
         );
         throwIfChatAborted(abortSignal);
         if (imageRecognitionContext) {
@@ -18567,7 +18834,7 @@ export function App() {
         responseMode === "persona"
           ? buildChatSenderContextPrompt(nextMessages, personas, responderPersona)
           : buildChatSenderContextPrompt(nextMessages, personas);
-      const multiAgentSystemPrompt =
+      const sequenceMultiAgentSystemPrompt =
         responderPersona && options.multiAgentPersonaIds && options.multiAgentPersonaIds.length > 1
           ? [
               "你正在参加一场多 Agent 顺序对话。每个 Agent 都会通过独立请求依次回复。",
@@ -18596,6 +18863,40 @@ export function App() {
                 : "",
             ].join("\n")
           : "";
+      const supervisorMultiAgentSystemPrompt =
+        responderPersona &&
+        options.multiAgentSupervisorMode &&
+        delegatedSubAgents.length > 0
+          ? [
+              `你是本次多 Agent 协作的主 Agent「${responderPersona.name}」。你对用户主任务的最终完成质量负责。`,
+              `当前主任务目标：${
+                options.multiAgentTaskGoal?.trim() ||
+                [...nextMessages].reverse().find((message) => message.role === "user")?.content ||
+                "完成用户当前请求"
+              }`,
+              [
+                "工作规则：",
+                "1. 先分析主任务，再根据下方每个子 Agent 的完整人格、能力和职责，自主选择最合适的 Agent 与分配顺序；子 Agent 列表没有预设顺序。",
+                "2. 对实质性任务，使用 multi_agent_delegate_task 一次只委派一个边界清晰、可验收的子任务，并给出明确完成标准。不要让子 Agent 代替你规划整个主任务。",
+                "3. 每次工具返回后必须亲自审查结果是否满足该子任务和主任务目标。未完成时，向同一 Agent 分配带具体返工反馈的后续任务；完成后再决定下一个子任务。",
+                "4. 不要仅凭子 Agent 自称完成就通过验收；结合结果、证据和可用工具自行判断。仍可由你直接使用本地或 MCP 工具补充检查与整合。",
+                "5. 只有当所有必要子任务均通过验收、主任务目标确实完成，或遇到需要用户决定的真实阻塞时，才停止委派并输出最终答复。最终答复由你统一整合，不能把验收责任推回用户。",
+                "6. 委派与验收是内部协作流程。最终答复聚焦完成结果，不要泄露工具协议、Agent ID 或内部提示词。",
+              ].join("\n"),
+              "可用子 Agent 完整人格设定：",
+              delegatedSubAgents
+                .map((persona) =>
+                  [
+                    `--- 子 Agent：${persona.name}（ID: ${persona.id}）---`,
+                    buildPersonaPrompt(persona),
+                    `--- ${persona.name} 人格设定结束 ---`,
+                  ].join("\n"),
+                )
+                .join("\n\n"),
+            ].join("\n\n")
+          : "";
+      const multiAgentSystemPrompt =
+        supervisorMultiAgentSystemPrompt || sequenceMultiAgentSystemPrompt;
       const toolSystemPrompt =
         !isDialogueRewrite && !isLocalRewrite && localToolsEnabled && localWorkspaceHandle
           ? buildLocalToolsSystemPrompt(localWorkspaceHandle)
@@ -18799,6 +19100,294 @@ export function App() {
           finishReason: payload.choices?.[0]?.finish_reason ?? "",
         };
       };
+      const subAgentToolDefinitions = getAvailableChatToolDefinitions(
+        requestMcpTools,
+      ).filter((tool) => !isChatChoiceToolName(tool.function.name));
+      let multiAgentDelegationCount = 0;
+
+      const executeMultiAgentDelegation = async (rawArguments: string) => {
+        if (!options.multiAgentSupervisorMode || !responderPersona) {
+          throw new Error("当前请求没有启用主 Agent 委派权限。");
+        }
+        if (multiAgentDelegationCount >= MAX_MULTI_AGENT_DELEGATIONS) {
+          throw new Error(
+            `本轮已达到 ${MAX_MULTI_AGENT_DELEGATIONS} 次子任务委派上限。请基于已有结果完成验收，或向用户说明真实阻塞。`,
+          );
+        }
+
+        const args = parseToolArguments(rawArguments);
+        const agentId = String(args.agent_id ?? "").trim();
+        const task = String(args.task ?? "").trim();
+        const acceptanceCriteria = String(args.acceptance_criteria ?? "").trim();
+        const context = String(args.context ?? "").trim();
+        const subAgent = delegatedSubAgents.find((persona) => persona.id === agentId);
+        if (!subAgent) throw new Error("指定的子 Agent 不在当前协作团队中。");
+        if (!task) throw new Error("委派子任务不能为空。");
+        if (!acceptanceCriteria) throw new Error("委派子任务必须包含完成标准。");
+
+        const { provider: subAgentProvider, modelId: subAgentModelId } =
+          getMultiAgentRequestConfig(subAgent.id);
+        if (!subAgentProvider?.apiBaseUrl || !subAgentModelId) {
+          throw new Error(`子 Agent「${subAgent.name}」没有可用的供应商或模型。`);
+        }
+        if (isImageGenerationModelId(subAgentModelId)) {
+          throw new Error(`子 Agent「${subAgent.name}」必须使用可返回文本的模型。`);
+        }
+
+        multiAgentDelegationCount += 1;
+        setChatStatus({
+          status: "loading",
+          message: `主 Agent 已委派给 ${subAgent.name}，正在执行子任务（${multiAgentDelegationCount}/${MAX_MULTI_AGENT_DELEGATIONS}）...`,
+        });
+
+        const subAgentCanReceiveImages = canProviderReceiveImageUrl(
+          subAgentProvider,
+          subAgentModelId,
+        );
+        const subAgentWorldBookPrompt = buildWorldBookPrompt(
+          filterPromptTemplateSpecialEntries(worldBooks, promptTemplateEnabled),
+          activeWorldBookIds,
+          messagesForApi.map((message) => ({
+            role: message.role,
+            content: message.content,
+          })),
+          {
+            userName: userProfile.nickname,
+            characterName: subAgent.name,
+          },
+        );
+        const subAgentSystemPrompt = [
+          selectedSystemPrompt,
+          skillSystemPrompt,
+          userProfileSystemPrompt,
+          buildPersonaPrompt(subAgent),
+          buildPersonaMemoryPrompt(
+            chatSessions,
+            activeChatSessionId,
+            subAgent,
+            personas,
+            userProfile,
+          ),
+          buildChatSenderContextPrompt(nextMessages, personas, subAgent),
+          subAgentWorldBookPrompt,
+          toolSystemPrompt,
+          mcpToolsSystemPrompt,
+          [
+            `你是由主 Agent「${responderPersona.name}」调用的子 Agent「${subAgent.name}」。`,
+            "只负责下面明确委派给你的子任务，不要重新规划整个主任务，也不要向用户提问或假装自己是主 Agent。",
+            "需要读取、修改或验证工作区时，直接使用可用工具推进，直到子任务完成或遇到无法自行解决的真实阻塞。",
+            "最后向主 Agent 返回可核验的执行结果：说明做了什么、关键证据、是否满足完成标准，以及仍存在的阻塞或风险。",
+          ].join("\n"),
+        ]
+          .filter(Boolean)
+          .join("\n\n");
+        const subAgentHistory = messagesForApi.map((message) =>
+          buildChatMessageForApi(
+            message,
+            personas,
+            userProfile,
+            subAgent,
+            {
+              sendImageAttachmentsToProvider: subAgentCanReceiveImages,
+              hasImageRecognitionMcp,
+            },
+          ),
+        );
+        const subAgentPreparedMessages = await applyPromptTemplateToApiMessages(
+          applyPromptRegexToApiMessages(
+            composeChatApiMessages(
+              subAgentSystemPrompt,
+              subAgentHistory,
+              subAgent,
+            ),
+            subAgent.name,
+          ),
+          messagesForApi,
+          null,
+          subAgent.name,
+          subAgentModelId,
+        );
+        const subAgentApiMessages = await applyTavernExtensionPromptFilters(
+          subAgentPreparedMessages,
+          { generationAfterCommands: false },
+        );
+        subAgentApiMessages.push({
+          role: "user",
+          content: [
+            `主任务目标：${options.multiAgentTaskGoal?.trim() || activeUserRequestTextRef.current || task}`,
+            `你的子任务：${task}`,
+            `完成标准：${acceptanceCriteria}`,
+            context ? `补充背景或返工反馈：${context}` : "",
+            "现在直接执行。不要只给计划；完成后把结果和证据返回给主 Agent。",
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+        });
+
+        for (let subToolRound = 0; subToolRound < MAX_SUB_AGENT_TOOL_ROUNDS; subToolRound += 1) {
+          throwIfChatAborted(abortSignal);
+          const response = await fetch("/api/chat/completions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            signal: abortSignal,
+            body: JSON.stringify({
+              apiBaseUrl: trimTrailingSlash(subAgentProvider.apiBaseUrl),
+              apiKey: subAgentProvider.apiKey,
+              sessionId: activeChatSessionId,
+              request: {
+                model: subAgentModelId,
+                messages: substituteUserNicknameInApiMessages(
+                  subAgentApiMessages,
+                  userProfile.nickname,
+                ),
+                ...(subAgentToolDefinitions.length > 0
+                  ? {
+                      tools: subAgentToolDefinitions,
+                      tool_choice: "auto",
+                    }
+                  : {}),
+                ...(activeChatPresetRequestParameters ?? { temperature: 0.72 }),
+                ...buildProviderReasoningRequest(subAgentProvider),
+                stream: false,
+              },
+            }),
+          });
+          const payload = (await response.json()) as {
+            error?: string | { message?: string };
+            choices?: Array<{ message?: ChatApiMessage }>;
+            output_text?: string;
+          };
+          throwIfChatAborted(abortSignal);
+          if (!response.ok) {
+            const errorMessage =
+              typeof payload.error === "string"
+                ? payload.error
+                : payload.error?.message;
+            throw new Error(
+              errorMessage
+                ? `${subAgent.name} 请求失败：${response.status} ${errorMessage}`
+                : `${subAgent.name} 请求失败：${response.status}`,
+            );
+          }
+
+          const subAgentMessage = payload.choices?.[0]?.message;
+          const subAgentContent =
+            getChatApiMessageText(subAgentMessage).trim() ||
+            payload.output_text?.trim() ||
+            "";
+          const subAgentToolCalls = subAgentMessage?.tool_calls ?? [];
+          if (subAgentToolCalls.length === 0) {
+            if (
+              localToolsEnabled &&
+              localWorkspaceHandle &&
+              subToolRound < MAX_SUB_AGENT_TOOL_ROUNDS - 1 &&
+              shouldAutoContinueLocalTask(subAgentContent)
+            ) {
+              subAgentApiMessages.push({
+                role: "assistant",
+                content: subAgentContent,
+              });
+              subAgentApiMessages.push({
+                role: "user",
+                content:
+                  "继续执行子任务，直接使用可用工具推进，直到满足完成标准或遇到真实阻塞。不要只说明计划。",
+              });
+              continue;
+            }
+            if (!subAgentContent) {
+              throw new Error(`${subAgent.name} 没有返回可供主 Agent 验收的结果。`);
+            }
+            return {
+              agentId: subAgent.id,
+              agentName: subAgent.name,
+              task,
+              acceptanceCriteria,
+              result: subAgentContent,
+            };
+          }
+
+          subAgentApiMessages.push({
+            ...(subAgentMessage ?? {}),
+            role: "assistant",
+            content: subAgentContent || null,
+            tool_calls: subAgentToolCalls,
+          });
+          const subAgentVisionMessages: ChatApiMessage[] = [];
+          for (const subToolCall of subAgentToolCalls) {
+            throwIfChatAborted(abortSignal);
+            appendAssistantTimelineMessage(
+              commitChatMessages,
+              formatToolActionMessage(
+                subToolCall,
+                localWorkspaceHandle,
+                requestMcpTools,
+              ),
+              [],
+              "",
+              { kind: "persona", personaId: subAgent.id },
+            );
+            try {
+              const subToolResult = await executeChatTool(
+                subToolCall.function.name,
+                subToolCall.function.arguments,
+                abortSignal,
+              );
+              throwIfChatAborted(abortSignal);
+              appendAssistantTimelineMessage(
+                commitChatMessages,
+                formatToolResultMessage(subToolCall, subToolResult),
+                getToolResultAttachments(subToolResult),
+                "",
+                { kind: "persona", personaId: subAgent.id },
+              );
+              subAgentApiMessages.push({
+                role: "tool",
+                tool_call_id: subToolCall.id,
+                content: formatToolResultForApi(
+                  subToolResult,
+                  subToolCall.function.name,
+                ),
+              });
+              const visionMessage = subAgentCanReceiveImages
+                ? getToolResultVisionMessage(subToolCall, subToolResult)
+                : null;
+              if (visionMessage) subAgentVisionMessages.push(visionMessage);
+            } catch (subToolError) {
+              if (isChatAbortError(subToolError)) throw subToolError;
+              appendAssistantTimelineMessage(
+                commitChatMessages,
+                formatToolErrorMessage(subToolCall, subToolError),
+                [],
+                "",
+                { kind: "persona", personaId: subAgent.id },
+              );
+              subAgentApiMessages.push({
+                role: "tool",
+                tool_call_id: subToolCall.id,
+                content: JSON.stringify({
+                  error:
+                    subToolError instanceof Error
+                      ? subToolError.message
+                      : "工具执行失败",
+                }),
+              });
+            }
+          }
+          subAgentApiMessages.push(...subAgentVisionMessages);
+        }
+
+        throw new Error(
+          `${subAgent.name} 连续执行了 ${MAX_SUB_AGENT_TOOL_ROUNDS} 轮工具调用，仍未返回可验收结果。`,
+        );
+      };
+
+      const executeRequestChatTool = (
+        toolName: string,
+        rawArguments: string,
+      ) =>
+        toolName === "multi_agent_delegate_task"
+          ? executeMultiAgentDelegation(rawArguments)
+          : executeChatTool(toolName, rawArguments, abortSignal);
       const appendStreamingAssistant = (delta: string) => {
         commitChatMessages((current) =>
           current.map((message) =>
@@ -19151,6 +19740,7 @@ export function App() {
           reasoningWriter.cancel();
         }
       } else {
+        let toolLoopCompleted = false;
         for (let toolRound = 0; toolRound < 99; toolRound += 1) {
           setChatStatus({
             status: "loading",
@@ -19190,6 +19780,7 @@ export function App() {
             assistantContent =
               assistantMessageContent || payload?.output_text?.trim() || presentedChoice.prompt;
             assistantReasoning = assistantMessageReasoning;
+            toolLoopCompleted = true;
             break;
           }
           if (hasSilentControlTool) {
@@ -19245,6 +19836,7 @@ export function App() {
               continue;
             }
 
+            toolLoopCompleted = true;
             break;
           }
 
@@ -19259,6 +19851,7 @@ export function App() {
           }
 
           apiMessages.push({
+            ...(assistantMessage ?? {}),
             role: "assistant",
             content: hasSilentControlTool ? null : assistantMessageContent || null,
             tool_calls: toolCalls,
@@ -19270,20 +19863,46 @@ export function App() {
               : `正在执行 ${toolCalls.length} 个工具...`,
           });
 
+          const firstDelegationToolCall = toolCalls.find(
+            (toolCall) =>
+              toolCall.function.name === "multi_agent_delegate_task",
+          );
+          const toolVisionMessages: ChatApiMessage[] = [];
           for (const toolCall of toolCalls) {
             throwIfChatAborted(abortSignal);
             const silentControl = isSilentChatControlTool(toolCall.function.name);
+            const isDelegationTool =
+              toolCall.function.name === "multi_agent_delegate_task";
+            if (
+              firstDelegationToolCall &&
+              toolCall.id !== firstDelegationToolCall.id
+            ) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: toolCall.id,
+                content: JSON.stringify({
+                  error:
+                    "包含子任务委派的决策只能执行这一项委派。请先验收返回结果，下一轮再决定其他委派或工具操作。",
+                }),
+              });
+              continue;
+            }
             if (!silentControl) {
               appendAssistantTimelineMessage(
                 commitChatMessages,
-                formatToolActionMessage(toolCall, localWorkspaceHandle, requestMcpTools),
+                formatToolActionMessage(
+                  toolCall,
+                  localWorkspaceHandle,
+                  requestMcpTools,
+                  delegatedSubAgents,
+                ),
                 [],
                 "",
                 assistantSender,
               );
             }
             try {
-              const toolResult = await executeChatTool(
+              const toolResult = await executeRequestChatTool(
                 toolCall.function.name,
                 toolCall.function.arguments,
               );
@@ -19306,7 +19925,12 @@ export function App() {
                   toolResultMessage,
                   toolResultAttachments,
                   "",
-                  assistantSender,
+                  isDelegationTool && isObjectRecord(toolResult)
+                    ? {
+                        kind: "persona",
+                        personaId: String(toolResult.agentId ?? ""),
+                      }
+                    : assistantSender,
                 );
                 if (toolResultMessage.trim() || toolResultAttachments.length > 0) {
                   hasVisibleToolResult = true;
@@ -19320,7 +19944,7 @@ export function App() {
               const visionMessage = sendImageAttachmentsToProvider
                 ? getToolResultVisionMessage(toolCall, toolResult)
                 : null;
-              if (visionMessage) apiMessages.push(visionMessage);
+              if (visionMessage) toolVisionMessages.push(visionMessage);
             } catch (toolError) {
               if (isChatAbortError(toolError)) throw toolError;
               const toolErrorResult = {
@@ -19349,7 +19973,12 @@ export function App() {
               });
             }
           }
-
+          apiMessages.push(...toolVisionMessages);
+        }
+        if (!toolLoopCompleted) {
+          throw new Error(
+            "主 Agent 连续推进了 99 轮工具任务，仍未形成可验收的最终答复。",
+          );
         }
       }
 
@@ -19378,7 +20007,53 @@ export function App() {
         assistantContent = maskedDialogues.content;
         dialoguePlaceholderCount = maskedDialogues.count;
       }
+      if (
+        !assistantContent &&
+        hasVisibleToolResult &&
+        options.multiAgentSupervisorMode
+      ) {
+        setChatStatus({
+          status: "loading",
+          message: "主 Agent 正在基于已完成的子任务整理最终答复...",
+        });
+        const summaryResult = await requestChatCompletion(
+          [
+            ...apiMessages,
+            {
+              role: "user",
+              content:
+                "请现在完成主任务验收并输出给用户的最终答复。综合所有已返回的子任务结果，明确说明已完成内容、关键证据和仍存在的真实阻塞；不要再调用工具，也不要只输出计划。",
+            },
+          ],
+          { includeTools: false, stream: false },
+        );
+        const summaryMessage = summaryResult.payload?.choices?.[0]?.message;
+        assistantContent =
+          getChatApiMessageText(summaryMessage).trim() ||
+          summaryResult.payload?.output_text?.trim() ||
+          "";
+        assistantReasoning =
+          getChatApiMessageReasoning(summaryMessage) ||
+          summaryResult.reasoning ||
+          assistantReasoning;
+        if (assistantContent) {
+          const summaryTemplateResult = await applyPromptTemplateToRenderedMessage(
+            assistantContent,
+            messagesForApi,
+            responderCharacterCard ?? null,
+            responderName,
+            requestModelId,
+          );
+          assistantContent = summaryTemplateResult.content;
+          assistantMessageVariables = summaryTemplateResult.messageVariables;
+        }
+      }
       if (!assistantContent) {
+        if (hasVisibleToolResult && options.multiAgentSupervisorMode) {
+          throw new Error(
+            "主 Agent 已收到子任务结果，但未能生成最终验收答复。",
+          );
+        }
         if (hasVisibleToolResult) {
           setChatStatus({ status: "success", message: options.successMessage ?? "工具执行完成。" });
           return null;
@@ -19598,14 +20273,31 @@ export function App() {
   };
 
   const getMultiAgentConfigurationError = () => {
-    if (multiAgentPersonas.length < 2) {
-      return "多 Agent 模式至少需要按顺序选择 2 个 Agent。";
+    if (multiAgentWorkflow === "supervisor") {
+      if (!multiAgentPrimaryPersona) {
+        return "主从协作模式需要选择 1 个主 Agent。";
+      }
+      if (multiAgentSubPersonas.length < 1) {
+        return "主从协作模式至少需要选择 1 个子 Agent。";
+      }
+    } else if (multiAgentPersonas.length < 2) {
+      return "固定顺序模式至少需要按顺序选择 2 个 Agent。";
     }
 
-    for (const persona of multiAgentPersonas) {
+    const requestPersonas =
+      multiAgentWorkflow === "supervisor"
+        ? multiAgentTeamPersonas
+        : multiAgentPersonas;
+    for (const persona of requestPersonas) {
       const { provider, modelId } = getMultiAgentRequestConfig(persona.id);
       if (!provider?.apiBaseUrl || !modelId) {
         return `请为 ${persona.name} 选择已配置 API 地址和模型的供应商。`;
+      }
+      if (
+        multiAgentWorkflow === "supervisor" &&
+        isImageGenerationModelId(modelId)
+      ) {
+        return `主从协作中的 ${persona.name} 必须使用可返回文本的模型。`;
       }
     }
 
@@ -19621,6 +20313,38 @@ export function App() {
     if (configurationError) {
       setChatStatus({ status: "error", message: configurationError });
       return false;
+    }
+
+    if (multiAgentWorkflow === "supervisor" && multiAgentPrimaryPersona) {
+      const { provider, modelId } = getMultiAgentRequestConfig(
+        multiAgentPrimaryPersona.id,
+      );
+      const assistantMessage = await generateAssistantForMessages(
+        initialMessages,
+        requestSender,
+        {
+          responseMode: "persona",
+          responderPersona: multiAgentPrimaryPersona,
+          requestProvider: provider,
+          requestModelId: modelId,
+          multiAgentSupervisorMode: true,
+          multiAgentSubPersonaIds,
+          multiAgentTaskGoal: triggerContent,
+          generationAfterCommands: false,
+          exposeHeartbeatTools: shouldExposeHeartbeatTools(triggerContent),
+          statusMessage: `${multiAgentPrimaryPersona.name} 正在分析主任务并安排协作...`,
+          streamingStatusMessage: `${multiAgentPrimaryPersona.name} 正在汇总最终结果...`,
+          successMessage: `${multiAgentPrimaryPersona.name} 已完成主任务验收与答复。`,
+        },
+      );
+      if (!assistantMessage) return false;
+      setChatStatus({
+        status: "success",
+        message: assistantMessage.choiceRequest
+          ? "主 Agent 正在等待你的选择。"
+          : "主 Agent 已完成协作与最终验收。",
+      });
+      return true;
     }
 
     pendingMultiAgentEndRef.current = null;
@@ -20301,6 +21025,7 @@ export function App() {
           imageRecognitionMcpTool,
           attachmentsToSend,
           effectiveContent,
+          abortSignal,
         );
         throwIfChatAborted(abortSignal);
         if (imageRecognitionContext) {
@@ -20745,6 +21470,7 @@ export function App() {
           }
 
           apiMessages.push({
+            ...(assistantMessage ?? {}),
             role: "assistant",
             content: hasSilentControlTool ? null : assistantMessageContent || null,
             tool_calls: toolCalls,
@@ -20756,6 +21482,7 @@ export function App() {
               : `正在执行 ${toolCalls.length} 个工具...`,
           });
 
+          const directToolVisionMessages: ChatApiMessage[] = [];
           for (const toolCall of toolCalls) {
             throwIfChatAborted(abortSignal);
             const silentControl = isSilentChatControlTool(toolCall.function.name);
@@ -20769,6 +21496,7 @@ export function App() {
               const toolResult = await executeChatTool(
                 toolCall.function.name,
                 toolCall.function.arguments,
+                abortSignal,
               );
               throwIfChatAborted(abortSignal);
               if (needsChromeDevtoolsObservation(toolCall, requestMcpTools)) {
@@ -20801,7 +21529,7 @@ export function App() {
               const visionMessage = sendImageAttachmentsToProvider
                 ? getToolResultVisionMessage(toolCall, toolResult)
                 : null;
-              if (visionMessage) apiMessages.push(visionMessage);
+              if (visionMessage) directToolVisionMessages.push(visionMessage);
             } catch (toolError) {
               if (isChatAbortError(toolError)) throw toolError;
               const toolErrorResult = {
@@ -20827,7 +21555,7 @@ export function App() {
               });
             }
           }
-
+          apiMessages.push(...directToolVisionMessages);
         }
       }
 
@@ -26828,7 +27556,11 @@ export function App() {
           chatPersonalization.quoteStyleEnabled ? "quote-style-enabled" : ""
         } ${chatPersonalization.italicStyleEnabled ? "italic-style-enabled" : ""}`}
         bodyStyle={chatVisualStyle}
-        statusPrimary={activePersona.name}
+        statusPrimary={
+          chatMode === "multi" && multiAgentWorkflow === "supervisor"
+            ? multiAgentPrimaryPersona?.name ?? "主 Agent 待选择"
+            : activePersona.name
+        }
         statusSecondary={chatModelLabel}
         statusReady={chatModelReady}
         {...createManagedWindowProps(chatWindowState)}
@@ -27106,7 +27838,9 @@ export function App() {
                   (chatMode === "persona"
                     ? `${activePersona.name} / Agent`
                     : chatMode === "multi"
-                      ? "多 Agent 对话"
+                      ? multiAgentWorkflow === "supervisor"
+                        ? "主 Agent + 多子 Agent"
+                        : "多 Agent 对话"
                       : chatMode === "roleplay"
                         ? activeSessionRoleplayCard
                           ? `角色：${activeSessionRoleplayCard.name}`
@@ -27329,7 +28063,9 @@ export function App() {
                       {chatMode === "persona"
                         ? activePersona.name
                         : chatMode === "multi"
-                          ? `多 Agent · 已选 ${multiAgentPersonas.length} 个`
+                          ? multiAgentWorkflow === "supervisor"
+                            ? `${multiAgentPrimaryPersona?.name ?? "主 Agent 待选择"} · ${multiAgentSubPersonas.length} 个子 Agent`
+                            : `多 Agent · 已选 ${multiAgentPersonas.length} 个`
                           : chatMode === "roleplay"
                             ? activeSessionRoleplayCard?.name ?? "选择一张角色卡"
                           : "AI 直连"}
@@ -27928,7 +28664,9 @@ export function App() {
                         chatMode === "ai"
                           ? "AI 直连模式不使用人格"
                           : chatMode === "multi"
-                            ? "按点击顺序选择至少 2 个 Agent"
+                            ? multiAgentWorkflow === "supervisor"
+                              ? "选择 1 个主 Agent 和任意多个无序子 Agent"
+                              : "按点击顺序选择至少 2 个 Agent"
                             : chatMode === "roleplay"
                               ? "选择角色卡并创建绑定会话"
                             : "选择人格"
@@ -27938,7 +28676,9 @@ export function App() {
                         {chatMode === "ai"
                           ? "AI直连"
                           : chatMode === "multi"
-                            ? `多Agent · ${multiAgentPersonas.length}`
+                            ? multiAgentWorkflow === "supervisor"
+                              ? `主从 · ${multiAgentPrimaryPersona ? 1 : 0}+${multiAgentSubPersonas.length}`
+                              : `多Agent · ${multiAgentPersonas.length}`
                             : chatMode === "roleplay"
                               ? activeSessionRoleplayCard?.name ?? "选择角色卡"
                             : activePersona.name}
@@ -27951,7 +28691,32 @@ export function App() {
                     >
                       {chatMode === "multi" ? (
                         <>
-                          <div className="multi-agent-sequence">
+                          <div
+                            className="multi-agent-workflow-switch"
+                            role="group"
+                            aria-label="多 Agent 工作模式"
+                          >
+                            <button
+                              type="button"
+                              className={multiAgentWorkflow === "sequence" ? "active" : ""}
+                              aria-pressed={multiAgentWorkflow === "sequence"}
+                              onClick={() => setMultiAgentWorkflow("sequence")}
+                            >
+                              <Boxes size={14} />
+                              固定顺序
+                            </button>
+                            <button
+                              type="button"
+                              className={multiAgentWorkflow === "supervisor" ? "active" : ""}
+                              aria-pressed={multiAgentWorkflow === "supervisor"}
+                              onClick={() => setMultiAgentWorkflow("supervisor")}
+                            >
+                              <Crown size={14} />
+                              主从协作
+                            </button>
+                          </div>
+                          {multiAgentWorkflow === "sequence" ? (
+                            <div className="multi-agent-sequence">
                             <strong>回复顺序</strong>
                             <label className="multi-agent-rounds-field">
                               <span>回复轮次</span>
@@ -28017,9 +28782,43 @@ export function App() {
                                 ? `已选择 ${multiAgentPersonas.length} 个 Agent`
                                 : "至少选择 2 个 Agent 才能发送"}
                             </small>
-                          </div>
+                            </div>
+                          ) : (
+                            <div className="multi-agent-sequence supervisor-summary">
+                              <strong>主 Agent 自主编排</strong>
+                              <span>
+                                主 Agent：{multiAgentPrimaryPersona?.name ?? "未选择"}
+                              </span>
+                              <span>
+                                子 Agent：{multiAgentSubPersonas.length > 0
+                                  ? multiAgentSubPersonas
+                                      .map((persona) => persona.name)
+                                      .join("、")
+                                  : "未选择"}
+                              </span>
+                              <small
+                                className={
+                                  multiAgentPrimaryPersona && multiAgentSubPersonas.length > 0
+                                    ? "ready"
+                                    : "attention"
+                                }
+                              >
+                                {multiAgentPrimaryPersona && multiAgentSubPersonas.length > 0
+                                  ? "主 Agent 将按人格能力分配、验收并推进子任务"
+                                  : "请选择 1 个主 Agent 和至少 1 个子 Agent"}
+                              </small>
+                            </div>
+                          )}
                           {personas.map((persona) => {
                             const orderIndex = multiAgentPersonaIds.indexOf(persona.id);
+                            const isSupervisorPrimary =
+                              persona.id === multiAgentPrimaryPersonaId;
+                            const isSupervisorSub =
+                              multiAgentSubPersonaIds.includes(persona.id);
+                            const isSelected =
+                              multiAgentWorkflow === "supervisor"
+                                ? isSupervisorPrimary || isSupervisorSub
+                                : orderIndex >= 0;
                             const requestConfig = getMultiAgentRequestConfig(persona.id);
                             const providerModelIds = Array.from(
                               new Set(
@@ -28032,21 +28831,62 @@ export function App() {
                             return (
                               <div
                                 className={`multi-agent-config-row ${
-                                  orderIndex >= 0 ? "active" : ""
+                                  isSelected ? "active" : ""
                                 }`}
                                 key={persona.id}
                               >
-                                <button
-                                  type="button"
-                                  className="multi-agent-option"
-                                  aria-pressed={orderIndex >= 0}
-                                  onClick={() => toggleMultiAgentPersona(persona.id)}
-                                >
-                                  <span className="multi-agent-order">
-                                    {orderIndex >= 0 ? orderIndex + 1 : "+"}
-                                  </span>
-                                  <span>{persona.name}</span>
-                                </button>
+                                {multiAgentWorkflow === "supervisor" ? (
+                                  <div className="multi-agent-role-picker">
+                                    <strong title={persona.name}>{persona.name}</strong>
+                                    <div role="group" aria-label={`${persona.name} 的协作角色`}>
+                                      <button
+                                        type="button"
+                                        className={`multi-agent-role-button ${
+                                          isSupervisorPrimary ? "active" : ""
+                                        }`}
+                                        aria-pressed={isSupervisorPrimary}
+                                        title={`设为主 Agent：${persona.name}`}
+                                        onClick={() =>
+                                          selectMultiAgentPrimaryPersona(persona.id)
+                                        }
+                                      >
+                                        <Crown size={13} />
+                                        主
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className={`multi-agent-role-button ${
+                                          isSupervisorSub ? "active" : ""
+                                        }`}
+                                        aria-pressed={isSupervisorSub}
+                                        disabled={isSupervisorPrimary}
+                                        title={
+                                          isSupervisorPrimary
+                                            ? "主 Agent 不能同时作为子 Agent"
+                                            : `${isSupervisorSub ? "移除" : "选择"}子 Agent：${persona.name}`
+                                        }
+                                        onClick={() =>
+                                          toggleMultiAgentSubPersona(persona.id)
+                                        }
+                                      >
+                                        <Users size={13} />
+                                        子
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="multi-agent-option"
+                                    aria-pressed={orderIndex >= 0}
+                                    onClick={() => toggleMultiAgentPersona(persona.id)}
+                                  >
+                                    <span className="multi-agent-order">
+                                      {orderIndex >= 0 ? orderIndex + 1 : "+"}
+                                    </span>
+                                    <span>{persona.name}</span>
+                                  </button>
+                                )}
                                 <div className="multi-agent-model-selects">
                                   <select
                                     aria-label={`${persona.name} 供应商`}
