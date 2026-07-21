@@ -12823,12 +12823,23 @@ export function App() {
 
   const downloadJsonFile = (content: string, name: string, fallbackName = "export") => {
     const safeName = (name.trim() || fallbackName).replace(/[\\/:*?"<>|]/g, "_");
+    const fileName = `${safeName}.json`;
+    if (window.rengeAndroid?.isAndroid) {
+      void window.rengeAndroid
+        .saveDownload({
+          fileName,
+          mimeType: "application/json",
+          content,
+        })
+        .catch((error) => console.error("Android JSON 导出失败", error));
+      return;
+    }
     const url = URL.createObjectURL(
       new Blob([content], { type: "application/json;charset=utf-8" }),
     );
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `${safeName}.json`;
+    anchor.download = fileName;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
