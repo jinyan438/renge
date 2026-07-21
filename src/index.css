@@ -15,6 +15,99 @@ body.desktop-home-active {
   overflow: hidden;
 }
 
+.app-error-boundary {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+  color: #172033;
+  background: #f3f6f8;
+}
+
+.app-error-panel {
+  display: grid;
+  width: min(100%, 520px);
+  grid-template-columns: auto 1fr auto;
+  gap: 16px;
+  align-items: center;
+  padding: 22px;
+  border: 1px solid #dfe4ec;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.12);
+}
+
+.app-error-icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 50%;
+  color: #b42318;
+  background: #feeceb;
+}
+
+.app-error-panel h1 {
+  margin: 0 0 5px;
+  font-size: 19px;
+  letter-spacing: 0;
+}
+
+.app-error-panel p {
+  margin: 0;
+  color: #667085;
+  font-size: 14px;
+}
+
+.app-error-panel button {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 6px;
+  color: #ffffff;
+  background: #172033;
+  cursor: pointer;
+  font: inherit;
+}
+
+.app-error-panel details {
+  grid-column: 1 / -1;
+  padding-top: 12px;
+  border-top: 1px solid #eaecf0;
+  color: #667085;
+  font-size: 13px;
+}
+
+.app-error-panel summary {
+  cursor: pointer;
+}
+
+.app-error-panel pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 10px 0 0;
+  padding: 10px;
+  border-radius: 6px;
+  color: #7a271a;
+  background: #fff6f5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 560px) {
+  .app-error-panel {
+    grid-template-columns: auto 1fr;
+  }
+
+  .app-error-panel button {
+    grid-column: 1 / -1;
+  }
+}
+
 @keyframes springIn {
   0% {
     opacity: 0;
