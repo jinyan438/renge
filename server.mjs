@@ -1860,6 +1860,8 @@ const unsafeObjectKeys = new Set(["__proto__", "constructor", "prototype"]);
 const openAiRequestKeys = new Set([
   "audio",
   "frequency_penalty",
+  "enable_thinking",
+  "include_reasoning",
   "logit_bias",
   "logprobs",
   "max_completion_tokens",
@@ -1884,6 +1886,7 @@ const openAiRequestKeys = new Set([
   "stream",
   "stream_options",
   "temperature",
+  "thinking",
   "tool_choice",
   "tools",
   "top_a",
