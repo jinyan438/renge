@@ -83,6 +83,7 @@ import {
   createDelegationRoster,
   getAgentApiName,
   resolveDelegationAgentReference,
+  shouldRetrySupervisorToolCompletionAsStream,
   type DelegationRoster,
 } from "./multiAgentUtils";
 import {
@@ -19176,6 +19177,7 @@ export function App() {
       let hasVisibleToolResult = false;
       let hasSuccessfulVisibleToolResult = false;
       let multiAgentDelegationDisabled = false;
+      let preferStreamingSupervisorToolCalls = false;
       let pendingMcpObservationPrompt = "";
       let pendingMcpObservationRetries = 0;
       let pendingMcpObservationPromptSent = false;
@@ -19249,6 +19251,7 @@ export function App() {
             reasoning: streamResult.reasoning,
             toolCalls: streamResult.toolCalls,
             finishReason: streamResult.finishReason,
+            includedToolCount: chatToolsForRequest.length,
           };
         }
 
@@ -19271,6 +19274,7 @@ export function App() {
           reasoning: getChatCompletionPayloadReasoning(payload),
           toolCalls: [] as ChatToolCall[],
           finishReason: payload.choices?.[0]?.finish_reason ?? "",
+          includedToolCount: chatToolsForRequest.length,
         };
       };
       const subAgentToolDefinitions = getAvailableChatToolDefinitions(
@@ -19977,24 +19981,69 @@ export function App() {
             });
             pendingMcpObservationPromptSent = true;
           }
-          const { payload, reasoning } = await requestChatCompletion(apiMessages, {
+          let completionResult = await requestChatCompletion(apiMessages, {
             includeTools: availableChatTools.length > 0,
-            stream: false,
+            stream: preferStreamingSupervisorToolCalls,
             toolChoice: "auto",
           });
           throwIfChatAborted(abortSignal);
 
-          const assistantMessage = payload?.choices?.[0]?.message;
-          const toolCalls = (assistantMessage?.tool_calls ?? []).filter(
+          let assistantMessage = completionResult.payload?.choices?.[0]?.message;
+          let toolCalls = (
+            assistantMessage?.tool_calls ?? completionResult.toolCalls
+          ).filter(
             (toolCall) =>
               chatChoiceToolsEnabled || !isChatChoiceToolName(toolCall.function.name),
           );
+          let assistantMessageContent =
+            getChatApiMessageText(assistantMessage).trim() ||
+            completionResult.payload?.output_text?.trim() ||
+            completionResult.content.trim();
+          let assistantMessageReasoning =
+            getChatApiMessageReasoning(assistantMessage) || completionResult.reasoning || "";
+
+          // Some compatible gateways omit non-streamed tool calls even though their SSE deltas are valid.
+          if (
+            !preferStreamingSupervisorToolCalls &&
+            shouldRetrySupervisorToolCompletionAsStream({
+              supervisorMode: options.multiAgentSupervisorMode === true,
+              includedTools: completionResult.includedToolCount > 0,
+              content: assistantMessageContent,
+              outputText: completionResult.payload?.output_text,
+              toolCalls,
+              finishReason: completionResult.finishReason,
+              payloadError: completionResult.payload?.error,
+            })
+          ) {
+            preferStreamingSupervisorToolCalls = true;
+            setChatStatus({
+              status: "loading",
+              message: "主 Agent 正在切换兼容的流式工具调用...",
+            });
+            completionResult = await requestChatCompletion(apiMessages, {
+              includeTools: availableChatTools.length > 0,
+              stream: true,
+              toolChoice: "auto",
+            });
+            throwIfChatAborted(abortSignal);
+            assistantMessage = completionResult.payload?.choices?.[0]?.message;
+            toolCalls = (
+              assistantMessage?.tool_calls ?? completionResult.toolCalls
+            ).filter(
+              (toolCall) =>
+                chatChoiceToolsEnabled || !isChatChoiceToolName(toolCall.function.name),
+            );
+            assistantMessageContent =
+              getChatApiMessageText(assistantMessage).trim() ||
+              completionResult.payload?.output_text?.trim() ||
+              completionResult.content.trim();
+            assistantMessageReasoning =
+              getChatApiMessageReasoning(assistantMessage) || completionResult.reasoning || "";
+          }
+
           const hasSilentControlTool = toolCalls.some((toolCall) =>
             isSilentChatControlTool(toolCall.function.name),
           );
-          const assistantMessageContent = getChatApiMessageText(assistantMessage).trim();
-          const assistantMessageReasoning =
-            getChatApiMessageReasoning(assistantMessage) || reasoning || "";
           const choiceToolCall = chatChoiceToolsEnabled
             ? toolCalls.find((toolCall) => isChatChoiceToolName(toolCall.function.name))
             : undefined;
@@ -20002,7 +20051,7 @@ export function App() {
             const presentedChoice = createChatChoiceRequestFromToolCall(choiceToolCall);
             assistantChoiceRequest = presentedChoice.choiceRequest;
             assistantContent =
-              assistantMessageContent || payload?.output_text?.trim() || presentedChoice.prompt;
+              assistantMessageContent || presentedChoice.prompt;
             assistantReasoning = assistantMessageReasoning;
             toolLoopCompleted = true;
             break;
@@ -20012,7 +20061,7 @@ export function App() {
             assistantReasoning = "";
           } else {
             assistantContent =
-              assistantMessageContent || payload?.output_text?.trim() || assistantContent;
+              assistantMessageContent || assistantContent;
             if (assistantMessageReasoning) assistantReasoning = assistantMessageReasoning;
           }
 
@@ -20078,6 +20127,9 @@ export function App() {
             ...(assistantMessage ?? {}),
             role: "assistant",
             content: hasSilentControlTool ? null : assistantMessageContent || null,
+            ...(!assistantMessage && assistantMessageReasoning
+              ? { reasoning_content: assistantMessageReasoning }
+              : {}),
             tool_calls: toolCalls,
           });
           setChatStatus({
