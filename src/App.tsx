@@ -188,6 +188,18 @@ import {
   type ChatLiveStreamEmbed,
   type ChatLiveStreamTextItem,
 } from "./chatLiveStreamUtils";
+import {
+  buildProviderReasoningReplay,
+  buildProviderReasoningRequest,
+  getFirstReasoningText,
+  getReasoningTextFromValue,
+  mergeReasoningStreamChunk,
+  normalizeProviderReasoningEffort,
+  providerRequiresReasoningContentReplay,
+  splitSseFrames,
+  type ProviderReasoningEffort,
+  type ReasoningMessageStreamMode,
+} from "./reasoningUtils";
 import settingsModuleIcon from "./assets/module-icons/settings.png";
 import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryType } from "./types";
 
@@ -326,7 +338,6 @@ type ComposerModelMenuSection = "provider" | "model" | "reasoning";
 type ChatRole = "user" | "assistant";
 type ChatApiRole = "system" | "user" | "assistant" | "tool";
 type ChatSenderKind = "user" | "persona" | "system";
-type ProviderReasoningEffort = "low" | "medium" | "high" | "xhigh";
 type RegexScriptScope = "global" | "preset";
 type TavernScriptScope = "global" | "character";
 
@@ -856,6 +867,7 @@ type ChatApiMessage = {
   content: string | ChatApiContentPart[] | null;
   reasoning?: unknown;
   reasoning_content?: unknown;
+  reasoning_text?: unknown;
   reasoning_details?: unknown;
   thinking?: unknown;
   thinking_content?: unknown;
@@ -1006,56 +1018,10 @@ function stampPersona(persona: AgentPersona): AgentPersona {
   return { ...persona, updatedAt: new Date().toISOString() };
 }
 
-function normalizeProviderReasoningEffort(value: unknown): ProviderReasoningEffort {
-  const normalizedValue = String(value ?? "").trim().toLowerCase().replace(/[-\s]+/g, "_");
-
-  if (
-    normalizedValue === "xhigh" ||
-    normalizedValue === "x_high" ||
-    normalizedValue === "extra_high" ||
-    normalizedValue === "very_high" ||
-    normalizedValue === "ultra" ||
-    normalizedValue === "ultra_high"
-  ) {
-    return "xhigh";
-  }
-
-  if (normalizedValue === "high") return "high";
-  if (normalizedValue === "low") return "low";
-  return "medium";
-}
-
 function getProviderReasoningEffortLabel(effort: ProviderReasoningEffort) {
   return (
     providerReasoningEffortOptions.find((option) => option.value === effort)?.label ?? "中"
   );
-}
-
-function buildProviderReasoningRequest(provider?: ModelProviderChannel) {
-  if (!provider?.reasoningEnabled) return {};
-  const effort = normalizeProviderReasoningEffort(provider.reasoningEffort);
-  const apiBaseUrl = provider.apiBaseUrl.toLowerCase();
-  if (apiBaseUrl.includes("openrouter.ai")) {
-    return {
-      reasoning_effort: effort,
-      reasoning: {
-        effort,
-        exclude: false,
-      },
-      include_reasoning: true,
-    };
-  }
-
-  if (apiBaseUrl.includes("api.openai.com")) {
-    return {
-      reasoning_effort: effort,
-    };
-  }
-
-  return {
-    reasoning_effort: effort,
-    include_reasoning: true,
-  };
 }
 
 function createProviderChannel(name = "OpenAI Compatible"): ModelProviderChannel {
@@ -7179,6 +7145,7 @@ function buildChatMessageForApi(
   options: {
     sendImageAttachmentsToProvider?: boolean;
     hasImageRecognitionMcp?: boolean;
+    replayReasoningContent?: boolean;
   } = {},
 ): ChatApiMessage {
   const senderPersona =
@@ -7195,6 +7162,9 @@ function buildChatMessageForApi(
       activeChatPersona,
       options,
     ),
+    ...(message.role === "assistant" && options.replayReasoningContent
+      ? { reasoning_content: message.reasoning ?? "" }
+      : {}),
   };
 }
 
@@ -7235,53 +7205,26 @@ function substituteUserNicknameInApiMessages(
   });
 }
 
-function getReasoningTextFromValue(value: unknown): string {
-  if (typeof value === "string") return value.trim();
-  if (Array.isArray(value)) {
-    return value
-      .map((item) => getReasoningTextFromValue(item))
-      .filter(Boolean)
-      .join("\n\n")
-      .trim();
-  }
-  if (!value || typeof value !== "object") return "";
-
-  const record = value as Record<string, unknown>;
-  return [
-    record.text,
-    record.content,
-    record.reasoning,
-    record.reasoning_content,
-    record.summary,
-  ]
-    .map(getReasoningTextFromValue)
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
-}
-
-function getChatApiMessageReasoning(message?: ChatApiMessage) {
+function getChatApiMessageReasoning(
+  message?: ChatApiMessage,
+  options: { preserveWhitespace?: boolean } = {},
+) {
   if (!message) return "";
-  const directReasoning = [
-    message.reasoning,
+  const directReasoning = getFirstReasoningText([
     message.reasoning_content,
+    message.reasoning,
+    message.reasoning_text,
     message.reasoning_details,
     message.thinking,
     message.thinking_content,
-  ]
-    .map(getReasoningTextFromValue)
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
+  ], options);
   if (directReasoning) return directReasoning;
 
   if (!Array.isArray(message.content)) return "";
-  return message.content
-    .filter((part) => part.type !== "text" && part.type !== "image_url")
-    .map(getReasoningTextFromValue)
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
+  return getReasoningTextFromValue(
+    message.content.filter((part) => part.type !== "text" && part.type !== "image_url"),
+    options,
+  );
 }
 
 function getChatCompletionPayloadReasoning(payload: unknown) {
@@ -7296,18 +7239,14 @@ function getChatCompletionPayloadReasoning(payload: unknown) {
     choiceRecord.message && typeof choiceRecord.message === "object"
       ? getChatApiMessageReasoning(choiceRecord.message as ChatApiMessage)
       : "";
-  return [
+  return getFirstReasoningText([
     messageReasoning,
-    choiceRecord.reasoning,
     choiceRecord.reasoning_content,
-    record.reasoning,
+    choiceRecord.reasoning,
     record.reasoning_content,
+    record.reasoning,
     record.output_reasoning,
-  ]
-    .map(getReasoningTextFromValue)
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
+  ]);
 }
 
 function readFileAsDataUrl(file: File) {
@@ -8638,8 +8577,12 @@ function extractStreamContent(payload: unknown): {
         content?: string;
         reasoning?: unknown;
         reasoning_content?: unknown;
+        reasoning_text?: unknown;
+        reasoning_details?: unknown;
         thinking?: unknown;
         thinking_content?: unknown;
+        analysis?: unknown;
+        analysis_content?: unknown;
         tool_calls?: ChatToolCallDelta[];
       };
       message?: ChatApiMessage;
@@ -8653,16 +8596,16 @@ function extractStreamContent(payload: unknown): {
 
   const deltaContent = streamPayload.choices?.[0]?.delta?.content;
   const deltaToolCalls = streamPayload.choices?.[0]?.delta?.tool_calls ?? [];
-  const deltaReasoning = [
-    streamPayload.choices?.[0]?.delta?.reasoning,
+  const deltaReasoning = getFirstReasoningText([
     streamPayload.choices?.[0]?.delta?.reasoning_content,
+    streamPayload.choices?.[0]?.delta?.reasoning,
+    streamPayload.choices?.[0]?.delta?.reasoning_text,
+    streamPayload.choices?.[0]?.delta?.reasoning_details,
     streamPayload.choices?.[0]?.delta?.thinking,
     streamPayload.choices?.[0]?.delta?.thinking_content,
-  ]
-    .map(getReasoningTextFromValue)
-    .filter(Boolean)
-    .join("\n")
-    .trim();
+    streamPayload.choices?.[0]?.delta?.analysis,
+    streamPayload.choices?.[0]?.delta?.analysis_content,
+  ], { preserveWhitespace: true });
   if (deltaContent !== undefined || deltaReasoning || deltaToolCalls.length > 0) {
     return {
       content: deltaContent ?? "",
@@ -8674,7 +8617,9 @@ function extractStreamContent(payload: unknown): {
   }
 
   const message = streamPayload.choices?.[0]?.message;
-  const cumulativeReasoning = message ? getChatApiMessageReasoning(message) : "";
+  const cumulativeReasoning = message
+    ? getChatApiMessageReasoning(message, { preserveWhitespace: true })
+    : "";
   const cumulativeContent =
     (message ? getChatApiMessageText(message) : "") || streamPayload.output_text;
   if (
@@ -9433,6 +9378,7 @@ async function readChatStream(
   let buffer = "";
   let fullContent = "";
   let fullReasoning = "";
+  let reasoningMessageMode: ReasoningMessageStreamMode = "unknown";
   let finishReason = "";
   const toolCallsByIndex = new Map<number, ChatToolCall>();
 
@@ -9462,6 +9408,62 @@ async function readChatStream(
     toolCalls.forEach((toolCall, index) => toolCallsByIndex.set(index, toolCall));
   };
 
+  const applyStreamPayload = (data: string) => {
+    if (!data || data.trim() === "[DONE]") return true;
+
+    try {
+      const streamContent = extractStreamContent(JSON.parse(data));
+      if (streamContent.finishReason) finishReason = streamContent.finishReason;
+      if (streamContent.toolCallDeltas) {
+        applyToolCallDeltas(streamContent.toolCallDeltas);
+      }
+      if (streamContent.toolCalls) {
+        applyCompleteToolCalls(streamContent.toolCalls);
+      }
+      if (streamContent.reasoning) {
+        const mergedReasoning = mergeReasoningStreamChunk(
+          fullReasoning,
+          streamContent.reasoning,
+          streamContent.mode,
+          reasoningMessageMode,
+        );
+        fullReasoning = mergedReasoning.text;
+        reasoningMessageMode = mergedReasoning.messageMode;
+        if (mergedReasoning.delta) onReasoningDelta(mergedReasoning.delta);
+      }
+      if (!streamContent.content) return true;
+
+      if (streamContent.mode === "delta") {
+        fullContent += streamContent.content;
+        onDelta(streamContent.content);
+        return true;
+      }
+
+      if (streamContent.content.startsWith(fullContent)) {
+        const delta = streamContent.content.slice(fullContent.length);
+        fullContent = streamContent.content;
+        if (delta) onDelta(delta);
+      } else if (!fullContent.startsWith(streamContent.content)) {
+        fullContent = streamContent.content;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const applySseFrame = (frame: string) => {
+    const dataLines = frame
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /, ""));
+    if (dataLines.length === 0) return;
+
+    const combinedData = dataLines.join("\n");
+    if (applyStreamPayload(combinedData) || dataLines.length === 1) return;
+    dataLines.forEach((data) => applyStreamPayload(data));
+  };
+
   while (true) {
     throwIfChatAborted(signal);
     const { done, value } = await reader.read();
@@ -9469,61 +9471,13 @@ async function readChatStream(
     if (done) break;
 
     buffer += decoder.decode(value, { stream: true });
-    const chunks = buffer.split("\n\n");
-    buffer = chunks.pop() ?? "";
-
-    for (const chunk of chunks) {
-      const dataLines = chunk
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trim());
-
-      for (const data of dataLines) {
-        if (!data || data === "[DONE]") continue;
-
-        try {
-          const streamContent = extractStreamContent(JSON.parse(data));
-          if (streamContent.finishReason) finishReason = streamContent.finishReason;
-          if (streamContent.toolCallDeltas) {
-            applyToolCallDeltas(streamContent.toolCallDeltas);
-          }
-          if (streamContent.toolCalls) {
-            applyCompleteToolCalls(streamContent.toolCalls);
-          }
-          if (streamContent.reasoning) {
-            if (streamContent.mode === "delta") {
-              fullReasoning += streamContent.reasoning;
-              onReasoningDelta(streamContent.reasoning);
-            } else if (streamContent.reasoning.startsWith(fullReasoning)) {
-              const reasoningDelta = streamContent.reasoning.slice(fullReasoning.length);
-              fullReasoning = streamContent.reasoning;
-              if (reasoningDelta) onReasoningDelta(reasoningDelta);
-            } else {
-              fullReasoning = streamContent.reasoning;
-            }
-          }
-          if (!streamContent.content) continue;
-
-          if (streamContent.mode === "delta") {
-            fullContent += streamContent.content;
-            onDelta(streamContent.content);
-            continue;
-          }
-
-          if (streamContent.content.startsWith(fullContent)) {
-            const delta = streamContent.content.slice(fullContent.length);
-            fullContent = streamContent.content;
-            if (delta) onDelta(delta);
-          } else {
-            fullContent = streamContent.content;
-          }
-        } catch {
-          // Ignore malformed event frames from non-standard providers.
-        }
-      }
-    }
+    const parsed = splitSseFrames(buffer);
+    buffer = parsed.rest;
+    parsed.frames.forEach(applySseFrame);
   }
+
+  buffer += decoder.decode();
+  splitSseFrames(buffer, true).frames.forEach(applySseFrame);
 
   return {
     content: fullContent,
@@ -19141,6 +19095,8 @@ export function App() {
                 {
                   sendImageAttachmentsToProvider,
                   hasImageRecognitionMcp,
+                  replayReasoningContent:
+                    providerRequiresReasoningContentReplay(requestProvider),
                 },
               ),
             ),
@@ -19177,7 +19133,8 @@ export function App() {
       let hasVisibleToolResult = false;
       let hasSuccessfulVisibleToolResult = false;
       let multiAgentDelegationDisabled = false;
-      let preferStreamingSupervisorToolCalls = false;
+      let preferStreamingSupervisorToolCalls =
+        chatStreamEnabled && requestProvider.reasoningEnabled;
       let pendingMcpObservationPrompt = "";
       let pendingMcpObservationRetries = 0;
       let pendingMcpObservationPromptSent = false;
@@ -19229,10 +19186,12 @@ export function App() {
                     tool_choice: options.toolChoice ?? "auto",
                   }
                 : {}),
+              ...buildProviderReasoningRequest(requestProvider, {
+                stream: options.stream,
+              }),
               ...(activeChatPresetRequestParameters ?? {
                 temperature: responseMode === "persona" ? 0.72 : 0.6,
               }),
-              ...buildProviderReasoningRequest(requestProvider),
               stream: options.stream,
             },
           }),
@@ -19418,6 +19377,8 @@ export function App() {
             {
               sendImageAttachmentsToProvider: subAgentCanReceiveImages,
               hasImageRecognitionMcp,
+              replayReasoningContent:
+                providerRequiresReasoningContentReplay(subAgentProvider),
             },
           ),
         );
@@ -19454,6 +19415,7 @@ export function App() {
 
         for (let subToolRound = 0; subToolRound < MAX_SUB_AGENT_TOOL_ROUNDS; subToolRound += 1) {
           throwIfChatAborted(abortSignal);
+          const subAgentShouldStream = subAgentProvider.reasoningEnabled;
           const response = await fetch("/api/chat/completions", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -19474,23 +19436,35 @@ export function App() {
                       tool_choice: "auto",
                     }
                   : {}),
+                ...buildProviderReasoningRequest(subAgentProvider, {
+                  stream: subAgentShouldStream,
+                }),
                 ...(activeChatPresetRequestParameters ?? { temperature: 0.72 }),
-                ...buildProviderReasoningRequest(subAgentProvider),
-                stream: false,
+                stream: subAgentShouldStream,
               },
             }),
           });
-          const payload = (await response.json()) as {
-            error?: string | { message?: string };
-            choices?: Array<{ message?: ChatApiMessage }>;
-            output_text?: string;
-          };
+          const streamResult = subAgentShouldStream
+            ? await readChatStream(
+                response,
+                () => undefined,
+                () => undefined,
+                abortSignal,
+              )
+            : null;
+          const payload = subAgentShouldStream
+            ? null
+            : ((await response.json()) as {
+                error?: string | { message?: string };
+                choices?: Array<{ message?: ChatApiMessage }>;
+                output_text?: string;
+              });
           throwIfChatAborted(abortSignal);
-          if (!response.ok) {
+          if (!subAgentShouldStream && !response.ok) {
             const errorMessage =
-              typeof payload.error === "string"
+              typeof payload?.error === "string"
                 ? payload.error
-                : payload.error?.message;
+                : payload?.error?.message;
             throw new Error(
               errorMessage
                 ? `${subAgent.name} 请求失败：${response.status} ${errorMessage}`
@@ -19498,12 +19472,16 @@ export function App() {
             );
           }
 
-          const subAgentMessage = payload.choices?.[0]?.message;
+          const subAgentMessage = payload?.choices?.[0]?.message;
           const subAgentContent =
             getChatApiMessageText(subAgentMessage).trim() ||
-            payload.output_text?.trim() ||
+            payload?.output_text?.trim() ||
+            streamResult?.content.trim() ||
             "";
-          const subAgentToolCalls = subAgentMessage?.tool_calls ?? [];
+          const subAgentReasoning =
+            getChatApiMessageReasoning(subAgentMessage) || streamResult?.reasoning || "";
+          const subAgentToolCalls =
+            subAgentMessage?.tool_calls ?? streamResult?.toolCalls ?? [];
           if (subAgentToolCalls.length === 0) {
             if (
               localToolsEnabled &&
@@ -19514,6 +19492,10 @@ export function App() {
               subAgentApiMessages.push({
                 role: "assistant",
                 content: subAgentContent,
+                ...buildProviderReasoningReplay(
+                  subAgentProvider,
+                  subAgentReasoning,
+                ),
               });
               subAgentApiMessages.push({
                 role: "user",
@@ -19538,6 +19520,12 @@ export function App() {
             ...(subAgentMessage ?? {}),
             role: "assistant",
             content: subAgentContent || null,
+            ...(subAgentMessage?.reasoning_content === undefined
+              ? buildProviderReasoningReplay(
+                  subAgentProvider,
+                  subAgentReasoning,
+                )
+              : {}),
             tool_calls: subAgentToolCalls,
           });
           const subAgentVisionMessages: ChatApiMessage[] = [];
@@ -20070,6 +20058,10 @@ export function App() {
               apiMessages.push({
                 role: "assistant",
                 content: assistantContent || "",
+                ...buildProviderReasoningReplay(
+                  requestProvider,
+                  assistantReasoning,
+                ),
               });
               apiMessages.push({
                 role: "user",
@@ -20098,6 +20090,10 @@ export function App() {
               apiMessages.push({
                 role: "assistant",
                 content: assistantContent,
+                ...buildProviderReasoningReplay(
+                  requestProvider,
+                  assistantReasoning,
+                ),
               });
               apiMessages.push({
                 role: "user",
@@ -20127,8 +20123,11 @@ export function App() {
             ...(assistantMessage ?? {}),
             role: "assistant",
             content: hasSilentControlTool ? null : assistantMessageContent || null,
-            ...(!assistantMessage && assistantMessageReasoning
-              ? { reasoning_content: assistantMessageReasoning }
+            ...(assistantMessage?.reasoning_content === undefined
+              ? buildProviderReasoningReplay(
+                  requestProvider,
+                  assistantMessageReasoning,
+                )
               : {}),
             tool_calls: toolCalls,
           });
@@ -21079,6 +21078,11 @@ export function App() {
             messages: requestMessages,
             ...(hasCustomApi
               ? {}
+              : buildProviderReasoningRequest(chatProvider, {
+                  stream: transportStream,
+                })),
+            ...(hasCustomApi
+              ? {}
               : activeChatPresetRequestParameters ?? {
                   temperature: chatMode === "persona" ? 0.72 : 0.6,
                 }),
@@ -21136,7 +21140,6 @@ export function App() {
             ...(requestedResponseFormat
               ? { response_format: requestedResponseFormat }
               : {}),
-            ...(hasCustomApi ? {} : buildProviderReasoningRequest(chatProvider)),
             stream: transportStream,
           },
         }),
@@ -21447,6 +21450,8 @@ export function App() {
                 {
                   sendImageAttachmentsToProvider,
                   hasImageRecognitionMcp,
+                  replayReasoningContent:
+                    providerRequiresReasoningContentReplay(chatProvider),
                 },
               ),
             ),
@@ -21516,10 +21521,12 @@ export function App() {
                     tool_choice: options.toolChoice ?? "auto",
                   }
                 : {}),
+              ...buildProviderReasoningRequest(chatProvider, {
+                stream: options.stream,
+              }),
               ...(activeChatPresetRequestParameters ?? {
                 temperature: chatMode === "persona" ? 0.72 : 0.6,
               }),
-              ...buildProviderReasoningRequest(chatProvider),
               stream: options.stream,
             },
           }),
@@ -21641,6 +21648,8 @@ export function App() {
           reasoningWriter.cancel();
         }
       } else {
+        const useStreamingToolCompletion =
+          chatStreamEnabled && chatProvider.reasoningEnabled;
         for (let toolRound = 0; toolRound < 99; toolRound += 1) {
           setChatStatus({
             status: "loading",
@@ -21653,24 +21662,30 @@ export function App() {
             });
             pendingMcpObservationPromptSent = true;
           }
-          const { payload, reasoning } = await requestChatCompletion(apiMessages, {
+          const completionResult = await requestChatCompletion(apiMessages, {
             includeTools: availableChatTools.length > 0,
-            stream: false,
+            stream: useStreamingToolCompletion,
             toolChoice: "auto",
           });
           throwIfChatAborted(abortSignal);
 
+          const { payload } = completionResult;
           const assistantMessage = payload?.choices?.[0]?.message;
-          const toolCalls = (assistantMessage?.tool_calls ?? []).filter(
+          const toolCalls = (
+            assistantMessage?.tool_calls ?? completionResult.toolCalls
+          ).filter(
             (toolCall) =>
               chatChoiceToolsEnabled || !isChatChoiceToolName(toolCall.function.name),
           );
           const hasSilentControlTool = toolCalls.some((toolCall) =>
             isSilentChatControlTool(toolCall.function.name),
           );
-          const assistantMessageContent = getChatApiMessageText(assistantMessage).trim();
+          const assistantMessageContent =
+            getChatApiMessageText(assistantMessage).trim() ||
+            payload?.output_text?.trim() ||
+            completionResult.content.trim();
           const assistantMessageReasoning =
-            getChatApiMessageReasoning(assistantMessage) || reasoning || "";
+            getChatApiMessageReasoning(assistantMessage) || completionResult.reasoning || "";
           const choiceToolCall = chatChoiceToolsEnabled
             ? toolCalls.find((toolCall) => isChatChoiceToolName(toolCall.function.name))
             : undefined;
@@ -21678,7 +21693,7 @@ export function App() {
             const presentedChoice = createChatChoiceRequestFromToolCall(choiceToolCall);
             assistantChoiceRequest = presentedChoice.choiceRequest;
             assistantContent =
-              assistantMessageContent || payload?.output_text?.trim() || presentedChoice.prompt;
+              assistantMessageContent || presentedChoice.prompt;
             assistantReasoning = assistantMessageReasoning;
             break;
           }
@@ -21687,7 +21702,7 @@ export function App() {
             assistantReasoning = "";
           } else {
             assistantContent =
-              assistantMessageContent || payload?.output_text?.trim() || assistantContent;
+              assistantMessageContent || assistantContent;
             if (assistantMessageReasoning) assistantReasoning = assistantMessageReasoning;
           }
 
@@ -21696,6 +21711,10 @@ export function App() {
               apiMessages.push({
                 role: "assistant",
                 content: assistantContent || "",
+                ...buildProviderReasoningReplay(
+                  chatProvider,
+                  assistantReasoning,
+                ),
               });
               apiMessages.push({
                 role: "user",
@@ -21723,6 +21742,10 @@ export function App() {
               apiMessages.push({
                 role: "assistant",
                 content: assistantContent,
+                ...buildProviderReasoningReplay(
+                  chatProvider,
+                  assistantReasoning,
+                ),
               });
               apiMessages.push({
                 role: "user",
@@ -21750,6 +21773,12 @@ export function App() {
             ...(assistantMessage ?? {}),
             role: "assistant",
             content: hasSilentControlTool ? null : assistantMessageContent || null,
+            ...(assistantMessage?.reasoning_content === undefined
+              ? buildProviderReasoningReplay(
+                  chatProvider,
+                  assistantMessageReasoning,
+                )
+              : {}),
             tool_calls: toolCalls,
           });
           setChatStatus({
