@@ -4,6 +4,7 @@ import {
   createDelegationRoster,
   getAgentApiName,
   resolveDelegationAgentReference,
+  shouldRetrySupervisorToolCompletionAsStream,
 } from "../src/multiAgentUtils.ts";
 
 const bareId = "5047d8eb-097f-4bbb-923a-aca9367d274c";
@@ -85,5 +86,73 @@ test("rejects duplicate names and reference collisions instead of guessing", () 
   assert.equal(
     resolveDelegationAgentReference("persona_alpha", collidingIds).status,
     "ambiguous",
+  );
+});
+
+test("retries an empty supervisor tool completion as a stream", () => {
+  assert.equal(
+    shouldRetrySupervisorToolCompletionAsStream({
+      supervisorMode: true,
+      includedTools: true,
+      content: "",
+      outputText: undefined,
+      toolCalls: [],
+      finishReason: "stop",
+    }),
+    true,
+  );
+
+  assert.equal(
+    shouldRetrySupervisorToolCompletionAsStream({
+      supervisorMode: true,
+      includedTools: true,
+      content: "",
+      toolCalls: [],
+      finishReason: "tool_calls",
+    }),
+    true,
+  );
+});
+
+test("does not retry non-empty, tool-free, or truncated completions", () => {
+  const base = {
+    supervisorMode: true,
+    includedTools: true,
+    content: "",
+    outputText: "",
+    toolCalls: [],
+    finishReason: "stop",
+  };
+
+  assert.equal(
+    shouldRetrySupervisorToolCompletionAsStream({ ...base, content: "最终答复" }),
+    false,
+  );
+  assert.equal(
+    shouldRetrySupervisorToolCompletionAsStream({ ...base, toolCalls: [{}] }),
+    false,
+  );
+  assert.equal(
+    shouldRetrySupervisorToolCompletionAsStream({ ...base, includedTools: false }),
+    false,
+  );
+  assert.equal(
+    shouldRetrySupervisorToolCompletionAsStream({ ...base, supervisorMode: false }),
+    false,
+  );
+  assert.equal(
+    shouldRetrySupervisorToolCompletionAsStream({ ...base, finishReason: "length" }),
+    false,
+  );
+  assert.equal(
+    shouldRetrySupervisorToolCompletionAsStream({ ...base, finishReason: "content_filter" }),
+    false,
+  );
+  assert.equal(
+    shouldRetrySupervisorToolCompletionAsStream({
+      ...base,
+      payloadError: { message: "upstream failed" },
+    }),
+    false,
   );
 });

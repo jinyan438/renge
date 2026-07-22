@@ -15,6 +15,16 @@ export type DelegationAgentResolution =
   | { status: "not_found" }
   | { status: "ambiguous" };
 
+type SupervisorToolCompletionRetryInput = {
+  supervisorMode: boolean;
+  includedTools: boolean;
+  content?: unknown;
+  outputText?: unknown;
+  toolCalls?: readonly unknown[];
+  finishReason?: unknown;
+  payloadError?: unknown;
+};
+
 const uuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi;
 const delegationTokenPattern = /delegate_[a-z0-9]+_\d+/gi;
 
@@ -108,4 +118,29 @@ export function resolveDelegationAgentReference(
   return matchedEntries.length > 1
     ? { status: "ambiguous" }
     : { status: "not_found" };
+}
+
+export function shouldRetrySupervisorToolCompletionAsStream({
+  supervisorMode,
+  includedTools,
+  content,
+  outputText,
+  toolCalls,
+  finishReason,
+  payloadError,
+}: SupervisorToolCompletionRetryInput) {
+  if (!supervisorMode || !includedTools) return false;
+  if (payloadError !== undefined && payloadError !== null && payloadError !== "") return false;
+  if (typeof content === "string" && content.trim()) return false;
+  if (typeof outputText === "string" && outputText.trim()) return false;
+  if (Array.isArray(toolCalls) && toolCalls.length > 0) return false;
+
+  const normalizedFinishReason =
+    typeof finishReason === "string" ? finishReason.trim().toLowerCase() : "";
+  return (
+    !normalizedFinishReason ||
+    normalizedFinishReason === "stop" ||
+    normalizedFinishReason === "tool_calls" ||
+    normalizedFinishReason === "function_call"
+  );
 }
