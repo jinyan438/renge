@@ -16882,7 +16882,26 @@ export function App() {
       chatSessions,
       (session) => session.id === sessionId,
     );
-    const safeRemaining = remaining.length > 0 ? remaining : [createChatSession()];
+    const workspaceHasRemainingSessions = deletedSession
+      ? remaining.some((session) => session.workspaceKey === deletedSession.workspaceKey)
+      : true;
+    const safeRemaining = [...remaining];
+
+    if (deletedSession && !workspaceHasRemainingSessions) {
+      const deletedSessionIndex = chatSessions.findIndex((session) => session.id === sessionId);
+      const replacementSession = createChatSession(
+        deletedSession.workspaceKey,
+        deletedSession.workspaceName,
+        deletedSession.workspacePath,
+      );
+      safeRemaining.splice(
+        Math.min(Math.max(deletedSessionIndex, 0), safeRemaining.length),
+        0,
+        replacementSession,
+      );
+    } else if (safeRemaining.length === 0) {
+      safeRemaining.push(createChatSession());
+    }
 
     setChatSessions(safeRemaining);
 
