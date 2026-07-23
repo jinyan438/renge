@@ -23,6 +23,7 @@ import {
 import { createPortal } from "react-dom";
 import {
   getStatusBarItemValue,
+  normalizeStatusBarState,
   type StatusBarState,
 } from "./statusBarUtils";
 import "./status-bar.css";
@@ -31,6 +32,15 @@ type StatusBarItem = StatusBarState["items"][number];
 type StatusBarItemType = StatusBarItem["type"];
 type StatusBarItemWidth = StatusBarItem["width"];
 type StatusBarItemSize = StatusBarItem["size"];
+type StatusBarPreset = {
+  id: string;
+  name: string;
+  title: string;
+  accentColor: string;
+  items: Array<Omit<StatusBarItem, "id">>;
+  createdAt: string;
+  updatedAt: string;
+};
 
 export type StatusBarSidebarProps = {
   state: StatusBarState;
@@ -45,6 +55,8 @@ type StatusBarCssProperties = CSSProperties & {
 };
 
 const DEFAULT_ACCENT_COLOR = "#ff758c";
+const STATUS_BAR_PRESETS_STORAGE_KEY = "renge_status_bar_presets";
+const MAX_STATUS_BAR_PRESETS = 100;
 const EDITOR_FOCUSABLE_SELECTOR = [
   "button:not([disabled])",
   "input:not([disabled]):not([type='hidden'])",
@@ -136,6 +148,87 @@ function createStatusItemId() {
     return crypto.randomUUID();
   }
   return `status-item-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function createStatusPresetId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `status-preset-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function clonePresetItems(items: StatusBarPreset["items"]): StatusBarPreset["items"] {
+  return items.map((item) => ({ ...item }));
+}
+
+function normalizeStatusBarPreset(rawValue: unknown, index: number): StatusBarPreset | null {
+  if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue)) return null;
+  const rawPreset = rawValue as Record<string, unknown>;
+  if (!Array.isArray(rawPreset.items)) return null;
+
+  const normalizedState = normalizeStatusBarState({
+    enabled: false,
+    title: rawPreset.title,
+    accentColor: rawPreset.accentColor,
+    items: rawPreset.items,
+    values: {},
+    updatedAt: rawPreset.updatedAt,
+  });
+  const name =
+    typeof rawPreset.name === "string" && rawPreset.name.trim()
+      ? rawPreset.name.trim().slice(0, 48)
+      : `状态栏预设 ${index + 1}`;
+  const timestamp = new Date().toISOString();
+
+  return {
+    id:
+      typeof rawPreset.id === "string" && rawPreset.id.trim()
+        ? rawPreset.id.trim()
+        : createStatusPresetId(),
+    name,
+    title: normalizedState.title,
+    accentColor: normalizedState.accentColor,
+    items: normalizedState.items.map(({ id: _id, ...item }) => item),
+    createdAt:
+      typeof rawPreset.createdAt === "string" ? rawPreset.createdAt : timestamp,
+    updatedAt:
+      typeof rawPreset.updatedAt === "string" ? rawPreset.updatedAt : timestamp,
+  };
+}
+
+function loadStatusBarPresets(): StatusBarPreset[] {
+  if (typeof localStorage === "undefined") return [];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STATUS_BAR_PRESETS_STORAGE_KEY) ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    const seenIds = new Set<string>();
+    return parsed
+      .slice(0, MAX_STATUS_BAR_PRESETS)
+      .flatMap((preset, index) => {
+        const normalized = normalizeStatusBarPreset(preset, index);
+        if (!normalized) return [];
+        if (seenIds.has(normalized.id)) normalized.id = createStatusPresetId();
+        seenIds.add(normalized.id);
+        return [normalized];
+      });
+  } catch {
+    return [];
+  }
+}
+
+function createUniquePresetName(presets: StatusBarPreset[], requestedName: string) {
+  const baseName = requestedName.trim().slice(0, 48) || `状态栏预设 ${presets.length + 1}`;
+  const existingNames = new Set(presets.map((preset) => preset.name.toLocaleLowerCase()));
+  if (!existingNames.has(baseName.toLocaleLowerCase())) return baseName;
+
+  let suffix = 2;
+  let candidate = "";
+  do {
+    const suffixText = ` ${suffix}`;
+    candidate = `${baseName.slice(0, 48 - suffixText.length)}${suffixText}`;
+    suffix += 1;
+  } while (existingNames.has(candidate.toLocaleLowerCase()));
+  return candidate;
 }
 
 function createUniqueVariableName(items: StatusBarItem[], prefix = "新变量") {
@@ -394,6 +487,10 @@ export function StatusBarSidebar({
   const [dragOverItemId, setDragOverItemId] = useState("");
   const [showValidation, setShowValidation] = useState(false);
   const [valuesClearedInEditor, setValuesClearedInEditor] = useState(false);
+  const [presets, setPresets] = useState<StatusBarPreset[]>(loadStatusBarPresets);
+  const [selectedPresetId, setSelectedPresetId] = useState("");
+  const [presetName, setPresetName] = useState("");
+  const [presetFeedback, setPresetFeedback] = useState("");
   const latestStateRef = useRef(state);
   const editorModalRef = useRef<HTMLElement | null>(null);
   const editorInitialFocusRef = useRef<HTMLInputElement | null>(null);
@@ -402,11 +499,24 @@ export function StatusBarSidebar({
   latestStateRef.current = state;
 
   const validationErrors = useMemo(() => validateStatusItems(draft.items), [draft.items]);
+  const selectedPreset = useMemo(
+    () => presets.find((preset) => preset.id === selectedPresetId) ?? null,
+    [presets, selectedPresetId],
+  );
   const sidebarStyle = {
     "--status-accent": getSafeAccentColor(state.accentColor),
   } as StatusBarCssProperties;
 
   const closeEditor = () => setEditorOpen(false);
+
+  useEffect(() => {
+    if (typeof localStorage === "undefined") return;
+    try {
+      localStorage.setItem(STATUS_BAR_PRESETS_STORAGE_KEY, JSON.stringify(presets));
+    } catch {
+      // The editor stays usable even when browser storage is unavailable or full.
+    }
+  }, [presets]);
 
   useEffect(() => {
     if (!editorOpen || typeof document === "undefined") return;
@@ -500,6 +610,7 @@ export function StatusBarSidebar({
     setValuesClearedInEditor(false);
     setDraggedItemId("");
     setDragOverItemId("");
+    setPresetFeedback("");
     setEditorOpen(true);
   };
 
@@ -602,6 +713,98 @@ export function StatusBarSidebar({
     }));
   };
 
+  const createPresetFromDraft = (id: string, name: string, createdAt: string) => {
+    const normalizedDraft = normalizeDraftForSave(
+      draft,
+      {} as StatusBarState["values"],
+      false,
+    );
+    return {
+      id,
+      name,
+      title: normalizedDraft.title,
+      accentColor: normalizedDraft.accentColor,
+      items: normalizedDraft.items.map(({ id: _id, ...item }) => item),
+      createdAt,
+      updatedAt: new Date().toISOString(),
+    } satisfies StatusBarPreset;
+  };
+
+  const validateDraftBeforePresetSave = () => {
+    const nextErrors = validateStatusItems(draft.items);
+    if (nextErrors.size === 0) return true;
+    setShowValidation(true);
+    setPresetFeedback("请先修正变量名，再保存预设。");
+    return false;
+  };
+
+  const saveDraftAsNewPreset = () => {
+    if (!validateDraftBeforePresetSave()) return;
+    if (presets.length >= MAX_STATUS_BAR_PRESETS) {
+      setPresetFeedback(`最多可保存 ${MAX_STATUS_BAR_PRESETS} 个状态栏预设。`);
+      return;
+    }
+    const timestamp = new Date().toISOString();
+    const name = createUniquePresetName(presets, presetName);
+    const preset = createPresetFromDraft(createStatusPresetId(), name, timestamp);
+    setPresets((current) => [...current, preset]);
+    setSelectedPresetId(preset.id);
+    setPresetName(preset.name);
+    setPresetFeedback(`已保存新预设“${preset.name}”。`);
+  };
+
+  const updateSelectedPreset = () => {
+    if (!selectedPreset || !validateDraftBeforePresetSave()) return;
+    const requestedName = presetName.trim().slice(0, 48) || selectedPreset.name;
+    const name = createUniquePresetName(
+      presets.filter((preset) => preset.id !== selectedPreset.id),
+      requestedName,
+    );
+    const nextPreset = createPresetFromDraft(
+      selectedPreset.id,
+      name,
+      selectedPreset.createdAt,
+    );
+    setPresets((current) =>
+      current.map((preset) => (preset.id === selectedPreset.id ? nextPreset : preset)),
+    );
+    setPresetName(name);
+    setPresetFeedback(`已更新预设“${name}”。`);
+  };
+
+  const applySelectedPreset = () => {
+    if (!selectedPreset) return;
+    setDraft((current) => ({
+      ...current,
+      title: selectedPreset.title,
+      accentColor: selectedPreset.accentColor,
+      items: clonePresetItems(selectedPreset.items).map((item) => ({
+        ...item,
+        id: createStatusItemId(),
+      })),
+      values: {} as StatusBarState["values"],
+      updatedAt: new Date().toISOString(),
+    }));
+    setValuesClearedInEditor(true);
+    setShowValidation(false);
+    setPresetName(selectedPreset.name);
+    setPresetFeedback(`已载入“${selectedPreset.name}”，保存状态栏后应用到当前会话。`);
+  };
+
+  const deleteSelectedPreset = () => {
+    if (!selectedPreset) return;
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(`删除状态栏预设“${selectedPreset.name}”？此操作不会修改当前会话。`)
+    ) {
+      return;
+    }
+    setPresets((current) => current.filter((preset) => preset.id !== selectedPreset.id));
+    setSelectedPresetId("");
+    setPresetName("");
+    setPresetFeedback(`已删除预设“${selectedPreset.name}”。`);
+  };
+
   const saveDraft = () => {
     const nextErrors = validateStatusItems(draft.items);
     if (nextErrors.size > 0) {
@@ -666,6 +869,76 @@ export function StatusBarSidebar({
 
               <div className="status-bar-editor-content">
                 <section className="status-bar-editor-form" aria-label="状态栏条目配置">
+                  <div className="status-bar-preset-manager">
+                    <div className="status-bar-preset-heading">
+                      <div>
+                        <strong>状态栏预设</strong>
+                        <span>跨会话保存条目结构和样式，不保存实时变量值</span>
+                      </div>
+                      <small>{presets.length} / {MAX_STATUS_BAR_PRESETS}</small>
+                    </div>
+                    <div className="status-bar-preset-fields">
+                      <label>
+                        <span>已保存预设</span>
+                        <select
+                          onChange={(event) => {
+                            const nextId = event.target.value;
+                            const nextPreset = presets.find((preset) => preset.id === nextId);
+                            setSelectedPresetId(nextId);
+                            setPresetName(nextPreset?.name ?? "");
+                            setPresetFeedback("");
+                          }}
+                          value={selectedPresetId}
+                        >
+                          <option value="">选择一个预设</option>
+                          {presets.map((preset) => (
+                            <option key={preset.id} value={preset.id}>
+                              {preset.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        <span>预设名称</span>
+                        <input
+                          maxLength={48}
+                          onChange={(event) => setPresetName(event.target.value)}
+                          placeholder={`状态栏预设 ${presets.length + 1}`}
+                          type="text"
+                          value={presetName}
+                        />
+                      </label>
+                    </div>
+                    <div className="status-bar-preset-actions">
+                      <button disabled={!selectedPreset} onClick={applySelectedPreset} type="button">
+                        <RotateCcw size={15} />
+                        应用所选
+                      </button>
+                      <button onClick={saveDraftAsNewPreset} type="button">
+                        <Plus size={15} />
+                        保存为新预设
+                      </button>
+                      <button disabled={!selectedPreset} onClick={updateSelectedPreset} type="button">
+                        <Save size={15} />
+                        更新所选
+                      </button>
+                      <button
+                        className="danger"
+                        disabled={!selectedPreset}
+                        onClick={deleteSelectedPreset}
+                        type="button"
+                      >
+                        <Trash2 size={15} />
+                        删除
+                      </button>
+                    </div>
+                    {presetFeedback ? (
+                      <p aria-live="polite" className="status-bar-preset-feedback" role="status">
+                        {presetFeedback}
+                      </p>
+                    ) : null}
+                  </div>
+
                   <div className="status-bar-general-fields">
                     <label>
                       <span>面板标题</span>
