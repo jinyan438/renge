@@ -448,6 +448,12 @@ type ChatMessage = {
   extra?: Record<string, unknown>;
 };
 
+type MultiAgentResponseResult = {
+  assistantMessages: ChatMessage[];
+  finalMessage: ChatMessage;
+  completed: boolean;
+};
+
 type ChatHeartbeatConfig = {
   enabled: boolean;
   intervalMinutes: number;
@@ -2024,6 +2030,75 @@ function normalizeChatSession(rawValue: unknown): ChatSession {
         ? rawSession.updatedAt
         : new Date().toISOString(),
   };
+}
+
+function removeStatusBarPatchFromMessage(message: ChatMessage): ChatMessage {
+  if (!message.extra || !("statusBarPatch" in message.extra)) return message;
+  const {
+    statusBarPatch: _statusBarPatch,
+    statusBarPatchSourceMessageIds: _statusBarPatchSourceMessageIds,
+    ...remainingExtra
+  } = message.extra;
+  const nextMessage = { ...message };
+  if (Object.keys(remainingExtra).length > 0) {
+    nextMessage.extra = remainingExtra;
+  } else {
+    delete nextMessage.extra;
+  }
+  return nextMessage;
+}
+
+function invalidateStatusBarPatchesForSourceMessage(
+  messages: ChatMessage[],
+  sourceMessageId: string,
+) {
+  return messages.map((message) => {
+    const sourceMessageIds = message.extra?.statusBarPatchSourceMessageIds;
+    return message.id === sourceMessageId ||
+      (Array.isArray(sourceMessageIds) && sourceMessageIds.includes(sourceMessageId))
+      ? removeStatusBarPatchFromMessage(message)
+      : message;
+  });
+}
+
+function rebuildStatusBarStateFromMessages(
+  state: StatusBarState,
+  messages: ChatMessage[],
+): StatusBarState {
+  const normalizedState = normalizeStatusBarState(state);
+  const existingMessageIds = new Set(messages.map((message) => message.id));
+  let rebuiltState = normalizeStatusBarState({
+    ...normalizedState,
+    values: {},
+  });
+
+  messages.forEach((message) => {
+    const rawPatch = message.extra?.statusBarPatch;
+    if (!rawPatch) return;
+    const sourceMessageIds = message.extra?.statusBarPatchSourceMessageIds;
+    if (
+      Array.isArray(sourceMessageIds) &&
+      sourceMessageIds.some(
+        (messageId) => typeof messageId !== "string" || !existingMessageIds.has(messageId),
+      )
+    ) {
+      return;
+    }
+    try {
+      const parsed = parseStatusBarPatch(JSON.stringify(rawPatch), rebuiltState);
+      if (!parsed.error && parsed.patch.updates.length > 0) {
+        rebuiltState = mergeStatusBarPatch(rebuiltState, parsed.patch);
+      }
+    } catch {
+      // Ignore malformed legacy/script-owned message metadata.
+    }
+  });
+
+  return normalizeStatusBarState({
+    ...normalizedState,
+    values: rebuiltState.values,
+    updatedAt: new Date().toISOString(),
+  });
 }
 
 function createRoleplayGreetingMessage(
@@ -10496,8 +10571,24 @@ export function App() {
   const [chatDesktopSidebarCollapsed, setChatDesktopSidebarCollapsed] =
     useState(false);
   const [chatStatusSidebarCollapsed, setChatStatusSidebarCollapsed] =
-    useState(false);
+    useState(() =>
+      typeof window !== "undefined" && window.matchMedia("(max-width: 820px)").matches,
+    );
   const [mobilePromptPreviewOpen, setMobilePromptPreviewOpen] = useState(false);
+
+  useEffect(() => {
+    const mobileMedia = window.matchMedia("(max-width: 820px)");
+    const collapseForMobile = (event: MediaQueryListEvent) => {
+      if (event.matches) setChatStatusSidebarCollapsed(true);
+    };
+    mobileMedia.addEventListener("change", collapseForMobile);
+    return () => mobileMedia.removeEventListener("change", collapseForMobile);
+  }, []);
+
+  const changeChatStatusSidebarCollapsed = (collapsed: boolean) => {
+    setChatStatusSidebarCollapsed(collapsed);
+    if (!collapsed) setMobileSidebarOpen(false);
+  };
 
   const openWindow = useCallback((id: ModuleWindowId) => {
     const zIndex = ++topWindowZIndexRef.current;
@@ -10994,6 +11085,86 @@ export function App() {
     setChatSessions(nextSessions);
   };
 
+  const commitActiveSessionMessagesAndStatusBar = (
+    sessionId: string,
+    nextMessages: ChatMessage[],
+    updater: (current: StatusBarState) => StatusBarState,
+  ) => {
+    if (!sessionId || activeChatSessionIdRef.current !== sessionId) return false;
+    const timestamp = new Date().toISOString();
+    const nextSessions = chatSessionsRef.current.map((session) =>
+      session.id === sessionId
+        ? {
+            ...session,
+            messages: nextMessages,
+            statusBar: normalizeStatusBarState(
+              updater(normalizeStatusBarState(session.statusBar)),
+            ),
+            updatedAt: timestamp,
+          }
+        : session,
+    );
+    chatMessagesRef.current = nextMessages;
+    chatSessionsRef.current = nextSessions;
+    setChatMessages(nextMessages);
+    setChatSessions(nextSessions);
+    return true;
+  };
+
+  const getMessagesForSession = (sessionId: string) => {
+    if (activeChatSessionIdRef.current === sessionId) return chatMessagesRef.current;
+    return (
+      chatSessionsRef.current.find((candidate) => candidate.id === sessionId)?.messages ?? []
+    );
+  };
+
+  const commitStatusBarPatchForSession = (
+    sessionId: string,
+    assistantMessageId: string,
+    patch: StatusBarPatch,
+    sourceMessageIds: string[],
+  ) => {
+    const session = chatSessionsRef.current.find((candidate) => candidate.id === sessionId);
+    if (!session) return false;
+    let targetFound = false;
+    const nextMessages = getMessagesForSession(sessionId).map((message) => {
+      if (message.id !== assistantMessageId) return message;
+      targetFound = true;
+      return {
+        ...message,
+        extra: {
+          ...(message.extra ?? {}),
+          statusBarPatch: patch,
+          statusBarPatchSourceMessageIds: sourceMessageIds,
+        },
+      };
+    });
+    if (!targetFound) return false;
+
+    const timestamp = new Date().toISOString();
+    const nextStatusBar = mergeStatusBarPatch(
+      normalizeStatusBarState(session.statusBar),
+      patch,
+    );
+    const nextSessions = chatSessionsRef.current.map((candidate) =>
+      candidate.id === sessionId
+        ? {
+            ...candidate,
+            messages: nextMessages,
+            statusBar: nextStatusBar,
+            updatedAt: timestamp,
+          }
+        : candidate,
+    );
+    chatSessionsRef.current = nextSessions;
+    setChatSessions(nextSessions);
+    if (activeChatSessionIdRef.current === sessionId) {
+      chatMessagesRef.current = nextMessages;
+      setChatMessages(nextMessages);
+    }
+    return true;
+  };
+
   const updateActiveStatusBarState = (nextState: StatusBarState) => {
     const sessionId = activeChatSessionIdRef.current;
     commitStatusBarStateForSession(sessionId, () =>
@@ -11006,11 +11177,17 @@ export function App() {
 
   const clearActiveStatusBarValues = () => {
     const sessionId = activeChatSessionIdRef.current;
-    commitStatusBarStateForSession(sessionId, (current) => ({
-      ...current,
-      values: {},
-      updatedAt: new Date().toISOString(),
-    }));
+    if (!sessionId) return;
+    const nextMessages = chatMessagesRef.current.map(removeStatusBarPatchFromMessage);
+    commitActiveSessionMessagesAndStatusBar(
+      sessionId,
+      nextMessages,
+      (current) => ({
+        ...current,
+        values: {},
+        updatedAt: new Date().toISOString(),
+      }),
+    );
     setChatStatus({ status: "success", message: "已清空当前会话的状态栏变量。" });
   };
 
@@ -11548,6 +11725,7 @@ export function App() {
 
   function openMobileSidebar() {
     setMobilePromptPreviewOpen(false);
+    setChatStatusSidebarCollapsed(true);
     setMobileSidebarOpen(true);
   }
 
@@ -11584,6 +11762,27 @@ export function App() {
     if (!controller.signal.aborted) {
       controller.abort(createChatAbortError());
     }
+  };
+
+  const activeSessionChangeIsBlocked = (allowExistingLoading = false) => {
+    if (
+      !activeChatAbortControllerRef.current &&
+      (allowExistingLoading || chatStatus.status !== "loading")
+    ) {
+      return false;
+    }
+    setChatStatus({
+      status: "loading",
+      message: "当前回复或状态更新完成后才能切换会话。",
+    });
+    return true;
+  };
+
+  const showChatSession = (session: Pick<ChatSession, "id" | "messages">) => {
+    activeChatSessionIdRef.current = session.id;
+    chatMessagesRef.current = session.messages;
+    setActiveChatSessionId(session.id);
+    setChatMessages(session.messages);
   };
 
   useEffect(() => {
@@ -15955,10 +16154,10 @@ export function App() {
     }, 0);
   };
   const activateRoleplaySession = (session: ChatSession) => {
+    if (activeSessionChangeIsBlocked()) return;
     setActiveCharacterCardId(session.roleplayCharacterCardId ?? "");
     setChatMode("roleplay");
-    setActiveChatSessionId(session.id);
-    setChatMessages(session.messages);
+    showChatSession(session);
     setEditingChatMessage(null);
     setChatMessageMenu(null);
     setChatStatus({ status: "idle", message: "" });
@@ -15969,6 +16168,7 @@ export function App() {
     if (card) processRoleplayGreeting(session, card);
   };
   const startRoleplayInCurrentWorkspace = (card: CharacterCard, greetingIndex = 0) => {
+    if (activeSessionChangeIsBlocked()) return;
     const canBindCurrentSession = Boolean(
       activeChatSession &&
       activeChatSession.id === activeChatSessionId &&
@@ -15995,6 +16195,7 @@ export function App() {
     activateRoleplaySession(session);
   };
   const openOrCreateCharacterRoleplay = (card: CharacterCard) => {
+    if (activeSessionChangeIsBlocked()) return;
     const existingSession = chatSessions
       .filter((session) => session.roleplayCharacterCardId === card.id)
       .sort(
@@ -16646,7 +16847,11 @@ export function App() {
     if (chatStatus.status === "loading") return;
 
     const messageIndex = chatMessagesRef.current.findIndex((message) => message.id === messageId);
-    commitChatMessages((current) => current.filter((message) => message.id !== messageId));
+    const sessionId = activeChatSessionIdRef.current;
+    const nextMessages = chatMessagesRef.current.filter((message) => message.id !== messageId);
+    commitActiveSessionMessagesAndStatusBar(sessionId, nextMessages, (current) =>
+      rebuildStatusBarStateFromMessages(current, nextMessages),
+    );
     if (editingChatMessage?.messageId === messageId) {
       setEditingChatMessage(null);
     }
@@ -16751,12 +16956,12 @@ export function App() {
   };
 
   const openChatSession = async (sessionId: string) => {
+    if (activeSessionChangeIsBlocked()) return;
     const session = chatSessions.find((item) => item.id === sessionId);
     if (!session) return;
 
     workspaceAutoRestoreDisabledRef.current = false;
-    setActiveChatSessionId(session.id);
-    setChatMessages(session.messages);
+    showChatSession(session);
     setEditingChatMessage(null);
     setChatMessageMenu(null);
     if (session.roleplayCharacterCardId) {
@@ -16928,6 +17133,7 @@ export function App() {
     workspaceKey = workspaceInfo.key,
     workspaceName = workspaceInfo.name,
   ) => {
+    if (activeSessionChangeIsBlocked()) return;
     const knownWorkspacePath = chatSessions.find(
       (session) => session.workspaceKey === workspaceKey && session.workspacePath,
     )?.workspacePath;
@@ -16937,12 +17143,12 @@ export function App() {
       workspaceKey === workspaceInfo.key ? workspaceInfo.path : knownWorkspacePath,
     );
     setChatSessions((current) => [...current, session]);
-    setActiveChatSessionId(session.id);
-    setChatMessages([]);
+    showChatSession(session);
     setChatStatus({ status: "idle", message: "" });
   };
 
   const deleteChatSession = (sessionId: string) => {
+    if (activeSessionChangeIsBlocked()) return;
     const deletedSession = chatSessions.find((session) => session.id === sessionId);
     // 后端清理该会话目录下持久化的生成图片，fire-and-forget
     void fetch(`/api/session-images/${encodeURIComponent(sessionId)}`, { method: "DELETE" }).catch(() => undefined);
@@ -16977,13 +17183,13 @@ export function App() {
       const fallback =
         safeRemaining.find((session) => session.workspaceKey === deletedSession?.workspaceKey) ??
         safeRemaining[0];
-      setActiveChatSessionId(fallback.id);
-      setChatMessages(fallback.messages);
+      showChatSession(fallback);
     }
     setChatStatus({ status: "idle", message: "会话已删除，相关记忆已取消。" });
   };
 
   const clearLocalWorkspace = () => {
+    if (activeSessionChangeIsBlocked()) return;
     workspaceAutoRestoreDisabledRef.current = true;
     if (localWorkspaceHandle?.kind === "pc") {
       setPcTransferWorkspace(null);
@@ -17003,11 +17209,11 @@ export function App() {
     if (!chatSessions.some((session) => session.id === fallbackSession.id)) {
       setChatSessions((current) => [...current, fallbackSession]);
     }
-    setActiveChatSessionId(fallbackSession.id);
-    setChatMessages(fallbackSession.messages);
+    showChatSession(fallbackSession);
   };
 
   const deleteWorkspaceSessions = (workspaceKey: string, workspaceName: string) => {
+    if (activeSessionChangeIsBlocked()) return;
     const workspaceSessionCount = chatSessions.filter(
       (session) => session.workspaceKey === workspaceKey,
     ).length;
@@ -17050,8 +17256,7 @@ export function App() {
       const fallback =
         safeRemaining.find((session) => session.workspaceKey === DEFAULT_WORKSPACE_KEY) ??
         safeRemaining[0];
-      setActiveChatSessionId(fallback.id);
-      setChatMessages(fallback.messages);
+      showChatSession(fallback);
     }
     setChatStatus({ status: "idle", message: "工作区会话已删除，相关记忆已取消。" });
   };
@@ -17059,6 +17264,7 @@ export function App() {
   const activateWorkspaceSessions = (
     handle: LocalDirectoryHandle | ElectronWorkspaceHandle | AndroidWorkspaceHandle | PcWorkspaceHandle,
   ) => {
+    if (activeSessionChangeIsBlocked(true)) return;
     const nextWorkspaceInfo = getWorkspaceInfo(handle);
     const existingSession = chatSessions.find(
       (session) => session.workspaceKey === nextWorkspaceInfo.key,
@@ -17078,8 +17284,7 @@ export function App() {
           ),
         );
       }
-      setActiveChatSessionId(existingSession.id);
-      setChatMessages(existingSession.messages);
+      showChatSession(existingSession);
       return;
     }
 
@@ -17089,8 +17294,7 @@ export function App() {
       nextWorkspaceInfo.path,
     );
     setChatSessions((current) => [...current, session]);
-    setActiveChatSessionId(session.id);
-    setChatMessages([]);
+    showChatSession(session);
   };
 
   const pullProviderModels = async () => {
@@ -18838,6 +19042,7 @@ export function App() {
     finalAssistant: string;
     requestProvider: ModelProviderChannel;
     requestModelId: string;
+    sourceMessageIds?: string[];
     signal?: AbortSignal;
   }): Promise<{ attempted: boolean; updated: number; error?: string }> => {
     const {
@@ -18847,9 +19052,31 @@ export function App() {
       finalAssistant,
       requestProvider,
       requestModelId,
+      sourceMessageIds: rawSourceMessageIds,
       signal,
     } = options;
-    const session = chatSessionsRef.current.find((candidate) => candidate.id === sessionId);
+    const sourceMessageIds = Array.from(
+      new Set(
+        [assistantMessageId, ...(rawSourceMessageIds ?? [])]
+          .map((messageId) => messageId.trim())
+          .filter(Boolean),
+      ),
+    );
+    let session = chatSessionsRef.current.find((candidate) => candidate.id === sessionId);
+    if (session && activeChatSessionIdRef.current === sessionId) {
+      const activeMessages = chatMessagesRef.current;
+      const synchronizedSession = {
+        ...session,
+        messages: activeMessages,
+        updatedAt: new Date().toISOString(),
+      };
+      const nextSessions = chatSessionsRef.current.map((candidate) =>
+        candidate.id === sessionId ? synchronizedSession : candidate,
+      );
+      chatSessionsRef.current = nextSessions;
+      setChatSessions(nextSessions);
+      session = synchronizedSession;
+    }
     const statusBar = normalizeStatusBarState(session?.statusBar);
     const trackedItemCount = statusBar.items.filter(
       (item) => item.type !== "divider" && item.variableName,
@@ -18859,6 +19086,27 @@ export function App() {
     }
 
     const schemaRevision = statusBar.updatedAt;
+    const targetIsCurrent = () => {
+      if (signal?.aborted) return false;
+      const currentSession = chatSessionsRef.current.find(
+        (candidate) => candidate.id === sessionId,
+      );
+      if (!currentSession) return false;
+      const currentStatusBar = normalizeStatusBarState(currentSession.statusBar);
+      return (
+        currentStatusBar.updatedAt === schemaRevision &&
+        sourceMessageIds.every((messageId) =>
+          getMessagesForSession(sessionId).some((message) => message.id === messageId),
+        )
+      );
+    };
+    const ignoredResult = {
+      attempted: true,
+      updated: 0,
+      error: "会话内容或状态栏配置已变化，本次状态更新已安全忽略。",
+    } as const;
+    if (!targetIsCurrent()) return ignoredResult;
+
     const requestBody = (includeResponseFormat: boolean) => ({
       apiBaseUrl: trimTrailingSlash(requestProvider.apiBaseUrl),
       apiKey: requestProvider.apiKey,
@@ -18897,10 +19145,14 @@ export function App() {
     };
 
     try {
-      setChatStatus({ status: "loading", message: "正文已完成，正在更新状态栏变量..." });
+      if (activeChatSessionIdRef.current === sessionId) {
+        setChatStatus({ status: "loading", message: "正文已完成，正在更新状态栏变量..." });
+      }
       let result = await makeRequest(true);
+      if (!targetIsCurrent()) return ignoredResult;
       if (!result.response.ok && [400, 404, 415, 422].includes(result.response.status)) {
         result = await makeRequest(false);
+        if (!targetIsCurrent()) return ignoredResult;
       }
       if (!result.response.ok) {
         const errorMessage =
@@ -18922,43 +19174,17 @@ export function App() {
       if (parsed.error) return { attempted: true, updated: 0, error: parsed.error };
       if (parsed.patch.updates.length === 0) return { attempted: true, updated: 0 };
 
-      const currentSession = chatSessionsRef.current.find(
-        (candidate) => candidate.id === sessionId,
-      );
-      const currentStatusBar = normalizeStatusBarState(currentSession?.statusBar);
-      const targetStillExists = chatMessagesRef.current.some(
-        (message) => message.id === assistantMessageId,
-      );
-      if (
-        activeChatSessionIdRef.current !== sessionId ||
-        currentStatusBar.updatedAt !== schemaRevision ||
-        !targetStillExists ||
-        signal?.aborted
-      ) {
-        return {
-          attempted: true,
-          updated: 0,
-          error: "会话或状态栏配置已变化，本次状态更新已安全忽略。",
-        };
-      }
-
       const patch: StatusBarPatch = parsed.patch;
-      commitChatMessages((current) =>
-        current.map((message) =>
-          message.id === assistantMessageId
-            ? {
-                ...message,
-                extra: {
-                  ...(message.extra ?? {}),
-                  statusBarPatch: patch,
-                },
-              }
-            : message,
-        ),
-      );
-      commitStatusBarStateForSession(sessionId, (current) =>
-        mergeStatusBarPatch(current, patch),
-      );
+      if (
+        !commitStatusBarPatchForSession(
+          sessionId,
+          assistantMessageId,
+          patch,
+          sourceMessageIds,
+        )
+      ) {
+        return ignoredResult;
+      }
       return { attempted: true, updated: patch.updates.length };
     } catch (error) {
       if (isChatAbortError(error)) throw error;
@@ -18967,6 +19193,32 @@ export function App() {
         updated: 0,
         error: error instanceof Error ? error.message : "状态栏更新失败。",
       };
+    }
+  };
+
+  const runCancellableStatusBarUpdate = async (
+    options: Omit<Parameters<typeof updateStatusBarAfterAssistant>[0], "signal">,
+  ) => {
+    if (activeChatAbortControllerRef.current) {
+      return {
+        attempted: true,
+        updated: 0,
+        error: "另一个生成或状态更新任务仍在运行。",
+      } as const;
+    }
+    const reducerController = new AbortController();
+    activeChatAbortControllerRef.current = reducerController;
+    setChatGenerationState("running");
+    try {
+      return await updateStatusBarAfterAssistant({
+        ...options,
+        signal: reducerController.signal,
+      });
+    } finally {
+      if (activeChatAbortControllerRef.current === reducerController) {
+        activeChatAbortControllerRef.current = null;
+        setChatGenerationState("idle");
+      }
     }
   };
 
@@ -18992,6 +19244,7 @@ export function App() {
       multiAgentSubPersonaIds?: string[];
       multiAgentTaskGoal?: string;
       generationAfterCommands?: boolean;
+      requestSessionId?: string;
       continuationMessageId?: string;
       dialogueRewriteMessageId?: string;
       localRewriteMessageId?: string;
@@ -19007,6 +19260,7 @@ export function App() {
       setChatStatus({ status: "error", message: "续写、重写对话和局部重写不能同时执行。" });
       return null;
     }
+    const requestSessionId = options.requestSessionId || activeChatSessionIdRef.current;
     const continuationTargetMessage = options.continuationMessageId
       ? nextMessages.find(
           (message) =>
@@ -19312,7 +19566,7 @@ export function App() {
         ? buildHeartbeatSystemPrompt(activeChatSession?.heartbeat)
         : "";
       const statusBarContextPrompt = buildStatusBarContextPrompt(
-        getSessionStatusBarState(activeChatSessionIdRef.current),
+        getSessionStatusBarState(requestSessionId),
       );
       const worldBookSystemPrompt = buildWorldBookPrompt(
         filterPromptTemplateSpecialEntries(worldBooks, promptTemplateEnabled),
@@ -20742,6 +20996,53 @@ export function App() {
           finalAssistantMessage.id,
         );
       }
+      if (continuationTargetMessage || dialogueRewriteTargetMessage || localRewriteTargetMessage) {
+        const invalidatedMessages = invalidateStatusBarPatchesForSourceMessage(
+          chatMessagesRef.current,
+          finalAssistantMessage.id,
+        );
+        commitActiveSessionMessagesAndStatusBar(
+          requestSessionId,
+          invalidatedMessages,
+          (current) => rebuildStatusBarStateFromMessages(current, invalidatedMessages),
+        );
+        const currentAssistantMessage = chatMessagesRef.current.find(
+          (message) => message.id === finalAssistantMessage.id,
+        );
+        const latestUserMessage = [...nextMessages]
+          .reverse()
+          .find((message) => message.role === "user");
+        if (currentAssistantMessage?.content.trim()) {
+          const statusBarResult = await updateStatusBarAfterAssistant({
+            sessionId: requestSessionId,
+            assistantMessageId: currentAssistantMessage.id,
+            sourceMessageIds: latestUserMessage ? [latestUserMessage.id] : [],
+            latestUser: latestUserMessage?.content ?? "",
+            finalAssistant: currentAssistantMessage.content,
+            requestProvider,
+            requestModelId,
+            signal: abortSignal,
+          });
+          if (
+            statusBarResult.attempted &&
+            activeChatSessionIdRef.current === requestSessionId
+          ) {
+            setChatStatus({
+              status: statusBarResult.error ? "warning" : "success",
+              message: statusBarResult.error
+                ? `内容已更新，但状态栏未更新：${statusBarResult.error}`
+                : statusBarResult.updated > 0
+                  ? `内容与状态栏已更新 ${statusBarResult.updated} 项。`
+                  : "内容已更新，状态栏无变化。",
+            });
+          }
+        }
+        return (
+          chatMessagesRef.current.find(
+            (message) => message.id === finalAssistantMessage.id,
+          ) ?? finalAssistantMessage
+        );
+      }
       return finalAssistantMessage;
     } catch (error) {
       if (continuationTargetMessage) {
@@ -20870,11 +21171,12 @@ export function App() {
     initialMessages: ChatMessage[],
     requestSender: ChatSenderIdentity,
     triggerContent: string,
-  ) => {
+    requestSessionId: string,
+  ): Promise<MultiAgentResponseResult | null> => {
     const configurationError = getMultiAgentConfigurationError();
     if (configurationError) {
       setChatStatus({ status: "error", message: configurationError });
-      return false;
+      return null;
     }
 
     if (multiAgentWorkflow === "supervisor" && multiAgentPrimaryPersona) {
@@ -20893,24 +21195,30 @@ export function App() {
           multiAgentSubPersonaIds,
           multiAgentTaskGoal: triggerContent,
           generationAfterCommands: false,
+          requestSessionId,
           exposeHeartbeatTools: shouldExposeHeartbeatTools(triggerContent),
           statusMessage: `${multiAgentPrimaryPersona.name} 正在分析主任务并安排协作...`,
           streamingStatusMessage: `${multiAgentPrimaryPersona.name} 正在汇总最终结果...`,
           successMessage: `${multiAgentPrimaryPersona.name} 已完成主任务验收与答复。`,
         },
       );
-      if (!assistantMessage) return false;
+      if (!assistantMessage) return null;
       setChatStatus({
         status: "success",
         message: assistantMessage.choiceRequest
           ? "主 Agent 正在等待你的选择。"
           : "主 Agent 已完成协作与最终验收。",
       });
-      return true;
+      return {
+        assistantMessages: [assistantMessage],
+        finalMessage: assistantMessage,
+        completed: true,
+      };
     }
 
     pendingMultiAgentEndRef.current = null;
     let accumulatedMessages = initialMessages;
+    const assistantMessages: ChatMessage[] = [];
     const totalReplies = multiAgentPersonas.length * multiAgentRounds;
 
     for (let roundIndex = 0; roundIndex < multiAgentRounds; roundIndex += 1) {
@@ -20935,6 +21243,7 @@ export function App() {
             multiAgentAutoStopEnabled,
             multiAgentStopCondition,
             generationAfterCommands: false,
+            requestSessionId,
             exposeHeartbeatTools:
               completedBefore === totalReplies - 1 &&
               shouldExposeHeartbeatTools(triggerContent),
@@ -20946,13 +21255,21 @@ export function App() {
 
         if (!assistantMessage) {
           pendingMultiAgentEndRef.current = null;
-          return false;
+          const finalMessage = assistantMessages.at(-1);
+          return finalMessage
+            ? { assistantMessages, finalMessage, completed: false }
+            : null;
         }
+        assistantMessages.push(assistantMessage);
         accumulatedMessages = [...accumulatedMessages, assistantMessage];
         if (assistantMessage.choiceRequest) {
           pendingMultiAgentEndRef.current = null;
           setChatStatus({ status: "success", message: "AI 正在等待你的选择。" });
-          return true;
+          return {
+            assistantMessages,
+            finalMessage: assistantMessage,
+            completed: true,
+          };
         }
         const earlyEndRequest = pendingMultiAgentEndRef.current as {
           reason: string;
@@ -20964,7 +21281,11 @@ export function App() {
             status: "success",
             message: "多 Agent 对话已结束。",
           });
-          return true;
+          return {
+            assistantMessages,
+            finalMessage: assistantMessage,
+            completed: true,
+          };
         }
       }
     }
@@ -20974,7 +21295,74 @@ export function App() {
       status: "success",
       message: `${multiAgentPersonas.length} 个 Agent 已完成 ${multiAgentRounds} 轮、共 ${totalReplies} 次回复。`,
     });
-    return true;
+    const finalMessage = assistantMessages.at(-1);
+    return finalMessage
+      ? { assistantMessages, finalMessage, completed: true }
+      : null;
+  };
+
+  const updateStatusBarAfterMultiAgentResponses = async (
+    sessionId: string,
+    sourceUserMessageId: string,
+    latestUser: string,
+    result: MultiAgentResponseResult,
+  ) => {
+    const currentMessagesById = new Map(
+      getMessagesForSession(sessionId).map((message) => [message.id, message]),
+    );
+    const currentAssistantMessages = result.assistantMessages
+      .map((message) => currentMessagesById.get(message.id))
+      .filter(
+        (message): message is ChatMessage =>
+          message?.role === "assistant" && Boolean(message.content.trim()),
+      );
+    const finalMessage = currentMessagesById.get(result.finalMessage.id);
+    if (!finalMessage || currentAssistantMessages.length === 0) {
+      return {
+        attempted: true,
+        updated: 0,
+        error: "本轮多 Agent 消息已变化，状态栏更新已安全忽略。",
+      } as const;
+    }
+    const candidatePersonaIds = Array.from(
+      new Set([
+        ...currentAssistantMessages
+          .slice()
+          .reverse()
+          .flatMap((message) =>
+            message.sender?.kind === "persona" && message.sender.personaId
+              ? [message.sender.personaId]
+              : [],
+          ),
+        ...(multiAgentPrimaryPersona ? [multiAgentPrimaryPersona.id] : []),
+      ]),
+    );
+    const reducerConfig = candidatePersonaIds
+      .map((personaId) => getMultiAgentRequestConfig(personaId))
+      .find(
+        (config) =>
+          config.provider &&
+          config.modelId &&
+          !isImageGenerationModelId(config.modelId),
+      );
+    if (!reducerConfig?.provider || !reducerConfig.modelId) {
+      return { attempted: false, updated: 0 } as const;
+    }
+    return runCancellableStatusBarUpdate({
+      sessionId,
+      assistantMessageId: finalMessage.id,
+      latestUser,
+      finalAssistant: currentAssistantMessages
+        .map((message) => message.content.trim())
+        .filter(Boolean)
+        .join("\n\n---\n\n"),
+      requestProvider: reducerConfig.provider,
+      requestModelId: reducerConfig.modelId,
+      sourceMessageIds: [
+        sourceUserMessageId,
+        ...currentAssistantMessages.map((message) => message.id),
+      ],
+    });
   };
 
   const sendMultiAgentMessage = async (
@@ -21007,41 +21395,34 @@ export function App() {
       const prepared = await runTavernPreSendHooks(userMessage, content);
       accumulatedMessages = prepared.messages;
       activeUserRequestTextRef.current = prepared.content;
-      const completed = await runMultiAgentResponses(
+      const result = await runMultiAgentResponses(
         accumulatedMessages,
         currentChatSender,
         prepared.content,
+        requestSessionId,
       );
-      if (!completed) return;
-      const lastAssistant = [...chatMessagesRef.current]
-        .reverse()
-        .find((message) => message.role === "assistant" && message.content.trim());
-      const responderPersonaId =
-        lastAssistant?.sender?.kind === "persona"
-          ? lastAssistant.sender.personaId
-          : multiAgentPrimaryPersona?.id;
-      const reducerConfig = responderPersonaId
-        ? getMultiAgentRequestConfig(responderPersonaId)
-        : null;
-      if (lastAssistant && reducerConfig?.provider && reducerConfig.modelId) {
-        const statusBarResult = await updateStatusBarAfterAssistant({
-          sessionId: requestSessionId,
-          assistantMessageId: lastAssistant.id,
-          latestUser: prepared.content,
-          finalAssistant: lastAssistant.content,
-          requestProvider: reducerConfig.provider,
-          requestModelId: reducerConfig.modelId,
+      if (!result) return;
+      const statusBarResult = await updateStatusBarAfterMultiAgentResponses(
+        requestSessionId,
+        userMessage.id,
+        prepared.content,
+        result,
+      );
+      if (
+        statusBarResult.attempted &&
+        activeChatSessionIdRef.current === requestSessionId
+      ) {
+        const completionLabel = result.completed
+          ? "多 Agent 回复已完成"
+          : "多 Agent 运行已停止，已完成回复已保留";
+        setChatStatus({
+          status: statusBarResult.error ? "warning" : "success",
+          message: statusBarResult.error
+            ? `${completionLabel}，但状态栏未更新：${statusBarResult.error}`
+            : statusBarResult.updated > 0
+              ? `${completionLabel}，状态栏已更新 ${statusBarResult.updated} 项。`
+              : `${completionLabel}，状态栏无变化。`,
         });
-        if (statusBarResult.attempted) {
-          setChatStatus({
-            status: statusBarResult.error ? "warning" : "success",
-            message: statusBarResult.error
-              ? `多 Agent 回复已完成，但状态栏未更新：${statusBarResult.error}`
-              : statusBarResult.updated > 0
-                ? `多 Agent 回复已完成，状态栏已更新 ${statusBarResult.updated} 项。`
-                : "多 Agent 回复已完成，状态栏无变化。",
-          });
-        }
       }
     } catch (error) {
       if (isChatAbortError(error)) {
@@ -21701,7 +22082,7 @@ export function App() {
         ? buildHeartbeatSystemPrompt(activeChatSession?.heartbeat)
         : "";
       const statusBarContextPrompt = buildStatusBarContextPrompt(
-        getSessionStatusBarState(activeChatSessionIdRef.current),
+        getSessionStatusBarState(requestSessionId),
       );
       const worldBookSystemPrompt = buildWorldBookPrompt(
         filterPromptTemplateSpecialEntries(worldBooks, promptTemplateEnabled),
@@ -22274,22 +22655,25 @@ export function App() {
       const statusBarResult = await updateStatusBarAfterAssistant({
         sessionId: requestSessionId,
         assistantMessageId,
+        sourceMessageIds: [userMessage.id],
         latestUser: effectiveContent,
         finalAssistant: finalAssistantForStatus,
         requestProvider: chatProvider,
         requestModelId,
         signal: abortSignal,
       });
-      setChatStatus({
-        status: statusBarResult.error ? "warning" : "success",
-        message: statusBarResult.error
-          ? `回复已生成，但状态栏未更新：${statusBarResult.error}`
-          : assistantChoiceRequest
-            ? "AI 正在等待你的选择。"
-            : statusBarResult.updated > 0
-              ? `回复已生成，状态栏已更新 ${statusBarResult.updated} 项。`
-              : "回复已生成。",
-      });
+      if (activeChatSessionIdRef.current === requestSessionId) {
+        setChatStatus({
+          status: statusBarResult.error ? "warning" : "success",
+          message: statusBarResult.error
+            ? `回复已生成，但状态栏未更新：${statusBarResult.error}`
+            : assistantChoiceRequest
+              ? "AI 正在等待你的选择。"
+              : statusBarResult.updated > 0
+                ? `回复已生成，状态栏已更新 ${statusBarResult.updated} 项。`
+                : "回复已生成。",
+        });
+      }
     } catch (error) {
       if (isChatAbortError(error)) {
         if (streamingAssistantInserted && assistantMessageId) {
@@ -22516,12 +22900,53 @@ export function App() {
     commitChatMessages(nextMessages);
 
     try {
-      await generateAssistantForMessages(nextMessages, { kind: "system" }, {
+      const assistantMessage = await generateAssistantForMessages(nextMessages, { kind: "system" }, {
         statusMessage: "心跳检查正在运行...",
         streamingStatusMessage: "心跳检查正在流式生成回复...",
         successMessage: "心跳检查已完成。",
         exposeHeartbeatTools: true,
+        requestSessionId: sessionId,
       });
+      const currentAssistantMessage = assistantMessage
+        ? getMessagesForSession(sessionId).find(
+            (message) => message.id === assistantMessage.id,
+          )
+        : undefined;
+      if (currentAssistantMessage?.content.trim()) {
+        const statusBarResult = await runCancellableStatusBarUpdate({
+          sessionId,
+          assistantMessageId: currentAssistantMessage.id,
+          sourceMessageIds: [heartbeatMessage.id],
+          latestUser: heartbeatMessage.content,
+          finalAssistant: currentAssistantMessage.content,
+          requestProvider: chatProvider,
+          requestModelId: getEffectiveProviderModelId(chatProvider),
+        });
+        if (
+          statusBarResult.attempted &&
+          activeChatSessionIdRef.current === sessionId
+        ) {
+          setChatStatus({
+            status: statusBarResult.error ? "warning" : "success",
+            message: statusBarResult.error
+              ? `心跳检查已完成，但状态栏未更新：${statusBarResult.error}`
+              : statusBarResult.updated > 0
+                ? `心跳检查已完成，状态栏已更新 ${statusBarResult.updated} 项。`
+                : "心跳检查已完成，状态栏无变化。",
+          });
+        }
+      }
+    } catch (error) {
+      if (isChatAbortError(error)) {
+        if (activeChatSessionIdRef.current === sessionId) {
+          setChatStatus({ status: "success", message: "已停止心跳检查。" });
+        }
+      } else if (activeChatSessionIdRef.current === sessionId) {
+        setChatStatus({
+          status: "error",
+          message: error instanceof Error ? error.message : "心跳状态更新失败。",
+        });
+      }
     } finally {
       finalizeHeartbeatRun(sessionId);
       const pendingUpdate = pendingHeartbeatUpdateRef.current;
@@ -22751,19 +23176,30 @@ export function App() {
 
     const messageId = editingChatMessage.messageId;
     const messageIndex = chatMessagesRef.current.findIndex((message) => message.id === messageId);
-    commitChatMessages((current) =>
-      current.map((message) => {
-        if (message.id !== messageId) return message;
-        const updatedMessage = { ...message, content };
-        const dialoguePlaceholderCount = countDialoguePlaceholders(content);
-        return dialoguePlaceholderCount > 0
-          ? {
-              ...updatedMessage,
-              dialogueRewritePending: true,
-              dialoguePlaceholderCount,
-            }
-          : withoutDialogueRewriteMetadata(updatedMessage);
-      }),
+    const nextMessages = chatMessagesRef.current.map((message) => {
+      const patchSourceMessageIds = message.extra?.statusBarPatchSourceMessageIds;
+      const messageWithoutDependentPatch =
+        Array.isArray(patchSourceMessageIds) && patchSourceMessageIds.includes(messageId)
+          ? removeStatusBarPatchFromMessage(message)
+          : message;
+      if (message.id !== messageId) return messageWithoutDependentPatch;
+      const updatedMessage = removeStatusBarPatchFromMessage({
+        ...messageWithoutDependentPatch,
+        content,
+      });
+      const dialoguePlaceholderCount = countDialoguePlaceholders(content);
+      return dialoguePlaceholderCount > 0
+        ? {
+            ...updatedMessage,
+            dialogueRewritePending: true,
+            dialoguePlaceholderCount,
+          }
+        : withoutDialogueRewriteMetadata(updatedMessage);
+    });
+    commitActiveSessionMessagesAndStatusBar(
+      activeChatSessionIdRef.current,
+      nextMessages,
+      (current) => rebuildStatusBarStateFromMessages(current, nextMessages),
     );
     renderedEditingDraftRef.current = null;
     setEditingChatMessage(null);
@@ -22786,14 +23222,24 @@ export function App() {
 
     const messageId = editingChatMessage.messageId;
     const messageIndex = chatMessagesRef.current.findIndex((message) => message.id === messageId);
-    commitChatMessages((current) =>
-      current.map((message) =>
-        message.id === messageId ? { ...message, content } : message,
-      ),
+    const nextMessages = chatMessagesRef.current.map((message) => {
+      const patchSourceMessageIds = message.extra?.statusBarPatchSourceMessageIds;
+      const messageWithoutDependentPatch =
+        Array.isArray(patchSourceMessageIds) && patchSourceMessageIds.includes(messageId)
+          ? removeStatusBarPatchFromMessage(message)
+          : message;
+      return message.id === messageId
+        ? { ...messageWithoutDependentPatch, content }
+        : messageWithoutDependentPatch;
+    });
+    commitActiveSessionMessagesAndStatusBar(
+      activeChatSessionIdRef.current,
+      nextMessages,
+      (current) => rebuildStatusBarStateFromMessages(current, nextMessages),
     );
     renderedEditingDraftRef.current = null;
     setEditingChatMessage(null);
-    setChatStatus({ status: "success", message: "用户消息已保存，后续对话未改变。" });
+    setChatStatus({ status: "success", message: "用户消息已保存，关联状态已重新计算。" });
     if (messageIndex >= 0) {
       emitTavernEvent(TAVERN_EVENTS.MESSAGE_EDITED, messageIndex);
       emitTavernEvent(TAVERN_EVENTS.MESSAGE_UPDATED, messageIndex);
@@ -22807,6 +23253,7 @@ export function App() {
   const resendEditedUserMessage = async () => {
     if (!editingChatMessage || chatStatus.status === "loading") return;
 
+    const requestSessionId = activeChatSessionIdRef.current;
     const content = getEditingChatMessageContent().trim();
     if (!content) return;
 
@@ -22832,7 +23279,9 @@ export function App() {
     }
 
     setChatSender(requestSender);
-    commitChatMessages(nextMessages);
+    commitActiveSessionMessagesAndStatusBar(requestSessionId, nextMessages, (current) =>
+      rebuildStatusBarStateFromMessages(current, nextMessages),
+    );
     renderedEditingDraftRef.current = null;
     setEditingChatMessage(null);
     emitTavernEvent(TAVERN_EVENTS.MESSAGE_EDITED, messageIndex);
@@ -22840,10 +23289,83 @@ export function App() {
       TAVERN_EVENTS.CHAT_CHANGED,
       activeChatSessionIdRef.current,
     );
-    if (chatMode === "multi") {
-      await runMultiAgentResponses(nextMessages, requestSender, content);
-    } else {
-      await generateAssistantForMessages(nextMessages, requestSender);
+    try {
+      if (chatMode === "multi") {
+        const result = await runMultiAgentResponses(
+          nextMessages,
+          requestSender,
+          content,
+          requestSessionId,
+        );
+        if (!result) return;
+        const statusBarResult = await updateStatusBarAfterMultiAgentResponses(
+          requestSessionId,
+          editedMessage.id,
+          content,
+          result,
+        );
+        if (
+          statusBarResult.attempted &&
+          activeChatSessionIdRef.current === requestSessionId
+        ) {
+          const completionLabel = result.completed
+            ? "回复已重新生成"
+            : "生成已停止，已完成回复已保留";
+          setChatStatus({
+            status: statusBarResult.error ? "warning" : "success",
+            message: statusBarResult.error
+              ? `${completionLabel}，但状态栏未更新：${statusBarResult.error}`
+              : statusBarResult.updated > 0
+                ? `${completionLabel}，状态栏已更新 ${statusBarResult.updated} 项。`
+                : `${completionLabel}，状态栏无变化。`,
+          });
+        }
+      } else {
+        const assistantMessage = await generateAssistantForMessages(nextMessages, requestSender, {
+          requestSessionId,
+        });
+        if (!assistantMessage) return;
+        const currentAssistantMessage = getMessagesForSession(requestSessionId).find(
+          (message) => message.id === assistantMessage.id,
+        );
+        if (!currentAssistantMessage?.content.trim()) return;
+        const requestModelId = getEffectiveProviderModelId(chatProvider);
+        const statusBarResult = await runCancellableStatusBarUpdate({
+          sessionId: requestSessionId,
+          assistantMessageId: currentAssistantMessage.id,
+          sourceMessageIds: [editedMessage.id],
+          latestUser: content,
+          finalAssistant: currentAssistantMessage.content,
+          requestProvider: chatProvider,
+          requestModelId,
+        });
+        if (
+          statusBarResult.attempted &&
+          activeChatSessionIdRef.current === requestSessionId
+        ) {
+          setChatStatus({
+            status: statusBarResult.error ? "warning" : "success",
+            message: statusBarResult.error
+              ? `回复已重新生成，但状态栏未更新：${statusBarResult.error}`
+              : statusBarResult.updated > 0
+                ? `回复已重新生成，状态栏已更新 ${statusBarResult.updated} 项。`
+                : "回复已重新生成，状态栏无变化。",
+          });
+        }
+      }
+    } catch (error) {
+      if (isChatAbortError(error)) {
+        if (activeChatSessionIdRef.current === requestSessionId) {
+          setChatStatus({ status: "success", message: "已停止输出。" });
+        }
+        return;
+      }
+      if (activeChatSessionIdRef.current === requestSessionId) {
+        setChatStatus({
+          status: "error",
+          message: error instanceof Error ? error.message : "状态栏更新失败。",
+        });
+      }
     }
   };
 
@@ -28557,7 +29079,7 @@ export function App() {
                 aria-label={chatStatusSidebarCollapsed ? "展开右侧状态栏" : "隐藏右侧状态栏"}
                 aria-pressed={!chatStatusSidebarCollapsed}
                 onClick={() =>
-                  setChatStatusSidebarCollapsed((current) => !current)
+                  changeChatStatusSidebarCollapsed(!chatStatusSidebarCollapsed)
                 }
               >
                 {chatStatusSidebarCollapsed ? (
@@ -28697,7 +29219,12 @@ export function App() {
                           activeChatSession?.roleplayGreetingIndex ?? 0,
                         )
                       : null;
-                  setChatMessages(greeting ? [greeting] : []);
+                  const nextMessages = greeting ? [greeting] : [];
+                  commitActiveSessionMessagesAndStatusBar(
+                    activeChatSessionIdRef.current,
+                    nextMessages,
+                    (current) => rebuildStatusBarStateFromMessages(current, nextMessages),
+                  );
                   setChatStatus({ status: "idle", message: "" });
                 }}
               >
@@ -29968,7 +30495,7 @@ export function App() {
         <StatusBarSidebar
           state={activeStatusBarState}
           collapsed={chatStatusSidebarCollapsed}
-          onCollapsedChange={setChatStatusSidebarCollapsed}
+          onCollapsedChange={changeChatStatusSidebarCollapsed}
           onStateChange={updateActiveStatusBarState}
           onClearValues={clearActiveStatusBarValues}
         />
