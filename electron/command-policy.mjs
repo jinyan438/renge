@@ -75,3 +75,21 @@ export function looksLikePackageManagerOutput(command, args = []) {
     .replace(/[:：]+$/, "");
   return packageManagerOutputTokens.has(firstArg);
 }
+
+export function createCommandApprovalSessionStore() {
+  const approvedSessionIds = new Set();
+  const normalizeSessionId = (sessionId) => String(sessionId ?? "").trim();
+
+  return {
+    approve(sessionId) {
+      const normalizedSessionId = normalizeSessionId(sessionId);
+      if (!normalizedSessionId) return false;
+      approvedSessionIds.add(normalizedSessionId);
+      return true;
+    },
+    has(sessionId) {
+      const normalizedSessionId = normalizeSessionId(sessionId);
+      return Boolean(normalizedSessionId) && approvedSessionIds.has(normalizedSessionId);
+    },
+  };
+}
