@@ -10052,13 +10052,13 @@ const localFileToolDefinitions = [
     type: "function",
     function: {
       name: "local_run_command",
-      description: "在当前工作区运行命令。白名单命令直接执行，白名单外命令会请求用户批准后通过系统 Shell 执行；开启完全访问后无需审批。仅 Electron 桌面版支持。",
+      description: "在当前工作区运行命令。白名单命令直接执行，白名单外命令会在执行前请求用户批准；开启完全访问后无需审批。command 只能填写实际命令，不能填写 npm error、日志输出或解释文字。仅 Electron 桌面版支持。",
       parameters: {
         type: "object",
         properties: {
           command: {
             type: "string",
-            description: "命令名或完整命令行。npm/pnpm/yarn/node/git 等白名单命令可直接执行；其他命令和高风险 git 子命令会请求用户授权，完全访问开启时则直接执行。",
+            description: "命令名或完整命令行，不要用额外引号包裹整条命令，也不要填写命令输出、npm error 日志或解释文字。npm/pnpm/yarn/node/git 等白名单命令可直接执行；其他命令和高风险 git 子命令会在执行前请求用户授权，完全访问开启时则直接执行。",
           },
           args: {
             type: "array",

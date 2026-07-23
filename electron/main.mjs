@@ -6,6 +6,11 @@ import { dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { startRengeServer } from "../server.mjs";
+import {
+  looksLikePackageManagerOutput,
+  normalizeCommandLine,
+  splitCommandLine,
+} from "./command-policy.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const appIconPath = join(
@@ -36,6 +41,7 @@ const highRiskGitCommands = new Set([
   "rm",
   "switch",
 ]);
+const whitelistedCommandNames = ["npm", "pnpm", "yarn", "node", "git"];
 
 function getPersistentDataDir() {
   if (process.env.RENGE_DATA_DIR) return resolve(process.env.RENGE_DATA_DIR);
@@ -159,18 +165,6 @@ function getWhitelistedCommandExecutable(command) {
   return Object.prototype.hasOwnProperty.call(executableMap, normalizedCommand)
     ? executableMap[normalizedCommand]
     : null;
-}
-
-function splitCommandLine(commandLine) {
-  const tokens = [];
-  const pattern = /"([^"]*)"|'([^']*)'|(\S+)/g;
-  let match;
-
-  while ((match = pattern.exec(String(commandLine ?? "")))) {
-    tokens.push(match[1] ?? match[2] ?? match[3]);
-  }
-
-  return tokens;
 }
 
 function isLikelyTextPath(path) {
@@ -518,7 +512,7 @@ async function validateWorkspaceCommand(command, args, alreadyAuthorized = false
 }
 
 async function runWorkspaceCommand({ command, args = [], timeoutMs = 60000 }) {
-  const rawCommandLine = String(command ?? "").trim();
+  const rawCommandLine = normalizeCommandLine(command, whitelistedCommandNames);
   const hasExplicitArgs = Array.isArray(args) && args.length > 0;
   const commandTokens = hasExplicitArgs
     ? [rawCommandLine, ...args.map((arg) => String(arg))]
@@ -527,7 +521,11 @@ async function runWorkspaceCommand({ command, args = [], timeoutMs = 60000 }) {
   if (!rawCommand) throw new Error("command 不能为空");
 
   const whitelistedExecutable = getWhitelistedCommandExecutable(rawCommand);
-  const requiresShell = !whitelistedExecutable || (!hasExplicitArgs && hasShellSyntax(rawCommandLine));
+  const resemblesCommandOutput = looksLikePackageManagerOutput(rawCommand, commandTokens);
+  const requiresShell =
+    !whitelistedExecutable ||
+    resemblesCommandOutput ||
+    (!hasExplicitArgs && hasShellSyntax(rawCommandLine));
   const shellCommandLine = hasExplicitArgs
     ? joinShellCommand(rawCommand, commandTokens)
     : rawCommandLine;
