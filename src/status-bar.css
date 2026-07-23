@@ -688,6 +688,99 @@
   border-right: 1px solid rgba(255, 255, 255, 0.075);
 }
 
+.status-bar-preset-manager {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--status-accent) 22%, rgba(255, 255, 255, 0.075));
+  border-radius: 13px;
+  background:
+    linear-gradient(120deg, color-mix(in srgb, var(--status-accent) 7%, transparent), transparent 55%),
+    rgba(255, 255, 255, 0.025);
+}
+
+.status-bar-preset-heading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.status-bar-preset-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.status-bar-preset-heading strong {
+  color: #f3f4f7;
+  font-size: 13px;
+}
+
+.status-bar-preset-heading span,
+.status-bar-preset-heading small {
+  color: #858b98;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.status-bar-preset-heading small {
+  flex: 0 0 auto;
+}
+
+.status-bar-preset-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.status-bar-preset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.status-bar-preset-actions button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.105);
+  border-radius: 8px;
+  color: #d6d9e1;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.status-bar-preset-actions button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--status-accent) 42%, transparent);
+  color: #ffffff;
+  background: color-mix(in srgb, var(--status-accent) 10%, transparent);
+}
+
+.status-bar-preset-actions button.danger:hover:not(:disabled) {
+  border-color: rgba(255, 105, 120, 0.4);
+  color: #ffabb4;
+  background: rgba(255, 91, 106, 0.1);
+}
+
+.status-bar-preset-actions button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.status-bar-preset-feedback {
+  margin: 0;
+  color: color-mix(in srgb, var(--status-accent) 72%, #ffffff);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
 .status-bar-general-fields {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(190px, 0.55fr);
@@ -1204,6 +1297,18 @@
   .status-bar-general-fields {
     grid-template-columns: 1fr;
     padding: 11px;
+  }
+
+  .status-bar-preset-manager {
+    padding: 11px;
+  }
+
+  .status-bar-preset-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .status-bar-preset-actions button {
+    flex: 1 1 calc(50% - 3px);
   }
 
   .status-bar-item-toolbar {
