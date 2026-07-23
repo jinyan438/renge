@@ -45,6 +45,14 @@ type StatusBarCssProperties = CSSProperties & {
 };
 
 const DEFAULT_ACCENT_COLOR = "#ff758c";
+const EDITOR_FOCUSABLE_SELECTOR = [
+  "button:not([disabled])",
+  "input:not([disabled]):not([type='hidden'])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "a[href]",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
 
 const STATUS_TYPE_OPTIONS: Array<{ value: StatusBarItemType; label: string }> = [
   { value: "grid", label: "方块数据" },
@@ -387,6 +395,10 @@ export function StatusBarSidebar({
   const [showValidation, setShowValidation] = useState(false);
   const [valuesClearedInEditor, setValuesClearedInEditor] = useState(false);
   const latestStateRef = useRef(state);
+  const editorModalRef = useRef<HTMLElement | null>(null);
+  const editorInitialFocusRef = useRef<HTMLInputElement | null>(null);
+  const editorTriggerRef = useRef<HTMLElement | null>(null);
+  const editorFallbackFocusRef = useRef<HTMLButtonElement | null>(null);
   latestStateRef.current = state;
 
   const validationErrors = useMemo(() => validateStatusItems(draft.items), [draft.items]);
@@ -394,18 +406,95 @@ export function StatusBarSidebar({
     "--status-accent": getSafeAccentColor(state.accentColor),
   } as StatusBarCssProperties;
 
+  const closeEditor = () => setEditorOpen(false);
+
   useEffect(() => {
-    if (!editorOpen) return;
+    if (!editorOpen || typeof document === "undefined") return;
+    const modal = editorModalRef.current;
+    const appRoot = document.getElementById("root");
+    const previousRootInert = appRoot?.inert ?? false;
+    const previousRootHadInertAttribute = appRoot?.hasAttribute("inert") ?? false;
+    const previousRootAriaHidden = appRoot?.getAttribute("aria-hidden") ?? null;
+    const previousBodyOverflow = document.body.style.overflow;
+    if (appRoot) {
+      appRoot.inert = true;
+      appRoot.setAttribute("inert", "");
+    }
+    document.body.style.overflow = "hidden";
+
+    const focusFrame = window.requestAnimationFrame(() => {
+      editorInitialFocusRef.current?.focus();
+      appRoot?.setAttribute("aria-hidden", "true");
+    });
+
+    const getFocusableElements = () =>
+      modal
+        ? Array.from(modal.querySelectorAll<HTMLElement>(EDITOR_FOCUSABLE_SELECTOR)).filter(
+            (element) => element.getClientRects().length > 0,
+          )
+        : [];
+
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      setEditorOpen(false);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeEditor();
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const focusableElements = getFocusableElements();
+      if (focusableElements.length === 0) {
+        event.preventDefault();
+        modal?.focus();
+        return;
+      }
+
+      const firstElement = focusableElements[0];
+      const lastElement = focusableElements[focusableElements.length - 1];
+      const activeElement = document.activeElement;
+      if (event.shiftKey) {
+        if (activeElement === firstElement || !modal?.contains(activeElement)) {
+          event.preventDefault();
+          lastElement.focus();
+        }
+        return;
+      }
+      if (activeElement === lastElement || !modal?.contains(activeElement)) {
+        event.preventDefault();
+        firstElement.focus();
+      }
     };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener("keydown", handleKeyDown, true);
+      if (appRoot) {
+        appRoot.inert = previousRootInert;
+        if (previousRootHadInertAttribute) appRoot.setAttribute("inert", "");
+        else appRoot.removeAttribute("inert");
+        if (previousRootAriaHidden === null) appRoot.removeAttribute("aria-hidden");
+        else appRoot.setAttribute("aria-hidden", previousRootAriaHidden);
+      }
+      document.body.style.overflow = previousBodyOverflow;
+
+      const trigger = editorTriggerRef.current;
+      const fallbackTrigger = editorFallbackFocusRef.current;
+      editorTriggerRef.current = null;
+      window.requestAnimationFrame(() => {
+        if (trigger?.isConnected) {
+          trigger.focus();
+        } else if (fallbackTrigger?.isConnected) {
+          fallbackTrigger.focus();
+        }
+      });
+    };
   }, [editorOpen]);
 
-  const openEditor = () => {
+  const openEditor = (event?: MouseEvent<HTMLButtonElement>) => {
+    const activeElement = typeof document !== "undefined" ? document.activeElement : null;
+    editorTriggerRef.current =
+      event?.currentTarget ?? (activeElement instanceof HTMLElement ? activeElement : null);
     setDraft(cloneStatusBarState(state));
     setShowValidation(false);
     setValuesClearedInEditor(false);
@@ -528,7 +617,7 @@ export function StatusBarSidebar({
       latestState.enabled,
     );
     onStateChange(nextState);
-    setEditorOpen(false);
+    closeEditor();
   };
 
   const editorPreviewState = useMemo(
@@ -545,14 +634,16 @@ export function StatusBarSidebar({
           <div
             className="status-bar-editor-backdrop"
             onMouseDown={(event: MouseEvent<HTMLDivElement>) => {
-              if (event.target === event.currentTarget) setEditorOpen(false);
+              if (event.target === event.currentTarget) closeEditor();
             }}
           >
             <section
+              ref={editorModalRef}
               aria-labelledby="status-bar-editor-title"
               aria-modal="true"
               className="status-bar-editor-modal"
               role="dialog"
+              tabIndex={-1}
               style={{
                 "--status-accent": getSafeAccentColor(draft.accentColor),
               } as StatusBarCssProperties}
@@ -566,7 +657,7 @@ export function StatusBarSidebar({
                 <button
                   aria-label="关闭状态栏编辑器"
                   className="status-editor-icon-button"
-                  onClick={() => setEditorOpen(false)}
+                  onClick={closeEditor}
                   type="button"
                 >
                   <X size={19} />
@@ -579,6 +670,7 @@ export function StatusBarSidebar({
                     <label>
                       <span>面板标题</span>
                       <input
+                        ref={editorInitialFocusRef}
                         maxLength={48}
                         onChange={(event) => updateDraft({ title: event.target.value })}
                         placeholder="状态监测终端"
@@ -854,7 +946,7 @@ export function StatusBarSidebar({
                       请修正 {validationErrors.size} 个变量名问题
                     </span>
                   ) : null}
-                  <button onClick={() => setEditorOpen(false)} type="button">
+                  <button onClick={closeEditor} type="button">
                     取消
                   </button>
                   <button className="primary" onClick={saveDraft} type="button">
@@ -877,7 +969,7 @@ export function StatusBarSidebar({
         style={sidebarStyle}
       >
         <button
-          aria-label="展开状态栏"
+          aria-label={`展开状态栏，AI 自动更新${state.enabled ? "已启用" : "已关闭"}`}
           className="status-bar-expand-button"
           onClick={() => onCollapsedChange(false)}
           title="展开状态栏"
@@ -885,7 +977,7 @@ export function StatusBarSidebar({
         >
           <ChevronLeft size={18} />
           <span>状态</span>
-          {state.enabled ? <i aria-label="状态栏已启用" /> : null}
+          {state.enabled ? <i aria-hidden="true" /> : null}
         </button>
         {editorModal}
       </aside>
@@ -893,64 +985,78 @@ export function StatusBarSidebar({
   }
 
   return (
-    <aside aria-label="会话状态栏" className="status-bar-sidebar" style={sidebarStyle}>
-      <header className="status-bar-sidebar-header">
-        <div className="status-bar-sidebar-heading">
-          <span>SESSION STATUS</span>
-          <strong>{state.title.trim() || "状态监测终端"}</strong>
-        </div>
-        <div className="status-bar-sidebar-actions">
-          <label
-            className="status-bar-enable-switch"
-            title={state.enabled ? "关闭 AI 状态更新" : "开启 AI 状态更新"}
-          >
-            <input
-              aria-label="启用状态栏"
-              checked={state.enabled}
-              onChange={(event) =>
-                onStateChange({
-                  ...state,
-                  enabled: event.target.checked,
-                  updatedAt: new Date().toISOString(),
-                })
-              }
-              type="checkbox"
-            />
-            <span aria-hidden="true" />
-          </label>
-          <button aria-label="编辑状态栏" onClick={openEditor} title="编辑状态栏" type="button">
-            <Pencil size={16} />
-          </button>
-          <button
-            aria-label="折叠状态栏"
-            onClick={() => onCollapsedChange(true)}
-            title="折叠状态栏"
-            type="button"
-          >
-            <ChevronRight size={17} />
-          </button>
-        </div>
-      </header>
+    <>
+      <button
+        aria-label="关闭右侧状态栏"
+        className="status-bar-mobile-backdrop"
+        onClick={() => onCollapsedChange(true)}
+        type="button"
+      />
+      <aside aria-label="会话状态栏" className="status-bar-sidebar" style={sidebarStyle}>
+        <header className="status-bar-sidebar-header">
+          <div className="status-bar-sidebar-heading">
+            <span>SESSION STATUS</span>
+            <strong>{state.title.trim() || "状态监测终端"}</strong>
+          </div>
+          <div className="status-bar-sidebar-actions">
+            <label
+              className="status-bar-enable-switch"
+              title={state.enabled ? "关闭 AI 状态更新" : "开启 AI 状态更新"}
+            >
+              <input
+                aria-label="启用状态栏"
+                checked={state.enabled}
+                onChange={(event) =>
+                  onStateChange({
+                    ...state,
+                    enabled: event.target.checked,
+                    updatedAt: new Date().toISOString(),
+                  })
+                }
+                type="checkbox"
+              />
+              <span aria-hidden="true" />
+            </label>
+            <button
+              ref={editorFallbackFocusRef}
+              aria-label="编辑状态栏"
+              onClick={openEditor}
+              title="编辑状态栏"
+              type="button"
+            >
+              <Pencil size={16} />
+            </button>
+            <button
+              aria-label="折叠状态栏"
+              onClick={() => onCollapsedChange(true)}
+              title="折叠状态栏"
+              type="button"
+            >
+              <ChevronRight size={17} />
+            </button>
+          </div>
+        </header>
 
-      <div className="status-bar-sidebar-body">
-        {!state.enabled ? (
-          <button className="status-bar-disabled-callout" onClick={openEditor} type="button">
-            <span>状态栏尚未启用</span>
-            <small>开启后，AI 会在回复完成时更新发生变化的变量。</small>
-          </button>
-        ) : null}
-        <div className={!state.enabled ? "status-bar-preview-disabled" : undefined}>
-          <StatusPanelPreview state={state} />
+        <div className="status-bar-sidebar-body">
+          {!state.enabled ? (
+            <button className="status-bar-disabled-callout" onClick={openEditor} type="button">
+              <span>状态栏尚未启用</span>
+              <small>开启后，AI 会在回复完成时更新发生变化的变量。</small>
+            </button>
+          ) : null}
+          <div className={!state.enabled ? "status-bar-preview-disabled" : undefined}>
+            <StatusPanelPreview state={state} />
+          </div>
         </div>
-      </div>
 
-      <footer className="status-bar-sidebar-footer">
-        <span className={state.enabled ? "is-enabled" : undefined}>
-          {state.enabled ? "AI 自动更新" : "自动更新已关闭"}
-        </span>
-        <time dateTime={state.updatedAt}>{formatUpdatedAt(state.updatedAt)}</time>
-      </footer>
-      {editorModal}
-    </aside>
+        <footer className="status-bar-sidebar-footer">
+          <span className={state.enabled ? "is-enabled" : undefined}>
+            {state.enabled ? "AI 自动更新" : "自动更新已关闭"}
+          </span>
+          <time dateTime={state.updatedAt}>{formatUpdatedAt(state.updatedAt)}</time>
+        </footer>
+        {editorModal}
+      </aside>
+    </>
   );
 }
