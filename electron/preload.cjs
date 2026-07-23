@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld("rengeDesktop", {
   selectWorkspace: () => ipcRenderer.invoke("workspace:select"),
   selectSkillFolder: () => ipcRenderer.invoke("skill:select-folder"),
   restoreWorkspace: (options) => ipcRenderer.invoke("workspace:restore", options),
+  setFullAccess: (options) => ipcRenderer.invoke("workspace:set-full-access", options),
   listFiles: (options) => ipcRenderer.invoke("workspace:list", options),
   readFile: (options) => ipcRenderer.invoke("workspace:read", options),
   readBinaryFile: (options) => ipcRenderer.invoke("workspace:read-binary", options),

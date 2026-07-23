@@ -17,6 +17,7 @@ const execFileAsync = promisify(execFile);
 let mainWindow = null;
 let serverController = null;
 let workspaceRoot = null;
+let workspaceFullAccessEnabled = false;
 let electronRuntimeCacheDir = null;
 let desktopProjectPositionsWriteQueue = Promise.resolve();
 const desktopServerPort = 5191;
@@ -100,7 +101,12 @@ function assertWorkspace() {
 
 function resolveWorkspacePath(inputPath = "") {
   assertWorkspace();
-  const normalizedInput = String(inputPath).replace(/\\/g, "/").replace(/^\/+/, "");
+  const rawInput = String(inputPath ?? "").trim();
+  if (workspaceFullAccessEnabled) {
+    return rawInput ? resolve(workspaceRoot, rawInput) : workspaceRoot;
+  }
+
+  const normalizedInput = rawInput.replace(/\\/g, "/").replace(/^\/+/, "");
   const targetPath = resolve(workspaceRoot, normalizedInput);
   const relativePath = relative(workspaceRoot, targetPath);
 
@@ -140,7 +146,7 @@ async function setWorkspaceRoot(nextWorkspaceRoot) {
   };
 }
 
-function getCommandExecutable(command) {
+function getWhitelistedCommandExecutable(command) {
   const normalizedCommand = String(command ?? "").trim().toLowerCase();
   const executableMap = {
     npm: process.platform === "win32" ? "npm.cmd" : "npm",
@@ -150,11 +156,9 @@ function getCommandExecutable(command) {
     git: getGitExecutable(),
   };
 
-  if (!Object.prototype.hasOwnProperty.call(executableMap, normalizedCommand)) {
-    throw new Error(`命令不在白名单中：${command}`);
-  }
-
-  return executableMap[normalizedCommand];
+  return Object.prototype.hasOwnProperty.call(executableMap, normalizedCommand)
+    ? executableMap[normalizedCommand]
+    : null;
 }
 
 function splitCommandLine(commandLine) {
@@ -179,6 +183,23 @@ function quoteWindowsCommandArg(arg) {
   return `"${value.replace(/"/g, '\\"')}"`;
 }
 
+function quotePosixCommandArg(arg) {
+  const value = String(arg);
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function joinShellCommand(command, args) {
+  const quoteArg = process.platform === "win32" ? quoteWindowsCommandArg : quotePosixCommandArg;
+  return [command, ...args].map(quoteArg).join(" ");
+}
+
+function hasShellSyntax(commandLine) {
+  return process.platform === "win32"
+    ? /(?:&&|\|\||[|<>])/.test(commandLine)
+    : /(?:&&|\|\||[|<>;])/.test(commandLine);
+}
+
 function getWorkspaceCommandInvocation(command, args) {
   if (process.platform !== "win32" || !/\.(cmd|bat)$/i.test(command)) {
     return { command, args };
@@ -201,6 +222,19 @@ async function execWorkspaceFile(command, args, options = {}) {
     maxBuffer: options.maxBuffer ?? 1024 * 1024 * 3,
   });
   return { stdout, stderr };
+}
+
+async function execWorkspaceShell(commandLine, options = {}) {
+  const invocation = process.platform === "win32"
+    ? {
+        command: process.env.ComSpec || "cmd.exe",
+        args: ["/d", "/s", "/c", String(commandLine)],
+      }
+    : {
+        command: process.env.SHELL || "/bin/sh",
+        args: ["-lc", String(commandLine)],
+      };
+  return execWorkspaceFile(invocation.command, invocation.args, options);
 }
 
 async function listFiles(inputPath = "", recursive = true, limit = 500) {
@@ -438,11 +472,32 @@ async function confirmHighRiskGitCommand(command, args) {
   return result.response === 0;
 }
 
-async function validateWorkspaceCommand(command, args) {
+async function confirmUnlistedWorkspaceCommand(commandLine) {
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: "warning",
+    buttons: ["允许本次运行", "取消"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+    title: "批准非白名单命令",
+    message: "AI 请求运行非白名单命令",
+    detail: [
+      `工作目录：${workspaceRoot}`,
+      "",
+      `命令：${commandLine}`,
+      "",
+      "批准后，该命令会通过系统 Shell 运行，并可能读取、修改或删除文件、启动程序或访问网络。请只批准你理解并信任的命令。",
+    ].join("\n"),
+  });
+
+  return result.response === 0;
+}
+
+async function validateWorkspaceCommand(command, args, alreadyAuthorized = false) {
   const normalizedCommand = String(command ?? "").trim().toLowerCase();
   const firstArg = String(args[0] ?? "").toLowerCase();
 
-  if (normalizedCommand === "git") {
+  if (!workspaceFullAccessEnabled && !alreadyAuthorized && normalizedCommand === "git") {
     if (highRiskGitCommands.has(firstArg)) {
       const authorized = await confirmHighRiskGitCommand(normalizedCommand, args);
       if (!authorized) {
@@ -463,14 +518,35 @@ async function validateWorkspaceCommand(command, args) {
 }
 
 async function runWorkspaceCommand({ command, args = [], timeoutMs = 60000 }) {
-  const commandTokens = Array.isArray(args) && args.length > 0
-    ? [String(command ?? ""), ...args.map((arg) => String(arg))]
-    : splitCommandLine(command);
+  const rawCommandLine = String(command ?? "").trim();
+  const hasExplicitArgs = Array.isArray(args) && args.length > 0;
+  const commandTokens = hasExplicitArgs
+    ? [rawCommandLine, ...args.map((arg) => String(arg))]
+    : splitCommandLine(rawCommandLine);
   const rawCommand = commandTokens.shift();
   if (!rawCommand) throw new Error("command 不能为空");
 
-  const executable = getCommandExecutable(rawCommand);
-  const validation = await validateWorkspaceCommand(rawCommand, commandTokens);
+  const whitelistedExecutable = getWhitelistedCommandExecutable(rawCommand);
+  const requiresShell = !whitelistedExecutable || (!hasExplicitArgs && hasShellSyntax(rawCommandLine));
+  const shellCommandLine = hasExplicitArgs
+    ? joinShellCommand(rawCommand, commandTokens)
+    : rawCommandLine;
+
+  if (requiresShell && !workspaceFullAccessEnabled) {
+    const authorized = await confirmUnlistedWorkspaceCommand(shellCommandLine);
+    if (!authorized) {
+      return {
+        ok: false,
+        command: rawCommand,
+        args: commandTokens,
+        canceled: true,
+        stdout: "",
+        stderr: `用户取消运行非白名单命令：${shellCommandLine}`,
+      };
+    }
+  }
+
+  const validation = await validateWorkspaceCommand(rawCommand, commandTokens, requiresShell);
   if (!validation.ok) {
     return {
       ok: false,
@@ -484,10 +560,10 @@ async function runWorkspaceCommand({ command, args = [], timeoutMs = 60000 }) {
   const timeout = Math.min(120000, Math.max(1000, Number(timeoutMs) || 60000));
 
   try {
-    const { stdout, stderr } = await execWorkspaceFile(executable, commandTokens, {
-      timeout,
-      maxBuffer: 1024 * 1024 * 4,
-    });
+    const executionOptions = { timeout, maxBuffer: 1024 * 1024 * 4 };
+    const { stdout, stderr } = requiresShell
+      ? await execWorkspaceShell(shellCommandLine, executionOptions)
+      : await execWorkspaceFile(whitelistedExecutable, commandTokens, executionOptions);
     return {
       ok: true,
       command: rawCommand,
@@ -630,6 +706,11 @@ function registerIpcHandlers() {
   ipcMain.handle("workspace:restore", async (_event, options = {}) =>
     setWorkspaceRoot(options.path),
   );
+
+  ipcMain.handle("workspace:set-full-access", async (_event, options = {}) => {
+    workspaceFullAccessEnabled = Boolean(options.enabled);
+    return { enabled: workspaceFullAccessEnabled };
+  });
 
   ipcMain.handle("workspace:list", async (_event, options = {}) =>
     listFiles(options.path ?? "", options.recursive ?? true),

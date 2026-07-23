@@ -658,6 +658,7 @@ type RengeAppData = {
   chatChoiceToolsEnabled?: boolean;
   chatDialogueRewriteEnabled?: boolean;
   chatRenderedEditingEnabled?: boolean;
+  llmFullAccessEnabled?: boolean;
   chatPersonalization?: ChatPersonalizationSettings;
   mcpServers?: McpServerConfig[];
   skills?: SkillProfile[];
@@ -749,6 +750,7 @@ type RengeDesktopApi = {
   selectWorkspace(): Promise<ElectronWorkspaceHandle | null>;
   selectSkillFolder?(): Promise<{ path: string; name: string } | null>;
   restoreWorkspace(options: { path: string }): Promise<ElectronWorkspaceHandle>;
+  setFullAccess(options: { enabled: boolean }): Promise<{ enabled: boolean }>;
   listFiles(options: { path?: string; recursive?: boolean }): Promise<unknown>;
   readFile(options: { path: string }): Promise<unknown>;
   readBinaryFile(options: { path: string }): Promise<unknown>;
@@ -913,6 +915,7 @@ const CHAT_HEARTBEAT_REMINDER_VISIBLE_STORAGE_KEY = "renge_chat_heartbeat_remind
 const CHAT_CHOICE_TOOLS_ENABLED_STORAGE_KEY = "renge_chat_choice_tools_enabled";
 const CHAT_DIALOGUE_REWRITE_ENABLED_STORAGE_KEY = "renge_chat_dialogue_rewrite_enabled";
 const CHAT_RENDERED_EDITING_ENABLED_STORAGE_KEY = "renge_chat_rendered_editing_enabled";
+const LLM_FULL_ACCESS_ENABLED_STORAGE_KEY = "renge_llm_full_access_enabled";
 const CHAT_PERSONALIZATION_STORAGE_KEY = "renge_chat_personalization";
 const MCP_SERVERS_STORAGE_KEY = "renge_mcp_servers";
 const SKILLS_STORAGE_KEY = "renge_skills";
@@ -2351,6 +2354,10 @@ function persistAppDataToLocalStores(
   setLocalStorageValueSafely(
     CHAT_RENDERED_EDITING_ENABLED_STORAGE_KEY,
     String(data.chatRenderedEditingEnabled ?? false),
+  );
+  setLocalStorageValueSafely(
+    LLM_FULL_ACCESS_ENABLED_STORAGE_KEY,
+    String(data.llmFullAccessEnabled ?? false),
   );
   setLocalStorageJsonSafely(
     CHAT_PERSONALIZATION_STORAGE_KEY,
@@ -3955,10 +3962,10 @@ function getCommandName(line: string) {
   return line.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
 }
 
-function isRunnableCommandLine(line: string) {
+function isRunnableCommandLine(line: string, allowUnlisted = false) {
   const trimmedLine = line.trim();
   if (!trimmedLine || trimmedLine.startsWith("#") || trimmedLine.startsWith("//")) return false;
-  return executableCommandNames.has(getCommandName(trimmedLine));
+  return allowUnlisted || executableCommandNames.has(getCommandName(trimmedLine));
 }
 
 function getExecutableLines(content: string) {
@@ -3969,9 +3976,9 @@ function getExecutableLines(content: string) {
     .filter((line) => line && !line.startsWith("#") && !line.startsWith("//"));
 }
 
-function isExecutableCommandBlock(content: string) {
+function isExecutableCommandBlock(content: string, allowUnlisted = false) {
   const lines = getExecutableLines(content);
-  return lines.length > 0 && lines.every(isRunnableCommandLine);
+  return lines.length > 0 && lines.every((line) => isRunnableCommandLine(line, allowUnlisted));
 }
 
 function isStandaloneCodeLine(line: string) {
@@ -5154,7 +5161,7 @@ function parseGenericChatContentParts(
 
     const language = (match[1] || "text").toLowerCase();
     const codeContent = match[2].replace(/^\n|\n$/g, "");
-    const executable = shellLanguages.has(language) && isExecutableCommandBlock(codeContent);
+    const executable = shellLanguages.has(language) && isExecutableCommandBlock(codeContent, true);
     parts.push({
       type: "code",
       content: codeContent,
@@ -7687,8 +7694,10 @@ function buildHeartbeatSystemPrompt(heartbeat: ChatHeartbeatConfig | undefined) 
 
 function buildLocalToolsSystemPrompt(
   handle: LocalDirectoryHandle | ElectronWorkspaceHandle | AndroidWorkspaceHandle | PcWorkspaceHandle | null,
+  fullAccessEnabled = false,
 ) {
   if (!handle) return "";
+  const hasDesktopFullAccess = handle.kind === "electron" && fullAccessEnabled;
 
   const commonTools = [
     "- local_list_files：列出工作区文件和目录。",
@@ -7723,7 +7732,9 @@ function buildLocalToolsSystemPrompt(
       ? [
           "- local_rename_path：重命名或移动文件/目录。",
           "- local_run_script：运行 package.json 中已存在的 npm script。",
-          "- local_run_command：运行安全白名单命令；高风险 git 子命令会弹窗请求用户授权，用户授权后可以执行。",
+          hasDesktopFullAccess
+            ? "- local_run_command：运行任意命令；完全访问已开启，不会弹出白名单或高风险 Git 审批。"
+            : "- local_run_command：运行命令；白名单外命令和高风险 git 子命令会弹窗请求用户授权，用户授权后可以执行。",
           "- local_git_status：查看 Git 状态。",
           "- local_git_diff：查看 Git diff。",
         ]
@@ -7732,8 +7743,12 @@ function buildLocalToolsSystemPrompt(
         ];
 
   return [
-    `你可以使用本地文件工具操作用户授权的工作区「${handle.name}」。`,
-    "所有 path/from/to 必须是相对工作区根目录的路径；不要使用绝对路径或 ..。",
+    hasDesktopFullAccess
+      ? `你已获得桌面系统完全访问权限；工作区「${handle.name}」仅作为默认工作目录。你可以读取、创建、编辑、移动或删除当前系统账户有权访问的任意文件。`
+      : `你可以使用本地文件工具操作用户授权的工作区「${handle.name}」。`,
+    hasDesktopFullAccess
+      ? "path/from/to 可以使用绝对路径；相对路径仍以当前工作区为根目录。"
+      : "所有 path/from/to 必须是相对工作区根目录的路径；不要使用绝对路径或 ..。",
     "当用户已经明确要求执行文件操作时，不要二次确认，必须直接调用对应工具；不要只描述将要操作。",
     "当用户提出安装、部署、创建启动脚本、构建验证等多步骤任务时，必须连续调用工具推进，直到任务完成、遇到真实阻塞或用户中断；不要在中途只汇报计划并要求用户继续。",
     "如果用户要求重命名或移动文件/目录，并且 local_rename_path 可用，必须调用 local_rename_path。",
@@ -8066,6 +8081,14 @@ function formatWorkspacePathReference(
   handle: LocalDirectoryHandle | ElectronWorkspaceHandle | AndroidWorkspaceHandle | PcWorkspaceHandle | null,
   path: string,
 ) {
+  const rawPath = path.trim();
+  if (
+    handle?.kind === "electron" &&
+    (/^[A-Za-z]:[\\/]/.test(rawPath) || /^\\\\/.test(rawPath) || rawPath.startsWith("/"))
+  ) {
+    return rawPath.replace(/\\/g, "/");
+  }
+
   const relativePath = normalizeWorkspaceRelativePath(path) || ".";
   if (handle?.kind !== "electron") return relativePath;
 
@@ -10029,13 +10052,13 @@ const localFileToolDefinitions = [
     type: "function",
     function: {
       name: "local_run_command",
-      description: "在当前工作区运行安全白名单命令。仅 Electron 桌面版支持；不会通过 shell 执行。",
+      description: "在当前工作区运行命令。白名单命令直接执行，白名单外命令会请求用户批准后通过系统 Shell 执行；开启完全访问后无需审批。仅 Electron 桌面版支持。",
       parameters: {
         type: "object",
         properties: {
           command: {
             type: "string",
-            description: "命令名或完整命令行。只允许 npm/pnpm/yarn/node/git 等白名单命令；高风险 git 子命令会弹窗请求用户授权。",
+            description: "命令名或完整命令行。npm/pnpm/yarn/node/git 等白名单命令可直接执行；其他命令和高风险 git 子命令会请求用户授权，完全访问开启时则直接执行。",
           },
           args: {
             type: "array",
@@ -10733,6 +10756,9 @@ export function App() {
   );
   const [chatRenderedEditingEnabled, setChatRenderedEditingEnabled] = useState(
     () => localStorage.getItem(CHAT_RENDERED_EDITING_ENABLED_STORAGE_KEY) === "true",
+  );
+  const [llmFullAccessEnabled, setLlmFullAccessEnabled] = useState(
+    () => localStorage.getItem(LLM_FULL_ACCESS_ENABLED_STORAGE_KEY) === "true",
   );
   const [chatPersonalization, setChatPersonalization] =
     useState<ChatPersonalizationSettings>(loadChatPersonalization);
@@ -11592,6 +11618,7 @@ export function App() {
       chatChoiceToolsEnabled,
       chatDialogueRewriteEnabled,
       chatRenderedEditingEnabled,
+      llmFullAccessEnabled,
       chatPersonalization,
       mcpServers,
       skills,
@@ -11599,7 +11626,7 @@ export function App() {
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     };
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, extensions, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, extensions, llmFullAccessEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -11781,6 +11808,10 @@ export function App() {
         typeof persistentData?.chatRenderedEditingEnabled === "boolean"
           ? persistentData.chatRenderedEditingEnabled
           : localStorage.getItem(CHAT_RENDERED_EDITING_ENABLED_STORAGE_KEY) === "true";
+      const nextLlmFullAccessEnabled =
+        typeof persistentData?.llmFullAccessEnabled === "boolean"
+          ? persistentData.llmFullAccessEnabled
+          : localStorage.getItem(LLM_FULL_ACCESS_ENABLED_STORAGE_KEY) === "true";
       const nextChatPersonalization = persistentData?.chatPersonalization
         ? normalizeChatPersonalization(persistentData.chatPersonalization)
         : loadChatPersonalization();
@@ -11943,6 +11974,7 @@ export function App() {
       setChatChoiceToolsEnabled(nextChatChoiceToolsEnabled);
       setChatDialogueRewriteEnabled(nextChatDialogueRewriteEnabled);
       setChatRenderedEditingEnabled(nextChatRenderedEditingEnabled);
+      setLlmFullAccessEnabled(nextLlmFullAccessEnabled);
       setChatPersonalization(nextChatPersonalization);
       setMcpServers(nextMcpServers);
       setActiveMcpServerId(nextMcpServers[0]?.id ?? "");
@@ -12024,6 +12056,29 @@ export function App() {
     window.addEventListener("pagehide", flushLatestSnapshot);
     return () => window.removeEventListener("pagehide", flushLatestSnapshot);
   }, [appDataLoaded, buildCurrentAppData]);
+
+  useEffect(() => {
+    if (!appDataLoaded || !window.rengeDesktop?.isElectron) return;
+    let cancelled = false;
+    void window.rengeDesktop
+      .setFullAccess({ enabled: llmFullAccessEnabled })
+      .then((result) => {
+        if (!cancelled && result.enabled !== llmFullAccessEnabled) {
+          setLlmFullAccessEnabled(result.enabled);
+        }
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setLlmFullAccessEnabled(false);
+        setChatStatus({
+          status: "error",
+          message: error instanceof Error ? error.message : "完全访问权限设置失败。",
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [appDataLoaded, llmFullAccessEnabled]);
 
   useEffect(() => {
     setLocalStorageValueSafely(
@@ -18298,8 +18353,8 @@ export function App() {
     }
 
     const commands = getExecutableLines(content);
-    if (commands.length === 0 || commands.some((command) => !isRunnableCommandLine(command))) {
-      setChatStatus({ status: "error", message: "该代码块包含不可执行或非白名单命令。" });
+    if (commands.length === 0 || commands.some((command) => !isRunnableCommandLine(command, true))) {
+      setChatStatus({ status: "error", message: "该代码块不包含可执行命令。" });
       return;
     }
 
@@ -19018,7 +19073,7 @@ export function App() {
         supervisorMultiAgentSystemPrompt || sequenceMultiAgentSystemPrompt;
       const toolSystemPrompt =
         !isDialogueRewrite && !isLocalRewrite && localToolsEnabled && localWorkspaceHandle
-          ? buildLocalToolsSystemPrompt(localWorkspaceHandle)
+          ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
           : "";
       const mcpToolsSystemPrompt = buildMcpToolsSystemPrompt(requestMcpTools);
       const chatChoiceSystemPrompt = availableChatTools.some((tool) =>
@@ -21370,7 +21425,7 @@ export function App() {
           : buildChatSenderContextPrompt(nextMessages, personas);
       const toolSystemPrompt =
         localToolsEnabled && localWorkspaceHandle
-          ? buildLocalToolsSystemPrompt(localWorkspaceHandle)
+          ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
           : "";
       const mcpToolsSystemPrompt = buildMcpToolsSystemPrompt(requestMcpTools);
       const chatChoiceSystemPrompt = availableChatTools.some((tool) =>
@@ -25052,6 +25107,56 @@ export function App() {
                     {chatRenderedEditingEnabled
                       ? "可在渲染后的消息气泡中直接编辑，保存时转换回消息内容。"
                       : "右键编辑仍使用原始消息文本框。"}
+                  </span>
+                </div>
+              </article>
+              <article className="llm-setting-card">
+                <div className="llm-setting-copy">
+                  <h3>运行完全访问</h3>
+                  <p>
+                    开启后，Electron 桌面版中的 AI 可以使用绝对路径访问、创建、编辑、移动或删除
+                    当前系统账户有权操作的任意文件；所有命令（包括非白名单命令和高风险 Git
+                    命令）都会直接运行，不再弹出审批提示。
+                  </p>
+                </div>
+                <label className="tool-toggle llm-feature-toggle">
+                  <input
+                    type="checkbox"
+                    checked={llmFullAccessEnabled}
+                    disabled={!window.rengeDesktop?.isElectron}
+                    onChange={(event) => {
+                      const enabled = event.target.checked;
+                      if (
+                        enabled &&
+                        !window.confirm(
+                          "开启运行完全访问后，AI 可操作当前系统账户有权访问的所有文件，并可无审批运行任意命令。\n\n该设置会持久保存。仅在你信任当前模型、提示词和任务内容时开启。是否继续？",
+                        )
+                      ) {
+                        return;
+                      }
+                      setLlmFullAccessEnabled(enabled);
+                    }}
+                  />
+                  <span>开启运行完全访问</span>
+                </label>
+                <div
+                  className={`llm-setting-status ${
+                    llmFullAccessEnabled ? "enabled" : "disabled"
+                  }`}
+                >
+                  <strong>
+                    {!window.rengeDesktop?.isElectron
+                      ? "仅桌面版可用"
+                      : llmFullAccessEnabled
+                        ? "完全访问已开启"
+                        : "受限模式"}
+                  </strong>
+                  <span>
+                    {!window.rengeDesktop?.isElectron
+                      ? "浏览器和 Android 环境仍受各自的目录授权或系统权限限制。"
+                      : llmFullAccessEnabled
+                        ? "文件操作不再限制在工作区内，命令不会触发白名单审批。"
+                        : "文件操作限制在授权工作区内；白名单外命令会逐次请求你的批准。"}
                   </span>
                 </div>
               </article>
