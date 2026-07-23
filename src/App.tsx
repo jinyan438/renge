@@ -26,6 +26,8 @@ import {
   Palette,
   PanelLeftClose,
   PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Pencil,
   Play,
   Plus,
@@ -200,6 +202,19 @@ import {
   type ProviderReasoningEffort,
   type ReasoningMessageStreamMode,
 } from "./reasoningUtils";
+import { StatusBarSidebar } from "./StatusBarSidebar";
+import {
+  buildStatusBarContextPrompt,
+  buildStatusBarReducerPayload,
+  buildStatusBarReducerSystemPrompt,
+  buildStatusBarResponseFormat,
+  createDefaultStatusBarState,
+  mergeStatusBarPatch,
+  normalizeStatusBarState,
+  parseStatusBarPatch,
+  type StatusBarPatch,
+  type StatusBarState,
+} from "./statusBarUtils";
 import settingsModuleIcon from "./assets/module-icons/settings.png";
 import type { AgentPersona, InfluenceLevel, PersonalityEntry, PersonalityEntryType } from "./types";
 
@@ -465,6 +480,7 @@ type ChatSession = {
   roleplayGreetingIndex?: number;
   scriptVariables: Record<string, unknown>;
   tavernMetadata: Record<string, unknown>;
+  statusBar: StatusBarState;
   createdAt: string;
   updatedAt: string;
 };
@@ -1929,6 +1945,7 @@ function createChatSession(
     memoryPersonaIds: [],
     scriptVariables: {},
     tavernMetadata: {},
+    statusBar: createDefaultStatusBarState(),
     ...(roleplay
       ? {
           roleplayCharacterCardId: roleplay.characterCardId,
@@ -1987,6 +2004,7 @@ function normalizeChatSession(rawValue: unknown): ChatSession {
       : [],
     scriptVariables: normalizeTavernVariables(rawSession.scriptVariables),
     tavernMetadata: normalizeTavernVariables(rawSession.tavernMetadata),
+    statusBar: normalizeStatusBarState(rawSession.statusBar),
     ...(typeof rawSession.roleplayCharacterCardId === "string" &&
     rawSession.roleplayCharacterCardId.trim()
       ? {
@@ -10477,6 +10495,8 @@ export function App() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [chatDesktopSidebarCollapsed, setChatDesktopSidebarCollapsed] =
     useState(false);
+  const [chatStatusSidebarCollapsed, setChatStatusSidebarCollapsed] =
+    useState(false);
   const [mobilePromptPreviewOpen, setMobilePromptPreviewOpen] = useState(false);
 
   const openWindow = useCallback((id: ModuleWindowId) => {
@@ -10948,6 +10968,50 @@ export function App() {
       typeof update === "function" ? update(chatMessagesRef.current) : update;
     chatMessagesRef.current = nextMessages;
     setChatMessages(nextMessages);
+  };
+
+  const getSessionStatusBarState = (sessionId = activeChatSessionIdRef.current) => {
+    const session = chatSessionsRef.current.find((candidate) => candidate.id === sessionId);
+    return normalizeStatusBarState(session?.statusBar);
+  };
+
+  const commitStatusBarStateForSession = (
+    sessionId: string,
+    updater: (current: StatusBarState) => StatusBarState,
+  ) => {
+    if (!sessionId) return;
+    const timestamp = new Date().toISOString();
+    const nextSessions = chatSessionsRef.current.map((session) => {
+      if (session.id !== sessionId) return session;
+      const nextStatusBar = normalizeStatusBarState(updater(normalizeStatusBarState(session.statusBar)));
+      return {
+        ...session,
+        statusBar: nextStatusBar,
+        updatedAt: timestamp,
+      };
+    });
+    chatSessionsRef.current = nextSessions;
+    setChatSessions(nextSessions);
+  };
+
+  const updateActiveStatusBarState = (nextState: StatusBarState) => {
+    const sessionId = activeChatSessionIdRef.current;
+    commitStatusBarStateForSession(sessionId, () =>
+      normalizeStatusBarState({
+        ...nextState,
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+  };
+
+  const clearActiveStatusBarValues = () => {
+    const sessionId = activeChatSessionIdRef.current;
+    commitStatusBarStateForSession(sessionId, (current) => ({
+      ...current,
+      values: {},
+      updatedAt: new Date().toISOString(),
+    }));
+    setChatStatus({ status: "success", message: "已清空当前会话的状态栏变量。" });
   };
 
   useEffect(() => {
@@ -13749,6 +13813,10 @@ export function App() {
   const activeChatSession = useMemo(
     () => chatSessions.find((session) => session.id === activeChatSessionId) ?? chatSessions[0],
     [activeChatSessionId, chatSessions],
+  );
+  const activeStatusBarState = useMemo(
+    () => normalizeStatusBarState(activeChatSession?.statusBar),
+    [activeChatSession?.statusBar],
   );
   const activeSessionRoleplayCard = useMemo(
     () => scopedRoleplayCard,
@@ -18763,6 +18831,145 @@ export function App() {
     );
   };
 
+  const updateStatusBarAfterAssistant = async (options: {
+    sessionId: string;
+    assistantMessageId: string;
+    latestUser: string;
+    finalAssistant: string;
+    requestProvider: ModelProviderChannel;
+    requestModelId: string;
+    signal?: AbortSignal;
+  }): Promise<{ attempted: boolean; updated: number; error?: string }> => {
+    const {
+      sessionId,
+      assistantMessageId,
+      latestUser,
+      finalAssistant,
+      requestProvider,
+      requestModelId,
+      signal,
+    } = options;
+    const session = chatSessionsRef.current.find((candidate) => candidate.id === sessionId);
+    const statusBar = normalizeStatusBarState(session?.statusBar);
+    const trackedItemCount = statusBar.items.filter(
+      (item) => item.type !== "divider" && item.variableName,
+    ).length;
+    if (!statusBar.enabled || trackedItemCount === 0 || isImageGenerationModelId(requestModelId)) {
+      return { attempted: false, updated: 0 };
+    }
+
+    const schemaRevision = statusBar.updatedAt;
+    const requestBody = (includeResponseFormat: boolean) => ({
+      apiBaseUrl: trimTrailingSlash(requestProvider.apiBaseUrl),
+      apiKey: requestProvider.apiKey,
+      sessionId,
+      request: {
+        model: requestModelId,
+        messages: [
+          { role: "system", content: buildStatusBarReducerSystemPrompt() },
+          {
+            role: "user",
+            content: buildStatusBarReducerPayload(statusBar, latestUser, finalAssistant),
+          },
+        ],
+        temperature: 0,
+        max_tokens: Math.min(2048, Math.max(256, trackedItemCount * 96)),
+        ...(includeResponseFormat
+          ? { response_format: buildStatusBarResponseFormat(statusBar) }
+          : {}),
+        stream: false,
+      },
+    });
+
+    const makeRequest = async (includeResponseFormat: boolean) => {
+      const response = await fetch("/api/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal,
+        body: JSON.stringify(requestBody(includeResponseFormat)),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string | { message?: string };
+        choices?: Array<{ message?: ChatApiMessage }>;
+        output_text?: string;
+      };
+      return { response, payload };
+    };
+
+    try {
+      setChatStatus({ status: "loading", message: "正文已完成，正在更新状态栏变量..." });
+      let result = await makeRequest(true);
+      if (!result.response.ok && [400, 404, 415, 422].includes(result.response.status)) {
+        result = await makeRequest(false);
+      }
+      if (!result.response.ok) {
+        const errorMessage =
+          typeof result.payload.error === "string"
+            ? result.payload.error
+            : result.payload.error?.message;
+        return {
+          attempted: true,
+          updated: 0,
+          error: errorMessage || `状态栏更新请求失败：${result.response.status}`,
+        };
+      }
+
+      const rawPatch =
+        getChatApiMessageText(result.payload.choices?.[0]?.message).trim() ||
+        result.payload.output_text?.trim() ||
+        "";
+      const parsed = parseStatusBarPatch(rawPatch, statusBar);
+      if (parsed.error) return { attempted: true, updated: 0, error: parsed.error };
+      if (parsed.patch.updates.length === 0) return { attempted: true, updated: 0 };
+
+      const currentSession = chatSessionsRef.current.find(
+        (candidate) => candidate.id === sessionId,
+      );
+      const currentStatusBar = normalizeStatusBarState(currentSession?.statusBar);
+      const targetStillExists = chatMessagesRef.current.some(
+        (message) => message.id === assistantMessageId,
+      );
+      if (
+        activeChatSessionIdRef.current !== sessionId ||
+        currentStatusBar.updatedAt !== schemaRevision ||
+        !targetStillExists ||
+        signal?.aborted
+      ) {
+        return {
+          attempted: true,
+          updated: 0,
+          error: "会话或状态栏配置已变化，本次状态更新已安全忽略。",
+        };
+      }
+
+      const patch: StatusBarPatch = parsed.patch;
+      commitChatMessages((current) =>
+        current.map((message) =>
+          message.id === assistantMessageId
+            ? {
+                ...message,
+                extra: {
+                  ...(message.extra ?? {}),
+                  statusBarPatch: patch,
+                },
+              }
+            : message,
+        ),
+      );
+      commitStatusBarStateForSession(sessionId, (current) =>
+        mergeStatusBarPatch(current, patch),
+      );
+      return { attempted: true, updated: patch.updates.length };
+    } catch (error) {
+      if (isChatAbortError(error)) throw error;
+      return {
+        attempted: true,
+        updated: 0,
+        error: error instanceof Error ? error.message : "状态栏更新失败。",
+      };
+    }
+  };
+
   const generateAssistantForMessages = async (
     nextMessages: ChatMessage[],
     requestSender: ChatSenderIdentity,
@@ -19104,6 +19311,9 @@ export function App() {
       const heartbeatSystemPrompt = options.exposeHeartbeatTools
         ? buildHeartbeatSystemPrompt(activeChatSession?.heartbeat)
         : "";
+      const statusBarContextPrompt = buildStatusBarContextPrompt(
+        getSessionStatusBarState(activeChatSessionIdRef.current),
+      );
       const worldBookSystemPrompt = buildWorldBookPrompt(
         filterPromptTemplateSpecialEntries(worldBooks, promptTemplateEnabled),
         activeWorldBookIds,
@@ -19151,6 +19361,7 @@ export function App() {
         mcpToolsSystemPrompt,
         chatChoiceSystemPrompt,
         heartbeatSystemPrompt,
+        statusBarContextPrompt,
         isContinuation ? CHAT_CONTINUATION_SYSTEM_PROMPT : "",
         isDialogueRewrite ? CHAT_DIALOGUE_REWRITE_SYSTEM_PROMPT : "",
         isLocalRewrite ? CHAT_LOCAL_REWRITE_SYSTEM_PROMPT : "",
@@ -20775,6 +20986,7 @@ export function App() {
       setChatStatus({ status: "error", message: configurationError });
       return;
     }
+    const requestSessionId = activeChatSessionIdRef.current;
 
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
@@ -20795,11 +21007,42 @@ export function App() {
       const prepared = await runTavernPreSendHooks(userMessage, content);
       accumulatedMessages = prepared.messages;
       activeUserRequestTextRef.current = prepared.content;
-      await runMultiAgentResponses(
+      const completed = await runMultiAgentResponses(
         accumulatedMessages,
         currentChatSender,
         prepared.content,
       );
+      if (!completed) return;
+      const lastAssistant = [...chatMessagesRef.current]
+        .reverse()
+        .find((message) => message.role === "assistant" && message.content.trim());
+      const responderPersonaId =
+        lastAssistant?.sender?.kind === "persona"
+          ? lastAssistant.sender.personaId
+          : multiAgentPrimaryPersona?.id;
+      const reducerConfig = responderPersonaId
+        ? getMultiAgentRequestConfig(responderPersonaId)
+        : null;
+      if (lastAssistant && reducerConfig?.provider && reducerConfig.modelId) {
+        const statusBarResult = await updateStatusBarAfterAssistant({
+          sessionId: requestSessionId,
+          assistantMessageId: lastAssistant.id,
+          latestUser: prepared.content,
+          finalAssistant: lastAssistant.content,
+          requestProvider: reducerConfig.provider,
+          requestModelId: reducerConfig.modelId,
+        });
+        if (statusBarResult.attempted) {
+          setChatStatus({
+            status: statusBarResult.error ? "warning" : "success",
+            message: statusBarResult.error
+              ? `多 Agent 回复已完成，但状态栏未更新：${statusBarResult.error}`
+              : statusBarResult.updated > 0
+                ? `多 Agent 回复已完成，状态栏已更新 ${statusBarResult.updated} 项。`
+                : "多 Agent 回复已完成，状态栏无变化。",
+          });
+        }
+      }
     } catch (error) {
       if (isChatAbortError(error)) {
         setChatStatus({ status: "success", message: "已停止输出。" });
@@ -21295,6 +21538,7 @@ export function App() {
   ) => {
     const hasContentOverride = contentOverride !== undefined;
     const content = (hasContentOverride ? contentOverride : chatInput).trim();
+    const requestSessionId = activeChatSessionIdRef.current;
     const attachmentsToSend =
       attachmentsOverride ?? (hasContentOverride ? [] : chatAttachments);
     if ((!content && attachmentsToSend.length === 0) || chatStatus.status === "loading") return;
@@ -21456,6 +21700,9 @@ export function App() {
       const heartbeatSystemPrompt = exposeHeartbeatTools
         ? buildHeartbeatSystemPrompt(activeChatSession?.heartbeat)
         : "";
+      const statusBarContextPrompt = buildStatusBarContextPrompt(
+        getSessionStatusBarState(activeChatSessionIdRef.current),
+      );
       const worldBookSystemPrompt = buildWorldBookPrompt(
         filterPromptTemplateSpecialEntries(worldBooks, promptTemplateEnabled),
         activeWorldBookIds,
@@ -21506,6 +21753,7 @@ export function App() {
         mcpToolsSystemPrompt,
         chatChoiceSystemPrompt,
         heartbeatSystemPrompt,
+        statusBarContextPrompt,
       ]
         .filter(Boolean)
         .join("\n\n");
@@ -22016,14 +22264,32 @@ export function App() {
           ];
         });
       }
-      setChatStatus({
-        status: "success",
-        message: assistantChoiceRequest ? "AI 正在等待你的选择。" : "回复已生成。",
-      });
       await emitTavernMessageEventNow(
         TAVERN_EVENTS.MESSAGE_RECEIVED,
         assistantMessageId,
       );
+      const finalAssistantForStatus = chatMessagesRef.current.find(
+        (message) => message.id === assistantMessageId,
+      )?.content ?? assistantContent;
+      const statusBarResult = await updateStatusBarAfterAssistant({
+        sessionId: requestSessionId,
+        assistantMessageId,
+        latestUser: effectiveContent,
+        finalAssistant: finalAssistantForStatus,
+        requestProvider: chatProvider,
+        requestModelId,
+        signal: abortSignal,
+      });
+      setChatStatus({
+        status: statusBarResult.error ? "warning" : "success",
+        message: statusBarResult.error
+          ? `回复已生成，但状态栏未更新：${statusBarResult.error}`
+          : assistantChoiceRequest
+            ? "AI 正在等待你的选择。"
+            : statusBarResult.updated > 0
+              ? `回复已生成，状态栏已更新 ${statusBarResult.updated} 项。`
+              : "回复已生成。",
+      });
     } catch (error) {
       if (isChatAbortError(error)) {
         if (streamingAssistantInserted && assistantMessageId) {
@@ -27983,7 +28249,9 @@ export function App() {
         title="对话工作区"
         bodyClassName={`chat-shell ${
           chatDesktopSidebarCollapsed ? "desktop-sidebar-collapsed" : ""
-        } ${mobileSidebarOpen ? "mobile-sidebar-open" : ""} ${
+        } ${chatStatusSidebarCollapsed ? "status-sidebar-collapsed" : ""} ${
+          mobileSidebarOpen ? "mobile-sidebar-open" : ""
+        } ${
           chatPersonalization.quoteStyleEnabled ? "quote-style-enabled" : ""
         } ${chatPersonalization.italicStyleEnabled ? "italic-style-enabled" : ""}`}
         bodyStyle={chatVisualStyle}
@@ -28280,6 +28548,25 @@ export function App() {
               </h1>
             </div>
             <div className="chat-header-actions">
+              <button
+                type="button"
+                className={`ghost-action chat-status-sidebar-toggle ${
+                  activeStatusBarState.enabled ? "active-status-bar" : ""
+                }`}
+                title={chatStatusSidebarCollapsed ? "展开状态栏" : "隐藏状态栏"}
+                aria-label={chatStatusSidebarCollapsed ? "展开右侧状态栏" : "隐藏右侧状态栏"}
+                aria-pressed={!chatStatusSidebarCollapsed}
+                onClick={() =>
+                  setChatStatusSidebarCollapsed((current) => !current)
+                }
+              >
+                {chatStatusSidebarCollapsed ? (
+                  <PanelRightOpen size={16} />
+                ) : (
+                  <PanelRightClose size={16} />
+                )}
+                <span>状态栏</span>
+              </button>
               <label
                 className={`heartbeat-toggle ${activeHeartbeat.enabled ? "active" : ""}`}
                 title={activeHeartbeat.event.trim() ? "开启/关闭当前会话心跳" : "先填写心跳事件"}
@@ -29678,6 +29965,13 @@ export function App() {
             </div>
           </section>
         </section>
+        <StatusBarSidebar
+          state={activeStatusBarState}
+          collapsed={chatStatusSidebarCollapsed}
+          onCollapsedChange={setChatStatusSidebarCollapsed}
+          onStateChange={updateActiveStatusBarState}
+          onClearValues={clearActiveStatusBarValues}
+        />
       </PortfolioDesktopWindow>
   ) : null;
 
