@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
-    "test": "node --experimental-strip-types --test test/multiAgentUtils.test.mjs test/reasoningUtils.test.mjs test/serverAppData.test.mjs",
+    "test": "node --experimental-strip-types --test test/commandPolicy.test.mjs test/multiAgentUtils.test.mjs test/reasoningUtils.test.mjs test/serverAppData.test.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "serve": "node server.mjs",
     "start": "node server.mjs",
