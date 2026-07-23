@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { startRengeServer } from "../server.mjs";
 import {
+  createCommandApprovalSessionStore,
   looksLikePackageManagerOutput,
   normalizeCommandLine,
   splitCommandLine,
@@ -42,6 +43,7 @@ const highRiskGitCommands = new Set([
   "switch",
 ]);
 const whitelistedCommandNames = ["npm", "pnpm", "yarn", "node", "git"];
+const unlistedCommandApprovalSessions = createCommandApprovalSessionStore();
 
 function getPersistentDataDir() {
   if (process.env.RENGE_DATA_DIR) return resolve(process.env.RENGE_DATA_DIR);
@@ -466,10 +468,11 @@ async function confirmHighRiskGitCommand(command, args) {
   return result.response === 0;
 }
 
-async function confirmUnlistedWorkspaceCommand(commandLine) {
+async function confirmUnlistedWorkspaceCommand(commandLine, sessionId) {
+  const hasSessionId = Boolean(String(sessionId ?? "").trim());
   const result = await dialog.showMessageBox(mainWindow, {
     type: "warning",
-    buttons: ["允许本次运行", "取消"],
+    buttons: [hasSessionId ? "授权当前会话" : "允许本次运行", "取消"],
     defaultId: 1,
     cancelId: 1,
     noLink: true,
@@ -477,10 +480,13 @@ async function confirmUnlistedWorkspaceCommand(commandLine) {
     message: "AI 请求运行非白名单命令",
     detail: [
       `工作目录：${workspaceRoot}`,
+      ...(hasSessionId ? [`会话：${sessionId}`] : []),
       "",
       `命令：${commandLine}`,
       "",
-      "批准后，该命令会通过系统 Shell 运行，并可能读取、修改或删除文件、启动程序或访问网络。请只批准你理解并信任的命令。",
+      hasSessionId
+        ? "批准后，本次应用运行期间，该聊天会话中的非白名单命令将不再重复询问；切换到其他会话仍需单独授权。命令可能读取、修改或删除文件、启动程序或访问网络。"
+        : "批准后，该命令会通过系统 Shell 运行，并可能读取、修改或删除文件、启动程序或访问网络。请只批准你理解并信任的命令。",
     ].join("\n"),
   });
 
@@ -511,7 +517,7 @@ async function validateWorkspaceCommand(command, args, alreadyAuthorized = false
   return { ok: true };
 }
 
-async function runWorkspaceCommand({ command, args = [], timeoutMs = 60000 }) {
+async function runWorkspaceCommand({ command, args = [], timeoutMs = 60000, sessionId = "" }) {
   const rawCommandLine = normalizeCommandLine(command, whitelistedCommandNames);
   const hasExplicitArgs = Array.isArray(args) && args.length > 0;
   const commandTokens = hasExplicitArgs
@@ -530,8 +536,9 @@ async function runWorkspaceCommand({ command, args = [], timeoutMs = 60000 }) {
     ? joinShellCommand(rawCommand, commandTokens)
     : rawCommandLine;
 
-  if (requiresShell && !workspaceFullAccessEnabled) {
-    const authorized = await confirmUnlistedWorkspaceCommand(shellCommandLine);
+  const sessionAlreadyApproved = unlistedCommandApprovalSessions.has(sessionId);
+  if (requiresShell && !workspaceFullAccessEnabled && !sessionAlreadyApproved) {
+    const authorized = await confirmUnlistedWorkspaceCommand(shellCommandLine, sessionId);
     if (!authorized) {
       return {
         ok: false,
@@ -542,6 +549,7 @@ async function runWorkspaceCommand({ command, args = [], timeoutMs = 60000 }) {
         stderr: `用户取消运行非白名单命令：${shellCommandLine}`,
       };
     }
+    unlistedCommandApprovalSessions.approve(sessionId);
   }
 
   const validation = await validateWorkspaceCommand(rawCommand, commandTokens, requiresShell);

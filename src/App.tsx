@@ -764,7 +764,7 @@ type RengeDesktopApi = {
   renamePath(options: { from: string; to: string }): Promise<unknown>;
   deletePath(options: { path: string; recursive?: boolean }): Promise<unknown>;
   runScript(options: { script: string; args?: string[] }): Promise<unknown>;
-  runCommand(options: { command: string; args?: string[]; timeoutMs?: number }): Promise<unknown>;
+  runCommand(options: { command: string; args?: string[]; timeoutMs?: number; sessionId?: string }): Promise<unknown>;
   gitStatus(): Promise<unknown>;
   gitDiff(options: { path?: string; staged?: boolean }): Promise<unknown>;
   detectStack(): Promise<unknown>;
@@ -7734,7 +7734,7 @@ function buildLocalToolsSystemPrompt(
           "- local_run_script：运行 package.json 中已存在的 npm script。",
           hasDesktopFullAccess
             ? "- local_run_command：运行任意命令；完全访问已开启，不会弹出白名单或高风险 Git 审批。"
-            : "- local_run_command：运行命令；白名单外命令和高风险 git 子命令会弹窗请求用户授权，用户授权后可以执行。",
+            : "- local_run_command：运行命令；当前会话首次运行白名单外命令时会弹窗请求授权，批准后仅该会话后续的白名单外命令免审批；切换会话仍需重新授权。高风险 git 子命令仍会单独请求授权。",
           "- local_git_status：查看 Git 状态。",
           "- local_git_diff：查看 Git diff。",
         ]
@@ -10052,7 +10052,7 @@ const localFileToolDefinitions = [
     type: "function",
     function: {
       name: "local_run_command",
-      description: "在当前工作区运行命令。白名单命令直接执行，白名单外命令会在执行前请求用户批准；开启完全访问后无需审批。command 只能填写实际命令，不能填写 npm error、日志输出或解释文字。仅 Electron 桌面版支持。",
+      description: "在当前工作区运行命令。白名单命令直接执行；每个聊天会话首次运行白名单外命令时会在执行前请求用户批准，授权仅对该会话有效；开启完全访问后无需审批。command 只能填写实际命令，不能填写 npm error、日志输出或解释文字。仅 Electron 桌面版支持。",
       parameters: {
         type: "object",
         properties: {
@@ -17679,6 +17679,7 @@ export function App() {
             command: String(args.command ?? ""),
             args: Array.isArray(args.args) ? args.args.map(String) : [],
             timeoutMs: Number(args.timeoutMs ?? 60000),
+            sessionId: activeChatSessionId,
           });
         case "local_git_status":
           return desktopApi.gitStatus();
@@ -25156,7 +25157,7 @@ export function App() {
                       ? "浏览器和 Android 环境仍受各自的目录授权或系统权限限制。"
                       : llmFullAccessEnabled
                         ? "文件操作不再限制在工作区内，命令不会触发白名单审批。"
-                        : "文件操作限制在授权工作区内；白名单外命令会逐次请求你的批准。"}
+                        : "文件操作限制在授权工作区内；每个聊天会话首次运行白名单外命令时会请求你的批准。"}
                   </span>
                 </div>
               </article>

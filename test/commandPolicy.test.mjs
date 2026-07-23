@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createCommandApprovalSessionStore,
   looksLikePackageManagerOutput,
   normalizeCommandLine,
   splitCommandLine,
@@ -30,4 +31,14 @@ test("does not treat package-manager log output as a direct whitelist invocation
   assert.equal(looksLikePackageManagerOutput("yarn", ["warning", "deprecated"]), true);
   assert.equal(looksLikePackageManagerOutput("npm", ["install"]), false);
   assert.equal(looksLikePackageManagerOutput("git", ["error"]), false);
+});
+
+test("keeps non-whitelist command approval scoped to one chat session", () => {
+  const approvals = createCommandApprovalSessionStore();
+  assert.equal(approvals.has("session-a"), false);
+  assert.equal(approvals.approve("session-a"), true);
+  assert.equal(approvals.has("session-a"), true);
+  assert.equal(approvals.has("session-b"), false);
+  assert.equal(approvals.approve(""), false);
+  assert.equal(approvals.has(""), false);
 });
