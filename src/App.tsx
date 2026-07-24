@@ -213,6 +213,8 @@ import {
 import {
   buildStatusBarReducerPayload,
   buildStatusBarReducerSystemPrompt,
+  buildStatusBarSnapshotLineSystemPrompt,
+  buildStatusBarSnapshotPayload,
   buildStatusBarSnapshotSystemPrompt,
   buildStatusBarMvuSystemPrompt,
   buildStatusBarResponseFormat,
@@ -19249,6 +19251,7 @@ export function App() {
       | "json_schema"
       | "json_object"
       | "snapshot_json"
+      | "snapshot_lines"
       | "mvu_commands"
       | "line_protocol"
       | "none";
@@ -19256,9 +19259,17 @@ export function App() {
       ...statusRequestProvider,
       modelId: statusRequestModelId,
     });
+    const usesLocalPlainStatusProtocol = statusReasoningControl.reasoning_effort === "none";
     const initialResponseFormatMode: StatusBarResponseFormatMode =
-      Object.keys(statusReasoningControl).length > 0 ? "json_object" : "tool_call";
-    const requestBody = (responseFormatMode: StatusBarResponseFormatMode) => ({
+      usesLocalPlainStatusProtocol
+        ? "snapshot_lines"
+        : Object.keys(statusReasoningControl).length > 0
+          ? "json_object"
+          : "tool_call";
+    const requestBody = (
+      responseFormatMode: StatusBarResponseFormatMode,
+      includeReasoningControl = true,
+    ) => ({
       apiBaseUrl: trimTrailingSlash(statusRequestProvider.apiBaseUrl),
       apiKey: statusRequestProvider.apiKey,
       request: {
@@ -19266,7 +19277,9 @@ export function App() {
         messages: [
           {
             role: "system",
-            content: responseFormatMode === "snapshot_json"
+            content: responseFormatMode === "snapshot_lines"
+              ? buildStatusBarSnapshotLineSystemPrompt()
+              : responseFormatMode === "snapshot_json"
               ? buildStatusBarSnapshotSystemPrompt()
               : responseFormatMode === "mvu_commands"
               ? buildStatusBarMvuSystemPrompt()
@@ -19284,17 +19297,28 @@ export function App() {
           },
           {
             role: "user",
-            content: buildStatusBarReducerPayload(
-              statusBar,
-              latestUser,
-              finalAssistant,
-              reducerReferenceContext,
-            ),
+            content:
+              responseFormatMode === "snapshot_lines"
+                ? buildStatusBarSnapshotPayload(
+                    statusBar,
+                    latestUser,
+                    finalAssistant,
+                    reducerReferenceContext,
+                  )
+                : buildStatusBarReducerPayload(
+                    statusBar,
+                    latestUser,
+                    finalAssistant,
+                    reducerReferenceContext,
+                  ),
           },
         ],
         temperature: 0,
-        max_tokens: Math.min(8192, Math.max(4096, trackedItemCount * 384)),
-        ...statusReasoningControl,
+        max_tokens:
+          responseFormatMode === "snapshot_lines"
+            ? Math.min(2048, Math.max(512, trackedItemCount * 160))
+            : Math.min(8192, Math.max(4096, trackedItemCount * 384)),
+        ...(includeReasoningControl ? statusReasoningControl : {}),
         ...(responseFormatMode === "tool_call"
           ? {
               tools: [buildStatusBarToolDefinition(statusBar)],
@@ -19312,12 +19336,15 @@ export function App() {
       },
     });
 
-    const makeRequest = async (responseFormatMode: StatusBarResponseFormatMode) => {
+    const makeRequest = async (
+      responseFormatMode: StatusBarResponseFormatMode,
+      includeReasoningControl = true,
+    ) => {
       const response = await fetch("/api/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal,
-        body: JSON.stringify(requestBody(responseFormatMode)),
+        body: JSON.stringify(requestBody(responseFormatMode, includeReasoningControl)),
       });
       const payload = (await response.json().catch(() => ({}))) as {
         error?: string | { message?: string };
@@ -19385,6 +19412,16 @@ export function App() {
         setChatStatus({ status: "loading", message: "正文已完成，正在更新状态栏变量..." });
       }
       let result = await requestWithResponseFormatFallback(initialResponseFormatMode);
+      if (
+        !result.response.ok &&
+        usesLocalPlainStatusProtocol &&
+        [400, 404, 415, 422].includes(result.response.status)
+      ) {
+        result = {
+          ...(await makeRequest("snapshot_lines", false)),
+          mode: "snapshot_lines",
+        };
+      }
       if (!targetIsCurrent()) return ignoredResult;
       if (!result.response.ok) {
         const errorMessage =
@@ -19399,8 +19436,14 @@ export function App() {
       }
 
       let parsed = parseStatusBarPatch(getRawStatusBarPatch(result.payload), statusBar);
-      if (parsed.error || parsed.patch.updates.length === 0) {
-        const snapshotResult = await makeRequest("snapshot_json");
+      const snapshotMode: StatusBarResponseFormatMode = usesLocalPlainStatusProtocol
+        ? "snapshot_lines"
+        : "snapshot_json";
+      if (
+        result.mode !== snapshotMode &&
+        (parsed.error || parsed.patch.updates.length === 0)
+      ) {
+        const snapshotResult = await makeRequest(snapshotMode);
         if (!targetIsCurrent()) return ignoredResult;
         if (snapshotResult.response.ok) {
           const snapshotParsed = parseStatusBarPatch(

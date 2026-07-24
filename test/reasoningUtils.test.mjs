@@ -40,6 +40,13 @@ test("disables native DeepSeek thinking for deterministic reducer requests", () 
     }),
     {},
   );
+  assert.deepEqual(
+    buildProviderReasoningDisableRequest({
+      apiBaseUrl: "http://127.0.0.1:1234/v1",
+      modelId: "local-model",
+    }),
+    { reasoning_effort: "none" },
+  );
 });
 
 test("clamps unsupported DeepSeek V4 levels and maps xhigh to max", () => {

@@ -63,6 +63,21 @@ function detectReasoningFormat(provider?: ReasoningProviderConfig) {
   return "openai" as const;
 }
 
+function isLocalApiBaseUrl(value: unknown) {
+  const apiBaseUrl = String(value ?? "").trim();
+  if (!apiBaseUrl) return false;
+  try {
+    const hostname = new URL(apiBaseUrl).hostname.toLowerCase();
+    if (["localhost", "127.0.0.1", "0.0.0.0", "::1"].includes(hostname)) return true;
+    if (hostname.endsWith(".local")) return true;
+    if (/^10\./.test(hostname) || /^192\.168\./.test(hostname)) return true;
+    const private172 = hostname.match(/^172\.(\d{1,2})\./);
+    return Boolean(private172 && Number(private172[1]) >= 16 && Number(private172[1]) <= 31);
+  } catch {
+    return false;
+  }
+}
+
 function getModelSlug(modelId: string) {
   return modelId.split("/").pop() ?? modelId;
 }
@@ -239,6 +254,9 @@ export function buildProviderReasoningDisableRequest(
   const format = detectReasoningFormat(provider);
   if (format === "deepseek") {
     return { thinking: { type: "disabled" } };
+  }
+  if (isLocalApiBaseUrl(provider.apiBaseUrl)) {
+    return { reasoning_effort: "none" };
   }
   return {};
 }

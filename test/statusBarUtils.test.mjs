@@ -5,6 +5,8 @@ import {
   buildStatusBarReducerSystemPrompt,
   buildStatusBarMvuSystemPrompt,
   buildStatusBarResponseFormat,
+  buildStatusBarSnapshotLineSystemPrompt,
+  buildStatusBarSnapshotPayload,
   buildStatusBarSnapshotSystemPrompt,
   buildStatusBarToolDefinition,
   buildStatusBarToolSystemPrompt,
@@ -195,6 +197,10 @@ test("builds reducer payload and response schema", () => {
     reducerPayload.entries[0].description,
     "仅在角色明确表现出情绪变化时更新，使用简短情绪词。",
   );
+  assert.deepEqual(
+    reducerPayload.entries.map((entry) => entry.slot),
+    ["V1", "V2", "V3"],
+  );
   assert.deepEqual(reducerPayload.entries[1].constraints, {
     minimum: 0,
     maximum: 100,
@@ -227,6 +233,16 @@ test("builds reducer payload and response schema", () => {
   assert.match(buildStatusBarMvuSystemPrompt(), /_\.set/);
   assert.match(buildStatusBarSnapshotSystemPrompt(), /entries 中的每一个条目/);
   assert.match(buildStatusBarSnapshotSystemPrompt(), /原样复制.*currentValue/);
+  assert.match(buildStatusBarSnapshotLineSystemPrompt(), /每个 slot/);
+  assert.deepEqual(
+    JSON.parse(buildStatusBarSnapshotPayload(state, "抵达", "已经完成")).entries[0],
+    {
+      slot: "V1",
+      variableName: "情绪",
+      description: "仅在角色明确表现出情绪变化时更新，使用简短情绪词。",
+      currentValue: "平静",
+    },
+  );
 });
 
 test("parses a pure JSON status patch", () => {
@@ -328,6 +344,14 @@ test("accepts a simple line or Markdown table update protocol", () => {
     { id: "hp", value: 70 },
   ]);
   assert.deepEqual(parseStatusBarPatch("情绪：无变化", state).patch.updates, []);
+  assert.deepEqual(
+    parseStatusBarPatch("V1\t振奋\nV2\t90\nV3\t70", state).patch.updates,
+    [
+      { id: "mood", value: "振奋" },
+      { id: "progress", value: 90 },
+      { id: "hp", value: 70 },
+    ],
+  );
 });
 
 test("parses MVU UpdateVariable set commands and ignores its Analysis block", () => {

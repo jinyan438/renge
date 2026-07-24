@@ -335,7 +335,8 @@ export function getStatusBarItemValue(
 function getStatusBarEntriesForPrompt(state: StatusBarState) {
   return state.items
     .filter((item) => item.type !== "divider" && item.variableName)
-    .map((item) => ({
+    .map((item, index) => ({
+      slot: `V${index + 1}`,
       id: item.id,
       variableName: item.variableName,
       description: item.description,
@@ -377,6 +378,16 @@ export function buildStatusBarSnapshotSystemPrompt(): string {
   ].join("\n");
 }
 
+export function buildStatusBarSnapshotLineSystemPrompt(): string {
+  return [
+    "你只负责填写状态表，不要分析、解释或聊天。",
+    "必须根据 latestUser 和 finalAssistant，为 entries 的每个 slot 填写本轮结束时的最终值；每个 slot 恰好一行，不得遗漏或新增。",
+    "description 是该项要求。明确变化就填写新值；确实无法判断或没有变化才原样复制 currentValue；说明要求每次更新的条目必须生成新值。",
+    "每行格式只能是：V1、一个制表符、直接展示的最终值。",
+    "必须依次输出 V1、V2、V3……，不要输出 JSON、标题、序号、KEEP、原因、判断过程或其他文字。",
+  ].join("\n");
+}
+
 export function buildStatusBarToolSystemPrompt(): string {
   return [
     "你是确定性的会话状态归约器，不是聊天助手。",
@@ -412,6 +423,32 @@ export function buildStatusBarReducerPayload(
     version: 1,
     schemaRevision: state.updatedAt,
     entries: getStatusBarEntriesForPrompt(state),
+    ...(referenceContext.personaContext?.trim()
+      ? { personaContext: referenceContext.personaContext.trim() }
+      : {}),
+    ...(referenceContext.worldBookContext?.trim()
+      ? { worldBookContext: referenceContext.worldBookContext.trim() }
+      : {}),
+    latestUser,
+    finalAssistant,
+  });
+}
+
+export function buildStatusBarSnapshotPayload(
+  state: StatusBarState,
+  latestUser: string,
+  finalAssistant: string,
+  referenceContext: StatusBarReducerReferenceContext = {},
+) {
+  const entries = getStatusBarEntriesForPrompt(state).map((entry) => ({
+    slot: entry.slot,
+    variableName: entry.variableName,
+    description: entry.description,
+    currentValue: entry.currentValue,
+    ...(entry.constraints ? { constraints: entry.constraints } : {}),
+  }));
+  return JSON.stringify({
+    entries,
     ...(referenceContext.personaContext?.trim()
       ? { personaContext: referenceContext.personaContext.trim() }
       : {}),
@@ -876,9 +913,10 @@ export function parseStatusBarPatch(
   );
   const itemsById = new Map(trackedItems.map((item) => [item.id, item]));
   const itemsByReference = new Map<string, StatusBarItem>();
-  trackedItems.forEach((item) => {
+  trackedItems.forEach((item, index) => {
     itemsByReference.set(item.id.toLocaleLowerCase(), item);
     itemsByReference.set(item.variableName.toLocaleLowerCase(), item);
+    itemsByReference.set(`v${index + 1}`, item);
   });
   const labelGroups = new Map<string, StatusBarItem[]>();
   trackedItems.forEach((item) => {
