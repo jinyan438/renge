@@ -434,10 +434,13 @@ function getReducerJsonText(content: string) {
 
 function getReducerJsonCandidates(content: string) {
   const normalized = getReducerJsonText(content);
-  const candidates = [normalized];
-  const objectStarts = Array.from(normalized.matchAll(/\{/g), (match) => match.index).slice(-128);
-  for (const start of objectStarts) {
-    let depth = 0;
+  const balancedCandidates: Array<{ start: number; end: number; text: string }> = [];
+  const containerStarts = Array.from(
+    normalized.matchAll(/[\[{]/g),
+    (match) => match.index,
+  ).slice(-128);
+  for (const start of containerStarts) {
+    const stack: string[] = [];
     let inString = false;
     let escaped = false;
     for (let index = start; index < normalized.length; index += 1) {
@@ -454,25 +457,98 @@ function getReducerJsonCandidates(content: string) {
       }
       if (character === '"') {
         inString = true;
-      } else if (character === "{") {
-        depth += 1;
-      } else if (character === "}") {
-        depth -= 1;
-        if (depth === 0) {
+      } else if (character === "{" || character === "[") {
+        stack.push(character);
+      } else if (character === "}" || character === "]") {
+        const expectedOpening = character === "}" ? "{" : "[";
+        if (stack.at(-1) !== expectedOpening) break;
+        stack.pop();
+        if (stack.length === 0) {
           const candidate = normalized.slice(start, index + 1);
-          if (candidate !== normalized) candidates.push(candidate);
+          balancedCandidates.push({ start, end: index + 1, text: candidate });
           break;
         }
       }
     }
   }
-  return candidates;
+  const topLevelCandidates = balancedCandidates.filter(
+    (candidate) =>
+      !balancedCandidates.some(
+        (container) =>
+          container.start < candidate.start && container.end >= candidate.end,
+      ),
+  );
+  return [
+    normalized,
+    ...topLevelCandidates
+      .map((candidate) => candidate.text)
+      .filter((candidate) => candidate !== normalized),
+  ];
+}
+
+function parseLooseJsonCandidate(candidate: string): unknown[] {
+  const parsed: unknown[] = [];
+  try {
+    parsed.push(JSON.parse(candidate) as unknown);
+  } catch {
+    // Common model mistakes are repaired below and still pass strict patch validation later.
+  }
+  const repaired = candidate
+    .replace(/[“”]/g, '"')
+    .replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, (_match, value: string) =>
+      JSON.stringify(value.replace(/\\'/g, "'")),
+    )
+    .replace(/([{,]\s*)([A-Za-z_][\w-]*)(\s*:)/g, '$1"$2"$3')
+    .replace(/,\s*([}\]])/g, "$1");
+  if (repaired !== candidate) {
+    try {
+      parsed.push(JSON.parse(repaired) as unknown);
+    } catch {
+      // The line protocol fallback may still recover useful updates.
+    }
+  }
+  return parsed;
+}
+
+function parseLooseScalar(value: string): StatusBarValue {
+  const normalized = value.trim().replace(/[,，]\s*$/, "");
+  try {
+    const parsed = JSON.parse(normalized) as unknown;
+    if (
+      typeof parsed === "string" ||
+      typeof parsed === "number" ||
+      typeof parsed === "boolean" ||
+      parsed === null
+    ) {
+      return parsed;
+    }
+  } catch {
+    // Plain text values are valid status values.
+  }
+  const quotePairs: Array<[string, string]> = [
+    ["'", "'"],
+    ['"', '"'],
+    ["“", "”"],
+    ["‘", "’"],
+    ["`", "`"],
+  ];
+  const quotePair = quotePairs.find(
+    ([opening, closing]) =>
+      normalized.startsWith(opening) && normalized.endsWith(closing),
+  );
+  return quotePair ? normalized.slice(1, -1) : normalized;
 }
 
 function normalizePatchValue(item: StatusBarItem, rawValue: unknown): StatusBarValue | undefined {
   if (item.type === "progress") {
-    if (typeof rawValue !== "number" || !Number.isFinite(rawValue)) return undefined;
-    return Math.min(100, Math.max(0, rawValue));
+    const numericValue =
+      typeof rawValue === "number"
+        ? rawValue
+        : typeof rawValue === "string" && rawValue.trim()
+          ? Number(rawValue.trim().replace(/%$/, ""))
+          : Number.NaN;
+    if (!Number.isFinite(numericValue)) return undefined;
+    return Math.min(100, Math.max(0, numericValue));
   }
   if (typeof rawValue === "string") {
     return rawValue.slice(0, MAX_STATUS_BAR_STRING_LENGTH);
@@ -493,36 +569,132 @@ export function parseStatusBarPatch(
     return { patch: emptyPatch, error: "状态栏更新响应过长，已忽略。" };
   }
 
-  const parsedCandidates = getReducerJsonCandidates(content).flatMap((candidate) => {
-    try {
-      return [JSON.parse(candidate) as unknown];
-    } catch {
-      return [];
+  const trackedItems = state.items.filter(
+    (item) => item.type !== "divider" && item.variableName,
+  );
+  const itemsById = new Map(trackedItems.map((item) => [item.id, item]));
+  const itemsByReference = new Map<string, StatusBarItem>();
+  trackedItems.forEach((item) => {
+    itemsByReference.set(item.id.toLocaleLowerCase(), item);
+    itemsByReference.set(item.variableName.toLocaleLowerCase(), item);
+  });
+  const labelGroups = new Map<string, StatusBarItem[]>();
+  trackedItems.forEach((item) => {
+    const label = item.label.trim().toLocaleLowerCase();
+    if (label) labelGroups.set(label, [...(labelGroups.get(label) ?? []), item]);
+  });
+  labelGroups.forEach((items, label) => {
+    if (items.length === 1 && !itemsByReference.has(label)) {
+      itemsByReference.set(label, items[0]);
     }
   });
-  if (parsedCandidates.length === 0) {
-    return { patch: emptyPatch, error: "状态栏更新不是合法 JSON，已保留原状态。" };
-  }
-  const parsed = [...parsedCandidates].reverse().find(
-    (candidate) =>
-      isObjectRecord(candidate) && candidate.version === 1 && Array.isArray(candidate.updates),
-  );
-  if (!parsed || !isObjectRecord(parsed) || !Array.isArray(parsed.updates)) {
-    return { patch: emptyPatch, error: "状态栏更新结构无效，已保留原状态。" };
+  const resolveItem = (rawReference: unknown) => {
+    if (typeof rawReference !== "string") return undefined;
+    const reference = rawReference
+      .trim()
+      .replace(/^[`'"“‘]|[`'"”’]$/g, "")
+      .toLocaleLowerCase();
+    if (["__proto__", "constructor", "prototype"].includes(reference)) {
+      return undefined;
+    }
+    return itemsByReference.get(reference);
+  };
+
+  const parsedCandidates = getReducerJsonCandidates(content).flatMap(parseLooseJsonCandidate);
+  let rawUpdates: unknown[] | null = null;
+  for (const candidate of [...parsedCandidates].reverse()) {
+    if (Array.isArray(candidate)) {
+      rawUpdates = candidate;
+      break;
+    }
+    if (!isObjectRecord(candidate)) continue;
+    if (
+      candidate.version !== undefined &&
+      candidate.version !== 1 &&
+      candidate.version !== "1"
+    ) {
+      continue;
+    }
+    const candidateUpdates = [candidate.updates, candidate.changes, candidate.delta].find(
+      (value) => Array.isArray(value) || isObjectRecord(value),
+    );
+    if (Array.isArray(candidateUpdates)) {
+      rawUpdates = candidateUpdates;
+      break;
+    }
+    if (isObjectRecord(candidateUpdates)) {
+      rawUpdates = Object.entries(candidateUpdates).map(([reference, value]) => ({
+        id: reference,
+        value,
+      }));
+      break;
+    }
+    const mappedUpdates = Object.entries(candidate)
+      .filter(([reference]) => resolveItem(reference))
+      .map(([reference, value]) => ({ id: reference, value }));
+    if (mappedUpdates.length > 0) {
+      rawUpdates = mappedUpdates;
+      break;
+    }
   }
 
-  const itemsById = new Map(
-    state.items
-      .filter((item) => item.type !== "divider" && item.variableName)
-      .map((item) => [item.id, item]),
-  );
+  if (rawUpdates === null) {
+    const lineUpdates: Array<{ id: string; value: StatusBarValue }> = [];
+    let lineProtocolRecognized = false;
+    for (const rawLine of getReducerJsonText(content).split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || /^```/.test(line)) continue;
+      if (/^(?:NO[_ ]?UPDATES?|无更新|没有变化|无变化)[。.!！]?$/i.test(line)) {
+        lineProtocolRecognized = true;
+        continue;
+      }
+      const tableMatch = line.match(/^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|/);
+      const pairMatch = line.match(
+        /^(?:[-*]\s*|\d+[.)、]\s*)?(.+?)\s*(?:\t|=>|->|=|：|:)\s*(.*?)\s*$/,
+      );
+      const reference = tableMatch?.[1] ?? pairMatch?.[1];
+      const rawValue = tableMatch?.[2] ?? pairMatch?.[2];
+      const item = resolveItem(reference);
+      if (!item || rawValue === undefined || /^[-:：\s]+$/.test(rawValue)) continue;
+      lineProtocolRecognized = true;
+      if (/^(?:不变|无变化|保持(?:原值|不变)|unchanged|same)[。.!！]?$/i.test(rawValue.trim())) {
+        continue;
+      }
+      lineUpdates.push({ id: item.id, value: parseLooseScalar(rawValue) });
+    }
+    if (lineProtocolRecognized) rawUpdates = lineUpdates;
+  }
+
+  if (rawUpdates === null) {
+    return {
+      patch: emptyPatch,
+      error:
+        parsedCandidates.length > 0
+          ? "状态栏更新结构无效，已保留原状态。"
+          : "状态栏更新不是合法 JSON，已保留原状态。",
+    };
+  }
+
   const updatesById = new Map<string, StatusBarPatchEntry>();
-  for (const rawUpdate of parsed.updates) {
-    if (!isObjectRecord(rawUpdate) || typeof rawUpdate.id !== "string") continue;
-    if (["__proto__", "constructor", "prototype"].includes(rawUpdate.id)) continue;
-    const item = itemsById.get(rawUpdate.id);
+  for (const rawUpdate of rawUpdates) {
+    const tupleUpdate = Array.isArray(rawUpdate) ? rawUpdate : null;
+    const updateRecord = !tupleUpdate && isObjectRecord(rawUpdate) ? rawUpdate : null;
+    if (!tupleUpdate && !updateRecord) continue;
+    const rawReference = tupleUpdate
+      ? tupleUpdate[0]
+      : updateRecord?.id ??
+        updateRecord?.variableName ??
+        updateRecord?.variable ??
+        updateRecord?.name ??
+        updateRecord?.key;
+    const item = resolveItem(rawReference);
     if (!item) continue;
-    const value = normalizePatchValue(item, rawUpdate.value);
+    const rawValue = tupleUpdate
+      ? tupleUpdate[1]
+      : Object.prototype.hasOwnProperty.call(updateRecord, "value")
+        ? updateRecord?.value
+        : updateRecord?.newValue ?? updateRecord?.new_value ?? updateRecord?.status;
+    const value = normalizePatchValue(item, rawValue);
     if (value === undefined) continue;
     updatesById.set(item.id, { id: item.id, value });
   }
