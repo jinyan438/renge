@@ -19141,14 +19141,27 @@ export function App() {
     } as const;
     if (!targetIsCurrent()) return ignoredResult;
 
-    const requestBody = (includeResponseFormat: boolean) => ({
+    type StatusBarResponseFormatMode = "json_schema" | "json_object" | "none";
+    const requestBody = (
+      responseFormatMode: StatusBarResponseFormatMode,
+      correctionRetry = false,
+    ) => ({
       apiBaseUrl: trimTrailingSlash(requestProvider.apiBaseUrl),
       apiKey: requestProvider.apiKey,
-      sessionId,
       request: {
         model: requestModelId,
         messages: [
-          { role: "system", content: buildStatusBarReducerSystemPrompt() },
+          {
+            role: "system",
+            content: [
+              buildStatusBarReducerSystemPrompt(),
+              correctionRetry
+                ? "上一次输出无法解析。本次必须只返回一个完整 JSON 对象，首字符为 {，末字符为 }，不要输出思考过程、代码围栏或解释。"
+                : "",
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          },
           {
             role: "user",
             content: buildStatusBarReducerPayload(statusBar, latestUser, finalAssistant),
@@ -19156,19 +19169,24 @@ export function App() {
         ],
         temperature: 0,
         max_tokens: Math.min(2048, Math.max(256, trackedItemCount * 96)),
-        ...(includeResponseFormat
+        ...(responseFormatMode === "json_schema"
           ? { response_format: buildStatusBarResponseFormat(statusBar) }
-          : {}),
+          : responseFormatMode === "json_object"
+            ? { response_format: { type: "json_object" } }
+            : {}),
         stream: false,
       },
     });
 
-    const makeRequest = async (includeResponseFormat: boolean) => {
+    const makeRequest = async (
+      responseFormatMode: StatusBarResponseFormatMode,
+      correctionRetry = false,
+    ) => {
       const response = await fetch("/api/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal,
-        body: JSON.stringify(requestBody(includeResponseFormat)),
+        body: JSON.stringify(requestBody(responseFormatMode, correctionRetry)),
       });
       const payload = (await response.json().catch(() => ({}))) as {
         error?: string | { message?: string };
@@ -19177,17 +19195,43 @@ export function App() {
       };
       return { response, payload };
     };
+    const responseFormatFallback: Record<
+      Exclude<StatusBarResponseFormatMode, "none">,
+      StatusBarResponseFormatMode
+    > = {
+      json_schema: "json_object",
+      json_object: "none",
+    };
+    const requestWithResponseFormatFallback = async (
+      initialMode: StatusBarResponseFormatMode,
+      correctionRetry = false,
+    ) => {
+      let mode = initialMode;
+      let result = await makeRequest(mode, correctionRetry);
+      while (
+        !result.response.ok &&
+        [400, 404, 415, 422].includes(result.response.status) &&
+        mode !== "none"
+      ) {
+        mode = responseFormatFallback[mode];
+        result = await makeRequest(mode, correctionRetry);
+      }
+      return { ...result, mode };
+    };
+    const getRawStatusBarPatch = (payload: {
+      choices?: Array<{ message?: ChatApiMessage }>;
+      output_text?: string;
+    }) =>
+      getChatApiMessageText(payload.choices?.[0]?.message).trim() ||
+      payload.output_text?.trim() ||
+      "";
 
     try {
       if (activeChatSessionIdRef.current === sessionId) {
         setChatStatus({ status: "loading", message: "正文已完成，正在更新状态栏变量..." });
       }
-      let result = await makeRequest(true);
+      let result = await requestWithResponseFormatFallback("json_schema");
       if (!targetIsCurrent()) return ignoredResult;
-      if (!result.response.ok && [400, 404, 415, 422].includes(result.response.status)) {
-        result = await makeRequest(false);
-        if (!targetIsCurrent()) return ignoredResult;
-      }
       if (!result.response.ok) {
         const errorMessage =
           typeof result.payload.error === "string"
@@ -19200,11 +19244,18 @@ export function App() {
         };
       }
 
-      const rawPatch =
-        getChatApiMessageText(result.payload.choices?.[0]?.message).trim() ||
-        result.payload.output_text?.trim() ||
-        "";
-      const parsed = parseStatusBarPatch(rawPatch, statusBar);
+      let parsed = parseStatusBarPatch(getRawStatusBarPatch(result.payload), statusBar);
+      if (parsed.error) {
+        const correctionMode = result.mode === "json_schema" ? "json_object" : result.mode;
+        const correctionResult = await requestWithResponseFormatFallback(correctionMode, true);
+        if (!targetIsCurrent()) return ignoredResult;
+        if (correctionResult.response.ok) {
+          parsed = parseStatusBarPatch(
+            getRawStatusBarPatch(correctionResult.payload),
+            statusBar,
+          );
+        }
+      }
       if (parsed.error) return { attempted: true, updated: 0, error: parsed.error };
       if (parsed.patch.updates.length === 0) return { attempted: true, updated: 0 };
 
