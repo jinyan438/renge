@@ -31,7 +31,7 @@ type StatusBarItem = StatusBarState["items"][number];
 type StatusBarItemType = StatusBarItem["type"];
 type StatusBarItemWidth = StatusBarItem["width"];
 type StatusBarItemSize = StatusBarItem["size"];
-type StatusBarPreset = {
+export type StatusBarPreset = {
   id: string;
   name: string;
   title: string;
@@ -48,6 +48,8 @@ export type StatusBarSidebarProps = {
   onStateChange: (next: StatusBarState) => void;
   onClearValues: () => void;
   onManualUpdate: () => void | Promise<void>;
+  presets: StatusBarPreset[];
+  onPresetsChange: (next: StatusBarPreset[]) => void;
   manualUpdateDisabled?: boolean;
   manualUpdateRunning?: boolean;
 };
@@ -57,7 +59,7 @@ type StatusBarCssProperties = CSSProperties & {
 };
 
 const DEFAULT_ACCENT_COLOR = "#ff758c";
-const STATUS_BAR_PRESETS_STORAGE_KEY = "renge_status_bar_presets";
+export const STATUS_BAR_PRESETS_STORAGE_KEY = "renge_status_bar_presets";
 const MAX_STATUS_BAR_PRESETS = 100;
 const EDITOR_FOCUSABLE_SELECTOR = [
   "button:not([disabled])",
@@ -198,21 +200,26 @@ function normalizeStatusBarPreset(rawValue: unknown, index: number): StatusBarPr
   };
 }
 
-function loadStatusBarPresets(): StatusBarPreset[] {
+export function normalizeStatusBarPresets(rawValue: unknown): StatusBarPreset[] {
+  if (!Array.isArray(rawValue)) return [];
+  const seenIds = new Set<string>();
+  return rawValue
+    .slice(0, MAX_STATUS_BAR_PRESETS)
+    .flatMap((preset, index) => {
+      const normalized = normalizeStatusBarPreset(preset, index);
+      if (!normalized) return [];
+      if (seenIds.has(normalized.id)) normalized.id = createStatusPresetId();
+      seenIds.add(normalized.id);
+      return [normalized];
+    });
+}
+
+export function loadStatusBarPresetsFromStorage(): StatusBarPreset[] {
   if (typeof localStorage === "undefined") return [];
   try {
-    const parsed = JSON.parse(localStorage.getItem(STATUS_BAR_PRESETS_STORAGE_KEY) ?? "[]");
-    if (!Array.isArray(parsed)) return [];
-    const seenIds = new Set<string>();
-    return parsed
-      .slice(0, MAX_STATUS_BAR_PRESETS)
-      .flatMap((preset, index) => {
-        const normalized = normalizeStatusBarPreset(preset, index);
-        if (!normalized) return [];
-        if (seenIds.has(normalized.id)) normalized.id = createStatusPresetId();
-        seenIds.add(normalized.id);
-        return [normalized];
-      });
+    return normalizeStatusBarPresets(
+      JSON.parse(localStorage.getItem(STATUS_BAR_PRESETS_STORAGE_KEY) ?? "[]"),
+    );
   } catch {
     return [];
   }
@@ -483,6 +490,8 @@ export function StatusBarSidebar({
   onStateChange,
   onClearValues,
   onManualUpdate,
+  presets,
+  onPresetsChange,
   manualUpdateDisabled = false,
   manualUpdateRunning = false,
 }: StatusBarSidebarProps) {
@@ -492,7 +501,6 @@ export function StatusBarSidebar({
   const [dragOverItemId, setDragOverItemId] = useState("");
   const [showValidation, setShowValidation] = useState(false);
   const [valuesClearedInEditor, setValuesClearedInEditor] = useState(false);
-  const [presets, setPresets] = useState<StatusBarPreset[]>(loadStatusBarPresets);
   const [selectedPresetId, setSelectedPresetId] = useState("");
   const [presetName, setPresetName] = useState("");
   const [presetFeedback, setPresetFeedback] = useState("");
@@ -513,15 +521,6 @@ export function StatusBarSidebar({
   } as StatusBarCssProperties;
 
   const closeEditor = () => setEditorOpen(false);
-
-  useEffect(() => {
-    if (typeof localStorage === "undefined") return;
-    try {
-      localStorage.setItem(STATUS_BAR_PRESETS_STORAGE_KEY, JSON.stringify(presets));
-    } catch {
-      // The editor stays usable even when browser storage is unavailable or full.
-    }
-  }, [presets]);
 
   useEffect(() => {
     if (!editorOpen || typeof document === "undefined") return;
@@ -752,7 +751,7 @@ export function StatusBarSidebar({
     const timestamp = new Date().toISOString();
     const name = createUniquePresetName(presets, presetName);
     const preset = createPresetFromDraft(createStatusPresetId(), name, timestamp);
-    setPresets((current) => [...current, preset]);
+    onPresetsChange([...presets, preset]);
     setSelectedPresetId(preset.id);
     setPresetName(preset.name);
     setPresetFeedback(`已保存新预设“${preset.name}”。`);
@@ -770,8 +769,8 @@ export function StatusBarSidebar({
       name,
       selectedPreset.createdAt,
     );
-    setPresets((current) =>
-      current.map((preset) => (preset.id === selectedPreset.id ? nextPreset : preset)),
+    onPresetsChange(
+      presets.map((preset) => (preset.id === selectedPreset.id ? nextPreset : preset)),
     );
     setPresetName(name);
     setPresetFeedback(`已更新预设“${name}”。`);
@@ -804,7 +803,7 @@ export function StatusBarSidebar({
     ) {
       return;
     }
-    setPresets((current) => current.filter((preset) => preset.id !== selectedPreset.id));
+    onPresetsChange(presets.filter((preset) => preset.id !== selectedPreset.id));
     setSelectedPresetId("");
     setPresetName("");
     setPresetFeedback(`已删除预设“${selectedPreset.name}”。`);
