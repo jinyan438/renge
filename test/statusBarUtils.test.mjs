@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  buildStatusBarContextPrompt,
   buildStatusBarReducerPayload,
   buildStatusBarReducerSystemPrompt,
   buildStatusBarResponseFormat,
@@ -151,9 +150,8 @@ test("normalizes duplicate variable names, progress entries, and stored values",
   assert.equal(getStatusBarItemValue(state, state.items[1]), 75);
 });
 
-test("builds read-only context, reducer payload, and response schema", () => {
+test("builds reducer payload and response schema", () => {
   const state = createTestState();
-  const context = buildStatusBarContextPrompt(state);
   const reducerPayload = JSON.parse(
     buildStatusBarReducerPayload(state, "我抵达了终点", "任务已经完成。", {
       personaContext: "谨慎而可靠的向导",
@@ -161,14 +159,6 @@ test("builds read-only context, reducer payload, and response schema", () => {
     }),
   );
   const responseFormat = buildStatusBarResponseFormat(state);
-
-  assert.match(context, /当前会话状态（只读上下文）/);
-  assert.match(context, /正常回复中不要输出/);
-  assert.match(context, /"id": "progress"/);
-  assert.match(context, /仅在角色明确表现出情绪变化时更新/);
-  assert.match(context, /"minimum": 0/);
-  assert.doesNotMatch(context, /"id": "divider"/);
-  assert.equal(buildStatusBarContextPrompt({ ...state, enabled: false }), "");
 
   assert.equal(reducerPayload.version, 1);
   assert.equal(reducerPayload.schemaRevision, state.updatedAt);
