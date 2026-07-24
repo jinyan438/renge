@@ -232,6 +232,17 @@ export function buildProviderReasoningRequest(
   };
 }
 
+export function buildProviderReasoningDisableRequest(
+  provider?: ReasoningProviderConfig,
+): Record<string, unknown> {
+  if (!provider) return {};
+  const format = detectReasoningFormat(provider);
+  if (format === "deepseek") {
+    return { thinking: { type: "disabled" } };
+  }
+  return {};
+}
+
 export function getReasoningTextFromValue(
   value: unknown,
   options: { preserveWhitespace?: boolean } = {},
