@@ -218,6 +218,8 @@ import {
   buildStatusBarSnapshotPayload,
   buildStatusBarSnapshotSystemPrompt,
   buildStatusBarMvuSystemPrompt,
+  buildStatusBarProgressPayload,
+  buildStatusBarProgressSystemPrompt,
   buildStatusBarResponseFormat,
   buildStatusBarToolDefinition,
   buildStatusBarToolSystemPrompt,
@@ -19253,6 +19255,8 @@ export function App() {
       | "json_object"
       | "snapshot_json"
       | "snapshot_lines"
+      | "progress_json"
+      | "progress_lines"
       | "mvu_commands"
       | "line_protocol"
       | "none";
@@ -19266,6 +19270,7 @@ export function App() {
     const requestBody = (
       responseFormatMode: StatusBarResponseFormatMode,
       includeReasoningControl = true,
+      progressItemIds: string[] = [],
     ) => ({
       apiBaseUrl: trimTrailingSlash(statusRequestProvider.apiBaseUrl),
       apiKey: statusRequestProvider.apiKey,
@@ -19274,7 +19279,11 @@ export function App() {
         messages: [
           {
             role: "system",
-            content: responseFormatMode === "snapshot_lines"
+            content: responseFormatMode === "progress_lines"
+              ? buildStatusBarProgressSystemPrompt("lines")
+              : responseFormatMode === "progress_json"
+                ? buildStatusBarProgressSystemPrompt("json")
+                : responseFormatMode === "snapshot_lines"
               ? buildStatusBarSnapshotLineSystemPrompt()
               : responseFormatMode === "snapshot_json"
               ? buildStatusBarSnapshotSystemPrompt()
@@ -19295,7 +19304,19 @@ export function App() {
           {
             role: "user",
             content:
-              responseFormatMode === "snapshot_lines"
+              responseFormatMode === "progress_lines" ||
+              responseFormatMode === "progress_json"
+                ? buildStatusBarProgressPayload(
+                    statusBar,
+                    latestUser,
+                    finalAssistant,
+                    reducerReferenceContext,
+                    {
+                      itemIds: progressItemIds,
+                      includeIds: responseFormatMode === "progress_json",
+                    },
+                  )
+                : responseFormatMode === "snapshot_lines"
                 ? buildStatusBarSnapshotPayload(
                     statusBar,
                     latestUser,
@@ -19312,7 +19333,11 @@ export function App() {
         ],
         temperature: 0,
         max_tokens:
-          responseFormatMode === "snapshot_lines"
+          responseFormatMode === "progress_lines"
+            ? Math.min(1024, Math.max(256, progressItemIds.length * 96))
+            : responseFormatMode === "progress_json"
+              ? Math.min(2048, Math.max(512, progressItemIds.length * 128))
+              : responseFormatMode === "snapshot_lines"
             ? Math.min(2048, Math.max(512, trackedItemCount * 160))
             : Math.min(8192, Math.max(4096, trackedItemCount * 384)),
         ...(includeReasoningControl ? statusReasoningControl : {}),
@@ -19326,7 +19351,9 @@ export function App() {
             }
           : responseFormatMode === "json_schema"
           ? { response_format: buildStatusBarResponseFormat(statusBar) }
-          : responseFormatMode === "json_object" || responseFormatMode === "snapshot_json"
+          : responseFormatMode === "json_object" ||
+              responseFormatMode === "snapshot_json" ||
+              responseFormatMode === "progress_json"
             ? { response_format: { type: "json_object" } }
             : {}),
         stream: false,
@@ -19336,12 +19363,15 @@ export function App() {
     const makeRequest = async (
       responseFormatMode: StatusBarResponseFormatMode,
       includeReasoningControl = true,
+      progressItemIds: string[] = [],
     ) => {
       const response = await fetch("/api/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal,
-        body: JSON.stringify(requestBody(responseFormatMode, includeReasoningControl)),
+        body: JSON.stringify(
+          requestBody(responseFormatMode, includeReasoningControl, progressItemIds),
+        ),
       });
       const payload = (await response.json().catch(() => ({}))) as {
         error?: string | { message?: string };
@@ -19358,23 +19388,47 @@ export function App() {
       if (mode === "json_schema") return "json_object";
       if (mode === "json_object") return "none";
       if (mode === "snapshot_json") return "snapshot_lines";
+      if (mode === "progress_json") return "progress_lines";
       return null;
     };
     const requestWithResponseFormatFallback = async (
       initialMode: StatusBarResponseFormatMode,
       includeReasoningControl = true,
+      progressItemIds: string[] = [],
     ) => {
       let mode = initialMode;
-      let result = await makeRequest(mode, includeReasoningControl);
+      let result = await makeRequest(mode, includeReasoningControl, progressItemIds);
       while (
         !result.response.ok &&
         [400, 404, 415, 422, 500, 501].includes(result.response.status) &&
         getResponseFormatFallback(mode)
       ) {
         mode = getResponseFormatFallback(mode) ?? "none";
-        result = await makeRequest(mode, includeReasoningControl);
+        result = await makeRequest(mode, includeReasoningControl, progressItemIds);
       }
       return { ...result, mode };
+    };
+    const requestWithCompatibilityFallback = async (
+      initialMode: StatusBarResponseFormatMode,
+      progressItemIds: string[] = [],
+    ) => {
+      let result = await requestWithResponseFormatFallback(
+        initialMode,
+        true,
+        progressItemIds,
+      );
+      if (
+        !result.response.ok &&
+        Object.keys(statusReasoningControl).length > 0 &&
+        [400, 404, 415, 422, 500, 501].includes(result.response.status)
+      ) {
+        result = await requestWithResponseFormatFallback(
+          initialMode,
+          false,
+          progressItemIds,
+        );
+      }
+      return result;
     };
     const getRawStatusBarPatch = (payload: {
       choices?: Array<{ message?: ChatApiMessage; text?: string }>;
@@ -19410,17 +19464,7 @@ export function App() {
       if (activeChatSessionIdRef.current === sessionId) {
         setChatStatus({ status: "loading", message: "正文已完成，正在更新状态栏变量..." });
       }
-      let result = await requestWithResponseFormatFallback(initialResponseFormatMode);
-      if (
-        !result.response.ok &&
-        Object.keys(statusReasoningControl).length > 0 &&
-        [400, 404, 415, 422, 500, 501].includes(result.response.status)
-      ) {
-        result = await requestWithResponseFormatFallback(
-          initialResponseFormatMode,
-          false,
-        );
-      }
+      const result = await requestWithCompatibilityFallback(initialResponseFormatMode);
       if (!targetIsCurrent()) return ignoredResult;
       if (!result.response.ok) {
         const errorMessage =
@@ -19456,6 +19500,42 @@ export function App() {
         }
       }
       if (parsed.error) return { attempted: true, updated: 0, error: parsed.error };
+      const updatedItemIds = new Set(parsed.patch.updates.map((update) => update.id));
+      const unscoredProgressItemIds = statusBar.items
+        .filter(
+          (item) =>
+            item.type === "progress" &&
+            item.variableName &&
+            !updatedItemIds.has(item.id),
+        )
+        .map((item) => item.id);
+      if (unscoredProgressItemIds.length > 0) {
+        const progressMode: StatusBarResponseFormatMode = usesLocalPlainStatusProtocol
+          ? "progress_lines"
+          : "progress_json";
+        const progressResult = await requestWithCompatibilityFallback(
+          progressMode,
+          unscoredProgressItemIds,
+        );
+        if (!targetIsCurrent()) return ignoredResult;
+        if (progressResult.response.ok) {
+          const progressParsed = parseStatusBarPatch(
+            getRawStatusBarPatch(progressResult.payload),
+            statusBar,
+          );
+          if (!progressParsed.error && progressParsed.patch.updates.length > 0) {
+            const mergedUpdates = new Map(
+              parsed.patch.updates.map((update) => [update.id, update]),
+            );
+            progressParsed.patch.updates.forEach((update) => {
+              mergedUpdates.set(update.id, update);
+            });
+            parsed = {
+              patch: { version: 1, updates: Array.from(mergedUpdates.values()) },
+            };
+          }
+        }
+      }
       if (parsed.patch.updates.length === 0) return { attempted: true, updated: 0 };
 
       const patch: StatusBarPatch = parsed.patch;
