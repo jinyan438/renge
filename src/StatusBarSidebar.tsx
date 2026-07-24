@@ -93,9 +93,10 @@ const STATUS_SIZE_OPTIONS: Array<{ value: StatusBarItemSize; label: string }> = 
 
 const ITEM_TYPE_DEFAULTS: Record<
   StatusBarItemType,
-  Pick<StatusBarItem, "label" | "icon" | "width" | "size" | "initialValue">
+  Pick<StatusBarItem, "description" | "label" | "icon" | "width" | "size" | "initialValue">
 > = {
   header: {
+    description: "",
     label: "时间",
     icon: "🕒",
     width: "short",
@@ -103,6 +104,7 @@ const ITEM_TYPE_DEFAULTS: Record<
     initialValue: "未设定",
   },
   banner: {
+    description: "",
     label: "心理",
     icon: "🎭",
     width: "long",
@@ -110,6 +112,7 @@ const ITEM_TYPE_DEFAULTS: Record<
     initialValue: "平静",
   },
   grid: {
+    description: "",
     label: "新属性",
     icon: "✨",
     width: "medium",
@@ -117,6 +120,7 @@ const ITEM_TYPE_DEFAULTS: Record<
     initialValue: "未设定",
   },
   progress: {
+    description: "",
     label: "进度",
     icon: "📊",
     width: "long",
@@ -124,6 +128,7 @@ const ITEM_TYPE_DEFAULTS: Record<
     initialValue: 0,
   },
   list: {
+    description: "",
     label: "条目",
     icon: "📍",
     width: "long",
@@ -131,6 +136,7 @@ const ITEM_TYPE_DEFAULTS: Record<
     initialValue: "未设定",
   },
   divider: {
+    description: "",
     label: "分割线",
     icon: "",
     width: "long",
@@ -469,6 +475,7 @@ function normalizeDraftForSave(
     items: draft.items.map((item) => ({
       ...item,
       variableName: item.type === "divider" ? "" : item.variableName.trim(),
+      description: item.type === "divider" ? "" : item.description.trim(),
       label: item.label.trim() || item.variableName.trim() || "分割线",
       icon: item.icon.trim(),
       initialValue:
@@ -1098,6 +1105,23 @@ export function StatusBarSidebar({
                                   placeholder={isDivider ? "分割线不占变量" : "例如：好感度"}
                                   type="text"
                                   value={item.variableName}
+                                />
+                              </label>
+                              <label className="variable-description-field">
+                                <span>变量说明</span>
+                                <textarea
+                                  disabled={isDivider}
+                                  maxLength={1000}
+                                  onChange={(event) =>
+                                    updateDraftItem(item.id, { description: event.target.value })
+                                  }
+                                  placeholder={
+                                    isDivider
+                                      ? "分割线无需说明"
+                                      : "例如：仅在角色明确表达情绪变化时更新，填写简短情绪词"
+                                  }
+                                  rows={2}
+                                  value={item.description}
                                 />
                               </label>
                               <label>

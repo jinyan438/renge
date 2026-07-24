@@ -23,6 +23,7 @@ function createTestState(overrides = {}) {
       {
         id: "mood",
         variableName: "情绪",
+        description: "仅在角色明确表现出情绪变化时更新，使用简短情绪词。",
         label: "情绪",
         icon: "🎭",
         type: "banner",
@@ -85,6 +86,7 @@ test("creates the default status bar and progress item defaults", () => {
   assert.deepEqual(progress, {
     id: "custom-progress",
     variableName: "进度",
+    description: "",
     label: "进度",
     icon: "📊",
     type: "progress",
@@ -138,6 +140,7 @@ test("normalizes duplicate variable names, progress entries, and stored values",
   assert.equal(state.title, "测试状态");
   assert.equal(state.accentColor, "#ff758c");
   assert.equal(state.items[0].variableName, "进度");
+  assert.equal(state.items[0].description, "");
   assert.equal(state.items[1].variableName, "进度_2");
   assert.equal(state.items[1].label, "进度_2");
   assert.equal(state.items[1].type, "progress");
@@ -159,6 +162,7 @@ test("builds read-only context, reducer payload, and response schema", () => {
   assert.match(context, /当前会话状态（只读上下文）/);
   assert.match(context, /正常回复中不要输出/);
   assert.match(context, /"id": "progress"/);
+  assert.match(context, /仅在角色明确表现出情绪变化时更新/);
   assert.match(context, /"minimum": 0/);
   assert.doesNotMatch(context, /"id": "divider"/);
   assert.equal(buildStatusBarContextPrompt({ ...state, enabled: false }), "");
@@ -171,6 +175,10 @@ test("builds read-only context, reducer payload, and response schema", () => {
     reducerPayload.entries.map((entry) => entry.id),
     ["mood", "progress", "hp"],
   );
+  assert.equal(
+    reducerPayload.entries[0].description,
+    "仅在角色明确表现出情绪变化时更新，使用简短情绪词。",
+  );
   assert.deepEqual(reducerPayload.entries[1].constraints, {
     minimum: 0,
     maximum: 100,
@@ -178,6 +186,7 @@ test("builds read-only context, reducer payload, and response schema", () => {
   const reducerSystemPrompt = buildStatusBarReducerSystemPrompt();
   assert.match(reducerSystemPrompt, /updates 只包含变化项/);
   assert.match(reducerSystemPrompt, /entries\[\]\.id/);
+  assert.match(reducerSystemPrompt, /entries\[\]\.description/);
   assert.match(reducerSystemPrompt, /\{"version":1,"updates":\[\]\}/);
   assert.match(
     reducerSystemPrompt,

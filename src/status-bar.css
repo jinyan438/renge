@@ -38,7 +38,8 @@
 .status-bar-sidebar button,
 .status-bar-editor-backdrop button,
 .status-bar-editor-backdrop input,
-.status-bar-editor-backdrop select {
+.status-bar-editor-backdrop select,
+.status-bar-editor-backdrop textarea {
   font: inherit;
 }
 
@@ -50,7 +51,8 @@
 .status-bar-sidebar button:focus-visible,
 .status-bar-editor-backdrop button:focus-visible,
 .status-bar-editor-backdrop input:focus-visible,
-.status-bar-editor-backdrop select:focus-visible {
+.status-bar-editor-backdrop select:focus-visible,
+.status-bar-editor-backdrop textarea:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--status-accent) 70%, white);
   outline-offset: 2px;
 }
@@ -773,10 +775,10 @@
 }
 
 .status-bar-editor-form input,
-.status-bar-editor-form select {
+.status-bar-editor-form select,
+.status-bar-editor-form textarea {
   width: 100%;
   min-width: 0;
-  height: 34px;
   padding: 0 9px;
   border: 1px solid rgba(255, 255, 255, 0.11);
   border-radius: 8px;
@@ -786,14 +788,27 @@
   background: #131319;
 }
 
+.status-bar-editor-form input,
+.status-bar-editor-form select {
+  height: 34px;
+}
+
+.status-bar-editor-form textarea {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  line-height: 1.45;
+}
+
 .status-bar-editor-form input:focus,
-.status-bar-editor-form select:focus {
+.status-bar-editor-form select:focus,
+.status-bar-editor-form textarea:focus {
   border-color: color-mix(in srgb, var(--status-accent) 58%, transparent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-accent) 10%, transparent);
 }
 
 .status-bar-editor-form input:disabled,
-.status-bar-editor-form select:disabled {
+.status-bar-editor-form select:disabled,
+.status-bar-editor-form textarea:disabled {
   color: #707582;
   background: rgba(0, 0, 0, 0.16);
   cursor: not-allowed;
@@ -976,8 +991,14 @@
   gap: 7px;
 }
 
+.status-bar-item-fields .variable-description-field,
 .status-bar-item-fields .initial-value-field {
   grid-column: 1 / -1;
+}
+
+.status-bar-item-fields .variable-description-field textarea {
+  min-height: 52px;
+  resize: vertical;
 }
 
 .status-item-error {
@@ -1264,6 +1285,7 @@
   }
 
   .status-bar-item-fields .variable-field,
+  .status-bar-item-fields .variable-description-field,
   .status-bar-item-fields .initial-value-field {
     grid-column: span 2;
   }
@@ -1297,6 +1319,7 @@
   }
 
   .status-bar-item-fields .variable-field,
+  .status-bar-item-fields .variable-description-field,
   .status-bar-item-fields .initial-value-field {
     grid-column: 1 / -1;
   }
