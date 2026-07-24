@@ -308,6 +308,17 @@ test("accepts a simple line or Markdown table update protocol", () => {
   assert.deepEqual(parseStatusBarPatch("情绪：无变化", state).patch.updates, []);
 });
 
+test("rejects model analysis text masquerading as a status value", () => {
+  const state = createTestState();
+  const result = parseStatusBarPatch(
+    "情绪：当前值为平静，我们需要根据人格设定和最终助手回复判断是否更新，所以可能应该填入兴奋，但也可能保持原值。",
+    state,
+  );
+
+  assert.match(result.error, /分析说明/);
+  assert.deepEqual(result.patch.updates, []);
+});
+
 test("filters unknown IDs, unchanged values, and keeps the last duplicate update", () => {
   const state = createTestState();
 
