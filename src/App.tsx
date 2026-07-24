@@ -28903,9 +28903,7 @@ export function App() {
         title="对话工作区"
         bodyClassName={`chat-shell ${
           chatDesktopSidebarCollapsed ? "desktop-sidebar-collapsed" : ""
-        } ${chatStatusSidebarCollapsed ? "status-sidebar-collapsed" : ""} ${
-          mobileSidebarOpen ? "mobile-sidebar-open" : ""
-        } ${
+        } ${mobileSidebarOpen ? "mobile-sidebar-open" : ""} ${
           chatPersonalization.quoteStyleEnabled ? "quote-style-enabled" : ""
         } ${chatPersonalization.italicStyleEnabled ? "italic-style-enabled" : ""}`}
         bodyStyle={chatVisualStyle}

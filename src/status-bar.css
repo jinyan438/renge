@@ -591,52 +591,6 @@
   white-space: nowrap;
 }
 
-.status-bar-sidebar.is-collapsed {
-  width: 46px;
-  align-items: center;
-  justify-content: flex-start;
-  overflow: visible;
-  background: #171720;
-}
-
-.status-bar-expand-button {
-  position: relative;
-  display: flex;
-  width: 46px;
-  min-height: 126px;
-  align-items: center;
-  flex-direction: column;
-  gap: 8px;
-  padding: 14px 0;
-  border: 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  color: #bfc4d0;
-  background: rgba(255, 255, 255, 0.035);
-}
-
-.status-bar-expand-button:hover {
-  color: #ffffff;
-  background: color-mix(in srgb, var(--status-accent) 12%, transparent);
-}
-
-.status-bar-expand-button > span {
-  font-size: 11px;
-  font-weight: 750;
-  letter-spacing: 0.12em;
-  writing-mode: vertical-rl;
-}
-
-.status-bar-expand-button > i {
-  position: absolute;
-  right: 8px;
-  bottom: 9px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--status-accent);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--status-accent) 75%, transparent);
-}
-
 .status-bar-editor-backdrop {
   position: fixed;
   z-index: 4000;
@@ -1157,7 +1111,7 @@
     container-type: inline-size;
   }
 
-  .status-bar-sidebar:not(.is-collapsed) {
+  .status-bar-sidebar {
     width: clamp(220px, 24cqw, 340px);
   }
 
@@ -1177,7 +1131,7 @@
       --desktop-chat-sidebar-width: clamp(210px, 28cqw, 250px);
     }
 
-    .status-bar-sidebar:not(.is-collapsed) {
+    .status-bar-sidebar {
       width: clamp(190px, 27cqw, 240px);
     }
   }
@@ -1223,37 +1177,6 @@
     height: calc(100dvh - 42px);
     border-left-color: rgba(255, 255, 255, 0.12);
     box-shadow: -22px 0 60px rgba(4, 6, 14, 0.42);
-  }
-
-  .status-bar-sidebar.is-collapsed {
-    top: 64px;
-    right: 0;
-    bottom: auto;
-    width: 46px;
-    height: 54px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-right: 0;
-    border-radius: 12px 0 0 12px;
-    box-shadow: 0 8px 22px rgba(4, 6, 14, 0.25);
-  }
-
-  .status-bar-sidebar.is-collapsed .status-bar-expand-button {
-    width: 46px;
-    min-height: 52px;
-    flex-direction: row;
-    gap: 0;
-    padding: 0;
-    border: 0;
-    justify-content: center;
-  }
-
-  .status-bar-sidebar.is-collapsed .status-bar-expand-button > span {
-    display: none;
-  }
-
-  .status-bar-sidebar.is-collapsed .status-bar-expand-button > i {
-    right: 6px;
-    bottom: 7px;
   }
 
   .status-bar-sidebar-header {
