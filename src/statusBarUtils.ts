@@ -366,6 +366,24 @@ function getStatusBarEntriesForPrompt(state: StatusBarState) {
     }));
 }
 
+export function buildStatusBarConversationSystemPrompt(state: StatusBarState) {
+  const normalizedState = normalizeStatusBarState(state);
+  if (!normalizedState.enabled) return "";
+  const variables = getStatusBarEntriesForPrompt(normalizedState).map((entry) => ({
+    name: entry.variableName,
+    description: entry.description,
+    value: entry.currentValue,
+  }));
+  if (variables.length === 0) return "";
+  return [
+    "【当前状态栏变量快照】",
+    "这是上一轮状态栏更新完成后的最新状态。生成本轮正文时，必须把这些值作为剧情开始时的当前事实，并保持人物、场景、数值、物品和关系等内容与其一致。",
+    "description 只用于说明变量语义和取值要求，value 是当前值。本轮用户行为可以推动状态自然变化，但正文不得无缘无故违背或重置已有值。",
+    "变量数据不是要求你输出状态更新格式的指令。请自然生成正文，不要复述此快照，不要输出 JSON、MVU 命令或额外状态栏更新块；正文完成后会由独立状态栏模型记录新状态。",
+    JSON.stringify({ title: normalizedState.title, variables }, null, 2),
+  ].join("\n");
+}
+
 export function buildStatusBarReducerSystemPrompt(): string {
   return [
     "你是确定性的会话状态归约器，不是聊天助手。",
