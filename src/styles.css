@@ -3765,6 +3765,10 @@ summary:focus-visible {
   z-index: 1;
 }
 
+.chat-workspace > .chat-header {
+  z-index: 30;
+}
+
 .chat-header {
   display: flex;
   align-items: center;
