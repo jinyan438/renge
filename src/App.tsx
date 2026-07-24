@@ -202,7 +202,13 @@ import {
   type ProviderReasoningEffort,
   type ReasoningMessageStreamMode,
 } from "./reasoningUtils";
-import { StatusBarSidebar } from "./StatusBarSidebar";
+import {
+  loadStatusBarPresetsFromStorage,
+  normalizeStatusBarPresets,
+  STATUS_BAR_PRESETS_STORAGE_KEY,
+  StatusBarSidebar,
+  type StatusBarPreset,
+} from "./StatusBarSidebar";
 import {
   buildStatusBarContextPrompt,
   buildStatusBarReducerPayload,
@@ -660,6 +666,7 @@ type RengeAppData = {
   activeSystemPromptId?: string;
   activeSystemPromptIds?: string[];
   chatPresets?: ChatPreset[];
+  statusBarPresets?: StatusBarPreset[];
   activeChatPresetId?: string;
   chatPresetEnabled?: boolean;
   worldBooks?: WorldBook[];
@@ -2377,6 +2384,7 @@ function persistAppDataToLocalStores(
     data.activeSystemPromptIds ?? [],
   );
   setLocalStorageJsonSafely(CHAT_PRESETS_STORAGE_KEY, data.chatPresets ?? []);
+  setLocalStorageJsonSafely(STATUS_BAR_PRESETS_STORAGE_KEY, data.statusBarPresets ?? []);
   setLocalStorageValueSafely(ACTIVE_CHAT_PRESET_STORAGE_KEY, data.activeChatPresetId ?? "");
   setLocalStorageValueSafely(
     CHAT_PRESET_ENABLED_STORAGE_KEY,
@@ -10699,6 +10707,9 @@ export function App() {
   const [chatPresets, setChatPresets] = useState<ChatPreset[]>(() =>
     loadChatPresetsFromStorage(CHAT_PRESETS_STORAGE_KEY),
   );
+  const [statusBarPresets, setStatusBarPresets] = useState<StatusBarPreset[]>(
+    loadStatusBarPresetsFromStorage,
+  );
   const [activeChatPresetId, setActiveChatPresetId] = useState(() => {
     const storedPresetId = localStorage.getItem(ACTIVE_CHAT_PRESET_STORAGE_KEY);
     return chatPresets.some((preset) => preset.id === storedPresetId)
@@ -11877,6 +11888,7 @@ export function App() {
       activeSystemPromptId,
       activeSystemPromptIds,
       chatPresets,
+      statusBarPresets,
       activeChatPresetId,
       chatPresetEnabled,
       worldBooks,
@@ -11905,7 +11917,7 @@ export function App() {
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     };
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, extensions, llmFullAccessEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, extensions, llmFullAccessEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -11957,6 +11969,9 @@ export function App() {
         persistentData?.chatPresets && persistentData.chatPresets.length > 0
           ? persistentData.chatPresets.map((preset, index) => normalizeChatPreset(preset, index))
           : loadChatPresetsFromStorage(CHAT_PRESETS_STORAGE_KEY);
+      const normalizedStatusBarPresets = Array.isArray(persistentData?.statusBarPresets)
+        ? normalizeStatusBarPresets(persistentData.statusBarPresets)
+        : loadStatusBarPresetsFromStorage();
       const normalizedWorldBooks = Array.isArray(persistentData?.worldBooks)
         ? persistentData.worldBooks.map(normalizeWorldBook)
         : loadWorldBooksFromStorage(WORLD_BOOKS_STORAGE_KEY);
@@ -12216,6 +12231,7 @@ export function App() {
       setActiveSystemPromptId(nextActiveSystemPromptId);
       setActiveSystemPromptIds(nextActiveSystemPromptIds);
       setChatPresets(normalizedChatPresets);
+      setStatusBarPresets(normalizedStatusBarPresets);
       setActiveChatPresetId(nextActiveChatPresetId);
       setChatPresetEnabled(nextChatPresetEnabled);
       setWorldBooks(normalizedWorldBooks);
@@ -30629,6 +30645,8 @@ export function App() {
           onStateChange={updateActiveStatusBarState}
           onClearValues={clearActiveStatusBarValues}
           onManualUpdate={manuallyUpdateActiveStatusBar}
+          presets={statusBarPresets}
+          onPresetsChange={setStatusBarPresets}
           manualUpdateDisabled={chatGenerationState !== "idle"}
           manualUpdateRunning={manualStatusBarUpdateRunning}
         />
