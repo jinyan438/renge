@@ -155,7 +155,10 @@ test("builds read-only context, reducer payload, and response schema", () => {
   const state = createTestState();
   const context = buildStatusBarContextPrompt(state);
   const reducerPayload = JSON.parse(
-    buildStatusBarReducerPayload(state, "我抵达了终点", "任务已经完成。"),
+    buildStatusBarReducerPayload(state, "我抵达了终点", "任务已经完成。", {
+      personaContext: "谨慎而可靠的向导",
+      worldBookContext: "终点位于北境山谷",
+    }),
   );
   const responseFormat = buildStatusBarResponseFormat(state);
 
@@ -171,6 +174,8 @@ test("builds read-only context, reducer payload, and response schema", () => {
   assert.equal(reducerPayload.schemaRevision, state.updatedAt);
   assert.equal(reducerPayload.latestUser, "我抵达了终点");
   assert.equal(reducerPayload.finalAssistant, "任务已经完成。");
+  assert.equal(reducerPayload.personaContext, "谨慎而可靠的向导");
+  assert.equal(reducerPayload.worldBookContext, "终点位于北境山谷");
   assert.deepEqual(
     reducerPayload.entries.map((entry) => entry.id),
     ["mood", "progress", "hp"],
