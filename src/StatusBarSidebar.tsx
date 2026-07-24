@@ -1107,23 +1107,6 @@ export function StatusBarSidebar({
                                   value={item.variableName}
                                 />
                               </label>
-                              <label className="variable-description-field">
-                                <span>变量说明</span>
-                                <textarea
-                                  disabled={isDivider}
-                                  maxLength={1000}
-                                  onChange={(event) =>
-                                    updateDraftItem(item.id, { description: event.target.value })
-                                  }
-                                  placeholder={
-                                    isDivider
-                                      ? "分割线无需说明"
-                                      : "例如：仅在角色明确表达情绪变化时更新，填写简短情绪词"
-                                  }
-                                  rows={2}
-                                  value={item.description}
-                                />
-                              </label>
                               <label>
                                 <span>显示名称</span>
                                 <input
@@ -1196,6 +1179,23 @@ export function StatusBarSidebar({
                                     </option>
                                   ))}
                                 </select>
+                              </label>
+                              <label className="variable-description-field">
+                                <span>变量说明</span>
+                                <textarea
+                                  disabled={isDivider}
+                                  maxLength={1000}
+                                  onChange={(event) =>
+                                    updateDraftItem(item.id, { description: event.target.value })
+                                  }
+                                  placeholder={
+                                    isDivider
+                                      ? "分割线无需说明"
+                                      : "例如：仅在角色明确表达情绪变化时更新，填写简短情绪词"
+                                  }
+                                  rows={2}
+                                  value={item.description}
+                                />
                               </label>
                               <label className="initial-value-field">
                                 <span>初始值</span>
