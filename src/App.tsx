@@ -19141,6 +19141,87 @@ export function App() {
     } as const;
     if (!targetIsCurrent()) return ignoredResult;
 
+    const sessionMessages = getMessagesForSession(sessionId);
+    const sourceMessagesById = new Map(
+      sessionMessages.map((message) => [message.id, message]),
+    );
+    const respondingPersonaIds = Array.from(
+      new Set(
+        sourceMessageIds.flatMap((messageId) => {
+          const sender = sourceMessagesById.get(messageId)?.sender;
+          return sender?.kind === "persona" && sender.personaId ? [sender.personaId] : [];
+        }),
+      ),
+    );
+    if (respondingPersonaIds.length === 0 && chatMode === "persona" && chatPersona) {
+      respondingPersonaIds.push(chatPersona.id);
+    }
+    const respondingPersonas = respondingPersonaIds.flatMap((personaId) => {
+      const persona = personas.find((candidate) => candidate.id === personaId);
+      return persona ? [persona] : [];
+    });
+    const roleplayCard = session?.roleplayCharacterCardId
+      ? characterCards.find((card) => card.id === session.roleplayCharacterCardId) ?? null
+      : null;
+    const personaContext = [
+      ...respondingPersonas.map(
+        (persona) => `【人格设定：${persona.name}】\n${buildPersonaPrompt(persona)}`,
+      ),
+      ...(roleplayCard
+        ? [
+            `【角色设定：${roleplayCard.name}】\n${buildCharacterCardPrompt(
+              roleplayCard,
+              userProfile.nickname.trim() || "用户",
+            )}`,
+          ]
+        : []),
+    ].join("\n\n");
+    const targetAssistantIndex = sessionMessages.findIndex(
+      (message) => message.id === assistantMessageId,
+    );
+    const worldBookSourceMessages =
+      targetAssistantIndex >= 0
+        ? sessionMessages.slice(0, targetAssistantIndex)
+        : sessionMessages;
+    const worldBookMessages = worldBookSourceMessages.map((message) => ({
+      role: message.role,
+      content: message.content,
+    }));
+    const referenceCharacterName =
+      roleplayCard?.name ?? respondingPersonas.at(-1)?.name ?? chatPersona?.name ?? "助手";
+    const worldBookContext = buildWorldBookPrompt(
+      filterPromptTemplateSpecialEntries(worldBooks, promptTemplateEnabled),
+      activeWorldBookIds,
+      worldBookMessages,
+      {
+        userName: userProfile.nickname,
+        characterName: referenceCharacterName,
+      },
+    );
+    const characterWorldBook = roleplayCard
+      ? resolveCharacterWorldBook(roleplayCard, worldBooks)
+      : null;
+    const characterWorldBookContext =
+      roleplayCard &&
+      characterWorldBook &&
+      !activeWorldBookIds.includes(characterWorldBook.id)
+        ? buildWorldBookPrompt(
+            filterPromptTemplateSpecialEntries([characterWorldBook], promptTemplateEnabled),
+            [characterWorldBook.id],
+            worldBookMessages,
+            {
+              userName: userProfile.nickname,
+              characterName: roleplayCard.name,
+            },
+          )
+        : "";
+    const reducerReferenceContext = {
+      personaContext,
+      worldBookContext: [worldBookContext, characterWorldBookContext]
+        .filter(Boolean)
+        .join("\n\n"),
+    };
+
     type StatusBarResponseFormatMode = "json_schema" | "json_object" | "none";
     const requestBody = (
       responseFormatMode: StatusBarResponseFormatMode,
@@ -19164,7 +19245,12 @@ export function App() {
           },
           {
             role: "user",
-            content: buildStatusBarReducerPayload(statusBar, latestUser, finalAssistant),
+            content: buildStatusBarReducerPayload(
+              statusBar,
+              latestUser,
+              finalAssistant,
+              reducerReferenceContext,
+            ),
           },
         ],
         temperature: 0,
