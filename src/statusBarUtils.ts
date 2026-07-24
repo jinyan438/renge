@@ -338,17 +338,6 @@ function getStatusBarEntriesForPrompt(state: StatusBarState) {
     }));
 }
 
-export function buildStatusBarContextPrompt(state: StatusBarState): string {
-  if (!state.enabled) return "";
-  const entries = getStatusBarEntriesForPrompt(state);
-  if (entries.length === 0) return "";
-  return [
-    "【当前会话状态（只读上下文）】",
-    "以下状态仅供理解当前会话。正常回复中不要输出、复述或解释任何状态栏协议、条目 ID 或机器 JSON；正文完成后系统会独立更新状态。",
-    JSON.stringify(entries, null, 2),
-  ].join("\n");
-}
-
 export function buildStatusBarReducerSystemPrompt(): string {
   return [
     "你是确定性的会话状态归约器，不是聊天助手。",

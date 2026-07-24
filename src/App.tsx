@@ -210,7 +210,6 @@ import {
   type StatusBarPreset,
 } from "./StatusBarSidebar";
 import {
-  buildStatusBarContextPrompt,
   buildStatusBarReducerPayload,
   buildStatusBarReducerSystemPrompt,
   buildStatusBarResponseFormat,
@@ -19884,9 +19883,6 @@ export function App() {
       const heartbeatSystemPrompt = options.exposeHeartbeatTools
         ? buildHeartbeatSystemPrompt(activeChatSession?.heartbeat)
         : "";
-      const statusBarContextPrompt = buildStatusBarContextPrompt(
-        getSessionStatusBarState(requestSessionId),
-      );
       const worldBookSystemPrompt = buildWorldBookPrompt(
         filterPromptTemplateSpecialEntries(worldBooks, promptTemplateEnabled),
         activeWorldBookIds,
@@ -19934,7 +19930,6 @@ export function App() {
         mcpToolsSystemPrompt,
         chatChoiceSystemPrompt,
         heartbeatSystemPrompt,
-        statusBarContextPrompt,
         isContinuation ? CHAT_CONTINUATION_SYSTEM_PROMPT : "",
         isDialogueRewrite ? CHAT_DIALOGUE_REWRITE_SYSTEM_PROMPT : "",
         isLocalRewrite ? CHAT_LOCAL_REWRITE_SYSTEM_PROMPT : "",
@@ -22400,9 +22395,6 @@ export function App() {
       const heartbeatSystemPrompt = exposeHeartbeatTools
         ? buildHeartbeatSystemPrompt(activeChatSession?.heartbeat)
         : "";
-      const statusBarContextPrompt = buildStatusBarContextPrompt(
-        getSessionStatusBarState(requestSessionId),
-      );
       const worldBookSystemPrompt = buildWorldBookPrompt(
         filterPromptTemplateSpecialEntries(worldBooks, promptTemplateEnabled),
         activeWorldBookIds,
@@ -22453,7 +22445,6 @@ export function App() {
         mcpToolsSystemPrompt,
         chatChoiceSystemPrompt,
         heartbeatSystemPrompt,
-        statusBarContextPrompt,
       ]
         .filter(Boolean)
         .join("\n\n");
