@@ -5,6 +5,7 @@ import {
   buildProviderReasoningReplay,
   buildProviderReasoningRequest,
   getFirstReasoningText,
+  isLocalProviderEndpoint,
   mergeReasoningStreamChunk,
   splitSseFrames,
 } from "../src/reasoningUtils.ts";
@@ -38,12 +39,52 @@ test("disables native DeepSeek thinking for deterministic reducer requests", () 
       apiBaseUrl: "https://example-proxy.invalid/v1",
       modelId: "deepseek-v4-pro",
     }),
-    {},
+    { reasoning_effort: "none" },
   );
   assert.deepEqual(
     buildProviderReasoningDisableRequest({
       apiBaseUrl: "http://127.0.0.1:1234/v1",
       modelId: "local-model",
+    }),
+    { reasoning_effort: "none" },
+  );
+  assert.equal(
+    isLocalProviderEndpoint({ apiBaseUrl: "http://192.168.1.8:1234/v1" }),
+    true,
+  );
+  assert.equal(
+    isLocalProviderEndpoint({ apiBaseUrl: "https://api.example.com/v1" }),
+    false,
+  );
+});
+
+test("uses provider-native controls to disable reasoning for status reducers", () => {
+  assert.deepEqual(
+    buildProviderReasoningDisableRequest({
+      apiBaseUrl: "https://openrouter.ai/api/v1",
+      modelId: "vendor/model",
+    }),
+    { reasoning: { enabled: false } },
+  );
+  assert.deepEqual(
+    buildProviderReasoningDisableRequest({
+      apiBaseUrl: "https://opencode.ai/zen/go/v1",
+      modelId: "qwen3.6-plus",
+    }),
+    { enable_thinking: false },
+  );
+  assert.deepEqual(
+    buildProviderReasoningDisableRequest({
+      apiBaseUrl: "https://api.z.ai/api/paas/v4",
+      modelId: "glm-5.2",
+    }),
+    { thinking: { type: "disabled" } },
+  );
+  assert.deepEqual(
+    buildProviderReasoningDisableRequest({
+      apiBaseUrl: "https://api.openai.com/v1",
+      modelId: "gpt-4.1",
+      reasoningEnabled: false,
     }),
     { reasoning_effort: "none" },
   );
