@@ -212,6 +212,7 @@ import {
   type StatusBarPreset,
 } from "./StatusBarSidebar";
 import {
+  buildStatusBarConversationSystemPrompt,
   buildStatusBarReducerPayload,
   buildStatusBarReducerSystemPrompt,
   buildStatusBarSnapshotLineSystemPrompt,
@@ -13966,6 +13967,18 @@ export function App() {
       lastUserMessage: getChatApiMessageText(lastUserMessage),
     }) as ChatApiMessage[];
   };
+  const prependStatusBarConversationContext = (
+    messages: ChatApiMessage[],
+    sessionId: string,
+  ): ChatApiMessage[] => {
+    const session = chatSessionsRef.current.find((candidate) => candidate.id === sessionId);
+    const context = buildStatusBarConversationSystemPrompt(
+      normalizeStatusBarState(session?.statusBar),
+    );
+    return context
+      ? [{ role: "system", content: context }, ...messages]
+      : messages;
+  };
   const applyPromptRegexToApiMessages = (
     messages: ChatApiMessage[],
     characterName: string,
@@ -20128,9 +20141,12 @@ export function App() {
         responderName,
         requestModelId,
       );
-      const apiMessages = await applyTavernExtensionPromptFilters(preparedApiMessages, {
-        generationAfterCommands: options.generationAfterCommands,
-      });
+      const apiMessages = prependStatusBarConversationContext(
+        await applyTavernExtensionPromptFilters(preparedApiMessages, {
+          generationAfterCommands: options.generationAfterCommands,
+        }),
+        requestSessionId,
+      );
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);
@@ -20409,9 +20425,12 @@ export function App() {
           subAgent.name,
           subAgentModelId,
         );
-        const subAgentApiMessages = await applyTavernExtensionPromptFilters(
-          subAgentPreparedMessages,
-          { generationAfterCommands: false },
+        const subAgentApiMessages = prependStatusBarConversationContext(
+          await applyTavernExtensionPromptFilters(
+            subAgentPreparedMessages,
+            { generationAfterCommands: false },
+          ),
+          requestSessionId,
         );
         subAgentApiMessages.push({
           role: "user",
@@ -22191,12 +22210,14 @@ export function App() {
               responseName,
               requestModelId,
             );
-      const apiMessages =
+      const apiMessages = prependStatusBarConversationContext(
         normalizedConfig.quiet === true
           ? preparedApiMessages
           : await applyTavernExtensionPromptFilters(preparedApiMessages, {
               generationAfterCommands: false,
-            });
+            }),
+        activeChatSessionIdRef.current,
+      );
       throwIfChatAborted(abortSignal);
       const requestedJsonSchema = isObjectRecord(normalizedConfig.json_schema)
         ? normalizedConfig.json_schema
@@ -22641,9 +22662,12 @@ export function App() {
         responseName,
         requestModelId,
       );
-      const apiMessages = await applyTavernExtensionPromptFilters(preparedApiMessages, {
-        generationAfterCommands: false,
-      });
+      const apiMessages = prependStatusBarConversationContext(
+        await applyTavernExtensionPromptFilters(preparedApiMessages, {
+          generationAfterCommands: false,
+        }),
+        requestSessionId,
+      );
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildStatusBarConversationSystemPrompt,
   buildStatusBarReducerPayload,
   buildStatusBarReducerSystemPrompt,
   buildStatusBarMvuSystemPrompt,
@@ -313,6 +314,24 @@ test("builds reducer payload and response schema", () => {
       description: "仅在角色明确表现出情绪变化时更新，使用简短情绪词。",
       currentValue: "平静",
     },
+  );
+});
+
+test("builds a conversation context from the latest enabled status values", () => {
+  const state = createTestState();
+  const prompt = buildStatusBarConversationSystemPrompt(state);
+
+  assert.match(prompt, /上一轮状态栏更新完成后的最新状态/);
+  assert.match(prompt, /自然生成正文/);
+  assert.match(prompt, /"name": "情绪"/);
+  assert.match(prompt, /"description": "仅在角色明确表现出情绪变化时更新，使用简短情绪词。"/);
+  assert.match(prompt, /"value": "平静"/);
+  assert.match(prompt, /"name": "任务进度"/);
+  assert.match(prompt, /"value": 40/);
+  assert.doesNotMatch(prompt, /不应保留/);
+  assert.equal(
+    buildStatusBarConversationSystemPrompt(createTestState({ enabled: false })),
+    "",
   );
 });
 
