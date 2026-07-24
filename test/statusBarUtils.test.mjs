@@ -5,6 +5,7 @@ import {
   buildStatusBarReducerSystemPrompt,
   buildStatusBarMvuSystemPrompt,
   buildStatusBarResponseFormat,
+  buildStatusBarSnapshotSystemPrompt,
   buildStatusBarToolDefinition,
   buildStatusBarToolSystemPrompt,
   createDefaultStatusBarState,
@@ -224,6 +225,8 @@ test("builds reducer payload and response schema", () => {
   assert.match(buildStatusBarToolSystemPrompt(), /必须且只能调用一次/);
   assert.match(buildStatusBarMvuSystemPrompt(), /<UpdateVariable>/);
   assert.match(buildStatusBarMvuSystemPrompt(), /_\.set/);
+  assert.match(buildStatusBarSnapshotSystemPrompt(), /entries 中的每一个条目/);
+  assert.match(buildStatusBarSnapshotSystemPrompt(), /原样复制.*currentValue/);
 });
 
 test("parses a pure JSON status patch", () => {

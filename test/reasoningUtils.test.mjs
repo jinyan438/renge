@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildProviderReasoningDisableRequest,
   buildProviderReasoningReplay,
   buildProviderReasoningRequest,
   getFirstReasoningText,
@@ -25,6 +26,19 @@ test("builds the Liyuan-compatible DeepSeek V4 reasoning request", () => {
       reasoning_effort: "high",
       stream_options: { include_usage: true },
     },
+  );
+});
+
+test("disables native DeepSeek thinking for deterministic reducer requests", () => {
+  assert.deepEqual(buildProviderReasoningDisableRequest(deepSeekV4Provider), {
+    thinking: { type: "disabled" },
+  });
+  assert.deepEqual(
+    buildProviderReasoningDisableRequest({
+      apiBaseUrl: "https://example-proxy.invalid/v1",
+      modelId: "deepseek-v4-pro",
+    }),
+    {},
   );
 });
 

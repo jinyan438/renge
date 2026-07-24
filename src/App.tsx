@@ -191,6 +191,7 @@ import {
   type ChatLiveStreamTextItem,
 } from "./chatLiveStreamUtils";
 import {
+  buildProviderReasoningDisableRequest,
   buildProviderReasoningReplay,
   buildProviderReasoningRequest,
   getFirstReasoningText,
@@ -212,6 +213,7 @@ import {
 import {
   buildStatusBarReducerPayload,
   buildStatusBarReducerSystemPrompt,
+  buildStatusBarSnapshotSystemPrompt,
   buildStatusBarMvuSystemPrompt,
   buildStatusBarResponseFormat,
   buildStatusBarToolDefinition,
@@ -19246,9 +19248,16 @@ export function App() {
       | "tool_call"
       | "json_schema"
       | "json_object"
+      | "snapshot_json"
       | "mvu_commands"
       | "line_protocol"
       | "none";
+    const statusReasoningControl = buildProviderReasoningDisableRequest({
+      ...statusRequestProvider,
+      modelId: statusRequestModelId,
+    });
+    const initialResponseFormatMode: StatusBarResponseFormatMode =
+      Object.keys(statusReasoningControl).length > 0 ? "json_object" : "tool_call";
     const requestBody = (responseFormatMode: StatusBarResponseFormatMode) => ({
       apiBaseUrl: trimTrailingSlash(statusRequestProvider.apiBaseUrl),
       apiKey: statusRequestProvider.apiKey,
@@ -19257,7 +19266,9 @@ export function App() {
         messages: [
           {
             role: "system",
-            content: responseFormatMode === "mvu_commands"
+            content: responseFormatMode === "snapshot_json"
+              ? buildStatusBarSnapshotSystemPrompt()
+              : responseFormatMode === "mvu_commands"
               ? buildStatusBarMvuSystemPrompt()
               : responseFormatMode === "line_protocol"
                 ? [
@@ -19282,7 +19293,8 @@ export function App() {
           },
         ],
         temperature: 0,
-        max_tokens: Math.min(2048, Math.max(256, trackedItemCount * 96)),
+        max_tokens: Math.min(8192, Math.max(4096, trackedItemCount * 384)),
+        ...statusReasoningControl,
         ...(responseFormatMode === "tool_call"
           ? {
               tools: [buildStatusBarToolDefinition(statusBar)],
@@ -19293,7 +19305,7 @@ export function App() {
             }
           : responseFormatMode === "json_schema"
           ? { response_format: buildStatusBarResponseFormat(statusBar) }
-          : responseFormatMode === "json_object"
+          : responseFormatMode === "json_object" || responseFormatMode === "snapshot_json"
             ? { response_format: { type: "json_object" } }
             : {}),
         stream: false,
@@ -19372,7 +19384,7 @@ export function App() {
       if (activeChatSessionIdRef.current === sessionId) {
         setChatStatus({ status: "loading", message: "正文已完成，正在更新状态栏变量..." });
       }
-      let result = await requestWithResponseFormatFallback("tool_call");
+      let result = await requestWithResponseFormatFallback(initialResponseFormatMode);
       if (!targetIsCurrent()) return ignoredResult;
       if (!result.response.ok) {
         const errorMessage =
@@ -19387,6 +19399,17 @@ export function App() {
       }
 
       let parsed = parseStatusBarPatch(getRawStatusBarPatch(result.payload), statusBar);
+      if (parsed.error || parsed.patch.updates.length === 0) {
+        const snapshotResult = await makeRequest("snapshot_json");
+        if (!targetIsCurrent()) return ignoredResult;
+        if (snapshotResult.response.ok) {
+          const snapshotParsed = parseStatusBarPatch(
+            getRawStatusBarPatch(snapshotResult.payload),
+            statusBar,
+          );
+          if (!snapshotParsed.error) parsed = snapshotParsed;
+        }
+      }
       if (parsed.error) {
         const correctionResult = await makeRequest("mvu_commands");
         if (!targetIsCurrent()) return ignoredResult;
