@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import {
   buildStatusBarReducerPayload,
   buildStatusBarReducerSystemPrompt,
+  buildStatusBarMvuSystemPrompt,
   buildStatusBarResponseFormat,
+  buildStatusBarToolDefinition,
+  buildStatusBarToolSystemPrompt,
   createDefaultStatusBarState,
   createStatusBarItem,
   getStatusBarItemValue,
@@ -175,6 +178,7 @@ test("builds reducer payload and response schema", () => {
     }),
   );
   const responseFormat = buildStatusBarResponseFormat(state);
+  const toolDefinition = buildStatusBarToolDefinition(state);
 
   assert.equal(reducerPayload.version, 1);
   assert.equal(reducerPayload.schemaRevision, state.updatedAt);
@@ -211,6 +215,15 @@ test("builds reducer payload and response schema", () => {
     responseFormat.json_schema.schema.properties.updates.maxItems,
     3,
   );
+  assert.equal(toolDefinition.function.name, "renge_update_status_bar");
+  assert.deepEqual(toolDefinition.function.parameters.required, ["delta"]);
+  assert.match(
+    toolDefinition.function.parameters.properties.delta.description,
+    /mood, progress, hp/,
+  );
+  assert.match(buildStatusBarToolSystemPrompt(), /必须且只能调用一次/);
+  assert.match(buildStatusBarMvuSystemPrompt(), /<UpdateVariable>/);
+  assert.match(buildStatusBarMvuSystemPrompt(), /_\.set/);
 });
 
 test("parses a pure JSON status patch", () => {
@@ -312,6 +325,149 @@ test("accepts a simple line or Markdown table update protocol", () => {
     { id: "hp", value: 70 },
   ]);
   assert.deepEqual(parseStatusBarPatch("情绪：无变化", state).patch.updates, []);
+});
+
+test("parses MVU UpdateVariable set commands and ignores its Analysis block", () => {
+  const state = createTestState();
+  const result = parseStatusBarPatch(
+    `<UpdateVariable>
+<Analysis>
+情绪: Y
+任务进度: N
+</Analysis>
+_.set('情绪', '平静', '开心');//收到好消息
+_.set('任务进度', 40, 80)
+</UpdateVariable>`,
+    state,
+  );
+
+  assert.equal(result.error, undefined);
+  assert.deepEqual(result.patch.updates, [
+    { id: "mood", value: "开心" },
+    { id: "progress", value: 80 },
+  ]);
+});
+
+test("parses the MVU delta string returned by the status update tool", () => {
+  const state = createTestState();
+  const result = parseStatusBarPatch(
+    JSON.stringify({
+      delta: "_.set('情绪', '平静', '雀跃');\n_.set('HP', 90, 70);",
+    }),
+    state,
+  );
+
+  assert.equal(result.error, undefined);
+  assert.deepEqual(result.patch.updates, [
+    { id: "mood", value: "雀跃" },
+    { id: "hp", value: 70 },
+  ]);
+  assert.deepEqual(parseStatusBarPatch('{"delta":""}', state).patch.updates, []);
+});
+
+test("parses weak-model MVU variants with full-width punctuation and an unclosed block", () => {
+  const state = createTestState();
+  const result = parseStatusBarPatch(
+    "<UpdateVariables>\n_.set（‘情绪’，‘平静’，‘安心’）\n_.set（'HP'，90，75）",
+    state,
+  );
+
+  assert.equal(result.error, undefined);
+  assert.deepEqual(result.patch.updates, [
+    { id: "mood", value: "安心" },
+    { id: "hp", value: 75 },
+  ]);
+  assert.deepEqual(
+    parseStatusBarPatch("<UpdateVariable></UpdateVariable>", state).patch.updates,
+    [],
+  );
+});
+
+test("parses MVU legacy arrows, prose updates, and JSON Patch output", () => {
+  const state = createTestState();
+
+  assert.deepEqual(
+    parseStatusBarPatch("set|情绪=平静→振奋|(剧情变化)", state).patch.updates,
+    [{ id: "mood", value: "振奋" }],
+  );
+  assert.deepEqual(
+    parseStatusBarPatch("情绪应该更新为专注", state).patch.updates,
+    [{ id: "mood", value: "专注" }],
+  );
+  assert.deepEqual(
+    parseStatusBarPatch(
+      JSON.stringify({
+        analysis: "omitted",
+        json_patch: [
+          { op: "replace", path: "/mood", value: "期待" },
+          { op: "delta", path: "/progress", value: 15 },
+        ],
+      }),
+      state,
+    ).patch.updates,
+    [
+      { id: "mood", value: "期待" },
+      { id: "progress", value: 55 },
+    ],
+  );
+});
+
+test("parses XML, YAML, and double-encoded tool argument fallbacks", () => {
+  const state = createTestState();
+
+  assert.deepEqual(
+    parseStatusBarPatch(
+      '<updates><update id="情绪" value="释然"/><item><id>HP</id><value>65</value></item></updates>',
+      state,
+    ).patch.updates,
+    [
+      { id: "mood", value: "释然" },
+      { id: "hp", value: 65 },
+    ],
+  );
+  assert.deepEqual(
+    parseStatusBarPatch("updates:\n  - id: 情绪\n    value: 笃定\n  - id: HP\n    value: 60", state)
+      .patch.updates,
+    [
+      { id: "mood", value: "笃定" },
+      { id: "hp", value: 60 },
+    ],
+  );
+  assert.deepEqual(
+    parseStatusBarPatch(
+      JSON.stringify(JSON.stringify({ updates: [{ id: "mood", value: "轻松" }] })),
+      state,
+    ).patch.updates,
+    [{ id: "mood", value: "轻松" }],
+  );
+});
+
+test("rejects a recognized non-empty update payload when every entry is unusable", () => {
+  const state = createTestState();
+  const result = parseStatusBarPatch('{"updates":[{"id":"mood"}]}', state);
+
+  assert.match(result.error, /没有可用的变量和值/);
+  assert.deepEqual(result.patch.updates, []);
+});
+
+test("keeps valid updates when another returned value is analysis pollution", () => {
+  const state = createTestState();
+  const result = parseStatusBarPatch(
+    JSON.stringify({
+      updates: [
+        { id: "mood", value: "开心" },
+        {
+          id: "hp",
+          value:
+            "当前值为 90，我们需要根据变量说明和最终助手回复判断是否更新，所以应该先分析用户消息。",
+        },
+      ],
+    }),
+    state,
+  );
+
+  assert.equal(result.error, undefined);
+  assert.deepEqual(result.patch.updates, [{ id: "mood", value: "开心" }]);
 });
 
 test("rejects model analysis text masquerading as a status value", () => {
