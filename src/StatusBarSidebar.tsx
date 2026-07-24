@@ -1,7 +1,5 @@
 import {
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   ChevronUp,
   GripVertical,
   Pencil,
@@ -1242,26 +1240,7 @@ export function StatusBarSidebar({
       : null;
 
   if (collapsed) {
-    return (
-      <aside
-        aria-label="已折叠的状态栏"
-        className="status-bar-sidebar is-collapsed"
-        style={sidebarStyle}
-      >
-        <button
-          aria-label={`展开状态栏，AI 自动更新${state.enabled ? "已启用" : "已关闭"}`}
-          className="status-bar-expand-button"
-          onClick={() => onCollapsedChange(false)}
-          title="展开状态栏"
-          type="button"
-        >
-          <ChevronLeft size={18} />
-          <span>状态</span>
-          {state.enabled ? <i aria-hidden="true" /> : null}
-        </button>
-        {editorModal}
-      </aside>
-    );
+    return editorModal;
   }
 
   return (
@@ -1326,14 +1305,6 @@ export function StatusBarSidebar({
               type="button"
             >
               <Pencil size={16} />
-            </button>
-            <button
-              aria-label="折叠状态栏"
-              onClick={() => onCollapsedChange(true)}
-              title="折叠状态栏"
-              type="button"
-            >
-              <ChevronRight size={17} />
             </button>
           </div>
         </header>
