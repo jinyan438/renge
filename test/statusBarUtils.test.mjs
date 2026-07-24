@@ -236,6 +236,28 @@ test("parses JSON enclosed by an exact Markdown fence", () => {
   assert.deepEqual(result.patch.updates, [{ id: "mood", value: "紧张" }]);
 });
 
+test("extracts the final valid patch when a model wraps JSON with extra text", () => {
+  const state = createTestState();
+  const result = parseStatusBarPatch(
+    '<think>先分析状态变化。</think>\n结果如下：\n```json\n{"version":1,"updates":[{"id":"mood","value":"期待"}]}\n```',
+    state,
+  );
+
+  assert.equal(result.error, undefined);
+  assert.deepEqual(result.patch.updates, [{ id: "mood", value: "期待" }]);
+});
+
+test("prefers the last valid status patch in a response", () => {
+  const state = createTestState();
+  const result = parseStatusBarPatch(
+    '示例：{"version":1,"updates":[]}\n最终：{"version":1,"updates":[{"id":"hp","value":80}]}',
+    state,
+  );
+
+  assert.equal(result.error, undefined);
+  assert.deepEqual(result.patch.updates, [{ id: "hp", value: 80 }]);
+});
+
 test("filters unknown IDs, unchanged values, and keeps the last duplicate update", () => {
   const state = createTestState();
 

@@ -419,6 +419,43 @@ function getReducerJsonText(content: string) {
   return fencedMatch ? fencedMatch[1].trim() : trimmed;
 }
 
+function getReducerJsonCandidates(content: string) {
+  const normalized = getReducerJsonText(content);
+  const candidates = [normalized];
+  const objectStarts = Array.from(normalized.matchAll(/\{/g), (match) => match.index).slice(-128);
+  for (const start of objectStarts) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < normalized.length; index += 1) {
+      const character = normalized[index];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (character === "\\") {
+          escaped = true;
+        } else if (character === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (character === '"') {
+        inString = true;
+      } else if (character === "{") {
+        depth += 1;
+      } else if (character === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          const candidate = normalized.slice(start, index + 1);
+          if (candidate !== normalized) candidates.push(candidate);
+          break;
+        }
+      }
+    }
+  }
+  return candidates;
+}
+
 function normalizePatchValue(item: StatusBarItem, rawValue: unknown): StatusBarValue | undefined {
   if (item.type === "progress") {
     if (typeof rawValue !== "number" || !Number.isFinite(rawValue)) return undefined;
@@ -443,17 +480,21 @@ export function parseStatusBarPatch(
     return { patch: emptyPatch, error: "状态栏更新响应过长，已忽略。" };
   }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(getReducerJsonText(content));
-  } catch {
+  const parsedCandidates = getReducerJsonCandidates(content).flatMap((candidate) => {
+    try {
+      return [JSON.parse(candidate) as unknown];
+    } catch {
+      return [];
+    }
+  });
+  if (parsedCandidates.length === 0) {
     return { patch: emptyPatch, error: "状态栏更新不是合法 JSON，已保留原状态。" };
   }
-  if (
-    !isObjectRecord(parsed) ||
-    parsed.version !== 1 ||
-    !Array.isArray(parsed.updates)
-  ) {
+  const parsed = [...parsedCandidates].reverse().find(
+    (candidate) =>
+      isObjectRecord(candidate) && candidate.version === 1 && Array.isArray(candidate.updates),
+  );
+  if (!parsed || !isObjectRecord(parsed) || !Array.isArray(parsed.updates)) {
     return { patch: emptyPatch, error: "状态栏更新结构无效，已保留原状态。" };
   }
 
