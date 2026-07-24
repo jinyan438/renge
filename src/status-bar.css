@@ -110,11 +110,26 @@
   background: rgba(255, 255, 255, 0.055);
 }
 
-.status-bar-sidebar-actions > button:hover,
+.status-bar-sidebar-actions > button:hover:not(:disabled),
 .status-editor-icon-button:hover {
   border-color: color-mix(in srgb, var(--status-accent) 45%, transparent);
   color: #ffffff;
   background: color-mix(in srgb, var(--status-accent) 13%, transparent);
+}
+
+.status-bar-sidebar-actions > button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.status-bar-manual-update.is-updating svg {
+  animation: status-bar-manual-spin 0.8s linear infinite;
+}
+
+@keyframes status-bar-manual-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .status-bar-enable-switch {
@@ -1378,5 +1393,9 @@
   .status-bar-enable-switch > span,
   .status-bar-enable-switch > span::after {
     transition: none;
+  }
+
+  .status-bar-manual-update.is-updating svg {
+    animation: none;
   }
 }
