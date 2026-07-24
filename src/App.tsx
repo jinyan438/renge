@@ -10930,6 +10930,7 @@ export function App() {
   }>({ status: "idle", message: "" });
   const [chatGenerationState, setChatGenerationState] =
     useState<ChatGenerationState>("idle");
+  const [manualStatusBarUpdateRunning, setManualStatusBarUpdateRunning] = useState(false);
   const [pcBrowserOpen, setPcBrowserOpen] = useState(false);
   const [pcServerUrl, setPcServerUrl] = useState(
     () => localStorage.getItem(PC_SERVER_URL_STORAGE_KEY) ?? "",
@@ -11123,6 +11124,7 @@ export function App() {
     assistantMessageId: string,
     patch: StatusBarPatch,
     sourceMessageIds: string[],
+    mergeWithExistingPatch = false,
   ) => {
     const session = chatSessionsRef.current.find((candidate) => candidate.id === sessionId);
     if (!session) return false;
@@ -11130,11 +11132,25 @@ export function App() {
     const nextMessages = getMessagesForSession(sessionId).map((message) => {
       if (message.id !== assistantMessageId) return message;
       targetFound = true;
+      let storedPatch = patch;
+      if (mergeWithExistingPatch) {
+        const existingPatch = message.extra?.statusBarPatch as Partial<StatusBarPatch> | undefined;
+        const updatesById = new Map(
+          (Array.isArray(existingPatch?.updates) ? existingPatch.updates : [])
+            .filter(
+              (update): update is StatusBarPatch["updates"][number] =>
+                Boolean(update) && typeof update.id === "string" && "value" in update,
+            )
+            .map((update) => [update.id, update]),
+        );
+        patch.updates.forEach((update) => updatesById.set(update.id, update));
+        storedPatch = { version: 1, updates: Array.from(updatesById.values()) };
+      }
       return {
         ...message,
         extra: {
           ...(message.extra ?? {}),
-          statusBarPatch: patch,
+          statusBarPatch: storedPatch,
           statusBarPatchSourceMessageIds: sourceMessageIds,
         },
       };
@@ -19043,6 +19059,7 @@ export function App() {
     requestProvider: ModelProviderChannel;
     requestModelId: string;
     sourceMessageIds?: string[];
+    mergeWithExistingPatch?: boolean;
     signal?: AbortSignal;
   }): Promise<{ attempted: boolean; updated: number; error?: string }> => {
     const {
@@ -19053,6 +19070,7 @@ export function App() {
       requestProvider,
       requestModelId,
       sourceMessageIds: rawSourceMessageIds,
+      mergeWithExistingPatch,
       signal,
     } = options;
     const sourceMessageIds = Array.from(
@@ -19181,6 +19199,7 @@ export function App() {
           assistantMessageId,
           patch,
           sourceMessageIds,
+          mergeWithExistingPatch,
         )
       ) {
         return ignoredResult;
@@ -19219,6 +19238,119 @@ export function App() {
         activeChatAbortControllerRef.current = null;
         setChatGenerationState("idle");
       }
+    }
+  };
+
+  const manuallyUpdateActiveStatusBar = async () => {
+    const sessionId = activeChatSessionIdRef.current;
+    const statusBar = getSessionStatusBarState(sessionId);
+    if (!statusBar.enabled) {
+      setChatStatus({ status: "warning", message: "请先启用状态栏，再手动更新。" });
+      return;
+    }
+    if (activeChatAbortControllerRef.current || manualStatusBarUpdateRunning) {
+      setChatStatus({ status: "warning", message: "请等待当前生成或状态更新完成。" });
+      return;
+    }
+
+    const messages = getMessagesForSession(sessionId);
+    let lastAssistantIndex = -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].role === "assistant" && messages[index].content.trim()) {
+        lastAssistantIndex = index;
+        break;
+      }
+    }
+    if (lastAssistantIndex < 0) {
+      setChatStatus({ status: "warning", message: "当前会话还没有可用于更新状态栏的 AI 回复。" });
+      return;
+    }
+
+    let latestUserIndex = -1;
+    for (let index = lastAssistantIndex - 1; index >= 0; index -= 1) {
+      if (messages[index].role === "user") {
+        latestUserIndex = index;
+        break;
+      }
+    }
+    const assistantMessages = messages
+      .slice(latestUserIndex >= 0 ? latestUserIndex + 1 : lastAssistantIndex, lastAssistantIndex + 1)
+      .filter(
+        (message): message is ChatMessage =>
+          message.role === "assistant" && Boolean(message.content.trim()),
+      );
+    const finalMessage = assistantMessages.at(-1);
+    if (!finalMessage) {
+      setChatStatus({ status: "warning", message: "没有找到可用于手动更新的 AI 内容。" });
+      return;
+    }
+
+    const candidateConfigs = [
+      ...(chatMode === "multi"
+        ? assistantMessages
+            .slice()
+            .reverse()
+            .flatMap((message) =>
+              message.sender?.kind === "persona" && message.sender.personaId
+                ? [getMultiAgentRequestConfig(message.sender.personaId)]
+                : [],
+            )
+        : []),
+      {
+        provider: chatProvider,
+        modelId: getEffectiveProviderModelId(chatProvider),
+      },
+    ];
+    const reducerConfig = candidateConfigs.find(
+      (config) =>
+        Boolean(config.provider?.apiBaseUrl && config.modelId) &&
+        !isImageGenerationModelId(config.modelId),
+    );
+    if (!reducerConfig?.provider || !reducerConfig.modelId) {
+      setChatStatus({
+        status: "error",
+        message: "没有可用于手动更新状态栏的文本模型，请先配置模型。",
+      });
+      return;
+    }
+
+    setManualStatusBarUpdateRunning(true);
+    try {
+      const result = await runCancellableStatusBarUpdate({
+        sessionId,
+        assistantMessageId: finalMessage.id,
+        latestUser: latestUserIndex >= 0 ? messages[latestUserIndex].content : "",
+        finalAssistant: assistantMessages
+          .map((message) => message.content.trim())
+          .filter(Boolean)
+          .join("\n\n---\n\n"),
+        requestProvider: reducerConfig.provider,
+        requestModelId: reducerConfig.modelId,
+        sourceMessageIds: [
+          ...(latestUserIndex >= 0 ? [messages[latestUserIndex].id] : []),
+          ...assistantMessages.map((message) => message.id),
+        ],
+        mergeWithExistingPatch: true,
+      });
+      setChatStatus({
+        status: result.error ? "warning" : "success",
+        message: result.error
+          ? `状态栏手动更新失败：${result.error}`
+          : result.updated > 0
+            ? `状态栏已手动更新 ${result.updated} 项。`
+            : "状态栏已检查，没有变量需要更新。",
+      });
+    } catch (error) {
+      setChatStatus({
+        status: isChatAbortError(error) ? "warning" : "error",
+        message: isChatAbortError(error)
+          ? "已停止手动更新状态栏。"
+          : error instanceof Error
+            ? `状态栏手动更新失败：${error.message}`
+            : "状态栏手动更新失败。",
+      });
+    } finally {
+      setManualStatusBarUpdateRunning(false);
     }
   };
 
@@ -30498,6 +30630,9 @@ export function App() {
           onCollapsedChange={changeChatStatusSidebarCollapsed}
           onStateChange={updateActiveStatusBarState}
           onClearValues={clearActiveStatusBarValues}
+          onManualUpdate={manuallyUpdateActiveStatusBar}
+          manualUpdateDisabled={chatGenerationState !== "idle"}
+          manualUpdateRunning={manualStatusBarUpdateRunning}
         />
       </PortfolioDesktopWindow>
   ) : null;

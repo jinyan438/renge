@@ -6,6 +6,7 @@ import {
   GripVertical,
   Pencil,
   Plus,
+  RefreshCw,
   RotateCcw,
   Save,
   Trash2,
@@ -48,6 +49,9 @@ export type StatusBarSidebarProps = {
   onCollapsedChange: (collapsed: boolean) => void;
   onStateChange: (next: StatusBarState) => void;
   onClearValues: () => void;
+  onManualUpdate: () => void | Promise<void>;
+  manualUpdateDisabled?: boolean;
+  manualUpdateRunning?: boolean;
 };
 
 type StatusBarCssProperties = CSSProperties & {
@@ -480,6 +484,9 @@ export function StatusBarSidebar({
   onCollapsedChange,
   onStateChange,
   onClearValues,
+  onManualUpdate,
+  manualUpdateDisabled = false,
+  manualUpdateRunning = false,
 }: StatusBarSidebarProps) {
   const [editorOpen, setEditorOpen] = useState(false);
   const [draft, setDraft] = useState<StatusBarState>(() => cloneStatusBarState(state));
@@ -1290,6 +1297,27 @@ export function StatusBarSidebar({
               />
               <span aria-hidden="true" />
             </label>
+            <button
+              aria-busy={manualUpdateRunning}
+              aria-label="手动更新状态栏"
+              className={
+                manualUpdateRunning
+                  ? "status-bar-manual-update is-updating"
+                  : "status-bar-manual-update"
+              }
+              disabled={!state.enabled || manualUpdateDisabled || manualUpdateRunning}
+              onClick={() => void onManualUpdate()}
+              title={
+                !state.enabled
+                  ? "请先启用状态栏"
+                  : manualUpdateRunning
+                    ? "正在更新状态栏"
+                    : "根据当前会话手动更新状态栏"
+              }
+              type="button"
+            >
+              <RefreshCw size={15} />
+            </button>
             <button
               ref={editorFallbackFocusRef}
               aria-label="编辑状态栏"
