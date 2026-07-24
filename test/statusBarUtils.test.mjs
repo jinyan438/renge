@@ -4,6 +4,8 @@ import {
   buildStatusBarReducerPayload,
   buildStatusBarReducerSystemPrompt,
   buildStatusBarMvuSystemPrompt,
+  buildStatusBarProgressPayload,
+  buildStatusBarProgressSystemPrompt,
   buildStatusBarResponseFormat,
   buildStatusBarSnapshotLineSystemPrompt,
   buildStatusBarSnapshotPayload,
@@ -201,10 +203,19 @@ test("builds reducer payload and response schema", () => {
     reducerPayload.entries.map((entry) => entry.slot),
     ["V1", "V2", "V3"],
   );
-  assert.deepEqual(reducerPayload.entries[1].constraints, {
-    minimum: 0,
-    maximum: 100,
-  });
+  assert.equal(reducerPayload.entries[1].constraints.minimum, 0);
+  assert.equal(reducerPayload.entries[1].constraints.maximum, 100);
+  assert.equal(reducerPayload.entries[1].constraints.integer, true);
+  assert.match(reducerPayload.entries[1].constraints.updateRule, /正文不需要出现数字/);
+  assert.deepEqual(reducerPayload.entries[1].constraints.qualitativeAnchors, [
+    "0=完全不存在、最低或尚未开始",
+    "15=轻微",
+    "30=较低",
+    "50=中等",
+    "70=明显或较高",
+    "85=强烈",
+    "100=极限、完全或结束",
+  ]);
   const reducerSystemPrompt = buildStatusBarReducerSystemPrompt();
   assert.match(reducerSystemPrompt, /updates 只包含变化项/);
   assert.match(reducerSystemPrompt, /entries\[\]\.id/);
@@ -233,7 +244,30 @@ test("builds reducer payload and response schema", () => {
   assert.match(buildStatusBarMvuSystemPrompt(), /_\.set/);
   assert.match(buildStatusBarSnapshotSystemPrompt(), /entries 中的每一个条目/);
   assert.match(buildStatusBarSnapshotSystemPrompt(), /原样复制.*currentValue/);
+  assert.match(buildStatusBarSnapshotSystemPrompt(), /progress.*0–100 整数/);
+  assert.match(buildStatusBarSnapshotSystemPrompt(), /没有直接写数字或百分比/);
   assert.match(buildStatusBarSnapshotLineSystemPrompt(), /每个 slot/);
+  assert.match(buildStatusBarSnapshotLineSystemPrompt(), /进度条必须填写 0–100 整数/);
+  assert.match(buildStatusBarProgressSystemPrompt("json"), /绝对分数/);
+  assert.match(buildStatusBarProgressSystemPrompt("lines"), /meter\.slot/);
+  assert.deepEqual(
+    JSON.parse(
+      buildStatusBarProgressPayload(state, "抵达", "已经完成", {}, {
+        itemIds: ["progress"],
+        includeIds: false,
+      }),
+    ).meters,
+    [
+      {
+        slot: "V2",
+        name: "任务进度",
+        rule: "",
+        current: 40,
+        scale:
+          "0=尚未开始，10=刚开始，25=完成少量，50=完成一半，75=大部分完成，90=接近完成，100=已经完成",
+      },
+    ],
+  );
   assert.deepEqual(
     JSON.parse(buildStatusBarSnapshotPayload(state, "抵达", "已经完成")).entries[0],
     {

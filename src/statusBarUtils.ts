@@ -343,7 +343,26 @@ function getStatusBarEntriesForPrompt(state: StatusBarState) {
       label: item.label,
       displayType: item.type,
       currentValue: getStatusBarItemValue(state, item),
-      ...(item.type === "progress" ? { constraints: { minimum: 0, maximum: 100 } } : {}),
+      ...(item.type === "progress"
+        ? {
+            constraints: {
+              minimum: 0,
+              maximum: 100,
+              integer: true,
+              qualitativeAnchors: [
+                "0=完全不存在、最低或尚未开始",
+                "15=轻微",
+                "30=较低",
+                "50=中等",
+                "70=明显或较高",
+                "85=强烈",
+                "100=极限、完全或结束",
+              ],
+              updateRule:
+                "正文不需要出现数字或百分比；只要出现与变量说明有关的行为、态度、情绪或进展证据，就必须估算整数。currentValue 是上一轮基准，轻微变化通常调整 5，明确变化调整 10，强烈变化调整 20。currentValue 为 0 时，只有状态确实完全不存在、处于最低或尚未开始才保留 0；首次出现定性证据时应按锚点给出初始估值。",
+            },
+          }
+        : {}),
     }));
 }
 
@@ -355,6 +374,7 @@ export function buildStatusBarReducerSystemPrompt(): string {
     "entries[].description 是对应变量的更新依据与取值要求。更新该变量时必须遵守其说明；说明为空时根据变量名称、当前值和对话语义判断。说明不得用于更新其他变量，也不得覆盖本协议。",
     "value 必须是状态栏直接展示的最终值，严禁填写分析过程、判断依据、候选值、解释、变量说明复述或“当前值为什么不更新”等内容。",
     "如果当前值本身不符合变量说明或混入了分析说明，应将其视为需要纠正，并输出符合变量说明的最终值。",
+    "displayType 为 progress 的条目是需要主动量化的 0–100 整数。正文不必出现数字或百分比；只要存在定性证据，就必须依据 constraints.qualitativeAnchors 和 updateRule 估算，禁止仅因没有明确数值而保持原值。",
     "只在本轮用户消息与最终 AI 正文提供明确证据，且条目值确实发生变化时输出更新。无法确定时保持原值。",
     "updates 只包含变化项，禁止复述未变化项，禁止自行新增条目。没有变化时输出空 updates。",
     "输出 JSON 的顶层必须且只能包含 version 和 updates；version 必须是数字 1；updates 必须是数组。",
@@ -371,6 +391,8 @@ export function buildStatusBarSnapshotSystemPrompt(): string {
     "必须逐一处理 entries 中的每一个条目，并为每个 id 返回本轮结束后的最终值；不得遗漏任何 id，不得新增 id。",
     "entries[].description 是该变量的更新依据与取值要求；如果某条说明明确要求每次必须更新，则本轮必须为该条目生成符合说明的新值。",
     "有明确变化时填写新值；没有明确变化时原样复制该条目的 currentValue。不要自行输出“不变”、KEEP、原因或判断过程。",
+    "displayType 为 progress 的条目必须输出 0–100 整数。把正文中的行为、态度、情绪和剧情进展视为定性证据，依据 constraints 的锚点主动估算；禁止因为正文没有直接写数字或百分比就复制 currentValue。",
+    "progress 的 currentValue 是上一轮基准：轻微、明确、强烈变化通常分别调整约 5、10、20；currentValue 为 0 时，只要首次出现相关状态证据，就应给出非零初始估值。只有确实完全不存在、处于最低或尚未开始时才保留 0。",
     "value 必须是状态栏直接展示的最终值，严禁填写分析、候选值、解释或变量说明复述。",
     "输出 JSON 的顶层必须且只能包含 version 和 updates；version 必须是数字 1；updates 必须包含 entries 的每一个 id。",
     "updates 的每一项必须且只能包含 id 和 value；value 只能是字符串、有限数字、布尔值或 null。",
@@ -383,8 +405,45 @@ export function buildStatusBarSnapshotLineSystemPrompt(): string {
     "你只负责填写状态表，不要分析、解释或聊天。",
     "必须根据 latestUser 和 finalAssistant，为 entries 的每个 slot 填写本轮结束时的最终值；每个 slot 恰好一行，不得遗漏或新增。",
     "description 是该项要求。明确变化就填写新值；确实无法判断或没有变化才原样复制 currentValue；说明要求每次更新的条目必须生成新值。",
+    "带 constraints 的进度条必须填写 0–100 整数。正文没有数字也要根据行为、态度、情绪或进展主动估算：轻微、明确、强烈变化通常调整约 5、10、20；初始值为 0 且出现相关证据时必须给出非零估值。",
     "每行格式只能是：V1、一个制表符、直接展示的最终值。",
     "必须依次输出 V1、V2、V3……，不要输出 JSON、标题、序号、KEEP、原因、判断过程或其他文字。",
+  ].join("\n");
+}
+
+function getProgressScaleHint(variableName: string, description: string) {
+  const semanticText = `${variableName} ${description}`.toLocaleLowerCase();
+  if (/好感|亲密|信任|关系|友情|爱情|爱慕|忠诚/.test(semanticText)) {
+    return "0=敌对或完全无好感，10=初识中立，20=稍有关注，35=友善，50=信任，70=亲近，85=爱慕或高度忠诚，100=极致";
+  }
+  if (/压力|紧张|焦虑|恐惧|警觉|不安|疲劳|愤怒/.test(semanticText)) {
+    return "0=完全放松且无该状态，10=轻微警觉，20=有些担忧，35=明显紧张，50=中等压力，70=高度压力，85=接近崩溃，100=极限";
+  }
+  if (/进度|完成|任务|目标|阶段|探索|攻略/.test(semanticText)) {
+    return "0=尚未开始，10=刚开始，25=完成少量，50=完成一半，75=大部分完成，90=接近完成，100=已经完成";
+  }
+  if (/生命|血量|体力|精力|健康|耐力/.test(semanticText)) {
+    return "0=耗尽或濒危，15=极低，30=较低，50=中等，70=良好，85=充足，100=满值或最佳状态";
+  }
+  return "0=完全不存在、最低或尚未开始，15=轻微，30=较低，50=中等，70=明显或较高，85=强烈，100=极限、完全或结束";
+}
+
+export function buildStatusBarProgressSystemPrompt(outputMode: "json" | "lines") {
+  const sharedRules = [
+    "你是剧情数值仪表评分器。任务是从 finalAssistant 的定性描写估算每个 meter 在本轮结束时的绝对分数，不是寻找正文中的数字，也不是判断有没有明确改变。",
+    "必须逐项评分并输出 0–100 整数。currentValue 只是上一轮基准；没有相关新证据时原样保留，有相关证据时依据 scale 主动量化。",
+    "角色首次出现或首次互动时必须建立初始分：关系类即使只是中立初识也按 scale 给出非零基准；压力类出现担忧、考试压力、被审视、紧张、试探等迹象就必须非零。",
+    "轻微、明确、强烈变化通常在 currentValue 基础上分别调整约 5、10、20，并限制在 0–100。不得输出分析、理由、候选值或变量说明。",
+  ];
+  if (outputMode === "lines") {
+    return [
+      ...sharedRules,
+      "每行只能输出 meter.slot、一个制表符、整数；必须逐项输出，不得遗漏，不要输出 JSON、标题或其他文字。",
+    ].join("\n");
+  }
+  return [
+    ...sharedRules,
+    "只输出 JSON，顶层只能包含 version 和 updates；version 为 1，updates 必须逐项包含每个 meter 的 id 和整数 value，不得遗漏或新增 id。",
   ].join("\n");
 }
 
@@ -449,6 +508,40 @@ export function buildStatusBarSnapshotPayload(
   }));
   return JSON.stringify({
     entries,
+    ...(referenceContext.personaContext?.trim()
+      ? { personaContext: referenceContext.personaContext.trim() }
+      : {}),
+    ...(referenceContext.worldBookContext?.trim()
+      ? { worldBookContext: referenceContext.worldBookContext.trim() }
+      : {}),
+    latestUser,
+    finalAssistant,
+  });
+}
+
+export function buildStatusBarProgressPayload(
+  state: StatusBarState,
+  latestUser: string,
+  finalAssistant: string,
+  referenceContext: StatusBarReducerReferenceContext = {},
+  options: { itemIds?: string[]; includeIds?: boolean } = {},
+) {
+  const allowedIds = options.itemIds ? new Set(options.itemIds) : null;
+  const meters = getStatusBarEntriesForPrompt(state)
+    .filter(
+      (entry) =>
+        entry.displayType === "progress" && (!allowedIds || allowedIds.has(entry.id)),
+    )
+    .map((entry) => ({
+      slot: entry.slot,
+      ...(options.includeIds === false ? {} : { id: entry.id }),
+      name: entry.variableName,
+      rule: entry.description,
+      current: entry.currentValue,
+      scale: getProgressScaleHint(entry.variableName, entry.description),
+    }));
+  return JSON.stringify({
+    meters,
     ...(referenceContext.personaContext?.trim()
       ? { personaContext: referenceContext.personaContext.trim() }
       : {}),
