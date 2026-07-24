@@ -14,6 +14,7 @@ import {
   type CSSProperties,
   type DragEvent,
   type MouseEvent,
+  type PointerEvent,
   useEffect,
   useMemo,
   useRef,
@@ -320,9 +321,15 @@ function getItemLabel(item: StatusBarItem) {
 function StatusPanelItem({
   item,
   state,
+  previewItemId,
+  dragging = false,
+  dragOver = false,
 }: {
   item: StatusBarItem;
   state: StatusBarState;
+  previewItemId?: string;
+  dragging?: boolean;
+  dragOver?: boolean;
 }) {
   const value = getStatusBarItemValue(state, item);
   const label = getItemLabel(item);
@@ -331,11 +338,16 @@ function StatusPanelItem({
     `type-${item.type}`,
     `width-${item.width}`,
     `size-${item.size}`,
-  ].join(" ");
+    dragging ? "is-preview-dragging" : "",
+    dragOver ? "is-preview-drag-over" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const previewProps = { "data-status-preview-item-id": previewItemId };
 
   if (item.type === "divider") {
     return (
-      <div className={itemClassName}>
+      <div className={itemClassName} {...previewProps}>
         <span />
         <strong>
           {item.icon ? <i aria-hidden="true">{item.icon}</i> : null}
@@ -348,7 +360,7 @@ function StatusPanelItem({
 
   if (item.type === "banner") {
     return (
-      <div className={itemClassName} title={item.variableName}>
+      <div className={itemClassName} title={item.variableName} {...previewProps}>
         <strong>
           {item.icon ? <i aria-hidden="true">{item.icon}</i> : null}
           {label}：
@@ -361,7 +373,7 @@ function StatusPanelItem({
   if (item.type === "progress") {
     const progress = clampProgressValue(value);
     return (
-      <div className={itemClassName} title={item.variableName}>
+      <div className={itemClassName} title={item.variableName} {...previewProps}>
         <div className="status-progress-heading">
           <strong>
             {item.icon ? <i aria-hidden="true">{item.icon}</i> : null}
@@ -385,7 +397,7 @@ function StatusPanelItem({
 
   if (item.type === "list") {
     return (
-      <div className={itemClassName} title={item.variableName}>
+      <div className={itemClassName} title={item.variableName} {...previewProps}>
         {item.icon ? <i className="status-list-icon" aria-hidden="true">{item.icon}</i> : null}
         <div>
           <strong>{label}</strong>
@@ -396,7 +408,7 @@ function StatusPanelItem({
   }
 
   return (
-    <div className={itemClassName} title={item.variableName}>
+    <div className={itemClassName} title={item.variableName} {...previewProps}>
       <strong>
         {item.icon ? <i aria-hidden="true">{item.icon}</i> : null}
         {label}
@@ -406,15 +418,110 @@ function StatusPanelItem({
   );
 }
 
-function StatusPanelPreview({ state, editor = false }: { state: StatusBarState; editor?: boolean }) {
+type StatusPanelPreviewProps = {
+  state: StatusBarState;
+  editor?: boolean;
+  draggedItemId?: string;
+  dragOverItemId?: string;
+  onItemMove?: (sourceItemId: string, targetItemId: string) => void;
+  onPointerDragStart?: (itemId: string) => void;
+  onPointerDragOver?: (itemId: string) => void;
+  onPointerDragEnd?: () => void;
+};
+
+function StatusPanelPreview({
+  state,
+  editor = false,
+  draggedItemId = "",
+  dragOverItemId = "",
+  onItemMove,
+  onPointerDragStart,
+  onPointerDragOver,
+  onPointerDragEnd,
+}: StatusPanelPreviewProps) {
   const accentColor = getSafeAccentColor(state.accentColor);
   const headerItems = state.items.filter((item) => item.type === "header");
   const bodyItems = state.items.filter((item) => item.type !== "header");
   const style = { "--status-accent": accentColor } as StatusBarCssProperties;
+  const canDragItems = editor && Boolean(onItemMove);
+  const pointerDragRef = useRef<{
+    pointerId: number;
+    sourceItemId: string;
+    targetItemId: string;
+    startX: number;
+    startY: number;
+    started: boolean;
+  } | null>(null);
+
+  const handlePreviewPointerDown = (event: PointerEvent<HTMLElement>) => {
+    if (!canDragItems || event.button !== 0 || !(event.target instanceof Element)) return;
+    const itemElement = event.target.closest<HTMLElement>("[data-status-preview-item-id]");
+    const sourceItemId = itemElement?.dataset.statusPreviewItemId ?? "";
+    if (!sourceItemId || !event.currentTarget.contains(itemElement)) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    pointerDragRef.current = {
+      pointerId: event.pointerId,
+      sourceItemId,
+      targetItemId: "",
+      startX: event.clientX,
+      startY: event.clientY,
+      started: false,
+    };
+  };
+
+  const handlePreviewPointerMove = (event: PointerEvent<HTMLElement>) => {
+    const pointerDrag = pointerDragRef.current;
+    if (!pointerDrag || pointerDrag.pointerId !== event.pointerId) return;
+    if (
+      !pointerDrag.started &&
+      Math.hypot(event.clientX - pointerDrag.startX, event.clientY - pointerDrag.startY) < 5
+    ) {
+      return;
+    }
+    if (!pointerDrag.started) {
+      pointerDrag.started = true;
+      onPointerDragStart?.(pointerDrag.sourceItemId);
+    }
+    const targetElement = document
+      .elementFromPoint(event.clientX, event.clientY)
+      ?.closest<HTMLElement>("[data-status-preview-item-id]");
+    const targetItemId = targetElement?.dataset.statusPreviewItemId ?? "";
+    pointerDrag.targetItemId =
+      targetItemId && targetItemId !== pointerDrag.sourceItemId ? targetItemId : "";
+    onPointerDragOver?.(pointerDrag.targetItemId);
+  };
+
+  const finishPreviewPointerDrag = (
+    event: PointerEvent<HTMLElement>,
+    commitMove = true,
+  ) => {
+    const pointerDrag = pointerDragRef.current;
+    if (!pointerDrag || pointerDrag.pointerId !== event.pointerId) return;
+    if (
+      commitMove &&
+      pointerDrag.started &&
+      pointerDrag.targetItemId &&
+      pointerDrag.targetItemId !== pointerDrag.sourceItemId
+    ) {
+      onItemMove?.(pointerDrag.sourceItemId, pointerDrag.targetItemId);
+    }
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    pointerDragRef.current = null;
+    onPointerDragEnd?.();
+  };
 
   return (
     <section
       className={`status-panel-preview ${editor ? "is-editor-preview" : ""}`}
+      onPointerCancel={
+        canDragItems ? (event) => finishPreviewPointerDrag(event, false) : undefined
+      }
+      onPointerDown={canDragItems ? handlePreviewPointerDown : undefined}
+      onPointerMove={canDragItems ? handlePreviewPointerMove : undefined}
+      onPointerUp={canDragItems ? finishPreviewPointerDrag : undefined}
       style={style}
       aria-label={`${state.title || "状态栏"}预览`}
     >
@@ -424,7 +531,10 @@ function StatusPanelPreview({ state, editor = false }: { state: StatusBarState; 
           <div className="status-panel-header-values">
             {headerItems.map((item) => (
               <span
-                className={`width-${item.width} size-${item.size}`}
+                className={`width-${item.width} size-${item.size} ${
+                  draggedItemId === item.id ? "is-preview-dragging" : ""
+                } ${dragOverItemId === item.id ? "is-preview-drag-over" : ""}`}
+                data-status-preview-item-id={canDragItems ? item.id : undefined}
                 key={item.id}
                 title={`${getItemLabel(item)} · ${item.variableName}`}
               >
@@ -439,7 +549,14 @@ function StatusPanelPreview({ state, editor = false }: { state: StatusBarState; 
       {bodyItems.length > 0 ? (
         <div className="status-panel-items">
           {bodyItems.map((item) => (
-            <StatusPanelItem item={item} state={state} key={item.id} />
+            <StatusPanelItem
+              dragOver={dragOverItemId === item.id}
+              dragging={draggedItemId === item.id}
+              item={item}
+              key={item.id}
+              previewItemId={canDragItems ? item.id : undefined}
+              state={state}
+            />
           ))}
         </div>
       ) : headerItems.length === 0 ? (
@@ -716,20 +833,23 @@ export function StatusBarSidebar({
     });
   };
 
-  const handleDragStart = (event: DragEvent<HTMLButtonElement>, itemId: string) => {
+  const handleDragStart = (event: DragEvent<HTMLElement>, itemId: string) => {
     setDraggedItemId(itemId);
     setDragOverItemId("");
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", itemId);
   };
 
-  const handleDrop = (event: DragEvent<HTMLDivElement>, targetItemId: string) => {
+  const handleDrop = (event: DragEvent<HTMLElement>, targetItemId: string) => {
     event.preventDefault();
     const sourceItemId = draggedItemId || event.dataTransfer.getData("text/plain");
     setDraggedItemId("");
     setDragOverItemId("");
     if (!sourceItemId || sourceItemId === targetItemId) return;
+    reorderDraftItems(sourceItemId, targetItemId);
+  };
 
+  const reorderDraftItems = (sourceItemId: string, targetItemId: string) => {
     setDraft((current) => {
       const sourceIndex = current.items.findIndex((item) => item.id === sourceItemId);
       const targetIndex = current.items.findIndex((item) => item.id === targetItemId);
@@ -1309,9 +1429,21 @@ export function StatusBarSidebar({
                       <span>LIVE PREVIEW</span>
                       <strong>实时预览</strong>
                     </div>
-                    <small>显示当前会话值；未填入时使用初始值</small>
+                    <small>按住条目拖动排序；未填入时使用初始值</small>
                   </div>
-                  <StatusPanelPreview editor state={editorPreviewState} />
+                  <StatusPanelPreview
+                    dragOverItemId={dragOverItemId}
+                    draggedItemId={draggedItemId}
+                    editor
+                    onItemMove={reorderDraftItems}
+                    onPointerDragEnd={() => {
+                      setDraggedItemId("");
+                      setDragOverItemId("");
+                    }}
+                    onPointerDragOver={setDragOverItemId}
+                    onPointerDragStart={setDraggedItemId}
+                    state={editorPreviewState}
+                  />
                   <div className="status-editor-variable-note">
                     <strong>变量更新规则</strong>
                     <p>AI 回复完成后只提交发生变化的变量。未提交的条目会保留当前值，分割线不会进入变量列表。</p>

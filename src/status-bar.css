@@ -1063,6 +1063,26 @@
   min-height: 180px;
 }
 
+.status-panel-preview.is-editor-preview [data-status-preview-item-id] {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.status-panel-preview.is-editor-preview [data-status-preview-item-id]:active {
+  cursor: grabbing;
+}
+
+.status-panel-preview.is-editor-preview .is-preview-dragging {
+  opacity: 0.42;
+}
+
+.status-panel-preview.is-editor-preview .is-preview-drag-over {
+  border-color: var(--status-accent);
+  background-color: color-mix(in srgb, var(--status-accent) 12%, rgba(0, 0, 0, 0.2));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-accent) 24%, transparent);
+}
+
 .status-editor-variable-note {
   margin-top: 12px;
   padding: 11px 12px;
