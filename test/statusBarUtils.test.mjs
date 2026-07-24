@@ -77,6 +77,8 @@ test("creates the default status bar and progress item defaults", () => {
   const progress = createStatusBarItem("progress", { id: "custom-progress" });
 
   assert.equal(state.enabled, false);
+  assert.equal(state.providerId, "");
+  assert.equal(state.modelId, "");
   assert.equal(state.title, "状态监测终端");
   assert.equal(state.accentColor, "#ff758c");
   assert.equal(state.items.length, 7);
@@ -98,6 +100,8 @@ test("creates the default status bar and progress item defaults", () => {
 test("normalizes duplicate variable names, progress entries, and stored values", () => {
   const state = normalizeStatusBarState({
     enabled: true,
+    providerId: "  provider-1  ",
+    modelId: "  text-model-1  ",
     title: "  测试状态  ",
     accentColor: "not-a-color",
     updatedAt: "fixed-revision",
@@ -136,6 +140,8 @@ test("normalizes duplicate variable names, progress entries, and stored values",
     },
   });
 
+  assert.equal(state.providerId, "provider-1");
+  assert.equal(state.modelId, "text-model-1");
   assert.equal(state.title, "测试状态");
   assert.equal(state.accentColor, "#ff758c");
   assert.equal(state.items[0].variableName, "进度");
@@ -148,6 +154,16 @@ test("normalizes duplicate variable names, progress entries, and stored values",
   assert.equal(state.items[2].variableName, "");
   assert.deepEqual(state.values, { first: true, second: 75 });
   assert.equal(getStatusBarItemValue(state, state.items[1]), 75);
+});
+
+test("keeps legacy status bars compatible when model settings are absent", () => {
+  const state = normalizeStatusBarState({
+    enabled: true,
+    items: [],
+  });
+
+  assert.equal(state.providerId, "");
+  assert.equal(state.modelId, "");
 });
 
 test("builds reducer payload and response schema", () => {

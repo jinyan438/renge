@@ -34,11 +34,19 @@ type StatusBarItemSize = StatusBarItem["size"];
 export type StatusBarPreset = {
   id: string;
   name: string;
+  providerId: string;
+  modelId: string;
   title: string;
   accentColor: string;
   items: Array<Omit<StatusBarItem, "id">>;
   createdAt: string;
   updatedAt: string;
+};
+
+export type StatusBarProviderOption = {
+  id: string;
+  name: string;
+  models: string[];
 };
 
 export type StatusBarSidebarProps = {
@@ -48,6 +56,7 @@ export type StatusBarSidebarProps = {
   onStateChange: (next: StatusBarState) => void;
   onClearValues: () => void;
   onManualUpdate: () => void | Promise<void>;
+  providerOptions: StatusBarProviderOption[];
   presets: StatusBarPreset[];
   onPresetsChange: (next: StatusBarPreset[]) => void;
   manualUpdateDisabled?: boolean;
@@ -178,6 +187,8 @@ function normalizeStatusBarPreset(rawValue: unknown, index: number): StatusBarPr
 
   const normalizedState = normalizeStatusBarState({
     enabled: false,
+    providerId: rawPreset.providerId,
+    modelId: rawPreset.modelId,
     title: rawPreset.title,
     accentColor: rawPreset.accentColor,
     items: rawPreset.items,
@@ -196,6 +207,8 @@ function normalizeStatusBarPreset(rawValue: unknown, index: number): StatusBarPr
         ? rawPreset.id.trim()
         : createStatusPresetId(),
     name,
+    providerId: normalizedState.providerId,
+    modelId: normalizedState.modelId,
     title: normalizedState.title,
     accentColor: normalizedState.accentColor,
     items: normalizedState.items.map(({ id: _id, ...item }) => item),
@@ -497,6 +510,7 @@ export function StatusBarSidebar({
   onStateChange,
   onClearValues,
   onManualUpdate,
+  providerOptions,
   presets,
   onPresetsChange,
   manualUpdateDisabled = false,
@@ -521,6 +535,21 @@ export function StatusBarSidebar({
   latestStateRef.current = state;
 
   const validationErrors = useMemo(() => validateStatusItems(draft.items), [draft.items]);
+  const selectedStatusProvider = useMemo(
+    () => providerOptions.find((provider) => provider.id === draft.providerId),
+    [draft.providerId, providerOptions],
+  );
+  const statusModelOptions = useMemo(() => {
+    const models = selectedStatusProvider?.models ?? [];
+    return draft.modelId && !models.includes(draft.modelId)
+      ? [draft.modelId, ...models]
+      : models;
+  }, [draft.modelId, selectedStatusProvider]);
+  const modelConfigurationError = !selectedStatusProvider
+    ? "请选择状态栏供应商"
+    : !draft.modelId.trim()
+      ? "请选择状态栏模型"
+      : "";
   const selectedPreset = useMemo(
     () => presets.find((preset) => preset.id === selectedPresetId) ?? null,
     [presets, selectedPresetId],
@@ -736,6 +765,8 @@ export function StatusBarSidebar({
     return {
       id,
       name,
+      providerId: normalizedDraft.providerId,
+      modelId: normalizedDraft.modelId,
       title: normalizedDraft.title,
       accentColor: normalizedDraft.accentColor,
       items: normalizedDraft.items.map(({ id: _id, ...item }) => item),
@@ -746,9 +777,9 @@ export function StatusBarSidebar({
 
   const validateDraftBeforePresetSave = () => {
     const nextErrors = validateStatusItems(draft.items);
-    if (nextErrors.size === 0) return true;
+    if (nextErrors.size === 0 && !modelConfigurationError) return true;
     setShowValidation(true);
-    setPresetFeedback("请先修正变量名，再保存预设。");
+    setPresetFeedback(modelConfigurationError || "请先修正变量名，再保存预设。");
     return false;
   };
 
@@ -793,6 +824,8 @@ export function StatusBarSidebar({
     setDeleteConfirmationPresetId("");
     setDraft((current) => ({
       ...current,
+      providerId: selectedPreset.providerId,
+      modelId: selectedPreset.modelId,
       title: selectedPreset.title,
       accentColor: selectedPreset.accentColor,
       items: clonePresetItems(selectedPreset.items).map((item) => ({
@@ -825,7 +858,7 @@ export function StatusBarSidebar({
 
   const saveDraft = () => {
     const nextErrors = validateStatusItems(draft.items);
-    if (nextErrors.size > 0) {
+    if (nextErrors.size > 0 || modelConfigurationError) {
       setShowValidation(true);
       return;
     }
@@ -891,7 +924,7 @@ export function StatusBarSidebar({
                     <div className="status-bar-preset-heading">
                       <div>
                         <strong>状态栏预设</strong>
-                        <span>跨会话保存条目结构和样式，不保存实时变量值</span>
+                        <span>跨会话保存模型、条目结构和样式，不保存实时变量值</span>
                       </div>
                       <small>{presets.length} / {MAX_STATUS_BAR_PRESETS}</small>
                     </div>
@@ -965,6 +998,47 @@ export function StatusBarSidebar({
                   </div>
 
                   <div className="status-bar-general-fields">
+                    <label>
+                      <span>状态栏供应商</span>
+                      <select
+                        onChange={(event) => {
+                          const providerId = event.target.value;
+                          const provider = providerOptions.find(
+                            (candidate) => candidate.id === providerId,
+                          );
+                          updateDraft({
+                            providerId,
+                            modelId:
+                              provider?.models.includes(draft.modelId)
+                                ? draft.modelId
+                                : provider?.models[0] ?? "",
+                          });
+                        }}
+                        value={draft.providerId}
+                      >
+                        <option value="">选择供应商</option>
+                        {providerOptions.map((provider) => (
+                          <option key={provider.id} value={provider.id}>
+                            {provider.name || "未命名供应商"}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>状态栏模型</span>
+                      <select
+                        disabled={!selectedStatusProvider}
+                        onChange={(event) => updateDraft({ modelId: event.target.value })}
+                        value={draft.modelId}
+                      >
+                        <option value="">选择模型</option>
+                        {statusModelOptions.map((modelId) => (
+                          <option key={modelId} value={modelId}>
+                            {modelId}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                     <label>
                       <span>面板标题</span>
                       <input
@@ -1259,6 +1333,11 @@ export function StatusBarSidebar({
                   {showValidation && validationErrors.size > 0 ? (
                     <span className="status-editor-validation-summary">
                       请修正 {validationErrors.size} 个变量名问题
+                    </span>
+                  ) : null}
+                  {showValidation && modelConfigurationError ? (
+                    <span className="status-editor-validation-summary">
+                      {modelConfigurationError}
                     </span>
                   ) : null}
                   <button onClick={closeEditor} type="button">

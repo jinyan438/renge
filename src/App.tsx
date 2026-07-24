@@ -19071,8 +19071,8 @@ export function App() {
     assistantMessageId: string;
     latestUser: string;
     finalAssistant: string;
-    requestProvider: ModelProviderChannel;
-    requestModelId: string;
+    requestProvider?: ModelProviderChannel;
+    requestModelId?: string;
     sourceMessageIds?: string[];
     mergeWithExistingPatch?: boolean;
     signal?: AbortSignal;
@@ -19114,8 +19114,25 @@ export function App() {
     const trackedItemCount = statusBar.items.filter(
       (item) => item.type !== "divider" && item.variableName,
     ).length;
-    if (!statusBar.enabled || trackedItemCount === 0 || isImageGenerationModelId(requestModelId)) {
+    if (!statusBar.enabled || trackedItemCount === 0) {
       return { attempted: false, updated: 0 };
+    }
+    const statusRequestProvider =
+      requestProvider ?? providers.find((provider) => provider.id === statusBar.providerId);
+    const statusRequestModelId = requestModelId?.trim() || statusBar.modelId.trim();
+    if (!statusRequestProvider?.apiBaseUrl || !statusRequestModelId) {
+      return {
+        attempted: true,
+        updated: 0,
+        error: "请在状态栏编辑器中选择状态栏供应商和模型。",
+      };
+    }
+    if (isImageGenerationModelId(statusRequestModelId)) {
+      return {
+        attempted: true,
+        updated: 0,
+        error: "状态栏更新需要文本模型，请重新选择状态栏模型。",
+      };
     }
 
     const schemaRevision = statusBar.updatedAt;
@@ -19227,10 +19244,10 @@ export function App() {
       correctionRetry = false,
       lineProtocolRetry = false,
     ) => ({
-      apiBaseUrl: trimTrailingSlash(requestProvider.apiBaseUrl),
-      apiKey: requestProvider.apiKey,
+      apiBaseUrl: trimTrailingSlash(statusRequestProvider.apiBaseUrl),
+      apiKey: statusRequestProvider.apiKey,
       request: {
-        model: requestModelId,
+        model: statusRequestModelId,
         messages: [
           {
             role: "system",
@@ -19471,8 +19488,8 @@ export function App() {
       return;
     }
 
-    const candidateConfigs = [
-      ...(chatMode === "multi"
+    const reducerConfig =
+      chatMode === "multi"
         ? assistantMessages
             .slice()
             .reverse()
@@ -19481,21 +19498,16 @@ export function App() {
                 ? [getMultiAgentRequestConfig(message.sender.personaId)]
                 : [],
             )
-        : []),
-      {
-        provider: chatProvider,
-        modelId: getEffectiveProviderModelId(chatProvider),
-      },
-    ];
-    const reducerConfig = candidateConfigs.find(
-      (config) =>
-        Boolean(config.provider?.apiBaseUrl && config.modelId) &&
-        !isImageGenerationModelId(config.modelId),
-    );
-    if (!reducerConfig?.provider || !reducerConfig.modelId) {
+            .find(
+              (config) =>
+                Boolean(config.provider?.apiBaseUrl && config.modelId) &&
+                !isImageGenerationModelId(config.modelId),
+            )
+        : undefined;
+    if (chatMode === "multi" && (!reducerConfig?.provider || !reducerConfig.modelId)) {
       setChatStatus({
         status: "error",
-        message: "没有可用于手动更新状态栏的文本模型，请先配置模型。",
+        message: "没有可用于手动更新状态栏的多 Agent 文本模型，请先配置模型。",
       });
       return;
     }
@@ -19510,8 +19522,12 @@ export function App() {
           .map((message) => message.content.trim())
           .filter(Boolean)
           .join("\n\n---\n\n"),
-        requestProvider: reducerConfig.provider,
-        requestModelId: reducerConfig.modelId,
+        ...(reducerConfig?.provider && reducerConfig.modelId
+          ? {
+              requestProvider: reducerConfig.provider,
+              requestModelId: reducerConfig.modelId,
+            }
+          : {}),
         sourceMessageIds: [
           ...(latestUserIndex >= 0 ? [messages[latestUserIndex].id] : []),
           ...assistantMessages.map((message) => message.id),
@@ -21333,8 +21349,6 @@ export function App() {
             sourceMessageIds: latestUserMessage ? [latestUserMessage.id] : [],
             latestUser: latestUserMessage?.content ?? "",
             finalAssistant: currentAssistantMessage.content,
-            requestProvider,
-            requestModelId,
             signal: abortSignal,
           });
           if (
@@ -22968,8 +22982,6 @@ export function App() {
         sourceMessageIds: [userMessage.id],
         latestUser: effectiveContent,
         finalAssistant: finalAssistantForStatus,
-        requestProvider: chatProvider,
-        requestModelId,
         signal: abortSignal,
       });
       if (activeChatSessionIdRef.current === requestSessionId) {
@@ -23639,15 +23651,12 @@ export function App() {
           (message) => message.id === assistantMessage.id,
         );
         if (!currentAssistantMessage?.content.trim()) return;
-        const requestModelId = getEffectiveProviderModelId(chatProvider);
         const statusBarResult = await runCancellableStatusBarUpdate({
           sessionId: requestSessionId,
           assistantMessageId: currentAssistantMessage.id,
           sourceMessageIds: [editedMessage.id],
           latestUser: content,
           finalAssistant: currentAssistantMessage.content,
-          requestProvider: chatProvider,
-          requestModelId,
         });
         if (
           statusBarResult.attempted &&
@@ -30807,6 +30816,11 @@ export function App() {
           onStateChange={updateActiveStatusBarState}
           onClearValues={clearActiveStatusBarValues}
           onManualUpdate={manuallyUpdateActiveStatusBar}
+          providerOptions={providers.map((provider) => ({
+            id: provider.id,
+            name: provider.name,
+            models: getProviderModelIds(provider),
+          }))}
           presets={statusBarPresets}
           onPresetsChange={setStatusBarPresets}
           manualUpdateDisabled={chatGenerationState !== "idle"}
