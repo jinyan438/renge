@@ -263,6 +263,51 @@ test("prefers the last valid status patch in a response", () => {
   assert.deepEqual(result.patch.updates, [{ id: "hp", value: 80 }]);
 });
 
+test("accepts common loose JSON shapes and variable names", () => {
+  const state = createTestState();
+
+  assert.deepEqual(
+    parseStatusBarPatch(
+      "结果：[{ variableName: '情绪', value: '开心', }, { name: '任务进度', newValue: '75' }]",
+      state,
+    ).patch.updates,
+    [
+      { id: "mood", value: "开心" },
+      { id: "progress", value: 75 },
+    ],
+  );
+  assert.deepEqual(
+    parseStatusBarPatch('{"情绪":"放松","HP":85}', state).patch.updates,
+    [
+      { id: "mood", value: "放松" },
+      { id: "hp", value: 85 },
+    ],
+  );
+  assert.deepEqual(
+    parseStatusBarPatch('{"updates":{"情绪":"安心","HP":88}}', state).patch.updates,
+    [
+      { id: "mood", value: "安心" },
+      { id: "hp", value: 88 },
+    ],
+  );
+});
+
+test("accepts a simple line or Markdown table update protocol", () => {
+  const state = createTestState();
+  const result = parseStatusBarPatch(
+    "状态更新：\n- 情绪：专注\n任务进度\t90\n| HP | 70 |",
+    state,
+  );
+
+  assert.equal(result.error, undefined);
+  assert.deepEqual(result.patch.updates, [
+    { id: "mood", value: "专注" },
+    { id: "progress", value: 90 },
+    { id: "hp", value: 70 },
+  ]);
+  assert.deepEqual(parseStatusBarPatch("情绪：无变化", state).patch.updates, []);
+});
+
 test("filters unknown IDs, unchanged values, and keeps the last duplicate update", () => {
   const state = createTestState();
 
@@ -335,7 +380,7 @@ test("filters unknown IDs, unchanged values, and keeps the last duplicate update
   );
 });
 
-test("clamps progress updates and rejects invalid progress values", () => {
+test("clamps progress updates and accepts numeric strings", () => {
   const state = createTestState();
 
   assert.deepEqual(
@@ -357,7 +402,11 @@ test("clamps progress updates and rejects invalid progress values", () => {
       '{"version":1,"updates":[{"id":"progress","value":"75"}]}',
       state,
     ).patch.updates,
-    [],
+    [{ id: "progress", value: 75 }],
+  );
+  assert.deepEqual(
+    parseStatusBarPatch("任务进度：80%", state).patch.updates,
+    [{ id: "progress", value: 80 }],
   );
 });
 
