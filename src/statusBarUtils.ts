@@ -428,22 +428,31 @@ function getProgressScaleHint(variableName: string, description: string) {
   return "0=完全不存在、最低或尚未开始，15=轻微，30=较低，50=中等，70=明显或较高，85=强烈，100=极限、完全或结束";
 }
 
-export function buildStatusBarProgressSystemPrompt(outputMode: "json" | "lines") {
+function isPlaceholderStatusValue(value: StatusBarValue) {
+  if (typeof value !== "string") return false;
+  return /^(?:待填入|待填写|待更新|未填写|未更新|未设置|未知|空|tbd|n\/?a|[?？])$/i.test(
+    value.trim(),
+  );
+}
+
+export function buildStatusBarFocusedSystemPrompt(outputMode: "json" | "lines") {
   const sharedRules = [
-    "你是剧情数值仪表评分器。任务是从 finalAssistant 的定性描写估算每个 meter 在本轮结束时的绝对分数，不是寻找正文中的数字，也不是判断有没有明确改变。",
-    "必须逐项评分并输出 0–100 整数。currentValue 只是上一轮基准；没有相关新证据时原样保留，有相关证据时依据 scale 主动量化。",
-    "角色首次出现或首次互动时必须建立初始分：关系类即使只是中立初识也按 scale 给出非零基准；压力类出现担忧、考试压力、被审视、紧张、试探等迹象就必须非零。",
-    "轻微、明确、强烈变化通常在 currentValue 基础上分别调整约 5、10、20，并限制在 0–100。不得输出分析、理由、候选值或变量说明。",
+    "你是遗漏状态变量的聚焦补全器。任务是根据 latestUser 和 finalAssistant，为 fields 中每一项填写本轮结束时可直接展示的最终值；不要判断样式，也不要寻找正文中的固定格式。",
+    "displayType 只控制界面外观，不影响变量逻辑。无论当前或未来新增什么样式，只要出现在 fields 中就必须按 name、rule、current 和 guidance 独立处理，不得遗漏。",
+    "current 是上一轮基准：没有相关新证据且不是占位值时原样保留；有相关证据时必须更新。placeholder 为 true 表示旧值无效且已从 current 移除，必须按 rule 和剧情推断一个新的最终值，严禁输出“待填入、待填写、待更新、未填写、未更新、未设置、未知、空、TBD、N/A、?、？”等占位词。",
+    "rule 给出数值范围时，即使正文没有直接数字也必须估算范围内的单个数字；物品或清单字段应提取场景中人物正在使用、携带或明确拥有的对象，确实没有则填“无”。",
+    "displayType 为 progress 的字段必须依据 guidance 输出 0–100 整数。正文没有数字也要主动量化；关系类首次互动使用非零中立基准，压力类出现担忧、考试压力、被审视、紧张或试探时必须非零。",
+    "不得输出分析、理由、候选值、变量说明复述或多个备选答案。",
   ];
   if (outputMode === "lines") {
     return [
       ...sharedRules,
-      "每行只能输出 meter.slot、一个制表符、整数；必须逐项输出，不得遗漏，不要输出 JSON、标题或其他文字。",
+      "每行只能输出 field.slot、一个制表符、最终值；必须逐项输出，不得遗漏，不要输出 JSON、标题或其他文字。",
     ].join("\n");
   }
   return [
     ...sharedRules,
-    "只输出 JSON，顶层只能包含 version 和 updates；version 为 1，updates 必须逐项包含每个 meter 的 id 和整数 value，不得遗漏或新增 id。",
+    "只输出 JSON，顶层只能包含 version 和 updates；version 为 1，updates 必须逐项包含每个 field 的 id 和最终 value，不得遗漏或新增 id。",
   ].join("\n");
 }
 
@@ -519,7 +528,7 @@ export function buildStatusBarSnapshotPayload(
   });
 }
 
-export function buildStatusBarProgressPayload(
+export function buildStatusBarFocusedPayload(
   state: StatusBarState,
   latestUser: string,
   finalAssistant: string,
@@ -527,21 +536,29 @@ export function buildStatusBarProgressPayload(
   options: { itemIds?: string[]; includeIds?: boolean } = {},
 ) {
   const allowedIds = options.itemIds ? new Set(options.itemIds) : null;
-  const meters = getStatusBarEntriesForPrompt(state)
-    .filter(
-      (entry) =>
-        entry.displayType === "progress" && (!allowedIds || allowedIds.has(entry.id)),
-    )
-    .map((entry) => ({
-      slot: entry.slot,
-      ...(options.includeIds === false ? {} : { id: entry.id }),
-      name: entry.variableName,
-      rule: entry.description,
-      current: entry.currentValue,
-      scale: getProgressScaleHint(entry.variableName, entry.description),
-    }));
+  const fields = getStatusBarEntriesForPrompt(state)
+    .filter((entry) => !allowedIds || allowedIds.has(entry.id))
+    .map((entry) => {
+      const placeholder = isPlaceholderStatusValue(entry.currentValue);
+      const valueGuidance =
+        entry.displayType === "progress"
+          ? `输出 0–100 整数。${getProgressScaleHint(entry.variableName, entry.description)}`
+          : "输出一个可直接展示的简洁字符串、有限数字、布尔值或 null；优先提取或归纳剧情事实，不要复述说明。";
+      return {
+        slot: entry.slot,
+        ...(options.includeIds === false ? {} : { id: entry.id }),
+        name: entry.variableName,
+        rule: entry.description,
+        displayType: entry.displayType,
+        current: placeholder ? null : entry.currentValue,
+        placeholder,
+        guidance: placeholder
+          ? `旧值是无效占位符，必须根据 rule 和剧情填写一个新的最终值，严禁输出占位词或 null。${valueGuidance}`
+          : valueGuidance,
+      };
+    });
   return JSON.stringify({
-    meters,
+    fields,
     ...(referenceContext.personaContext?.trim()
       ? { personaContext: referenceContext.personaContext.trim() }
       : {}),
@@ -1167,9 +1184,16 @@ export function parseStatusBarPatch(
         /^(?:[-*]\s*|\d+[.)、]\s*)?(.+?)\s*(?:应|应该|需要)?(?:更新为|改为|变为)\s*(.*?)\s*[。.!！]?$/,
       );
       const reference = tableMatch?.[1] ?? pairMatch?.[1] ?? proseUpdateMatch?.[1];
-      const rawValue = tableMatch?.[2] ?? pairMatch?.[2] ?? proseUpdateMatch?.[2];
+      let rawValue = tableMatch?.[2] ?? pairMatch?.[2] ?? proseUpdateMatch?.[2];
       const item = resolveItem(reference);
       if (!item || rawValue === undefined || /^[-:：\s]+$/.test(rawValue)) continue;
+      if (pairMatch && rawValue.includes("\t")) {
+        rawValue = rawValue
+          .split("\t")
+          .map((column) => column.trim())
+          .filter(Boolean)
+          .at(-1) ?? rawValue;
+      }
       lineProtocolRecognized = true;
       if (/^(?:不变|无变化|保持(?:原值|不变)|unchanged|same)[。.!！]?$/i.test(rawValue.trim())) {
         continue;
@@ -1244,7 +1268,15 @@ export function parseStatusBarPatch(
 
   const updates = Array.from(updatesById.values()).filter((update) => {
     const item = itemsById.get(update.id);
-    return item && !Object.is(update.value, getStatusBarItemValue(state, item));
+    if (!item) return false;
+    const currentValue = getStatusBarItemValue(state, item);
+    if (
+      isPlaceholderStatusValue(currentValue) &&
+      (update.value === null || isPlaceholderStatusValue(update.value))
+    ) {
+      return false;
+    }
+    return !Object.is(update.value, currentValue);
   });
 
   return {

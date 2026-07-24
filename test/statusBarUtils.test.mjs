@@ -4,8 +4,8 @@ import {
   buildStatusBarReducerPayload,
   buildStatusBarReducerSystemPrompt,
   buildStatusBarMvuSystemPrompt,
-  buildStatusBarProgressPayload,
-  buildStatusBarProgressSystemPrompt,
+  buildStatusBarFocusedPayload,
+  buildStatusBarFocusedSystemPrompt,
   buildStatusBarResponseFormat,
   buildStatusBarSnapshotLineSystemPrompt,
   buildStatusBarSnapshotPayload,
@@ -248,23 +248,60 @@ test("builds reducer payload and response schema", () => {
   assert.match(buildStatusBarSnapshotSystemPrompt(), /没有直接写数字或百分比/);
   assert.match(buildStatusBarSnapshotLineSystemPrompt(), /每个 slot/);
   assert.match(buildStatusBarSnapshotLineSystemPrompt(), /进度条必须填写 0–100 整数/);
-  assert.match(buildStatusBarProgressSystemPrompt("json"), /绝对分数/);
-  assert.match(buildStatusBarProgressSystemPrompt("lines"), /meter\.slot/);
+  assert.match(buildStatusBarFocusedSystemPrompt("json"), /每一项填写/);
+  assert.match(buildStatusBarFocusedSystemPrompt("lines"), /field\.slot/);
+  assert.match(buildStatusBarFocusedSystemPrompt("json"), /未来新增什么样式/);
+  assert.match(buildStatusBarFocusedSystemPrompt("json"), /旧值无效且已从 current 移除/);
   assert.deepEqual(
     JSON.parse(
-      buildStatusBarProgressPayload(state, "抵达", "已经完成", {}, {
-        itemIds: ["progress"],
+      buildStatusBarFocusedPayload(state, "抵达", "已经完成", {}, {
+        itemIds: ["mood", "progress"],
         includeIds: false,
       }),
-    ).meters,
+    ).fields,
     [
+      {
+        slot: "V1",
+        name: "情绪",
+        rule: "仅在角色明确表现出情绪变化时更新，使用简短情绪词。",
+        displayType: "banner",
+        current: "平静",
+        placeholder: false,
+        guidance:
+          "输出一个可直接展示的简洁字符串、有限数字、布尔值或 null；优先提取或归纳剧情事实，不要复述说明。",
+      },
       {
         slot: "V2",
         name: "任务进度",
         rule: "",
+        displayType: "progress",
         current: 40,
-        scale:
-          "0=尚未开始，10=刚开始，25=完成少量，50=完成一半，75=大部分完成，90=接近完成，100=已经完成",
+        placeholder: false,
+        guidance:
+          "输出 0–100 整数。0=尚未开始，10=刚开始，25=完成少量，50=完成一半，75=大部分完成，90=接近完成，100=已经完成",
+      },
+    ],
+  );
+  assert.deepEqual(
+    JSON.parse(
+      buildStatusBarFocusedPayload(
+        createTestState({ values: { mood: "待填入" } }),
+        "抵达",
+        "已经完成",
+        {},
+        { itemIds: ["mood"], includeIds: false },
+      ),
+    ).fields,
+    [
+      {
+        slot: "V1",
+        name: "情绪",
+        rule: "仅在角色明确表现出情绪变化时更新，使用简短情绪词。",
+        displayType: "banner",
+        current: null,
+        placeholder: true,
+        guidance:
+          "旧值是无效占位符，必须根据 rule 和剧情填写一个新的最终值，严禁输出占位词或 null。输出一个可直接展示的简洁字符串、有限数字、布尔值或 null；优先提取或归纳剧情事实，不要复述说明。",
       },
     ],
   );
@@ -384,6 +421,13 @@ test("accepts a simple line or Markdown table update protocol", () => {
       { id: "mood", value: "振奋" },
       { id: "progress", value: 90 },
       { id: "hp", value: 70 },
+    ],
+  );
+  assert.deepEqual(
+    parseStatusBarPatch("V1\t情绪\t振奋\nV2\t任务进度\t90", state).patch.updates,
+    [
+      { id: "mood", value: "振奋" },
+      { id: "progress", value: 90 },
     ],
   );
 });
@@ -641,6 +685,32 @@ test("clamps progress updates and accepts numeric strings", () => {
   assert.deepEqual(
     parseStatusBarPatch("任务进度：80%", state).patch.updates,
     [{ id: "progress", value: 80 }],
+  );
+});
+
+test("keeps unresolved placeholders eligible for focused completion", () => {
+  const state = createTestState({ values: { mood: "待填入" } });
+
+  assert.deepEqual(
+    parseStatusBarPatch(
+      '{"version":1,"updates":[{"id":"mood","value":"未知"}]}',
+      state,
+    ).patch.updates,
+    [],
+  );
+  assert.deepEqual(
+    parseStatusBarPatch(
+      '{"version":1,"updates":[{"id":"mood","value":null}]}',
+      state,
+    ).patch.updates,
+    [],
+  );
+  assert.deepEqual(
+    parseStatusBarPatch(
+      '{"version":1,"updates":[{"id":"mood","value":"无"}]}',
+      state,
+    ).patch.updates,
+    [{ id: "mood", value: "无" }],
   );
 });
 
