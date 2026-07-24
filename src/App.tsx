@@ -196,6 +196,7 @@ import {
   buildProviderReasoningRequest,
   getFirstReasoningText,
   getReasoningTextFromValue,
+  isLocalProviderEndpoint,
   mergeReasoningStreamChunk,
   normalizeProviderReasoningEffort,
   providerRequiresReasoningContentReplay,
@@ -19259,13 +19260,9 @@ export function App() {
       ...statusRequestProvider,
       modelId: statusRequestModelId,
     });
-    const usesLocalPlainStatusProtocol = statusReasoningControl.reasoning_effort === "none";
+    const usesLocalPlainStatusProtocol = isLocalProviderEndpoint(statusRequestProvider);
     const initialResponseFormatMode: StatusBarResponseFormatMode =
-      usesLocalPlainStatusProtocol
-        ? "snapshot_lines"
-        : Object.keys(statusReasoningControl).length > 0
-          ? "json_object"
-          : "tool_call";
+      usesLocalPlainStatusProtocol ? "snapshot_lines" : "snapshot_json";
     const requestBody = (
       responseFormatMode: StatusBarResponseFormatMode,
       includeReasoningControl = true,
@@ -19360,20 +19357,22 @@ export function App() {
       if (mode === "tool_call") return "json_schema";
       if (mode === "json_schema") return "json_object";
       if (mode === "json_object") return "none";
+      if (mode === "snapshot_json") return "snapshot_lines";
       return null;
     };
     const requestWithResponseFormatFallback = async (
       initialMode: StatusBarResponseFormatMode,
+      includeReasoningControl = true,
     ) => {
       let mode = initialMode;
-      let result = await makeRequest(mode);
+      let result = await makeRequest(mode, includeReasoningControl);
       while (
         !result.response.ok &&
         [400, 404, 415, 422, 500, 501].includes(result.response.status) &&
         getResponseFormatFallback(mode)
       ) {
         mode = getResponseFormatFallback(mode) ?? "none";
-        result = await makeRequest(mode);
+        result = await makeRequest(mode, includeReasoningControl);
       }
       return { ...result, mode };
     };
@@ -19414,13 +19413,13 @@ export function App() {
       let result = await requestWithResponseFormatFallback(initialResponseFormatMode);
       if (
         !result.response.ok &&
-        usesLocalPlainStatusProtocol &&
-        [400, 404, 415, 422].includes(result.response.status)
+        Object.keys(statusReasoningControl).length > 0 &&
+        [400, 404, 415, 422, 500, 501].includes(result.response.status)
       ) {
-        result = {
-          ...(await makeRequest("snapshot_lines", false)),
-          mode: "snapshot_lines",
-        };
+        result = await requestWithResponseFormatFallback(
+          initialResponseFormatMode,
+          false,
+        );
       }
       if (!targetIsCurrent()) return ignoredResult;
       if (!result.response.ok) {
@@ -19436,23 +19435,6 @@ export function App() {
       }
 
       let parsed = parseStatusBarPatch(getRawStatusBarPatch(result.payload), statusBar);
-      const snapshotMode: StatusBarResponseFormatMode = usesLocalPlainStatusProtocol
-        ? "snapshot_lines"
-        : "snapshot_json";
-      if (
-        result.mode !== snapshotMode &&
-        (parsed.error || parsed.patch.updates.length === 0)
-      ) {
-        const snapshotResult = await makeRequest(snapshotMode);
-        if (!targetIsCurrent()) return ignoredResult;
-        if (snapshotResult.response.ok) {
-          const snapshotParsed = parseStatusBarPatch(
-            getRawStatusBarPatch(snapshotResult.payload),
-            statusBar,
-          );
-          if (!snapshotParsed.error) parsed = snapshotParsed;
-        }
-      }
       if (parsed.error) {
         const correctionResult = await makeRequest("mvu_commands");
         if (!targetIsCurrent()) return ignoredResult;

@@ -78,6 +78,10 @@ function isLocalApiBaseUrl(value: unknown) {
   }
 }
 
+export function isLocalProviderEndpoint(provider?: ReasoningProviderConfig) {
+  return isLocalApiBaseUrl(provider?.apiBaseUrl);
+}
+
 function getModelSlug(modelId: string) {
   return modelId.split("/").pop() ?? modelId;
 }
@@ -251,14 +255,29 @@ export function buildProviderReasoningDisableRequest(
   provider?: ReasoningProviderConfig,
 ): Record<string, unknown> {
   if (!provider) return {};
+  if (isLocalApiBaseUrl(provider.apiBaseUrl)) {
+    return { reasoning_effort: "none" };
+  }
   const format = detectReasoningFormat(provider);
   if (format === "deepseek") {
     return { thinking: { type: "disabled" } };
   }
-  if (isLocalApiBaseUrl(provider.apiBaseUrl)) {
+  if (format === "zai") {
+    return { thinking: { type: "disabled" } };
+  }
+  if (format === "qwen") {
+    return { enable_thinking: false };
+  }
+  if (format === "openrouter" || format === "together") {
+    return { reasoning: { enabled: false } };
+  }
+  if (format === "opencode") {
     return { reasoning_effort: "none" };
   }
-  return {};
+  if (format === "ant-ling") {
+    return { reasoning: { effort: "none" } };
+  }
+  return { reasoning_effort: "none" };
 }
 
 export function getReasoningTextFromValue(
