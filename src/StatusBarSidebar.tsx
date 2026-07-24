@@ -504,9 +504,11 @@ export function StatusBarSidebar({
   const [selectedPresetId, setSelectedPresetId] = useState("");
   const [presetName, setPresetName] = useState("");
   const [presetFeedback, setPresetFeedback] = useState("");
+  const [deleteConfirmationPresetId, setDeleteConfirmationPresetId] = useState("");
   const latestStateRef = useRef(state);
   const editorModalRef = useRef<HTMLElement | null>(null);
   const editorInitialFocusRef = useRef<HTMLInputElement | null>(null);
+  const presetSelectRef = useRef<HTMLSelectElement | null>(null);
   const editorTriggerRef = useRef<HTMLElement | null>(null);
   const editorFallbackFocusRef = useRef<HTMLButtonElement | null>(null);
   latestStateRef.current = state;
@@ -615,6 +617,7 @@ export function StatusBarSidebar({
     setDraggedItemId("");
     setDragOverItemId("");
     setPresetFeedback("");
+    setDeleteConfirmationPresetId("");
     setEditorOpen(true);
   };
 
@@ -743,6 +746,7 @@ export function StatusBarSidebar({
   };
 
   const saveDraftAsNewPreset = () => {
+    setDeleteConfirmationPresetId("");
     if (!validateDraftBeforePresetSave()) return;
     if (presets.length >= MAX_STATUS_BAR_PRESETS) {
       setPresetFeedback(`最多可保存 ${MAX_STATUS_BAR_PRESETS} 个状态栏预设。`);
@@ -758,6 +762,7 @@ export function StatusBarSidebar({
   };
 
   const updateSelectedPreset = () => {
+    setDeleteConfirmationPresetId("");
     if (!selectedPreset || !validateDraftBeforePresetSave()) return;
     const requestedName = presetName.trim().slice(0, 48) || selectedPreset.name;
     const name = createUniquePresetName(
@@ -778,6 +783,7 @@ export function StatusBarSidebar({
 
   const applySelectedPreset = () => {
     if (!selectedPreset) return;
+    setDeleteConfirmationPresetId("");
     setDraft((current) => ({
       ...current,
       title: selectedPreset.title,
@@ -797,16 +803,17 @@ export function StatusBarSidebar({
 
   const deleteSelectedPreset = () => {
     if (!selectedPreset) return;
-    if (
-      typeof window !== "undefined" &&
-      !window.confirm(`删除状态栏预设“${selectedPreset.name}”？此操作不会修改当前会话。`)
-    ) {
+    if (deleteConfirmationPresetId !== selectedPreset.id) {
+      setDeleteConfirmationPresetId(selectedPreset.id);
+      setPresetFeedback(`再次点击“确认删除”，即可删除预设“${selectedPreset.name}”。`);
       return;
     }
     onPresetsChange(presets.filter((preset) => preset.id !== selectedPreset.id));
     setSelectedPresetId("");
     setPresetName("");
+    setDeleteConfirmationPresetId("");
     setPresetFeedback(`已删除预设“${selectedPreset.name}”。`);
+    window.requestAnimationFrame(() => presetSelectRef.current?.focus());
   };
 
   const saveDraft = () => {
@@ -885,12 +892,14 @@ export function StatusBarSidebar({
                       <label>
                         <span>已保存预设</span>
                         <select
+                          ref={presetSelectRef}
                           onChange={(event) => {
                             const nextId = event.target.value;
                             const nextPreset = presets.find((preset) => preset.id === nextId);
                             setSelectedPresetId(nextId);
                             setPresetName(nextPreset?.name ?? "");
                             setPresetFeedback("");
+                            setDeleteConfirmationPresetId("");
                           }}
                           value={selectedPresetId}
                         >
@@ -930,10 +939,15 @@ export function StatusBarSidebar({
                         className="danger"
                         disabled={!selectedPreset}
                         onClick={deleteSelectedPreset}
+                        title={
+                          deleteConfirmationPresetId === selectedPreset?.id
+                            ? "再次点击确认删除预设"
+                            : "删除所选预设"
+                        }
                         type="button"
                       >
                         <Trash2 size={15} />
-                        删除
+                        {deleteConfirmationPresetId === selectedPreset?.id ? "确认删除" : "删除"}
                       </button>
                     </div>
                     {presetFeedback ? (
