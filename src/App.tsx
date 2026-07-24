@@ -218,8 +218,8 @@ import {
   buildStatusBarSnapshotPayload,
   buildStatusBarSnapshotSystemPrompt,
   buildStatusBarMvuSystemPrompt,
-  buildStatusBarProgressPayload,
-  buildStatusBarProgressSystemPrompt,
+  buildStatusBarFocusedPayload,
+  buildStatusBarFocusedSystemPrompt,
   buildStatusBarResponseFormat,
   buildStatusBarToolDefinition,
   buildStatusBarToolSystemPrompt,
@@ -19255,8 +19255,8 @@ export function App() {
       | "json_object"
       | "snapshot_json"
       | "snapshot_lines"
-      | "progress_json"
-      | "progress_lines"
+      | "focused_json"
+      | "focused_lines"
       | "mvu_commands"
       | "line_protocol"
       | "none";
@@ -19270,7 +19270,7 @@ export function App() {
     const requestBody = (
       responseFormatMode: StatusBarResponseFormatMode,
       includeReasoningControl = true,
-      progressItemIds: string[] = [],
+      focusedItemIds: string[] = [],
     ) => ({
       apiBaseUrl: trimTrailingSlash(statusRequestProvider.apiBaseUrl),
       apiKey: statusRequestProvider.apiKey,
@@ -19279,10 +19279,10 @@ export function App() {
         messages: [
           {
             role: "system",
-            content: responseFormatMode === "progress_lines"
-              ? buildStatusBarProgressSystemPrompt("lines")
-              : responseFormatMode === "progress_json"
-                ? buildStatusBarProgressSystemPrompt("json")
+            content: responseFormatMode === "focused_lines"
+              ? buildStatusBarFocusedSystemPrompt("lines")
+              : responseFormatMode === "focused_json"
+                ? buildStatusBarFocusedSystemPrompt("json")
                 : responseFormatMode === "snapshot_lines"
               ? buildStatusBarSnapshotLineSystemPrompt()
               : responseFormatMode === "snapshot_json"
@@ -19304,16 +19304,16 @@ export function App() {
           {
             role: "user",
             content:
-              responseFormatMode === "progress_lines" ||
-              responseFormatMode === "progress_json"
-                ? buildStatusBarProgressPayload(
+              responseFormatMode === "focused_lines" ||
+              responseFormatMode === "focused_json"
+                ? buildStatusBarFocusedPayload(
                     statusBar,
                     latestUser,
                     finalAssistant,
                     reducerReferenceContext,
                     {
-                      itemIds: progressItemIds,
-                      includeIds: responseFormatMode === "progress_json",
+                      itemIds: focusedItemIds,
+                      includeIds: responseFormatMode === "focused_json",
                     },
                   )
                 : responseFormatMode === "snapshot_lines"
@@ -19333,10 +19333,10 @@ export function App() {
         ],
         temperature: 0,
         max_tokens:
-          responseFormatMode === "progress_lines"
-            ? Math.min(1024, Math.max(256, progressItemIds.length * 96))
-            : responseFormatMode === "progress_json"
-              ? Math.min(2048, Math.max(512, progressItemIds.length * 128))
+          responseFormatMode === "focused_lines"
+            ? Math.min(2048, Math.max(512, focusedItemIds.length * 160))
+            : responseFormatMode === "focused_json"
+              ? Math.min(4096, Math.max(1024, focusedItemIds.length * 192))
               : responseFormatMode === "snapshot_lines"
             ? Math.min(2048, Math.max(512, trackedItemCount * 160))
             : Math.min(8192, Math.max(4096, trackedItemCount * 384)),
@@ -19353,7 +19353,7 @@ export function App() {
           ? { response_format: buildStatusBarResponseFormat(statusBar) }
           : responseFormatMode === "json_object" ||
               responseFormatMode === "snapshot_json" ||
-              responseFormatMode === "progress_json"
+              responseFormatMode === "focused_json"
             ? { response_format: { type: "json_object" } }
             : {}),
         stream: false,
@@ -19363,14 +19363,14 @@ export function App() {
     const makeRequest = async (
       responseFormatMode: StatusBarResponseFormatMode,
       includeReasoningControl = true,
-      progressItemIds: string[] = [],
+      focusedItemIds: string[] = [],
     ) => {
       const response = await fetch("/api/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal,
         body: JSON.stringify(
-          requestBody(responseFormatMode, includeReasoningControl, progressItemIds),
+          requestBody(responseFormatMode, includeReasoningControl, focusedItemIds),
         ),
       });
       const payload = (await response.json().catch(() => ({}))) as {
@@ -19388,34 +19388,34 @@ export function App() {
       if (mode === "json_schema") return "json_object";
       if (mode === "json_object") return "none";
       if (mode === "snapshot_json") return "snapshot_lines";
-      if (mode === "progress_json") return "progress_lines";
+      if (mode === "focused_json") return "focused_lines";
       return null;
     };
     const requestWithResponseFormatFallback = async (
       initialMode: StatusBarResponseFormatMode,
       includeReasoningControl = true,
-      progressItemIds: string[] = [],
+      focusedItemIds: string[] = [],
     ) => {
       let mode = initialMode;
-      let result = await makeRequest(mode, includeReasoningControl, progressItemIds);
+      let result = await makeRequest(mode, includeReasoningControl, focusedItemIds);
       while (
         !result.response.ok &&
         [400, 404, 415, 422, 500, 501].includes(result.response.status) &&
         getResponseFormatFallback(mode)
       ) {
         mode = getResponseFormatFallback(mode) ?? "none";
-        result = await makeRequest(mode, includeReasoningControl, progressItemIds);
+        result = await makeRequest(mode, includeReasoningControl, focusedItemIds);
       }
       return { ...result, mode };
     };
     const requestWithCompatibilityFallback = async (
       initialMode: StatusBarResponseFormatMode,
-      progressItemIds: string[] = [],
+      focusedItemIds: string[] = [],
     ) => {
       let result = await requestWithResponseFormatFallback(
         initialMode,
         true,
-        progressItemIds,
+        focusedItemIds,
       );
       if (
         !result.response.ok &&
@@ -19425,7 +19425,7 @@ export function App() {
         result = await requestWithResponseFormatFallback(
           initialMode,
           false,
-          progressItemIds,
+          focusedItemIds,
         );
       }
       return result;
@@ -19501,33 +19501,33 @@ export function App() {
       }
       if (parsed.error) return { attempted: true, updated: 0, error: parsed.error };
       const updatedItemIds = new Set(parsed.patch.updates.map((update) => update.id));
-      const unscoredProgressItemIds = statusBar.items
+      const unresolvedItemIds = statusBar.items
         .filter(
           (item) =>
-            item.type === "progress" &&
+            item.type !== "divider" &&
             item.variableName &&
             !updatedItemIds.has(item.id),
         )
         .map((item) => item.id);
-      if (unscoredProgressItemIds.length > 0) {
-        const progressMode: StatusBarResponseFormatMode = usesLocalPlainStatusProtocol
-          ? "progress_lines"
-          : "progress_json";
-        const progressResult = await requestWithCompatibilityFallback(
-          progressMode,
-          unscoredProgressItemIds,
+      if (unresolvedItemIds.length > 0) {
+        const focusedMode: StatusBarResponseFormatMode = usesLocalPlainStatusProtocol
+          ? "focused_lines"
+          : "focused_json";
+        const focusedResult = await requestWithCompatibilityFallback(
+          focusedMode,
+          unresolvedItemIds,
         );
         if (!targetIsCurrent()) return ignoredResult;
-        if (progressResult.response.ok) {
-          const progressParsed = parseStatusBarPatch(
-            getRawStatusBarPatch(progressResult.payload),
+        if (focusedResult.response.ok) {
+          const focusedParsed = parseStatusBarPatch(
+            getRawStatusBarPatch(focusedResult.payload),
             statusBar,
           );
-          if (!progressParsed.error && progressParsed.patch.updates.length > 0) {
+          if (!focusedParsed.error && focusedParsed.patch.updates.length > 0) {
             const mergedUpdates = new Map(
               parsed.patch.updates.map((update) => [update.id, update]),
             );
-            progressParsed.patch.updates.forEach((update) => {
+            focusedParsed.patch.updates.forEach((update) => {
               mergedUpdates.set(update.id, update);
             });
             parsed = {
