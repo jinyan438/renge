@@ -323,13 +323,11 @@ function StatusPanelItem({
   state,
   previewItemId,
   dragging = false,
-  dragOver = false,
 }: {
   item: StatusBarItem;
   state: StatusBarState;
   previewItemId?: string;
   dragging?: boolean;
-  dragOver?: boolean;
 }) {
   const value = getStatusBarItemValue(state, item);
   const label = getItemLabel(item);
@@ -339,7 +337,6 @@ function StatusPanelItem({
     `width-${item.width}`,
     `size-${item.size}`,
     dragging ? "is-preview-dragging" : "",
-    dragOver ? "is-preview-drag-over" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -422,10 +419,12 @@ type StatusPanelPreviewProps = {
   state: StatusBarState;
   editor?: boolean;
   draggedItemId?: string;
-  dragOverItemId?: string;
-  onItemMove?: (sourceItemId: string, targetItemId: string) => void;
+  onItemInsert?: (
+    sourceItemId: string,
+    beforeItemId: string | null,
+    group: "header" | "body",
+  ) => void;
   onPointerDragStart?: (itemId: string) => void;
-  onPointerDragOver?: (itemId: string) => void;
   onPointerDragEnd?: () => void;
 };
 
@@ -433,21 +432,25 @@ function StatusPanelPreview({
   state,
   editor = false,
   draggedItemId = "",
-  dragOverItemId = "",
-  onItemMove,
+  onItemInsert,
   onPointerDragStart,
-  onPointerDragOver,
   onPointerDragEnd,
 }: StatusPanelPreviewProps) {
   const accentColor = getSafeAccentColor(state.accentColor);
   const headerItems = state.items.filter((item) => item.type === "header");
   const bodyItems = state.items.filter((item) => item.type !== "header");
   const style = { "--status-accent": accentColor } as StatusBarCssProperties;
-  const canDragItems = editor && Boolean(onItemMove);
+  const canDragItems = editor && Boolean(onItemInsert);
+  const [insertionIndicator, setInsertionIndicator] = useState<{
+    beforeItemId: string | null;
+    group: "header" | "body";
+    style: CSSProperties;
+  } | null>(null);
   const pointerDragRef = useRef<{
     pointerId: number;
     sourceItemId: string;
-    targetItemId: string;
+    group: "header" | "body";
+    beforeItemId: string | null | undefined;
     startX: number;
     startY: number;
     started: boolean;
@@ -457,13 +460,16 @@ function StatusPanelPreview({
     if (!canDragItems || event.button !== 0 || !(event.target instanceof Element)) return;
     const itemElement = event.target.closest<HTMLElement>("[data-status-preview-item-id]");
     const sourceItemId = itemElement?.dataset.statusPreviewItemId ?? "";
-    if (!sourceItemId || !event.currentTarget.contains(itemElement)) return;
+    if (!itemElement || !sourceItemId || !event.currentTarget.contains(itemElement)) return;
+    const group = itemElement.closest(".status-panel-header-values") ? "header" : "body";
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
+    setInsertionIndicator(null);
     pointerDragRef.current = {
       pointerId: event.pointerId,
       sourceItemId,
-      targetItemId: "",
+      group,
+      beforeItemId: undefined,
       startX: event.clientX,
       startY: event.clientY,
       started: false,
@@ -483,13 +489,132 @@ function StatusPanelPreview({
       pointerDrag.started = true;
       onPointerDragStart?.(pointerDrag.sourceItemId);
     }
-    const targetElement = document
+    const pointedItem = document
       .elementFromPoint(event.clientX, event.clientY)
       ?.closest<HTMLElement>("[data-status-preview-item-id]");
-    const targetItemId = targetElement?.dataset.statusPreviewItemId ?? "";
-    pointerDrag.targetItemId =
-      targetItemId && targetItemId !== pointerDrag.sourceItemId ? targetItemId : "";
-    onPointerDragOver?.(pointerDrag.targetItemId);
+    if (pointedItem) {
+      pointerDrag.beforeItemId = undefined;
+      setInsertionIndicator(null);
+      return;
+    }
+
+    const allItemElements = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>("[data-status-preview-item-id]"),
+    );
+    const sourceElement = allItemElements.find(
+      (element) => element.dataset.statusPreviewItemId === pointerDrag.sourceItemId,
+    );
+    const groupElement =
+      pointerDrag.group === "header"
+        ? sourceElement?.closest(".status-panel-header-values")
+        : sourceElement?.closest(".status-panel-items");
+    const groupItemElements = allItemElements.filter(
+      (element) => element.parentElement === groupElement,
+    );
+    const sourceIndex = groupItemElements.findIndex(
+      (element) => element.dataset.statusPreviewItemId === pointerDrag.sourceItemId,
+    );
+    if (!groupElement || sourceIndex < 0) {
+      pointerDrag.beforeItemId = undefined;
+      setInsertionIndicator(null);
+      return;
+    }
+
+    const previewRect = event.currentTarget.getBoundingClientRect();
+    const boundaryCandidates = Array.from(
+      { length: groupItemElements.length + 1 },
+      (_, index) => {
+        if (index === sourceIndex || index === sourceIndex + 1) return null;
+        const previousElement = groupItemElements[index - 1];
+        const nextElement = groupItemElements[index];
+        const previousRect = previousElement?.getBoundingClientRect();
+        const nextRect = nextElement?.getBoundingClientRect();
+        const beforeItemId = nextElement?.dataset.statusPreviewItemId ?? null;
+        if (previousRect && nextRect) {
+          const sameRow =
+            Math.abs(previousRect.top - nextRect.top) < 4 &&
+            nextRect.left >= previousRect.right;
+          if (sameRow) {
+            const x = (previousRect.right + nextRect.left) / 2;
+            const top = Math.min(previousRect.top, nextRect.top);
+            const bottom = Math.max(previousRect.bottom, nextRect.bottom);
+            const verticalDistance =
+              event.clientY < top
+                ? top - event.clientY
+                : event.clientY > bottom
+                  ? event.clientY - bottom
+                  : 0;
+            return {
+              beforeItemId,
+              distance: Math.hypot(event.clientX - x, verticalDistance),
+              style: {
+                height: Math.max(12, bottom - top),
+                left: x - previewRect.left - 1,
+                top: top - previewRect.top,
+                width: 2,
+              } satisfies CSSProperties,
+            };
+          }
+          const y = (previousRect.bottom + nextRect.top) / 2;
+          const left = Math.min(previousRect.left, nextRect.left);
+          const right = Math.max(previousRect.right, nextRect.right);
+          const horizontalDistance =
+            event.clientX < left
+              ? left - event.clientX
+              : event.clientX > right
+                ? event.clientX - right
+                : 0;
+          return {
+            beforeItemId,
+            distance: Math.hypot(event.clientY - y, horizontalDistance),
+            style: {
+              height: 2,
+              left: left - previewRect.left,
+              top: y - previewRect.top - 1,
+              width: Math.max(18, right - left),
+            } satisfies CSSProperties,
+          };
+        }
+        const edgeRect = nextRect ?? previousRect;
+        if (!edgeRect) return null;
+        const y = nextRect ? edgeRect.top - 6 : edgeRect.bottom + 6;
+        const horizontalDistance =
+          event.clientX < edgeRect.left
+            ? edgeRect.left - event.clientX
+            : event.clientX > edgeRect.right
+              ? event.clientX - edgeRect.right
+              : 0;
+        return {
+          beforeItemId,
+          distance: Math.hypot(event.clientY - y, horizontalDistance),
+          style: {
+            height: 2,
+            left: edgeRect.left - previewRect.left,
+            top: y - previewRect.top - 1,
+            width: Math.max(18, edgeRect.width),
+          } satisfies CSSProperties,
+        };
+      },
+    )
+      .filter((candidate) => candidate !== null)
+      .sort((first, second) => first.distance - second.distance);
+    const closestBoundary = boundaryCandidates[0];
+    if (!closestBoundary || closestBoundary.distance > 18) {
+      pointerDrag.beforeItemId = undefined;
+      setInsertionIndicator(null);
+      return;
+    }
+    pointerDrag.beforeItemId = closestBoundary.beforeItemId;
+    setInsertionIndicator((current) =>
+      current?.beforeItemId === closestBoundary.beforeItemId &&
+      current.group === pointerDrag.group
+        ? current
+        : {
+            beforeItemId: closestBoundary.beforeItemId,
+            group: pointerDrag.group,
+            style: closestBoundary.style,
+          },
+    );
   };
 
   const finishPreviewPointerDrag = (
@@ -501,15 +626,19 @@ function StatusPanelPreview({
     if (
       commitMove &&
       pointerDrag.started &&
-      pointerDrag.targetItemId &&
-      pointerDrag.targetItemId !== pointerDrag.sourceItemId
+      pointerDrag.beforeItemId !== undefined
     ) {
-      onItemMove?.(pointerDrag.sourceItemId, pointerDrag.targetItemId);
+      onItemInsert?.(
+        pointerDrag.sourceItemId,
+        pointerDrag.beforeItemId,
+        pointerDrag.group,
+      );
     }
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     pointerDragRef.current = null;
+    setInsertionIndicator(null);
     onPointerDragEnd?.();
   };
 
@@ -533,7 +662,7 @@ function StatusPanelPreview({
               <span
                 className={`width-${item.width} size-${item.size} ${
                   draggedItemId === item.id ? "is-preview-dragging" : ""
-                } ${dragOverItemId === item.id ? "is-preview-drag-over" : ""}`}
+                }`}
                 data-status-preview-item-id={canDragItems ? item.id : undefined}
                 key={item.id}
                 title={`${getItemLabel(item)} · ${item.variableName}`}
@@ -550,7 +679,6 @@ function StatusPanelPreview({
         <div className="status-panel-items">
           {bodyItems.map((item) => (
             <StatusPanelItem
-              dragOver={dragOverItemId === item.id}
               dragging={draggedItemId === item.id}
               item={item}
               key={item.id}
@@ -564,6 +692,13 @@ function StatusPanelPreview({
           <span>尚未添加状态条目</span>
           <small>打开编辑器，创建需要由 AI 维护的变量。</small>
         </div>
+      ) : null}
+      {insertionIndicator ? (
+        <span
+          aria-hidden="true"
+          className="status-preview-insertion-indicator"
+          style={insertionIndicator.style}
+        />
       ) : null}
     </section>
   );
@@ -858,6 +993,41 @@ export function StatusBarSidebar({
       const [movedItem] = nextItems.splice(sourceIndex, 1);
       nextItems.splice(targetIndex, 0, movedItem);
       return { ...current, items: nextItems };
+    });
+  };
+
+  const insertDraftItemAtPreviewGap = (
+    sourceItemId: string,
+    beforeItemId: string | null,
+    group: "header" | "body",
+  ) => {
+    setDraft((current) => {
+      const sourceIndex = current.items.findIndex((item) => item.id === sourceItemId);
+      if (sourceIndex < 0 || beforeItemId === sourceItemId) return current;
+      const nextItems = [...current.items];
+      const [movedItem] = nextItems.splice(sourceIndex, 1);
+      let targetIndex = beforeItemId
+        ? nextItems.findIndex((item) => item.id === beforeItemId)
+        : -1;
+      if (beforeItemId && targetIndex < 0) return current;
+      if (!beforeItemId) {
+        const belongsToGroup = (item: StatusBarItem) =>
+          group === "header" ? item.type === "header" : item.type !== "header";
+        const lastGroupIndex = nextItems.reduce(
+          (lastIndex, item, index) => (belongsToGroup(item) ? index : lastIndex),
+          -1,
+        );
+        targetIndex =
+          lastGroupIndex >= 0
+            ? lastGroupIndex + 1
+            : group === "header"
+              ? 0
+              : nextItems.length;
+      }
+      nextItems.splice(targetIndex, 0, movedItem);
+      return nextItems.every((item, index) => item.id === current.items[index]?.id)
+        ? current
+        : { ...current, items: nextItems };
     });
   };
 
@@ -1429,19 +1599,20 @@ export function StatusBarSidebar({
                       <span>LIVE PREVIEW</span>
                       <strong>实时预览</strong>
                     </div>
-                    <small>按住条目拖动排序；未填入时使用初始值</small>
+                    <small>按住条目，拖到条目之间的空白位置排序；未填入时使用初始值</small>
                   </div>
                   <StatusPanelPreview
-                    dragOverItemId={dragOverItemId}
                     draggedItemId={draggedItemId}
                     editor
-                    onItemMove={reorderDraftItems}
+                    onItemInsert={insertDraftItemAtPreviewGap}
                     onPointerDragEnd={() => {
                       setDraggedItemId("");
                       setDragOverItemId("");
                     }}
-                    onPointerDragOver={setDragOverItemId}
-                    onPointerDragStart={setDraggedItemId}
+                    onPointerDragStart={(itemId) => {
+                      setDraggedItemId(itemId);
+                      setDragOverItemId("");
+                    }}
                     state={editorPreviewState}
                   />
                   <div className="status-editor-variable-note">

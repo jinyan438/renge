@@ -1077,10 +1077,16 @@
   opacity: 0.42;
 }
 
-.status-panel-preview.is-editor-preview .is-preview-drag-over {
-  border-color: var(--status-accent);
-  background-color: color-mix(in srgb, var(--status-accent) 12%, rgba(0, 0, 0, 0.2));
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-accent) 24%, transparent);
+.status-preview-insertion-indicator {
+  position: absolute;
+  z-index: 4;
+  display: block;
+  border-radius: 999px;
+  pointer-events: none;
+  background: var(--status-accent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--status-accent) 42%, transparent),
+    0 0 10px color-mix(in srgb, var(--status-accent) 65%, transparent);
 }
 
 .status-editor-variable-note {
