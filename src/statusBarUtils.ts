@@ -33,6 +33,25 @@ export type StatusBarState = {
   updatedAt: string;
 };
 
+export type StatusBarPreset = {
+  id: string;
+  name: string;
+  providerId: string;
+  modelId: string;
+  title: string;
+  accentColor: string;
+  items: Array<Omit<StatusBarItem, "id">>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export const STATUS_BAR_PRESETS_STORAGE_KEY = "renge_status_bar_presets";
+export const DEFAULT_STATUS_BAR_PRESET_ID = "builtin:status-bar-default";
+export const DEFAULT_STATUS_BAR_PRESET_NAME = "状态栏默认预设";
+export const MAX_STATUS_BAR_PRESETS = 100;
+
+const DEFAULT_STATUS_BAR_PRESET_TIMESTAMP = "2026-07-25T00:00:00.000Z";
+
 export type StatusBarPatchEntry = {
   id: string;
   value: StatusBarValue;
@@ -346,6 +365,114 @@ export function createDefaultStatusBarState(): StatusBarState {
     values: {},
     updatedAt: timestamp,
   };
+}
+
+export function createDefaultStatusBarPreset(
+  modelBinding: Partial<Pick<StatusBarPreset, "providerId" | "modelId">> = {},
+): StatusBarPreset {
+  const state = createDefaultStatusBarState();
+  return {
+    id: DEFAULT_STATUS_BAR_PRESET_ID,
+    name: DEFAULT_STATUS_BAR_PRESET_NAME,
+    providerId: modelBinding.providerId?.trim() ?? "",
+    modelId: modelBinding.modelId?.trim() ?? "",
+    title: state.title,
+    accentColor: state.accentColor,
+    items: state.items.map(({ id: _id, ...item }) => item),
+    createdAt: DEFAULT_STATUS_BAR_PRESET_TIMESTAMP,
+    updatedAt: DEFAULT_STATUS_BAR_PRESET_TIMESTAMP,
+  };
+}
+
+export function isDefaultStatusBarPreset(
+  preset: Pick<StatusBarPreset, "id"> | null | undefined,
+) {
+  return preset?.id === DEFAULT_STATUS_BAR_PRESET_ID;
+}
+
+function normalizeStatusBarPreset(rawValue: unknown, index: number): StatusBarPreset | null {
+  if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue)) return null;
+  const rawPreset = rawValue as Record<string, unknown>;
+  if (!Array.isArray(rawPreset.items)) return null;
+
+  const normalizedState = normalizeStatusBarState({
+    enabled: false,
+    providerId: rawPreset.providerId,
+    modelId: rawPreset.modelId,
+    title: rawPreset.title,
+    accentColor: rawPreset.accentColor,
+    items: rawPreset.items,
+    values: {},
+    updatedAt: rawPreset.updatedAt,
+  });
+  const name =
+    typeof rawPreset.name === "string" && rawPreset.name.trim()
+      ? rawPreset.name.trim().slice(0, 48)
+      : `状态栏预设 ${index + 1}`;
+  const timestamp = new Date().toISOString();
+
+  return {
+    id:
+      typeof rawPreset.id === "string" && rawPreset.id.trim()
+        ? rawPreset.id.trim()
+        : createStableId(),
+    name,
+    providerId: normalizedState.providerId,
+    modelId: normalizedState.modelId,
+    title: normalizedState.title,
+    accentColor: normalizedState.accentColor,
+    items: normalizedState.items.map(({ id: _id, ...item }) => item),
+    createdAt:
+      typeof rawPreset.createdAt === "string" ? rawPreset.createdAt : timestamp,
+    updatedAt:
+      typeof rawPreset.updatedAt === "string" ? rawPreset.updatedAt : timestamp,
+  };
+}
+
+export function normalizeStatusBarPresets(rawValue: unknown): StatusBarPreset[] {
+  const rawPresets = Array.isArray(rawValue) ? rawValue : [];
+  const normalizedPresets = rawPresets
+    .slice(0, MAX_STATUS_BAR_PRESETS + 1)
+    .flatMap((preset, index) => {
+      const normalized = normalizeStatusBarPreset(preset, index);
+      return normalized ? [normalized] : [];
+    });
+  const legacyDefault = normalizedPresets.find(
+    (preset) =>
+      preset.id === DEFAULT_STATUS_BAR_PRESET_ID ||
+      preset.name.toLocaleLowerCase() === DEFAULT_STATUS_BAR_PRESET_NAME.toLocaleLowerCase(),
+  );
+  const defaultPreset = createDefaultStatusBarPreset(
+    legacyDefault
+      ? { providerId: legacyDefault.providerId, modelId: legacyDefault.modelId }
+      : undefined,
+  );
+  const seenIds = new Set([DEFAULT_STATUS_BAR_PRESET_ID]);
+  const userPresets = normalizedPresets
+    .filter(
+      (preset) =>
+        preset.id !== DEFAULT_STATUS_BAR_PRESET_ID &&
+        preset.name.toLocaleLowerCase() !== DEFAULT_STATUS_BAR_PRESET_NAME.toLocaleLowerCase(),
+    )
+    .flatMap((preset) => {
+      if (seenIds.has(preset.id)) preset.id = createStableId();
+      seenIds.add(preset.id);
+      return [preset];
+    })
+    .slice(0, MAX_STATUS_BAR_PRESETS);
+
+  return [defaultPreset, ...userPresets];
+}
+
+export function loadStatusBarPresetsFromStorage(): StatusBarPreset[] {
+  if (typeof localStorage === "undefined") return normalizeStatusBarPresets([]);
+  try {
+    return normalizeStatusBarPresets(
+      JSON.parse(localStorage.getItem(STATUS_BAR_PRESETS_STORAGE_KEY) ?? "[]"),
+    );
+  } catch {
+    return normalizeStatusBarPresets([]);
+  }
 }
 
 export function normalizeStatusBarState(rawValue: unknown): StatusBarState {

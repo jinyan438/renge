@@ -204,13 +204,7 @@ import {
   type ProviderReasoningEffort,
   type ReasoningMessageStreamMode,
 } from "./reasoningUtils";
-import {
-  loadStatusBarPresetsFromStorage,
-  normalizeStatusBarPresets,
-  STATUS_BAR_PRESETS_STORAGE_KEY,
-  StatusBarSidebar,
-  type StatusBarPreset,
-} from "./StatusBarSidebar";
+import { StatusBarSidebar } from "./StatusBarSidebar";
 import {
   buildStatusBarConversationSystemPrompt,
   buildStatusBarReducerPayload,
@@ -225,10 +219,15 @@ import {
   buildStatusBarToolDefinition,
   buildStatusBarToolSystemPrompt,
   createDefaultStatusBarState,
+  DEFAULT_STATUS_BAR_PRESET_ID,
+  loadStatusBarPresetsFromStorage,
   mergeStatusBarPatch,
+  normalizeStatusBarPresets,
   normalizeStatusBarState,
   parseStatusBarPatch,
   STATUS_BAR_UPDATE_TOOL_NAME,
+  STATUS_BAR_PRESETS_STORAGE_KEY,
+  type StatusBarPreset,
   type StatusBarPatch,
   type StatusBarState,
 } from "./statusBarUtils";
@@ -1958,7 +1957,7 @@ function createChatSession(
 ): ChatSession {
   const timestamp = new Date().toISOString();
   const savedDefaultStatusBarPreset = loadStatusBarPresetsFromStorage().find(
-    (preset) => preset.name === "状态栏默认预设",
+    (preset) => preset.id === DEFAULT_STATUS_BAR_PRESET_ID,
   );
   const initialStatusBar = savedDefaultStatusBarPreset
     ? normalizeStatusBarState({
