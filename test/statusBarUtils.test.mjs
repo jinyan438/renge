@@ -88,9 +88,35 @@ test("creates the default status bar and progress item defaults", () => {
   assert.equal(state.enabled, false);
   assert.equal(state.providerId, "");
   assert.equal(state.modelId, "");
-  assert.equal(state.title, "状态监测终端");
+  assert.equal(state.title, "状态栏");
   assert.equal(state.accentColor, "#ff758c");
-  assert.equal(state.items.length, 7);
+  assert.equal(state.items.length, 17);
+  assert.deepEqual(
+    state.items.map((item) => item.variableName),
+    [
+      "时间",
+      "{{char}}",
+      "性别",
+      "年龄",
+      "罩杯",
+      "容貌",
+      "好感度",
+      "压力值",
+      "健康",
+      "智力INT",
+      "内心独白",
+      "当前衣着",
+      "性经验次数",
+      "钱包",
+      "",
+      "地点",
+      "物品",
+    ],
+  );
+  assert.equal(
+    state.items.find((item) => item.variableName === "当前衣着")?.initialValue,
+    "待填入",
+  );
   assert.deepEqual(state.values, {});
   assert.match(state.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.deepEqual(progress, {

@@ -1957,6 +1957,27 @@ function createChatSession(
   roleplay?: { characterCardId: string; greetingIndex?: number },
 ): ChatSession {
   const timestamp = new Date().toISOString();
+  const savedDefaultStatusBarPreset = loadStatusBarPresetsFromStorage().find(
+    (preset) => preset.name === "状态栏默认预设",
+  );
+  const initialStatusBar = savedDefaultStatusBarPreset
+    ? normalizeStatusBarState({
+        enabled: false,
+        providerId: savedDefaultStatusBarPreset.providerId,
+        modelId: savedDefaultStatusBarPreset.modelId,
+        title: savedDefaultStatusBarPreset.title,
+        accentColor: savedDefaultStatusBarPreset.accentColor,
+        items: savedDefaultStatusBarPreset.items.map((item) => ({
+          ...item,
+          initialValue:
+            item.initialValue === "未设定" || item.initialValue === "待设定"
+              ? "待填入"
+              : item.initialValue,
+        })),
+        values: {},
+        updatedAt: timestamp,
+      })
+    : createDefaultStatusBarState();
 
   return {
     id: crypto.randomUUID(),
@@ -1969,7 +1990,7 @@ function createChatSession(
     memoryPersonaIds: [],
     scriptVariables: {},
     tavernMetadata: {},
-    statusBar: createDefaultStatusBarState(),
+    statusBar: initialStatusBar,
     ...(roleplay
       ? {
           roleplayCharacterCardId: roleplay.characterCardId,

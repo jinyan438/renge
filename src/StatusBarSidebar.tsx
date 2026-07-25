@@ -111,7 +111,7 @@ const ITEM_TYPE_DEFAULTS: Record<
     icon: "🕒",
     width: "short",
     size: "small",
-    initialValue: "未设定",
+    initialValue: "待填入",
   },
   banner: {
     description: "",
@@ -127,7 +127,7 @@ const ITEM_TYPE_DEFAULTS: Record<
     icon: "✨",
     width: "medium",
     size: "medium",
-    initialValue: "未设定",
+    initialValue: "待填入",
   },
   progress: {
     description: "",
@@ -143,7 +143,7 @@ const ITEM_TYPE_DEFAULTS: Record<
     icon: "📍",
     width: "long",
     size: "medium",
-    initialValue: "未设定",
+    initialValue: "待填入",
   },
   divider: {
     description: "",
