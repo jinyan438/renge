@@ -27,6 +27,7 @@ import java.io.Writer;
 import java.math.BigDecimal;
 import java.net.HttpURLConnection;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
@@ -86,14 +87,21 @@ public class LocalWebServer {
 
     public String start() throws IOException {
         try {
-            serverSocket = new ServerSocket(PREFERRED_PORT, 50, InetAddress.getByName("127.0.0.1"));
+            serverSocket = createServerSocket(PREFERRED_PORT);
         } catch (IOException ignored) {
-            serverSocket = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
+            serverSocket = createServerSocket(0);
         }
         running = true;
         acceptThread = new Thread(this::acceptLoop, "renge-local-server");
         acceptThread.start();
         return "http://127.0.0.1:" + serverSocket.getLocalPort() + "/";
+    }
+
+    private ServerSocket createServerSocket(int port) throws IOException {
+        ServerSocket socket = new ServerSocket();
+        socket.setReuseAddress(true);
+        socket.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), 50);
+        return socket;
     }
 
     public void stop() {

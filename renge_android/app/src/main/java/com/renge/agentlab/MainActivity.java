@@ -21,16 +21,19 @@ import android.widget.FrameLayout;
 import android.widget.Toast;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 import java.net.URLDecoder;
+import java.util.Collections;
 
 public class MainActivity extends Activity {
     private static final int FILE_CHOOSER_REQUEST = 1201;
     private static final int DIRECTORY_PICKER_REQUEST = 1202;
+    private static final String HTML_PREVIEW_HOST = "html-preview.renge.invalid";
 
     private WebView webView;
     private LocalWebServer localWebServer;
@@ -75,6 +78,29 @@ public class MainActivity extends Activity {
         webView.addJavascriptInterface(androidWorkspaceBridge, "RengeAndroidNative");
 
         webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                if (HTML_PREVIEW_HOST.equalsIgnoreCase(uri.getHost())
+                        && "/html-preview-frame.html".equals(uri.getPath())) {
+                    try {
+                        WebResourceResponse response = new WebResourceResponse(
+                                "text/html",
+                                "UTF-8",
+                                getAssets().open("www/html-preview-frame.html")
+                        );
+                        response.setStatusCodeAndReasonPhrase(200, "OK");
+                        response.setResponseHeaders(Collections.singletonMap(
+                                "Cache-Control",
+                                "no-store"
+                        ));
+                        return response;
+                    } catch (Exception ignored) {
+                    }
+                }
+                return super.shouldInterceptRequest(view, request);
+            }
+
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();

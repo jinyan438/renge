@@ -877,6 +877,7 @@ declare global {
   interface Window {
     rengeDesktop?: RengeDesktopApi;
     rengeAndroid?: RengeAndroidApi;
+    RengeAndroidNative?: unknown;
   }
 }
 
@@ -5533,6 +5534,8 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "let rafId = 0;",
     "let rafFallbackTimer = 0;",
     "let heavyPostTimer = 0;",
+    "let visibilityResizeRaf = 0;",
+    "let visibilityResizeTimer = 0;",
     "let lastHeight = 0;",
     "let lastExpandedDetailsHeight = 0;",
     "let lastExpandedDetailsState = false;",
@@ -5762,6 +5765,20 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "    }",
     "  });",
     "};",
+    "const scheduleVisibilityResize = () => {",
+    "  if (visibilityResizeRaf) cancelAnimationFrame(visibilityResizeRaf);",
+    "  if (visibilityResizeTimer) window.clearTimeout(visibilityResizeTimer);",
+    "  visibilityResizeRaf = requestAnimationFrame(() => {",
+    "    visibilityResizeRaf = requestAnimationFrame(() => {",
+    "      visibilityResizeRaf = 0;",
+    "      window.dispatchEvent(new Event('resize'));",
+    "      visibilityResizeTimer = window.setTimeout(() => {",
+    "        visibilityResizeTimer = 0;",
+    "        window.dispatchEvent(new Event('resize'));",
+    "      }, 180);",
+    "    });",
+    "  });",
+    "};",
     'window.addEventListener("message", (event) => {',
     "  const payload = event.data;",
     "  if (!payload || payload.type !== remeasureMessageType || payload.id !== previewId) return;",
@@ -5794,11 +5811,30 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "  mutationObserver.observe(document.documentElement, heavyContent",
     "    ? { childList: true, subtree: true }",
     "    : { attributes: true, childList: true, subtree: true, characterData: true });",
+    "  const visibilityObserver = new MutationObserver((mutations) => {",
+    "    const becameVisible = mutations.some((mutation) => {",
+    "      const element = mutation.target;",
+    "      if (!(element instanceof HTMLElement)) return false;",
+    "      if (mutation.attributeName === 'hidden') return !element.hidden;",
+    "      if (mutation.attributeName === 'open') return element.hasAttribute('open');",
+    "      const className = typeof element.className === 'string' ? element.className : '';",
+    "      return /(?:^|\\s)(?:active|open|opened|show|shown|visible)(?:\\s|$)/i.test(className);",
+    "    });",
+    "    if (becameVisible) scheduleVisibilityResize();",
+    "  });",
+    "  visibilityObserver.observe(document.documentElement, {",
+    "    attributes: true,",
+    "    subtree: true,",
+    "    attributeFilter: ['class', 'hidden', 'open'],",
+    "  });",
     "  window.addEventListener(\"unload\", () => {",
     "    mutationObserver.disconnect();",
+    "    visibilityObserver.disconnect();",
     "    if (rafId) cancelAnimationFrame(rafId);",
     "    if (rafFallbackTimer) window.clearTimeout(rafFallbackTimer);",
     "    if (heavyPostTimer) window.clearTimeout(heavyPostTimer);",
+    "    if (visibilityResizeRaf) cancelAnimationFrame(visibilityResizeRaf);",
+    "    if (visibilityResizeTimer) window.clearTimeout(visibilityResizeTimer);",
     "  }, { once: true });",
     "} catch {}",
     'document.addEventListener("toggle", () => { naturalLayoutDirty = true; schedulePost(); }, true);',
@@ -5839,6 +5875,12 @@ function injectHtmlPreviewHead(documentContent: string, headInjection: string) {
 
 function getIsolatedHtmlPreviewFrame(previewId: string) {
   if (typeof window === "undefined") return null;
+  if (window.RengeAndroidNative) {
+    const origin = "https://html-preview.renge.invalid";
+    const url = new URL("/html-preview-frame.html", origin);
+    url.hash = encodeURIComponent(previewId);
+    return { origin, url: url.toString() };
+  }
   const { protocol, hostname, port } = window.location;
   if (protocol !== "http:" && protocol !== "https:") return null;
 
