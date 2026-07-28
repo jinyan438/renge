@@ -106,10 +106,30 @@ public class AndroidWorkspaceBridge {
                         + "deletePath:function(options){return call('deletePath',options);},"
                         + "requestRootAccess:function(options){return call('requestRootAccess',options);},"
                         + "getRootAccessStatus:function(options){return call('getRootAccessStatus',options);},"
-                        + "getWorkspaceStatus:function(options){return call('getWorkspaceStatus',options);}"
+                        + "getWorkspaceStatus:function(options){return call('getWorkspaceStatus',options);},"
+                        + "enterFullscreen:function(){window.RengeAndroidNative.enterFullscreen();},"
+                        + "exitFullscreen:function(){window.RengeAndroidNative.exitFullscreen();}"
                         + "};"
                         + "})();";
         webView.evaluateJavascript(script, null);
+    }
+
+    @JavascriptInterface
+    public void enterFullscreen() {
+        activity.runOnUiThread(() -> {
+            if (activity instanceof MainActivity) {
+                ((MainActivity) activity).enterHtmlFullscreen();
+            }
+        });
+    }
+
+    @JavascriptInterface
+    public void exitFullscreen() {
+        activity.runOnUiThread(() -> {
+            if (activity instanceof MainActivity) {
+                ((MainActivity) activity).exitHtmlFullscreen(false);
+            }
+        });
     }
 
     @JavascriptInterface

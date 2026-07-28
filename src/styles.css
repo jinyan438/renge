@@ -5850,6 +5850,35 @@ summary:focus-visible {
   background: transparent;
 }
 
+html.renge-html-fullscreen,
+html.renge-html-fullscreen body {
+  overflow: hidden !important;
+}
+
+.renge-html-fullscreen-ancestor {
+  overflow: visible !important;
+  z-index: auto !important;
+  opacity: 1 !important;
+  transform: none !important;
+  filter: none !important;
+  perspective: none !important;
+  contain: none !important;
+  isolation: auto !important;
+}
+
+.chat-html-frame.renge-html-fullscreen-frame {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 2147483647 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  min-width: 100vw !important;
+  min-height: 100vh !important;
+  max-width: none !important;
+  margin: 0 !important;
+  background: #000 !important;
+}
+
 .chat-inline-editor {
   display: grid;
   gap: 9px;

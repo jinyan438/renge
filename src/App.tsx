@@ -869,6 +869,8 @@ type RengeAndroidApi = {
     path?: string;
     message?: string;
   }>;
+  enterFullscreen?(): void;
+  exitFullscreen?(): void;
 };
 
 declare global {
@@ -3090,6 +3092,8 @@ const HTML_PREVIEW_INTERACTION_MESSAGE = "renge-html-preview-interaction";
 const HTML_PREVIEW_VIEWPORT_MESSAGE = "renge-html-preview-viewport";
 const HTML_PREVIEW_REMEASURE_MESSAGE = "renge-html-preview-remeasure";
 const HTML_PREVIEW_FRAME_INIT_MESSAGE = "renge-html-preview-frame-init";
+const HTML_PREVIEW_FULLSCREEN_REQUEST_MESSAGE = "renge-html-preview-fullscreen-request";
+const HTML_PREVIEW_FULLSCREEN_EXIT_MESSAGE = "renge-html-preview-fullscreen-exit";
 const HYPNOOS_APPEND_OPERATION_MESSAGE = "HYPNOOS_APPEND_OPERATION";
 const HTML_PREVIEW_MEASURED_MIN_HEIGHT = 64;
 const HTML_PREVIEW_MAX_HEIGHT = 12000;
@@ -3281,9 +3285,90 @@ const htmlPreviewStyle = [
   "html{width:100%;max-width:100%;}",
   "body{box-sizing:border-box;transform-origin:top left;}",
   'iframe[data-renge-embedded-html-frame="true"]{display:block;width:100%;min-height:420px;margin:18px 0;border:0;background:transparent;box-sizing:border-box;}',
+  'iframe[data-renge-embedded-html-frame="true"].renge-embedded-fullscreen{position:fixed!important;inset:0!important;z-index:2147483647!important;width:100vw!important;height:100vh!important;min-height:100vh!important;max-width:none!important;margin:0!important;background:#000!important;}',
   "html[data-renge-quote-style] .renge-personalized-quote{color:var(--renge-chat-quote-color,#E18A24)!important;}",
   "</style>",
 ].join("");
+
+function buildHtmlPreviewFullscreenScript(previewId: string) {
+  const previewIdLiteral = serializeHtmlPreviewValue(previewId);
+  const requestTypeLiteral = serializeHtmlPreviewValue(
+    HTML_PREVIEW_FULLSCREEN_REQUEST_MESSAGE,
+  );
+  const exitTypeLiteral = serializeHtmlPreviewValue(HTML_PREVIEW_FULLSCREEN_EXIT_MESSAGE);
+  return [
+    '<script data-renge-html-preview-fullscreen="true">',
+    "(() => {",
+    `const previewId = ${previewIdLiteral};`,
+    `const requestType = ${requestTypeLiteral};`,
+    `const exitType = ${exitTypeLiteral};`,
+    "if (!/Android/i.test(navigator.userAgent)) return;",
+    "let fallbackElement = null;",
+    "const nativeRequest = Element.prototype.requestFullscreen;",
+    "const nativeWebkitRequest = Element.prototype.webkitRequestFullscreen;",
+    "const nativeExit = document.exitFullscreen?.bind(document);",
+    "const nativeWebkitExit = document.webkitExitFullscreen?.bind(document);",
+    "const nativeFullscreenElementGetter = Object.getOwnPropertyDescriptor(Document.prototype, 'fullscreenElement')?.get;",
+    "const nativeWebkitFullscreenElementGetter = Object.getOwnPropertyDescriptor(Document.prototype, 'webkitFullscreenElement')?.get;",
+    "const style = document.createElement('style');",
+    "style.dataset.rengeFullscreenFallback = 'true';",
+    "style.textContent = 'html.renge-fallback-fullscreen,html.renge-fallback-fullscreen body{width:100%!important;height:100%!important;overflow:hidden!important;background:#000!important;}[data-renge-fallback-fullscreen=\"true\"]{position:fixed!important;inset:0!important;z-index:2147483647!important;width:100vw!important;height:100vh!important;min-width:100vw!important;min-height:100vh!important;max-width:none!important;max-height:none!important;margin:0!important;overflow:auto!important;background:#000!important;}';",
+    "(document.head || document.documentElement).appendChild(style);",
+    "const dispatchChange = () => {",
+    "  document.dispatchEvent(new Event('fullscreenchange'));",
+    "  document.dispatchEvent(new Event('webkitfullscreenchange'));",
+    "};",
+    "const post = (type) => { try { parent.postMessage({ type, id: previewId }, '*'); } catch {} };",
+    "const leaveFallback = (notifyParent) => {",
+    "  if (!fallbackElement) return false;",
+    "  fallbackElement.removeAttribute('data-renge-fallback-fullscreen');",
+    "  fallbackElement = null;",
+    "  document.documentElement.classList.remove('renge-fallback-fullscreen');",
+    "  dispatchChange();",
+    "  if (notifyParent) post(exitType);",
+    "  return true;",
+    "};",
+    "const enterFallback = (element) => {",
+    "  if (!(element instanceof Element)) return Promise.reject(new TypeError('Fullscreen target is invalid'));",
+    "  if (fallbackElement && fallbackElement !== element) leaveFallback(false);",
+    "  fallbackElement = element;",
+    "  element.setAttribute('data-renge-fallback-fullscreen', 'true');",
+    "  document.documentElement.classList.add('renge-fallback-fullscreen');",
+    "  post(requestType);",
+    "  dispatchChange();",
+    "  return Promise.resolve();",
+    "};",
+    "const request = function(options) {",
+    "  const nativeHandler = nativeRequest || nativeWebkitRequest;",
+    "  if (nativeHandler) {",
+    "    try {",
+    "      const result = nativeHandler.call(this, options);",
+    "      return Promise.resolve(result).catch(() => enterFallback(this));",
+    "    } catch {}",
+    "  }",
+    "  return enterFallback(this);",
+    "};",
+    "try { Element.prototype.requestFullscreen = request; } catch {}",
+    "try { Element.prototype.webkitRequestFullscreen = request; } catch {}",
+    "const exit = () => {",
+    "  if (fallbackElement) { leaveFallback(true); return Promise.resolve(); }",
+    "  if (nativeExit) return Promise.resolve(nativeExit());",
+    "  if (nativeWebkitExit) return Promise.resolve(nativeWebkitExit());",
+    "  return Promise.resolve();",
+    "};",
+    "try { document.exitFullscreen = exit; } catch {}",
+    "try { document.webkitExitFullscreen = exit; } catch {}",
+    "try { Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => fallbackElement || nativeFullscreenElementGetter?.call(document) || null }); } catch {}",
+    "try { Object.defineProperty(document, 'webkitFullscreenElement', { configurable: true, get: () => fallbackElement || nativeWebkitFullscreenElementGetter?.call(document) || null }); } catch {}",
+    "try { Object.defineProperty(document, 'fullscreenEnabled', { configurable: true, get: () => true }); } catch {}",
+    "window.addEventListener('message', (event) => {",
+    "  const payload = event.data;",
+    "  if (payload?.type === exitType && payload.id === previewId) leaveFallback(false);",
+    "});",
+    "})();",
+    "<\/script>",
+  ].join("");
+}
 const htmlPreviewViewportMeta =
   '<meta data-renge-html-preview-viewport="true" name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover" />';
 const htmlPreviewJqueryScript = [
@@ -5832,6 +5917,12 @@ function buildHtmlPreviewEmbeddedFramesScript(previewId: string) {
   const remeasureMessageTypeLiteral = serializeHtmlPreviewValue(
     HTML_PREVIEW_REMEASURE_MESSAGE,
   );
+  const fullscreenRequestTypeLiteral = serializeHtmlPreviewValue(
+    HTML_PREVIEW_FULLSCREEN_REQUEST_MESSAGE,
+  );
+  const fullscreenExitTypeLiteral = serializeHtmlPreviewValue(
+    HTML_PREVIEW_FULLSCREEN_EXIT_MESSAGE,
+  );
 
   return [
     '<script data-renge-html-preview-embedded-frames="true">',
@@ -5839,6 +5930,8 @@ function buildHtmlPreviewEmbeddedFramesScript(previewId: string) {
     `const previewId = ${previewIdLiteral};`,
     `const resizeMessageType = ${resizeMessageTypeLiteral};`,
     `const remeasureMessageType = ${remeasureMessageTypeLiteral};`,
+    `const fullscreenRequestType = ${fullscreenRequestTypeLiteral};`,
+    `const fullscreenExitType = ${fullscreenExitTypeLiteral};`,
     'const frameSelector = "iframe[data-renge-embedded-html-frame=\\"true\\"]";',
     "const getFrames = () => Array.from(document.querySelectorAll(frameSelector));",
     "const getSourceFrame = (source) => getFrames().find((frame) => frame.contentWindow === source);",
@@ -5855,10 +5948,13 @@ function buildHtmlPreviewEmbeddedFramesScript(previewId: string) {
     "  const sourceFrame = getSourceFrame(event.source);",
     "  if (sourceFrame) {",
     "    if (payload.type === resizeMessageType) { resizeFrame(sourceFrame, payload.height); return; }",
+    "    if (payload.type === fullscreenRequestType) sourceFrame.classList.add('renge-embedded-fullscreen');",
+    "    if (payload.type === fullscreenExitType) sourceFrame.classList.remove('renge-embedded-fullscreen');",
     '    try { parent.postMessage(payload, "*"); } catch {}',
     "    return;",
     "  }",
     "  if (event.source !== parent) return;",
+    "  if (payload.type === fullscreenExitType) getFrames().forEach((frame) => frame.classList.remove('renge-embedded-fullscreen'));",
     "  getFrames().forEach((frame) => {",
     '    try { frame.contentWindow?.postMessage(payload, "*"); } catch {}',
     "  });",
@@ -5894,7 +5990,7 @@ function expandEmbeddedHtmlPreviewDocuments(
         );
         const frameIndex = embeddedIndex;
         embeddedIndex += 1;
-        return `<iframe allow="autoplay; fullscreen; gamepad" data-renge-embedded-html-frame="true" data-renge-embedded-index="${frameIndex}" loading="eager" sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts" srcdoc="${escapeChatHtmlAttribute(embeddedDocument)}" title="嵌套 HTML 预览"></iframe>`;
+        return `<iframe allow="autoplay; fullscreen; gamepad" allowfullscreen data-renge-embedded-html-frame="true" data-renge-embedded-index="${frameIndex}" loading="eager" sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts" srcdoc="${escapeChatHtmlAttribute(embeddedDocument)}" title="嵌套 HTML 预览"></iframe>`;
       } catch {
         return "";
       }
@@ -5927,7 +6023,7 @@ function buildHtmlPreviewDocument(
   )
     ? buildHtmlPreviewEmbeddedFramesScript(previewId)
     : "";
-  const headInjection = `${htmlPreviewViewportMeta}${htmlPreviewStyle}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
+  const headInjection = `${htmlPreviewViewportMeta}${htmlPreviewStyle}${buildHtmlPreviewFullscreenScript(previewId)}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
     return injectHtmlPreviewHead(trimmedContent, headInjection);
   }
@@ -11281,6 +11377,49 @@ export function App() {
   }, [activeChatSessionId, appDataLoaded]);
 
   useEffect(() => {
+    let fullscreenFrame: HTMLIFrameElement | null = null;
+    let fullscreenAncestors: HTMLElement[] = [];
+
+    const leaveHtmlPreviewFullscreen = (notifyFrame: boolean) => {
+      if (!fullscreenFrame) return;
+      const frame = fullscreenFrame;
+      fullscreenFrame = null;
+      frame.classList.remove("renge-html-fullscreen-frame");
+      fullscreenAncestors.forEach((element) =>
+        element.classList.remove("renge-html-fullscreen-ancestor"),
+      );
+      fullscreenAncestors = [];
+      document.documentElement.classList.remove("renge-html-fullscreen");
+      window.rengeAndroid?.exitFullscreen?.();
+      if (notifyFrame) {
+        frame.contentWindow?.postMessage(
+          { type: HTML_PREVIEW_FULLSCREEN_EXIT_MESSAGE, id: frame.dataset.previewId },
+          "*",
+        );
+      }
+    };
+
+    const enterHtmlPreviewFullscreen = (frame: HTMLIFrameElement) => {
+      if (fullscreenFrame === frame) return;
+      leaveHtmlPreviewFullscreen(true);
+      fullscreenFrame = frame;
+      fullscreenAncestors = [];
+      let ancestor = frame.parentElement;
+      while (ancestor && ancestor !== document.body) {
+        ancestor.classList.add("renge-html-fullscreen-ancestor");
+        fullscreenAncestors.push(ancestor);
+        ancestor = ancestor.parentElement;
+      }
+      frame.dataset.previewId =
+        Array.from(htmlPreviewFrameRefs.current.entries()).find(([, candidate]) => candidate === frame)?.[0] ??
+        "";
+      frame.classList.add("renge-html-fullscreen-frame");
+      document.documentElement.classList.add("renge-html-fullscreen");
+      window.rengeAndroid?.enterFullscreen?.();
+    };
+
+    const handleNativeFullscreenExit = () => leaveHtmlPreviewFullscreen(true);
+
     const focusChatInput = () => {
       window.requestAnimationFrame(() => {
         const input = chatInputRef.current;
@@ -11467,6 +11606,16 @@ export function App() {
 
       const frame = htmlPreviewFrameRefs.current.get(payload.id);
       if (!frame || frame.contentWindow !== event.source) return;
+
+      if (payload.type === HTML_PREVIEW_FULLSCREEN_REQUEST_MESSAGE) {
+        enterHtmlPreviewFullscreen(frame);
+        return;
+      }
+
+      if (payload.type === HTML_PREVIEW_FULLSCREEN_EXIT_MESSAGE) {
+        leaveHtmlPreviewFullscreen(false);
+        return;
+      }
 
       if (payload.type === HTML_PREVIEW_INTERACTION_MESSAGE) {
         setChatMessageMenu(null);
@@ -11757,8 +11906,11 @@ export function App() {
     }
 
     window.addEventListener("message", handleHtmlPreviewMessage);
+    window.addEventListener("renge-native-fullscreen-exit", handleNativeFullscreenExit);
     return () => {
+      leaveHtmlPreviewFullscreen(true);
       window.removeEventListener("message", handleHtmlPreviewMessage);
+      window.removeEventListener("renge-native-fullscreen-exit", handleNativeFullscreenExit);
       executeTavernSlashCommandRef.current = () => {
         throw new Error("酒馆斜杠命令接口尚未初始化。");
       };

@@ -12,7 +12,12 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.graphics.Color;
+import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.widget.FrameLayout;
 import android.widget.Toast;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -32,6 +37,9 @@ public class MainActivity extends Activity {
     private AndroidWorkspaceBridge androidWorkspaceBridge;
     private ValueCallback<Uri[]> fileChooserCallback;
     private BroadcastReceiver downloadCompleteReceiver;
+    private View customFullscreenView;
+    private WebChromeClient.CustomViewCallback customFullscreenCallback;
+    private boolean htmlFullscreenActive;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -121,6 +129,30 @@ public class MainActivity extends Activity {
 
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
+            public void onShowCustomView(View view, CustomViewCallback callback) {
+                if (customFullscreenView != null) {
+                    callback.onCustomViewHidden();
+                    return;
+                }
+
+                customFullscreenView = view;
+                customFullscreenCallback = callback;
+                FrameLayout decor = (FrameLayout) getWindow().getDecorView();
+                view.setBackgroundColor(Color.BLACK);
+                decor.addView(view, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                ));
+                webView.setVisibility(View.GONE);
+                hideSystemBars();
+            }
+
+            @Override
+            public void onHideCustomView() {
+                hideCustomFullscreenView();
+            }
+
+            @Override
             public boolean onShowFileChooser(
                     WebView webView,
                     ValueCallback<Uri[]> filePathCallback,
@@ -186,6 +218,14 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (customFullscreenView != null) {
+            hideCustomFullscreenView();
+            return;
+        }
+        if (htmlFullscreenActive) {
+            exitHtmlFullscreen(true);
+            return;
+        }
         if (webView != null && webView.canGoBack()) {
             webView.goBack();
             return;
@@ -195,6 +235,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        hideCustomFullscreenView();
         if (downloadCompleteReceiver != null) {
             try {
                 unregisterReceiver(downloadCompleteReceiver);
@@ -209,6 +250,72 @@ public class MainActivity extends Activity {
             webView.destroy();
         }
         super.onDestroy();
+    }
+
+    void enterHtmlFullscreen() {
+        htmlFullscreenActive = true;
+        hideSystemBars();
+    }
+
+    void exitHtmlFullscreen(boolean notifyPage) {
+        if (!htmlFullscreenActive) return;
+        htmlFullscreenActive = false;
+        if (customFullscreenView == null) showSystemBars();
+        if (notifyPage && webView != null) {
+            webView.evaluateJavascript(
+                    "window.dispatchEvent(new CustomEvent('renge-native-fullscreen-exit'))",
+                    null
+            );
+        }
+    }
+
+    private void hideCustomFullscreenView() {
+        if (customFullscreenView == null) return;
+        ViewGroup parent = (ViewGroup) customFullscreenView.getParent();
+        if (parent != null) parent.removeView(customFullscreenView);
+        customFullscreenView = null;
+        webView.setVisibility(View.VISIBLE);
+        if (customFullscreenCallback != null) {
+            customFullscreenCallback.onCustomViewHidden();
+            customFullscreenCallback = null;
+        }
+        if (!htmlFullscreenActive) showSystemBars();
+    }
+
+    private void hideSystemBars() {
+        View decorView = getWindow().getDecorView();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getWindow().setDecorFitsSystemWindows(false);
+            WindowInsetsController controller = decorView.getWindowInsetsController();
+            if (controller != null) {
+                controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                controller.setSystemBarsBehavior(
+                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                );
+            }
+            return;
+        }
+        decorView.setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        | View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        );
+    }
+
+    private void showSystemBars() {
+        View decorView = getWindow().getDecorView();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            WindowInsetsController controller = decorView.getWindowInsetsController();
+            if (controller != null) {
+                controller.show(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+            }
+            getWindow().setDecorFitsSystemWindows(true);
+            return;
+        }
+        decorView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
     }
 
     private String getDownloadFileName(String url, String contentDisposition) {
