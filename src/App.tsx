@@ -68,6 +68,10 @@ import { strFromU8, strToU8, unzip, zip } from "fflate";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
 import {
+  stabilizeHtmlPreviewMapViewport,
+  stabilizeHtmlPreviewRuntimeCompatibility,
+} from "./htmlPreviewUtils";
+import {
   buildPersonaPrompt,
   createPersonaFromPromptText,
   createEntry,
@@ -6047,7 +6051,11 @@ function buildHtmlPreviewDocument(
   embeddedDepth = 0,
 ): string {
   const isolatedContent = isolateHtmlPreviewParentReferences(
-    stabilizeHtmlPreviewViewportUnits(content.trim()),
+    stabilizeHtmlPreviewMapViewport(
+      stabilizeHtmlPreviewRuntimeCompatibility(
+        stabilizeHtmlPreviewViewportUnits(content.trim()),
+      ),
+    ),
   );
   const trimmedContent: string = expandEmbeddedHtmlPreviewDocuments(
     isolatedContent,
