@@ -1,18 +1,25 @@
 import {
+  Activity,
+  ClipboardCheck,
   ChevronDown,
   ChevronUp,
+  Construction,
+  FolderOpen,
   GripVertical,
+  Globe,
   Pencil,
   Plus,
   RefreshCw,
   RotateCcw,
   Save,
+  SquareTerminal,
   Trash2,
   X,
 } from "lucide-react";
 import {
   type CSSProperties,
   type DragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent,
   type PointerEvent,
   useEffect,
@@ -57,7 +64,89 @@ export type StatusBarSidebarProps = {
 
 type StatusBarCssProperties = CSSProperties & {
   "--status-accent"?: string;
+  "--right-sidebar-width"?: string;
 };
+
+type RightSidebarToolId = "review" | "terminal" | "browser" | "files" | "status";
+
+const RIGHT_SIDEBAR_DEFAULT_WIDTH = 360;
+const RIGHT_SIDEBAR_MIN_WIDTH = 260;
+const RIGHT_SIDEBAR_MAX_WIDTH = 720;
+const RIGHT_SIDEBAR_MIN_CHAT_WIDTH = 320;
+const RIGHT_SIDEBAR_WIDTH_STORAGE_KEY = "renge-chat-right-sidebar-width";
+
+const RIGHT_SIDEBAR_TOOLS = [
+  {
+    id: "review",
+    label: "审阅",
+    description: "查看与审阅代码变更",
+    icon: ClipboardCheck,
+    available: false,
+  },
+  {
+    id: "terminal",
+    label: "终端",
+    description: "运行命令并查看输出",
+    icon: SquareTerminal,
+    available: false,
+  },
+  {
+    id: "browser",
+    label: "浏览器",
+    description: "预览和调试网页",
+    icon: Globe,
+    available: false,
+  },
+  {
+    id: "files",
+    label: "文件",
+    description: "浏览当前工作区文件",
+    icon: FolderOpen,
+    available: false,
+  },
+  {
+    id: "status",
+    label: "状态栏",
+    description: "查看会话中的动态状态",
+    icon: Activity,
+    available: true,
+  },
+] as const satisfies ReadonlyArray<{
+  id: RightSidebarToolId;
+  label: string;
+  description: string;
+  icon: typeof Activity;
+  available: boolean;
+}>;
+
+function clampRightSidebarWidth(width: number, maxWidth = RIGHT_SIDEBAR_MAX_WIDTH) {
+  return Math.round(
+    Math.min(Math.max(RIGHT_SIDEBAR_MIN_WIDTH, maxWidth), Math.max(RIGHT_SIDEBAR_MIN_WIDTH, width)),
+  );
+}
+
+function loadRightSidebarWidth() {
+  if (typeof window === "undefined") return RIGHT_SIDEBAR_DEFAULT_WIDTH;
+  try {
+    const storedWidth = Number.parseFloat(
+      window.localStorage.getItem(RIGHT_SIDEBAR_WIDTH_STORAGE_KEY) ?? "",
+    );
+    return Number.isFinite(storedWidth)
+      ? clampRightSidebarWidth(storedWidth)
+      : RIGHT_SIDEBAR_DEFAULT_WIDTH;
+  } catch {
+    return RIGHT_SIDEBAR_DEFAULT_WIDTH;
+  }
+}
+
+function saveRightSidebarWidth(width: number) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(RIGHT_SIDEBAR_WIDTH_STORAGE_KEY, String(Math.round(width)));
+  } catch {
+    // The sidebar still resizes for the current session when storage is unavailable.
+  }
+}
 
 const DEFAULT_ACCENT_COLOR = "#ff758c";
 const EDITOR_FOCUSABLE_SELECTOR = [
@@ -694,6 +783,17 @@ export function StatusBarSidebar({
   manualUpdateDisabled = false,
   manualUpdateRunning = false,
 }: StatusBarSidebarProps) {
+  const [activeToolId, setActiveToolId] = useState<RightSidebarToolId>("status");
+  const [sidebarWidth, setSidebarWidth] = useState(loadRightSidebarWidth);
+  const sidebarRef = useRef<HTMLElement | null>(null);
+  const resizeSessionRef = useRef({
+    active: false,
+    pointerId: -1,
+    startX: 0,
+    startWidth: RIGHT_SIDEBAR_DEFAULT_WIDTH,
+    currentWidth: RIGHT_SIDEBAR_DEFAULT_WIDTH,
+    maxWidth: RIGHT_SIDEBAR_MAX_WIDTH,
+  });
   const [editorOpen, setEditorOpen] = useState(false);
   const [draft, setDraft] = useState<StatusBarState>(() => cloneStatusBarState(state));
   const [draggedItemId, setDraggedItemId] = useState("");
@@ -739,7 +839,103 @@ export function StatusBarSidebar({
   );
   const sidebarStyle = {
     "--status-accent": getSafeAccentColor(state.accentColor),
+    "--right-sidebar-width": `${sidebarWidth}px`,
   } as StatusBarCssProperties;
+
+  const getAvailableSidebarMaxWidth = () => {
+    const chatShell = sidebarRef.current?.parentElement;
+    if (!chatShell) return RIGHT_SIDEBAR_MAX_WIDTH;
+    const leftSidebar = chatShell.querySelector<HTMLElement>(":scope > .chat-sidebar");
+    const leftSidebarWidth = leftSidebar?.getBoundingClientRect().width ?? 0;
+    const availableWidth =
+      chatShell.getBoundingClientRect().width - leftSidebarWidth - RIGHT_SIDEBAR_MIN_CHAT_WIDTH;
+    return Math.min(RIGHT_SIDEBAR_MAX_WIDTH, Math.max(RIGHT_SIDEBAR_MIN_WIDTH, availableWidth));
+  };
+
+  const finishSidebarResize = (handle?: HTMLElement, pointerId?: number) => {
+    const session = resizeSessionRef.current;
+    if (!session.active) return;
+    session.active = false;
+    document.body.classList.remove("right-sidebar-resizing");
+    if (handle && pointerId !== undefined && handle.hasPointerCapture(pointerId)) {
+      handle.releasePointerCapture(pointerId);
+    }
+    saveRightSidebarWidth(session.currentWidth);
+  };
+
+  const startSidebarResize = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    const currentWidth = sidebarRef.current?.getBoundingClientRect().width ?? sidebarWidth;
+    resizeSessionRef.current = {
+      active: true,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: currentWidth,
+      currentWidth,
+      maxWidth: getAvailableSidebarMaxWidth(),
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    document.body.classList.add("right-sidebar-resizing");
+    event.preventDefault();
+  };
+
+  const resizeSidebar = (event: PointerEvent<HTMLDivElement>) => {
+    const session = resizeSessionRef.current;
+    if (!session.active || session.pointerId !== event.pointerId) return;
+    const nextWidth = clampRightSidebarWidth(
+      session.startWidth + session.startX - event.clientX,
+      session.maxWidth,
+    );
+    session.currentWidth = nextWidth;
+    setSidebarWidth(nextWidth);
+  };
+
+  const stopSidebarResize = (event: PointerEvent<HTMLDivElement>) => {
+    if (resizeSessionRef.current.pointerId !== event.pointerId) return;
+    finishSidebarResize(event.currentTarget, event.pointerId);
+  };
+
+  const resizeSidebarWithKeyboard = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const direction = event.key === "ArrowLeft" ? 1 : event.key === "ArrowRight" ? -1 : 0;
+    if (direction === 0 && event.key !== "Home") return;
+    event.preventDefault();
+    const nextWidth =
+      event.key === "Home"
+        ? RIGHT_SIDEBAR_DEFAULT_WIDTH
+        : sidebarWidth + direction * (event.shiftKey ? 40 : 16);
+    const clampedWidth = clampRightSidebarWidth(nextWidth, getAvailableSidebarMaxWidth());
+    setSidebarWidth(clampedWidth);
+    saveRightSidebarWidth(clampedWidth);
+  };
+
+  useEffect(
+    () => () => {
+      document.body.classList.remove("right-sidebar-resizing");
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (collapsed) return;
+    const chatShell = sidebarRef.current?.parentElement;
+    if (!chatShell) return;
+    const keepSidebarInsideWorkspace = () => {
+      const nextMaxWidth = getAvailableSidebarMaxWidth();
+      setSidebarWidth((currentWidth) => {
+        const nextWidth = clampRightSidebarWidth(currentWidth, nextMaxWidth);
+        if (nextWidth !== currentWidth) saveRightSidebarWidth(nextWidth);
+        return nextWidth;
+      });
+    };
+    keepSidebarInsideWorkspace();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", keepSidebarInsideWorkspace);
+      return () => window.removeEventListener("resize", keepSidebarInsideWorkspace);
+    }
+    const resizeObserver = new ResizeObserver(keepSidebarInsideWorkspace);
+    resizeObserver.observe(chatShell);
+    return () => resizeObserver.disconnect();
+  }, [collapsed]);
 
   const closeEditor = () => setEditorOpen(false);
 
@@ -1627,82 +1823,173 @@ export function StatusBarSidebar({
         onClick={() => onCollapsedChange(true)}
         type="button"
       />
-      <aside aria-label="会话状态栏" className="status-bar-sidebar" style={sidebarStyle}>
-        <header className="status-bar-sidebar-header">
-          <div className="status-bar-sidebar-heading">
-            <span>SESSION STATUS</span>
-            <strong>{state.title.trim() || "状态监测终端"}</strong>
-          </div>
-          <div className="status-bar-sidebar-actions">
-            <label
-              className="status-bar-enable-switch"
-              title={state.enabled ? "关闭 AI 状态更新" : "开启 AI 状态更新"}
-            >
-              <input
-                aria-label="启用状态栏"
-                checked={state.enabled}
-                onChange={(event) =>
-                  onStateChange({
-                    ...state,
-                    enabled: event.target.checked,
-                    updatedAt: new Date().toISOString(),
-                  })
-                }
-                type="checkbox"
-              />
-              <span aria-hidden="true" />
-            </label>
-            <button
-              aria-busy={manualUpdateRunning}
-              aria-label="手动更新状态栏"
-              className={
-                manualUpdateRunning
-                  ? "status-bar-manual-update is-updating"
-                  : "status-bar-manual-update"
-              }
-              disabled={!state.enabled || manualUpdateDisabled || manualUpdateRunning}
-              onClick={() => void onManualUpdate()}
-              title={
-                !state.enabled
-                  ? "请先启用状态栏"
-                  : manualUpdateRunning
-                    ? "正在更新状态栏"
-                    : "根据当前会话手动更新状态栏"
-              }
-              type="button"
-            >
-              <RefreshCw size={15} />
-            </button>
-            <button
-              ref={editorFallbackFocusRef}
-              aria-label="编辑状态栏"
-              onClick={openEditor}
-              title="编辑状态栏"
-              type="button"
-            >
-              <Pencil size={16} />
-            </button>
-          </div>
-        </header>
-
-        <div className="status-bar-sidebar-body">
-          {!state.enabled ? (
-            <button className="status-bar-disabled-callout" onClick={openEditor} type="button">
-              <span>状态栏尚未启用</span>
-              <small>开启后，AI 会在回复完成时更新发生变化的变量。</small>
-            </button>
-          ) : null}
-          <div className={!state.enabled ? "status-bar-preview-disabled" : undefined}>
-            <StatusPanelPreview state={state} />
-          </div>
+      <aside
+        ref={sidebarRef}
+        aria-label="右侧工具栏"
+        className="status-bar-sidebar right-tools-sidebar"
+        style={sidebarStyle}
+      >
+        <div
+          aria-label="调整右侧栏宽度"
+          aria-orientation="vertical"
+          aria-valuemax={RIGHT_SIDEBAR_MAX_WIDTH}
+          aria-valuemin={RIGHT_SIDEBAR_MIN_WIDTH}
+          aria-valuenow={sidebarWidth}
+          className="right-sidebar-resize-handle"
+          onDoubleClick={() => {
+            const nextWidth = clampRightSidebarWidth(
+              RIGHT_SIDEBAR_DEFAULT_WIDTH,
+              getAvailableSidebarMaxWidth(),
+            );
+            setSidebarWidth(nextWidth);
+            saveRightSidebarWidth(nextWidth);
+          }}
+          onKeyDown={resizeSidebarWithKeyboard}
+          onLostPointerCapture={stopSidebarResize}
+          onPointerCancel={stopSidebarResize}
+          onPointerDown={startSidebarResize}
+          onPointerMove={resizeSidebar}
+          onPointerUp={stopSidebarResize}
+          role="separator"
+          tabIndex={0}
+          title="左右拖动调整宽度，双击恢复默认"
+        >
+          <GripVertical aria-hidden="true" size={14} />
         </div>
 
-        <footer className="status-bar-sidebar-footer">
-          <span className={state.enabled ? "is-enabled" : undefined}>
-            {state.enabled ? "AI 自动更新" : "自动更新已关闭"}
-          </span>
-          <time dateTime={state.updatedAt}>{formatUpdatedAt(state.updatedAt)}</time>
-        </footer>
+        <header className="right-tools-sidebar-header">
+          <div>
+            <span>WORKSPACE TOOLS</span>
+            <strong>工作区工具</strong>
+          </div>
+          <button
+            aria-label="关闭右侧栏"
+            onClick={() => onCollapsedChange(true)}
+            title="关闭右侧栏"
+            type="button"
+          >
+            <X size={16} />
+          </button>
+        </header>
+
+        <nav aria-label="右侧工具" className="right-tools-list">
+          {RIGHT_SIDEBAR_TOOLS.map((tool) => {
+            const ToolIcon = tool.icon;
+            const active = tool.id === activeToolId;
+            return (
+              <button
+                aria-current={active ? "page" : undefined}
+                className={active ? "active" : undefined}
+                key={tool.id}
+                onClick={() => setActiveToolId(tool.id)}
+                type="button"
+              >
+                <span className="right-tool-icon" aria-hidden="true">
+                  <ToolIcon size={16} />
+                </span>
+                <span className="right-tool-copy">
+                  <strong>{tool.label}</strong>
+                  <small>{tool.description}</small>
+                </span>
+                <span className={tool.available ? "is-available" : undefined}>
+                  {tool.available ? "可用" : "待实现"}
+                </span>
+              </button>
+            );
+          })}
+        </nav>
+
+        {activeToolId === "status" ? (
+          <section className="right-tool-content status-tool-content" aria-label="状态栏">
+            <header className="status-bar-sidebar-header">
+              <div className="status-bar-sidebar-heading">
+                <span>SESSION STATUS</span>
+                <strong>{state.title.trim() || "状态监测终端"}</strong>
+              </div>
+              <div className="status-bar-sidebar-actions">
+                <label
+                  className="status-bar-enable-switch"
+                  title={state.enabled ? "关闭 AI 状态更新" : "开启 AI 状态更新"}
+                >
+                  <input
+                    aria-label="启用状态栏"
+                    checked={state.enabled}
+                    onChange={(event) =>
+                      onStateChange({
+                        ...state,
+                        enabled: event.target.checked,
+                        updatedAt: new Date().toISOString(),
+                      })
+                    }
+                    type="checkbox"
+                  />
+                  <span aria-hidden="true" />
+                </label>
+                <button
+                  aria-busy={manualUpdateRunning}
+                  aria-label="手动更新状态栏"
+                  className={
+                    manualUpdateRunning
+                      ? "status-bar-manual-update is-updating"
+                      : "status-bar-manual-update"
+                  }
+                  disabled={!state.enabled || manualUpdateDisabled || manualUpdateRunning}
+                  onClick={() => void onManualUpdate()}
+                  title={
+                    !state.enabled
+                      ? "请先启用状态栏"
+                      : manualUpdateRunning
+                        ? "正在更新状态栏"
+                        : "根据当前会话手动更新状态栏"
+                  }
+                  type="button"
+                >
+                  <RefreshCw size={15} />
+                </button>
+                <button
+                  ref={editorFallbackFocusRef}
+                  aria-label="编辑状态栏"
+                  onClick={openEditor}
+                  title="编辑状态栏"
+                  type="button"
+                >
+                  <Pencil size={16} />
+                </button>
+              </div>
+            </header>
+
+            <div className="status-bar-sidebar-body">
+              {!state.enabled ? (
+                <button className="status-bar-disabled-callout" onClick={openEditor} type="button">
+                  <span>状态栏尚未启用</span>
+                  <small>开启后，AI 会在回复完成时更新发生变化的变量。</small>
+                </button>
+              ) : null}
+              <div className={!state.enabled ? "status-bar-preview-disabled" : undefined}>
+                <StatusPanelPreview state={state} />
+              </div>
+            </div>
+
+            <footer className="status-bar-sidebar-footer">
+              <span className={state.enabled ? "is-enabled" : undefined}>
+                {state.enabled ? "AI 自动更新" : "自动更新已关闭"}
+              </span>
+              <time dateTime={state.updatedAt}>{formatUpdatedAt(state.updatedAt)}</time>
+            </footer>
+          </section>
+        ) : (
+          <section className="right-tool-content right-tool-placeholder" aria-live="polite">
+            <span aria-hidden="true">
+              <Construction size={24} />
+            </span>
+            <strong>
+              {RIGHT_SIDEBAR_TOOLS.find((tool) => tool.id === activeToolId)?.label}功能待实现
+            </strong>
+            <p>
+              入口和面板位置已经预留，后续可在这里接入完整功能，不会影响现有状态栏。
+            </p>
+          </section>
+        )}
         {editorModal}
       </aside>
     </>

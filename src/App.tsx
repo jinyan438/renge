@@ -30867,8 +30867,8 @@ export function App() {
                 className={`ghost-action chat-status-sidebar-toggle ${
                   activeStatusBarState.enabled ? "active-status-bar" : ""
                 }`}
-                title={chatStatusSidebarCollapsed ? "展开状态栏" : "隐藏状态栏"}
-                aria-label={chatStatusSidebarCollapsed ? "展开右侧状态栏" : "隐藏右侧状态栏"}
+                title={chatStatusSidebarCollapsed ? "展开右侧栏" : "隐藏右侧栏"}
+                aria-label={chatStatusSidebarCollapsed ? "展开右侧栏" : "隐藏右侧栏"}
                 aria-pressed={!chatStatusSidebarCollapsed}
                 onClick={() =>
                   changeChatStatusSidebarCollapsed(!chatStatusSidebarCollapsed)
@@ -30879,7 +30879,7 @@ export function App() {
                 ) : (
                   <PanelRightClose size={16} />
                 )}
-                <span>状态栏</span>
+                <span>右侧栏</span>
               </button>
               <label
                 className={`heartbeat-toggle ${activeHeartbeat.enabled ? "active" : ""}`}
