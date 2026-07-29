@@ -131,7 +131,9 @@ function BrowserTabWebview({
   );
   return createElement("webview", {
     ref: captureNode,
-    allowpopups: true,
+    // Electron enables popups by the presence of this attribute. React 19 drops an
+    // unknown boolean attribute, so use a string to ensure it reaches the DOM.
+    allowpopups: "true",
     "aria-hidden": active ? undefined : "true",
     className: `browser-sidebar-webview ${active ? "is-active" : ""}`,
     partition: "persist:renge-sidebar-browser",
