@@ -12,6 +12,10 @@ import {
   normalizeCommandLine,
   splitCommandLine,
 } from "./command-policy.mjs";
+import {
+  createSidebarBrowserWindowOpenHandler,
+  isAllowedSidebarBrowserUrl,
+} from "./sidebar-browser-navigation.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const appIconPath = join(
@@ -167,15 +171,6 @@ function getWhitelistedCommandExecutable(command) {
   return Object.prototype.hasOwnProperty.call(executableMap, normalizedCommand)
     ? executableMap[normalizedCommand]
     : null;
-}
-
-function isAllowedSidebarBrowserUrl(value) {
-  try {
-    const url = new URL(String(value ?? ""));
-    return url.href === "about:blank" || url.protocol === "http:" || url.protocol === "https:";
-  } catch {
-    return false;
-  }
 }
 
 function isLikelyTextPath(path) {
@@ -887,12 +882,15 @@ async function createMainWindow() {
   });
 
   mainWindow.webContents.on("did-attach-webview", (_event, guestContents) => {
-    guestContents.setWindowOpenHandler(({ url }) => {
-      if (isAllowedSidebarBrowserUrl(url)) {
-        void guestContents.loadURL(url).catch(() => undefined);
-      }
-      return { action: "deny" };
-    });
+    guestContents.setWindowOpenHandler(
+      createSidebarBrowserWindowOpenHandler(guestContents.id, (request) => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        mainWindow.webContents.send("sidebar-browser:open-tab", {
+          sourceWebContentsId: request.sourceWebContentsId,
+          url: request.url,
+        });
+      }),
+    );
     const preventDisallowedNavigation = (navigationEvent, url) => {
       if (!isAllowedSidebarBrowserUrl(url)) navigationEvent.preventDefault();
     };

@@ -897,6 +897,9 @@ type RengeDesktopApi = {
   findSymbols(options: { query?: string; path?: string; maxMatches?: number }): Promise<unknown>;
   readPackageJson(): Promise<unknown>;
   scanTodos(options: { path?: string; maxMatches?: number }): Promise<unknown>;
+  onSidebarBrowserOpenTab?(
+    listener: (request: { sourceWebContentsId: number; url: string }) => void,
+  ): () => void;
 };
 
 type RengeAndroidApi = {

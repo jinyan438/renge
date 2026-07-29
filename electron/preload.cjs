@@ -30,4 +30,10 @@ contextBridge.exposeInMainWorld("rengeDesktop", {
   findSymbols: (options) => ipcRenderer.invoke("workspace:find-symbols", options),
   readPackageJson: () => ipcRenderer.invoke("workspace:package-json"),
   scanTodos: (options) => ipcRenderer.invoke("workspace:todos", options),
+  onSidebarBrowserOpenTab: (listener) => {
+    if (typeof listener !== "function") return () => undefined;
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on("sidebar-browser:open-tab", wrappedListener);
+    return () => ipcRenderer.removeListener("sidebar-browser:open-tab", wrappedListener);
+  },
 });

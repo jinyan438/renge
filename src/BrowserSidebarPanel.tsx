@@ -30,6 +30,11 @@ import {
   type BrowserSidebarController,
   type BrowserToolArguments,
 } from "./browserSidebarRuntime";
+import {
+  getBrowserTabAfterClose,
+  MAX_BROWSER_TABS,
+  parseBrowserOpenTabRequest,
+} from "./browserSidebarTabs";
 import "./browser-sidebar.css";
 
 type ElectronWebviewElement = HTMLElement & {
@@ -44,6 +49,7 @@ type ElectronWebviewElement = HTMLElement & {
   stop(): void;
   getZoomFactor(): number;
   setZoomFactor(factor: number): void;
+  getWebContentsId(): number;
   executeJavaScript<T = unknown>(code: string, userGesture?: boolean): Promise<T>;
   sendInputEvent(event: Record<string, unknown>): void;
 };
@@ -61,6 +67,15 @@ type BrowserPageState = {
   loading: boolean;
 };
 
+type BrowserTabState = BrowserPageState & {
+  id: string;
+  initialUrl: string;
+  address: string;
+  error: string;
+  zoomFactor: number;
+  autoFit: boolean;
+};
+
 const DEFAULT_PAGE_STATE: BrowserPageState = {
   url: "about:blank",
   title: "新页面",
@@ -72,6 +87,59 @@ const DEFAULT_PAGE_STATE: BrowserPageState = {
 const MIN_ZOOM_FACTOR = 0.25;
 const MAX_ZOOM_FACTOR = 2;
 const ZOOM_STEP = 0.1;
+let browserTabSequence = 0;
+
+function createBrowserTab(url = "about:blank"): BrowserTabState {
+  browserTabSequence += 1;
+  return {
+    ...DEFAULT_PAGE_STATE,
+    id: `browser-tab-${Date.now()}-${browserTabSequence}`,
+    initialUrl: url,
+    url,
+    address: url === "about:blank" ? "" : url,
+    error: "",
+    loading: url !== "about:blank",
+    zoomFactor: 1,
+    autoFit: true,
+  };
+}
+
+function getBrowserTabLabel(tab: BrowserTabState) {
+  if (tab.url === "about:blank") return "新标签页";
+  if (tab.title && tab.title !== DEFAULT_PAGE_STATE.title) return tab.title;
+  try {
+    return new URL(tab.url).hostname || "网页";
+  } catch {
+    return "网页";
+  }
+}
+
+function BrowserTabWebview({
+  active,
+  initialUrl,
+  onNode,
+  tabId,
+}: {
+  active: boolean;
+  initialUrl: string;
+  onNode: (tabId: string, node: ElectronWebviewElement | null) => void;
+  tabId: string;
+}) {
+  const captureNode = useCallback(
+    (node: HTMLElement | null) => onNode(tabId, node as ElectronWebviewElement | null),
+    [onNode, tabId],
+  );
+  return createElement("webview", {
+    ref: captureNode,
+    allowpopups: true,
+    "aria-hidden": active ? undefined : "true",
+    className: `browser-sidebar-webview ${active ? "is-active" : ""}`,
+    partition: "persist:renge-sidebar-browser",
+    src: initialUrl,
+    tabIndex: active ? 0 : -1,
+    webpreferences: "contextIsolation=yes,nodeIntegration=no,sandbox=yes",
+  });
+}
 
 function sleep(milliseconds: number) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
@@ -112,160 +180,315 @@ function getWebviewPageState(webview: ElectronWebviewElement, loading: boolean):
 
 export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProps) {
   const electronAvailable = Boolean(window.rengeDesktop?.isElectron);
-  const [webviewNode, setWebviewNode] = useState<ElectronWebviewElement | null>(null);
-  const [pageState, setPageState] = useState(DEFAULT_PAGE_STATE);
-  const [address, setAddress] = useState("");
-  const [error, setError] = useState("");
-  const [zoomFactor, setZoomFactor] = useState(1);
-  const [autoFit, setAutoFit] = useState(true);
-  const pageStateRef = useRef(pageState);
-  const zoomFactorRef = useRef(zoomFactor);
-  const autoFitRef = useRef(autoFit);
-  const fitRequestRef = useRef(0);
-  pageStateRef.current = pageState;
-  zoomFactorRef.current = zoomFactor;
-  autoFitRef.current = autoFit;
-  const captureWebviewNode = useCallback(
-    (node: HTMLElement | null) => setWebviewNode(node as ElectronWebviewElement | null),
+  const [tabs, setTabs] = useState<BrowserTabState[]>(() => [createBrowserTab()]);
+  const [activeTabId, setActiveTabId] = useState(() => tabs[0].id);
+  const [webviewNodes, setWebviewNodes] = useState(
+    () => new Map<string, ElectronWebviewElement>(),
+  );
+  const tabsRef = useRef(tabs);
+  const activeTabIdRef = useRef(activeTabId);
+  const webviewNodesRef = useRef(new Map<string, ElectronWebviewElement>());
+  const webviewCleanupRef = useRef(new Map<string, () => void>());
+  const fitRequestRef = useRef(new Map<string, number>());
+  tabsRef.current = tabs;
+  activeTabIdRef.current = activeTabId;
+
+  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
+  const webviewNode = activeTab ? webviewNodes.get(activeTab.id) ?? null : null;
+  const pageState: BrowserPageState = activeTab ?? DEFAULT_PAGE_STATE;
+  const address = activeTab?.address ?? "";
+  const error = activeTab?.error ?? "";
+  const zoomFactor = activeTab?.zoomFactor ?? 1;
+  const autoFit = activeTab?.autoFit ?? true;
+
+  const updateBrowserTab = useCallback(
+    (tabId: string, update: (tab: BrowserTabState) => BrowserTabState) => {
+      setTabs((current) => {
+        const next = current.map((tab) => (tab.id === tabId ? update(tab) : tab));
+        tabsRef.current = next;
+        return next;
+      });
+    },
     [],
   );
 
-  const refreshPageState = (loading = pageStateRef.current.loading) => {
-    if (!webviewNode) return DEFAULT_PAGE_STATE;
-    const nextState = getWebviewPageState(webviewNode, loading);
-    setPageState(nextState);
-    setAddress(nextState.url === "about:blank" ? "" : nextState.url);
-    return nextState;
-  };
+  const selectBrowserTab = useCallback((tabId: string) => {
+    if (!tabsRef.current.some((tab) => tab.id === tabId)) return;
+    activeTabIdRef.current = tabId;
+    setActiveTabId(tabId);
+  }, []);
 
-  const openAddress = async (rawAddress: string) => {
-    if (!webviewNode) throw new Error("浏览器页面容器尚未准备好");
+  const refreshPageState = useCallback(
+    (tabId: string, node: ElectronWebviewElement, loading: boolean) => {
+      const nextState = getWebviewPageState(node, loading);
+      updateBrowserTab(tabId, (tab) => ({
+        ...tab,
+        ...nextState,
+        address: nextState.url === "about:blank" ? "" : nextState.url,
+      }));
+      return nextState;
+    },
+    [updateBrowserTab],
+  );
+
+  const applyZoomFactor = useCallback(
+    (tabId: string, node: ElectronWebviewElement, value: number) => {
+      const nextZoom = Math.min(
+        MAX_ZOOM_FACTOR,
+        Math.max(MIN_ZOOM_FACTOR, Math.round(value * 100) / 100),
+      );
+      node.setZoomFactor(nextZoom);
+      updateBrowserTab(tabId, (tab) => ({ ...tab, zoomFactor: nextZoom }));
+    },
+    [updateBrowserTab],
+  );
+
+  const fitPageToWidth = useCallback(
+    async (tabId: string, node: ElectronWebviewElement, force = false) => {
+      const tab = tabsRef.current.find((candidate) => candidate.id === tabId);
+      if (!tab || (!force && !tab.autoFit)) return;
+      const containerWidth = node.getBoundingClientRect().width;
+      const pageUrl = node.getURL();
+      if (containerWidth < 80 || !pageUrl || pageUrl === "about:blank") return;
+
+      const requestId = (fitRequestRef.current.get(tabId) ?? 0) + 1;
+      fitRequestRef.current.set(tabId, requestId);
+      const previousZoom = tab.zoomFactor;
+      node.setZoomFactor(1);
+      await sleep(40);
+      let metrics: { contentWidth: number; viewportWidth: number };
+      try {
+        metrics = await node.executeJavaScript(`(() => {
+          const root = document.documentElement;
+          const body = document.body;
+          const viewportWidth = Math.max(root?.clientWidth || 0, innerWidth || 0);
+          const contentWidth = Math.max(root?.scrollWidth || 0, body?.scrollWidth || 0, viewportWidth);
+          return { viewportWidth, contentWidth };
+        })()`);
+      } catch (fitError) {
+        if (requestId === fitRequestRef.current.get(tabId)) {
+          applyZoomFactor(tabId, node, previousZoom);
+        }
+        throw fitError;
+      }
+      if (requestId !== fitRequestRef.current.get(tabId) || node.getURL() !== pageUrl) return;
+
+      applyZoomFactor(
+        tabId,
+        node,
+        calculateBrowserFitZoomFactor(metrics.viewportWidth, metrics.contentWidth),
+      );
+    },
+    [applyZoomFactor],
+  );
+
+  const captureWebviewNode = useCallback(
+    (tabId: string, node: ElectronWebviewElement | null) => {
+      const existingNode = webviewNodesRef.current.get(tabId);
+      if (existingNode === node) return;
+      webviewCleanupRef.current.get(tabId)?.();
+      webviewCleanupRef.current.delete(tabId);
+
+      if (!node) {
+        webviewNodesRef.current.delete(tabId);
+        fitRequestRef.current.delete(tabId);
+        setWebviewNodes((current) => {
+          const next = new Map(current);
+          next.delete(tabId);
+          return next;
+        });
+        return;
+      }
+
+      webviewNodesRef.current.set(tabId, node);
+      setWebviewNodes((current) => new Map(current).set(tabId, node));
+      const startLoading = () => {
+        fitRequestRef.current.set(tabId, (fitRequestRef.current.get(tabId) ?? 0) + 1);
+        const tab = tabsRef.current.find((candidate) => candidate.id === tabId);
+        if (tab?.autoFit) applyZoomFactor(tabId, node, 1);
+        refreshPageState(tabId, node, true);
+      };
+      const stopLoading = () => {
+        refreshPageState(tabId, node, false);
+        if (activeTabIdRef.current === tabId) {
+          void fitPageToWidth(tabId, node).catch(() => undefined);
+        }
+      };
+      const navigation = () => {
+        const loading = tabsRef.current.find((tab) => tab.id === tabId)?.loading ?? false;
+        refreshPageState(tabId, node, loading);
+      };
+      const titleUpdated = (event: Event) => {
+        const title = String((event as Event & { title?: string }).title ?? "");
+        updateBrowserTab(tabId, (tab) => ({ ...tab, title: title || tab.title }));
+      };
+      const failed = (event: Event) => {
+        const detail = event as Event & {
+          errorCode?: number;
+          errorDescription?: string;
+          isMainFrame?: boolean;
+        };
+        if (detail.isMainFrame === false || detail.errorCode === -3) return;
+        updateBrowserTab(tabId, (tab) => ({
+          ...tab,
+          error: detail.errorDescription || "页面加载失败",
+        }));
+        refreshPageState(tabId, node, false);
+      };
+      node.addEventListener("did-start-loading", startLoading);
+      node.addEventListener("did-stop-loading", stopLoading);
+      node.addEventListener("did-navigate", navigation);
+      node.addEventListener("did-navigate-in-page", navigation);
+      node.addEventListener("page-title-updated", titleUpdated);
+      node.addEventListener("did-fail-load", failed);
+
+      let resizeTimer = 0;
+      const resizeObserver = new ResizeObserver(() => {
+        window.clearTimeout(resizeTimer);
+        resizeTimer = window.setTimeout(() => {
+          if (activeTabIdRef.current === tabId) {
+            void fitPageToWidth(tabId, node).catch(() => undefined);
+          }
+        }, 160);
+      });
+      resizeObserver.observe(node);
+      webviewCleanupRef.current.set(tabId, () => {
+        window.clearTimeout(resizeTimer);
+        resizeObserver.disconnect();
+        node.removeEventListener("did-start-loading", startLoading);
+        node.removeEventListener("did-stop-loading", stopLoading);
+        node.removeEventListener("did-navigate", navigation);
+        node.removeEventListener("did-navigate-in-page", navigation);
+        node.removeEventListener("page-title-updated", titleUpdated);
+        node.removeEventListener("did-fail-load", failed);
+      });
+    },
+    [applyZoomFactor, fitPageToWidth, refreshPageState, updateBrowserTab],
+  );
+
+  const createNewBrowserTab = useCallback(
+    (url = "about:blank", sourceTabId = activeTabIdRef.current) => {
+      const current = tabsRef.current;
+      if (current.length >= MAX_BROWSER_TABS) {
+        updateBrowserTab(sourceTabId, (tab) => ({
+          ...tab,
+          error: `最多同时打开 ${MAX_BROWSER_TABS} 个标签页`,
+        }));
+        return "";
+      }
+      const tab = createBrowserTab(url);
+      const next = [...current, tab];
+      tabsRef.current = next;
+      activeTabIdRef.current = tab.id;
+      setTabs(next);
+      setActiveTabId(tab.id);
+      return tab.id;
+    },
+    [updateBrowserTab],
+  );
+
+  const closeBrowserTab = useCallback(
+    (tabId: string) => {
+      const current = tabsRef.current;
+      if (current.length === 1) {
+        const node = webviewNodesRef.current.get(tabId);
+        updateBrowserTab(tabId, (tab) => ({
+          ...createBrowserTab(),
+          id: tab.id,
+          initialUrl: tab.initialUrl,
+        }));
+        void node?.loadURL("about:blank").catch(() => undefined);
+        return;
+      }
+      const nextActiveTabId = getBrowserTabAfterClose(
+        current.map((tab) => tab.id),
+        activeTabIdRef.current,
+        tabId,
+      );
+      const next = current.filter((tab) => tab.id !== tabId);
+      tabsRef.current = next;
+      setTabs(next);
+      if (nextActiveTabId && nextActiveTabId !== activeTabIdRef.current) {
+        activeTabIdRef.current = nextActiveTabId;
+        setActiveTabId(nextActiveTabId);
+      }
+    },
+    [updateBrowserTab],
+  );
+
+  const openAddress = useCallback(async (rawAddress: string) => {
+    const tabId = activeTabIdRef.current;
+    const node = webviewNodesRef.current.get(tabId);
+    if (!node) throw new Error("浏览器页面容器尚未准备好");
     const url = normalizeBrowserAddress(rawAddress);
-    setError("");
-    setAddress(url === "about:blank" ? "" : url);
-    setPageState((current) => ({ ...current, url, loading: true }));
-    await webviewNode.loadURL(url);
-    return refreshPageState(false);
-  };
-
-  const applyZoomFactor = (value: number) => {
-    if (!webviewNode) return;
-    const nextZoom = Math.min(
-      MAX_ZOOM_FACTOR,
-      Math.max(MIN_ZOOM_FACTOR, Math.round(value * 100) / 100),
-    );
-    webviewNode.setZoomFactor(nextZoom);
-    zoomFactorRef.current = nextZoom;
-    setZoomFactor(nextZoom);
-  };
-
-  const fitPageToWidth = async (force = false) => {
-    if (!webviewNode || (!force && !autoFitRef.current)) return;
-    const containerWidth = webviewNode.getBoundingClientRect().width;
-    const pageUrl = webviewNode.getURL();
-    if (containerWidth < 80 || !pageUrl || pageUrl === "about:blank") return;
-
-    const requestId = ++fitRequestRef.current;
-    const previousZoom = zoomFactorRef.current;
-    webviewNode.setZoomFactor(1);
-    await sleep(40);
-    let metrics: { contentWidth: number; viewportWidth: number };
+    updateBrowserTab(tabId, (tab) => ({
+      ...tab,
+      address: url === "about:blank" ? "" : url,
+      error: "",
+      url,
+      loading: true,
+    }));
     try {
-      metrics = await webviewNode.executeJavaScript(`(() => {
-        const root = document.documentElement;
-        const body = document.body;
-        const viewportWidth = Math.max(root?.clientWidth || 0, innerWidth || 0);
-        const contentWidth = Math.max(root?.scrollWidth || 0, body?.scrollWidth || 0, viewportWidth);
-        return { viewportWidth, contentWidth };
-      })()`);
-    } catch (fitError) {
-      if (requestId === fitRequestRef.current) applyZoomFactor(previousZoom);
-      throw fitError;
+      await node.loadURL(url);
+      return refreshPageState(tabId, node, false);
+    } catch (loadError) {
+      updateBrowserTab(tabId, (tab) => ({
+        ...tab,
+        error: loadError instanceof Error ? loadError.message : "页面加载失败",
+        loading: false,
+      }));
+      throw loadError;
     }
-    if (requestId !== fitRequestRef.current || webviewNode.getURL() !== pageUrl) return;
-
-    applyZoomFactor(
-      calculateBrowserFitZoomFactor(metrics.viewportWidth, metrics.contentWidth),
-    );
-  };
+  }, [refreshPageState, updateBrowserTab]);
 
   const changeZoom = (delta: number) => {
-    fitRequestRef.current += 1;
-    autoFitRef.current = false;
-    setAutoFit(false);
-    applyZoomFactor(zoomFactorRef.current + delta);
+    if (!activeTab || !webviewNode) return;
+    fitRequestRef.current.set(
+      activeTab.id,
+      (fitRequestRef.current.get(activeTab.id) ?? 0) + 1,
+    );
+    updateBrowserTab(activeTab.id, (tab) => ({ ...tab, autoFit: false }));
+    applyZoomFactor(activeTab.id, webviewNode, activeTab.zoomFactor + delta);
   };
 
   const activateAutoFit = () => {
-    autoFitRef.current = true;
-    setAutoFit(true);
-    void fitPageToWidth(true).catch(() => undefined);
+    if (!activeTab || !webviewNode) return;
+    updateBrowserTab(activeTab.id, (tab) => ({ ...tab, autoFit: true }));
+    void fitPageToWidth(activeTab.id, webviewNode, true).catch(() => undefined);
   };
 
   useEffect(() => {
-    if (!webviewNode) return;
-    const startLoading = () => {
-      fitRequestRef.current += 1;
-      if (autoFitRef.current) applyZoomFactor(1);
-      refreshPageState(true);
-    };
-    const stopLoading = () => {
-      refreshPageState(false);
-      void fitPageToWidth().catch(() => undefined);
-    };
-    const navigation = () => refreshPageState(pageStateRef.current.loading);
-    const titleUpdated = (event: Event) => {
-      const title = String((event as Event & { title?: string }).title ?? "");
-      setPageState((current) => ({ ...current, title: title || current.title }));
-    };
-    const failed = (event: Event) => {
-      const detail = event as Event & {
-        errorCode?: number;
-        errorDescription?: string;
-        isMainFrame?: boolean;
-        validatedURL?: string;
-      };
-      if (detail.isMainFrame === false || detail.errorCode === -3) return;
-      setError(detail.errorDescription || "页面加载失败");
-      refreshPageState(false);
-    };
-    webviewNode.addEventListener("did-start-loading", startLoading);
-    webviewNode.addEventListener("did-stop-loading", stopLoading);
-    webviewNode.addEventListener("did-navigate", navigation);
-    webviewNode.addEventListener("did-navigate-in-page", navigation);
-    webviewNode.addEventListener("page-title-updated", titleUpdated);
-    webviewNode.addEventListener("did-fail-load", failed);
-    return () => {
-      webviewNode.removeEventListener("did-start-loading", startLoading);
-      webviewNode.removeEventListener("did-stop-loading", stopLoading);
-      webviewNode.removeEventListener("did-navigate", navigation);
-      webviewNode.removeEventListener("did-navigate-in-page", navigation);
-      webviewNode.removeEventListener("page-title-updated", titleUpdated);
-      webviewNode.removeEventListener("did-fail-load", failed);
-    };
-  }, [webviewNode]);
+    const subscribe = window.rengeDesktop?.onSidebarBrowserOpenTab;
+    if (!subscribe) return;
+    return subscribe((value) => {
+      const request = parseBrowserOpenTabRequest(value);
+      if (!request) return;
+      const sourceTab = tabsRef.current.find((tab) => {
+        const node = webviewNodesRef.current.get(tab.id);
+        try {
+          return node?.getWebContentsId() === request.sourceWebContentsId;
+        } catch {
+          return false;
+        }
+      });
+      if (!sourceTab) return;
+      createNewBrowserTab(request.url, sourceTab.id);
+    });
+  }, [createNewBrowserTab]);
 
   useEffect(() => {
-    if (!webviewNode) return;
-    let resizeTimer = 0;
-    const observer = new ResizeObserver(() => {
-      window.clearTimeout(resizeTimer);
-      resizeTimer = window.setTimeout(() => {
-        void fitPageToWidth().catch(() => undefined);
-      }, 160);
-    });
-    observer.observe(webviewNode);
-    return () => {
-      window.clearTimeout(resizeTimer);
-      observer.disconnect();
-    };
-  }, [webviewNode]);
+    if (!activeTab || !webviewNode) return;
+    void fitPageToWidth(activeTab.id, webviewNode).catch(() => undefined);
+  }, [activeTab?.id, fitPageToWidth, webviewNode]);
 
   const controller = useMemo<BrowserSidebarController | null>(() => {
     if (!webviewNode) return null;
     const executeInPage = <T,>(script: string, userGesture = false) =>
       webviewNode.executeJavaScript<T>(script, userGesture);
-    const readState = () => getWebviewPageState(webviewNode, pageStateRef.current.loading);
+    const readState = () => getWebviewPageState(
+      webviewNode,
+      tabsRef.current.find((tab) => tab.id === activeTabIdRef.current)?.loading ?? false,
+    );
     const targetCenter = async (args: BrowserToolArguments) =>
       executeInPage<{ x: number; y: number; label: string }>(`(() => {
         ${buildTargetPrelude(args)}
@@ -470,9 +693,7 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
 
   const submitAddress = (event: FormEvent) => {
     event.preventDefault();
-    void openAddress(address).catch((loadError) => {
-      setError(loadError instanceof Error ? loadError.message : "页面加载失败");
-    });
+    void openAddress(address).catch(() => undefined);
   };
 
   return (
@@ -493,6 +714,55 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
           <X size={16} />
         </button>
       </header>
+
+      <div aria-label="浏览器标签页" className="browser-sidebar-tabs" role="tablist">
+        {tabs.map((tab) => {
+          const label = getBrowserTabLabel(tab);
+          const active = tab.id === activeTabId;
+          return (
+            <div
+              className={`browser-sidebar-tab ${active ? "is-active" : ""}`}
+              key={tab.id}
+              role="presentation"
+            >
+              <button
+                aria-selected={active}
+                className="browser-sidebar-tab-main"
+                onClick={() => selectBrowserTab(tab.id)}
+                role="tab"
+                title={label}
+                type="button"
+              >
+                <Globe
+                  aria-hidden="true"
+                  className={tab.loading ? "is-loading" : undefined}
+                  size={12}
+                />
+                <span>{label}</span>
+              </button>
+              <button
+                aria-label={`关闭标签页：${label}`}
+                className="browser-sidebar-tab-close"
+                onClick={() => closeBrowserTab(tab.id)}
+                title="关闭标签页"
+                type="button"
+              >
+                <X size={11} />
+              </button>
+            </div>
+          );
+        })}
+        <button
+          aria-label="新建标签页"
+          className="browser-sidebar-new-tab"
+          disabled={tabs.length >= MAX_BROWSER_TABS}
+          onClick={() => createNewBrowserTab()}
+          title={tabs.length >= MAX_BROWSER_TABS ? `最多 ${MAX_BROWSER_TABS} 个标签页` : "新建标签页"}
+          type="button"
+        >
+          <Plus size={14} />
+        </button>
+      </div>
 
       <div className="browser-sidebar-toolbar">
         <button
@@ -527,7 +797,11 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
           <input
             aria-label="浏览器地址"
             disabled={!electronAvailable}
-            onChange={(event) => setAddress(event.target.value)}
+            onChange={(event) => {
+              if (!activeTab) return;
+              const nextAddress = event.target.value;
+              updateBrowserTab(activeTab.id, (tab) => ({ ...tab, address: nextAddress }));
+            }}
             placeholder="输入网址或搜索内容"
             spellCheck={false}
             value={address}
@@ -540,13 +814,15 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
 
       <div className="browser-sidebar-page">
         {electronAvailable
-          ? createElement("webview", {
-              ref: captureWebviewNode,
-              className: "browser-sidebar-webview",
-              partition: "persist:renge-sidebar-browser",
-              src: "about:blank",
-              webpreferences: "contextIsolation=yes,nodeIntegration=no,sandbox=yes",
-            })
+          ? tabs.map((tab) => (
+              <BrowserTabWebview
+                active={tab.id === activeTabId}
+                initialUrl={tab.initialUrl}
+                key={tab.id}
+                onNode={captureWebviewNode}
+                tabId={tab.id}
+              />
+            ))
           : null}
 
         {!electronAvailable ? (
