@@ -304,6 +304,47 @@
   font-size: 8px;
 }
 
+.browser-sidebar-zoom {
+  display: inline-flex;
+  height: 22px;
+  flex: 0 0 auto;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid rgba(198, 198, 204, 0.84);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.browser-sidebar-zoom > button {
+  display: inline-flex;
+  height: 100%;
+  min-width: 23px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 0 5px;
+  border: 0;
+  border-right: 1px solid rgba(208, 208, 213, 0.76);
+  color: #707077;
+  font-size: 8px;
+  background: transparent;
+}
+
+.browser-sidebar-zoom > button:last-child {
+  border-right: 0;
+}
+
+.browser-sidebar-zoom > button:hover:not(:disabled),
+.browser-sidebar-zoom > button.is-active {
+  color: #075bbd;
+  background: #eaf3ff;
+}
+
+.browser-sidebar-zoom > button:disabled {
+  color: #b7b7bc;
+  cursor: default;
+}
+
 @keyframes browser-loading-pulse {
   50% {
     opacity: 0.45;

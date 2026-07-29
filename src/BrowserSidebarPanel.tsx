@@ -4,6 +4,9 @@ import {
   Bot,
   Code2,
   Globe,
+  Maximize2,
+  Minus,
+  Plus,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -19,6 +22,7 @@ import {
   useState,
 } from "react";
 import {
+  calculateBrowserFitZoomFactor,
   normalizeBrowserAddress,
   registerBrowserSidebarController,
   type BrowserSidebarController,
@@ -36,6 +40,8 @@ type ElectronWebviewElement = HTMLElement & {
   goForward(): void;
   reload(): void;
   stop(): void;
+  getZoomFactor(): number;
+  setZoomFactor(factor: number): void;
   executeJavaScript<T = unknown>(code: string, userGesture?: boolean): Promise<T>;
   sendInputEvent(event: Record<string, unknown>): void;
 };
@@ -60,6 +66,10 @@ const DEFAULT_PAGE_STATE: BrowserPageState = {
   canGoForward: false,
   loading: false,
 };
+
+const MIN_ZOOM_FACTOR = 0.25;
+const MAX_ZOOM_FACTOR = 2;
+const ZOOM_STEP = 0.1;
 
 function sleep(milliseconds: number) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
@@ -183,8 +193,15 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
   const [pageState, setPageState] = useState(DEFAULT_PAGE_STATE);
   const [address, setAddress] = useState("");
   const [error, setError] = useState("");
+  const [zoomFactor, setZoomFactor] = useState(1);
+  const [autoFit, setAutoFit] = useState(true);
   const pageStateRef = useRef(pageState);
+  const zoomFactorRef = useRef(zoomFactor);
+  const autoFitRef = useRef(autoFit);
+  const fitRequestRef = useRef(0);
   pageStateRef.current = pageState;
+  zoomFactorRef.current = zoomFactor;
+  autoFitRef.current = autoFit;
   const captureWebviewNode = useCallback(
     (node: HTMLElement | null) => setWebviewNode(node as ElectronWebviewElement | null),
     [],
@@ -208,10 +225,71 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
     return refreshPageState(false);
   };
 
+  const applyZoomFactor = (value: number) => {
+    if (!webviewNode) return;
+    const nextZoom = Math.min(
+      MAX_ZOOM_FACTOR,
+      Math.max(MIN_ZOOM_FACTOR, Math.round(value * 100) / 100),
+    );
+    webviewNode.setZoomFactor(nextZoom);
+    zoomFactorRef.current = nextZoom;
+    setZoomFactor(nextZoom);
+  };
+
+  const fitPageToWidth = async (force = false) => {
+    if (!webviewNode || (!force && !autoFitRef.current)) return;
+    const containerWidth = webviewNode.getBoundingClientRect().width;
+    const pageUrl = webviewNode.getURL();
+    if (containerWidth < 80 || !pageUrl || pageUrl === "about:blank") return;
+
+    const requestId = ++fitRequestRef.current;
+    const previousZoom = zoomFactorRef.current;
+    webviewNode.setZoomFactor(1);
+    await sleep(40);
+    let metrics: { contentWidth: number; viewportWidth: number };
+    try {
+      metrics = await webviewNode.executeJavaScript(`(() => {
+        const root = document.documentElement;
+        const body = document.body;
+        const viewportWidth = Math.max(root?.clientWidth || 0, innerWidth || 0);
+        const contentWidth = Math.max(root?.scrollWidth || 0, body?.scrollWidth || 0, viewportWidth);
+        return { viewportWidth, contentWidth };
+      })()`);
+    } catch (fitError) {
+      if (requestId === fitRequestRef.current) applyZoomFactor(previousZoom);
+      throw fitError;
+    }
+    if (requestId !== fitRequestRef.current || webviewNode.getURL() !== pageUrl) return;
+
+    applyZoomFactor(
+      calculateBrowserFitZoomFactor(metrics.viewportWidth, metrics.contentWidth),
+    );
+  };
+
+  const changeZoom = (delta: number) => {
+    fitRequestRef.current += 1;
+    autoFitRef.current = false;
+    setAutoFit(false);
+    applyZoomFactor(zoomFactorRef.current + delta);
+  };
+
+  const activateAutoFit = () => {
+    autoFitRef.current = true;
+    setAutoFit(true);
+    void fitPageToWidth(true).catch(() => undefined);
+  };
+
   useEffect(() => {
     if (!webviewNode) return;
-    const startLoading = () => refreshPageState(true);
-    const stopLoading = () => refreshPageState(false);
+    const startLoading = () => {
+      fitRequestRef.current += 1;
+      if (autoFitRef.current) applyZoomFactor(1);
+      refreshPageState(true);
+    };
+    const stopLoading = () => {
+      refreshPageState(false);
+      void fitPageToWidth().catch(() => undefined);
+    };
     const navigation = () => refreshPageState(pageStateRef.current.loading);
     const titleUpdated = (event: Event) => {
       const title = String((event as Event & { title?: string }).title ?? "");
@@ -244,6 +322,22 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
     };
   }, [webviewNode]);
 
+  useEffect(() => {
+    if (!webviewNode) return;
+    let resizeTimer = 0;
+    const observer = new ResizeObserver(() => {
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        void fitPageToWidth().catch(() => undefined);
+      }, 160);
+    });
+    observer.observe(webviewNode);
+    return () => {
+      window.clearTimeout(resizeTimer);
+      observer.disconnect();
+    };
+  }, [webviewNode]);
+
   const controller = useMemo<BrowserSidebarController | null>(() => {
     if (!webviewNode) return null;
     const executeInPage = <T,>(script: string, userGesture = false) =>
@@ -257,7 +351,12 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
         return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2), label: target.getAttribute('aria-label') || target.innerText || target.tagName };
       })()`, true);
     const nativeMouse = (type: string, x: number, y: number, extra: Record<string, unknown> = {}) =>
-      webviewNode.sendInputEvent({ type, x, y, ...extra });
+      webviewNode.sendInputEvent({
+        type,
+        x: Math.round(x * webviewNode.getZoomFactor()),
+        y: Math.round(y * webviewNode.getZoomFactor()),
+        ...extra,
+      });
 
     return {
       async execute(toolName, args, signal) {
@@ -524,7 +623,40 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
         <strong>
           {!electronAvailable ? "桌面版可用" : pageState.loading ? "正在加载" : pageState.title || "新页面"}
         </strong>
-        <small>{electronAvailable ? "AI 可读取 · 控制 · 编辑" : "仅 Electron 桌面版"}</small>
+        {electronAvailable ? (
+          <div className="browser-sidebar-zoom" aria-label="网页缩放">
+            <button
+              aria-label="缩小网页"
+              disabled={zoomFactor <= MIN_ZOOM_FACTOR}
+              onClick={() => changeZoom(-ZOOM_STEP)}
+              title="缩小网页"
+              type="button"
+            >
+              <Minus size={12} />
+            </button>
+            <button
+              aria-label={`适应侧栏宽度，当前 ${Math.round(zoomFactor * 100)}%`}
+              className={autoFit ? "is-active" : undefined}
+              onClick={activateAutoFit}
+              title="重新适应侧栏宽度"
+              type="button"
+            >
+              <Maximize2 size={11} />
+              {Math.round(zoomFactor * 100)}%
+            </button>
+            <button
+              aria-label="放大网页"
+              disabled={zoomFactor >= MAX_ZOOM_FACTOR}
+              onClick={() => changeZoom(ZOOM_STEP)}
+              title="放大网页"
+              type="button"
+            >
+              <Plus size={12} />
+            </button>
+          </div>
+        ) : (
+          <small>仅 Electron 桌面版</small>
+        )}
       </footer>
     </section>
   );

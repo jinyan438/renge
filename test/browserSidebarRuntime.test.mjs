@@ -3,9 +3,19 @@ import test from "node:test";
 import {
   browserToolDefinitions,
   buildBrowserToolsSystemPrompt,
+  calculateBrowserFitZoomFactor,
   isBrowserToolName,
   normalizeBrowserAddress,
 } from "../src/browserSidebarRuntime.ts";
+
+test("fits horizontally overflowing pages into the sidebar viewport", () => {
+  assert.equal(calculateBrowserFitZoomFactor(720, 1200), 0.6);
+  assert.equal(calculateBrowserFitZoomFactor(360, 1200), 0.3);
+  assert.equal(calculateBrowserFitZoomFactor(260, 2000), 0.25);
+  assert.equal(calculateBrowserFitZoomFactor(720, 720), 1);
+  assert.equal(calculateBrowserFitZoomFactor(720, 721), 1);
+  assert.equal(calculateBrowserFitZoomFactor(720, 730), 0.98);
+});
 
 test("normalizes browser addresses and search queries", () => {
   assert.equal(normalizeBrowserAddress("https://example.com/a"), "https://example.com/a");
