@@ -32,6 +32,11 @@ import { createPortal } from "react-dom";
 import { BrowserSidebarPanel } from "./BrowserSidebarPanel";
 import { registerBrowserSidebarOpener } from "./browserSidebarRuntime";
 import {
+  clampRightSidebarWidth,
+  getRightSidebarMaxWidth,
+  RIGHT_SIDEBAR_MIN_WIDTH,
+} from "./rightSidebarSizing";
+import {
   getStatusBarItemValue,
   isDefaultStatusBarPreset,
   MAX_STATUS_BAR_PRESETS,
@@ -74,9 +79,6 @@ type RightSidebarToolId = "review" | "terminal" | "browser" | "files" | "status"
 type RightSidebarViewId = "menu" | RightSidebarToolId;
 
 const RIGHT_SIDEBAR_DEFAULT_WIDTH = 360;
-const RIGHT_SIDEBAR_MIN_WIDTH = 260;
-const RIGHT_SIDEBAR_MAX_WIDTH = 720;
-const RIGHT_SIDEBAR_MIN_CHAT_WIDTH = 320;
 const RIGHT_SIDEBAR_WIDTH_STORAGE_KEY = "renge-chat-right-sidebar-width";
 
 const RIGHT_SIDEBAR_TOOLS = [
@@ -123,12 +125,6 @@ const RIGHT_SIDEBAR_TOOLS = [
   available: boolean;
 }>;
 
-function clampRightSidebarWidth(width: number, maxWidth = RIGHT_SIDEBAR_MAX_WIDTH) {
-  return Math.round(
-    Math.min(Math.max(RIGHT_SIDEBAR_MIN_WIDTH, maxWidth), Math.max(RIGHT_SIDEBAR_MIN_WIDTH, width)),
-  );
-}
-
 function loadRightSidebarWidth() {
   if (typeof window === "undefined") return RIGHT_SIDEBAR_DEFAULT_WIDTH;
   try {
@@ -136,7 +132,10 @@ function loadRightSidebarWidth() {
       window.localStorage.getItem(RIGHT_SIDEBAR_WIDTH_STORAGE_KEY) ?? "",
     );
     return Number.isFinite(storedWidth)
-      ? clampRightSidebarWidth(storedWidth)
+      ? clampRightSidebarWidth(
+          storedWidth,
+          getRightSidebarMaxWidth(window.innerWidth, 0),
+        )
       : RIGHT_SIDEBAR_DEFAULT_WIDTH;
   } catch {
     return RIGHT_SIDEBAR_DEFAULT_WIDTH;
@@ -789,6 +788,11 @@ export function StatusBarSidebar({
 }: StatusBarSidebarProps) {
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
   const [sidebarWidth, setSidebarWidth] = useState(loadRightSidebarWidth);
+  const [sidebarMaxWidth, setSidebarMaxWidth] = useState(() =>
+    typeof window === "undefined"
+      ? RIGHT_SIDEBAR_DEFAULT_WIDTH
+      : getRightSidebarMaxWidth(window.innerWidth, 0),
+  );
   const sidebarRef = useRef<HTMLElement | null>(null);
   const resizeSessionRef = useRef({
     active: false,
@@ -796,7 +800,7 @@ export function StatusBarSidebar({
     startX: 0,
     startWidth: RIGHT_SIDEBAR_DEFAULT_WIDTH,
     currentWidth: RIGHT_SIDEBAR_DEFAULT_WIDTH,
-    maxWidth: RIGHT_SIDEBAR_MAX_WIDTH,
+    maxWidth: RIGHT_SIDEBAR_DEFAULT_WIDTH,
   });
   const [editorOpen, setEditorOpen] = useState(false);
   const [draft, setDraft] = useState<StatusBarState>(() => cloneStatusBarState(state));
@@ -848,12 +852,17 @@ export function StatusBarSidebar({
 
   const getAvailableSidebarMaxWidth = () => {
     const chatShell = sidebarRef.current?.parentElement;
-    if (!chatShell) return RIGHT_SIDEBAR_MAX_WIDTH;
+    if (!chatShell) {
+      return typeof window === "undefined"
+        ? RIGHT_SIDEBAR_DEFAULT_WIDTH
+        : getRightSidebarMaxWidth(window.innerWidth, 0);
+    }
     const leftSidebar = chatShell.querySelector<HTMLElement>(":scope > .chat-sidebar");
     const leftSidebarWidth = leftSidebar?.getBoundingClientRect().width ?? 0;
-    const availableWidth =
-      chatShell.getBoundingClientRect().width - leftSidebarWidth - RIGHT_SIDEBAR_MIN_CHAT_WIDTH;
-    return Math.min(RIGHT_SIDEBAR_MAX_WIDTH, Math.max(RIGHT_SIDEBAR_MIN_WIDTH, availableWidth));
+    return getRightSidebarMaxWidth(
+      chatShell.getBoundingClientRect().width,
+      leftSidebarWidth,
+    );
   };
 
   const finishSidebarResize = (handle?: HTMLElement, pointerId?: number) => {
@@ -870,13 +879,15 @@ export function StatusBarSidebar({
   const startSidebarResize = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
     const currentWidth = sidebarRef.current?.getBoundingClientRect().width ?? sidebarWidth;
+    const maxWidth = getAvailableSidebarMaxWidth();
+    setSidebarMaxWidth(maxWidth);
     resizeSessionRef.current = {
       active: true,
       pointerId: event.pointerId,
       startX: event.clientX,
       startWidth: currentWidth,
       currentWidth,
-      maxWidth: getAvailableSidebarMaxWidth(),
+      maxWidth,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
     document.body.classList.add("right-sidebar-resizing");
@@ -901,13 +912,17 @@ export function StatusBarSidebar({
 
   const resizeSidebarWithKeyboard = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const direction = event.key === "ArrowLeft" ? 1 : event.key === "ArrowRight" ? -1 : 0;
-    if (direction === 0 && event.key !== "Home") return;
+    if (direction === 0 && event.key !== "Home" && event.key !== "End") return;
     event.preventDefault();
+    const maxWidth = getAvailableSidebarMaxWidth();
     const nextWidth =
       event.key === "Home"
         ? RIGHT_SIDEBAR_DEFAULT_WIDTH
-        : sidebarWidth + direction * (event.shiftKey ? 40 : 16);
-    const clampedWidth = clampRightSidebarWidth(nextWidth, getAvailableSidebarMaxWidth());
+        : event.key === "End"
+          ? maxWidth
+          : sidebarWidth + direction * (event.shiftKey ? 40 : 16);
+    const clampedWidth = clampRightSidebarWidth(nextWidth, maxWidth);
+    setSidebarMaxWidth(maxWidth);
     setSidebarWidth(clampedWidth);
     saveRightSidebarWidth(clampedWidth);
   };
@@ -925,6 +940,7 @@ export function StatusBarSidebar({
     if (!chatShell) return;
     const keepSidebarInsideWorkspace = () => {
       const nextMaxWidth = getAvailableSidebarMaxWidth();
+      setSidebarMaxWidth(nextMaxWidth);
       setSidebarWidth((currentWidth) => {
         const nextWidth = clampRightSidebarWidth(currentWidth, nextMaxWidth);
         if (nextWidth !== currentWidth) saveRightSidebarWidth(nextWidth);
@@ -938,6 +954,8 @@ export function StatusBarSidebar({
     }
     const resizeObserver = new ResizeObserver(keepSidebarInsideWorkspace);
     resizeObserver.observe(chatShell);
+    const leftSidebar = chatShell.querySelector<HTMLElement>(":scope > .chat-sidebar");
+    if (leftSidebar) resizeObserver.observe(leftSidebar);
     return () => resizeObserver.disconnect();
   }, [collapsed]);
 
@@ -1856,7 +1874,7 @@ export function StatusBarSidebar({
         <div
           aria-label="调整右侧栏宽度"
           aria-orientation="vertical"
-          aria-valuemax={RIGHT_SIDEBAR_MAX_WIDTH}
+          aria-valuemax={sidebarMaxWidth}
           aria-valuemin={RIGHT_SIDEBAR_MIN_WIDTH}
           aria-valuenow={sidebarWidth}
           className="right-sidebar-resize-handle"
