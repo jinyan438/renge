@@ -95,6 +95,14 @@ test("preserves system instructions and recent turns while replacing older messa
   assert.match(String(compressed[0].content), /自动上下文压缩摘要/);
   assert.equal(compressed.at(-1), messages.at(-1));
   assert.ok(estimateContextMessagesTokens(compressed) < estimateContextMessagesTokens(messages));
+  const serializedRequestMessages = JSON.stringify(compressed);
+  for (const removedMessage of plan.removedMessages) {
+    assert.equal(
+      serializedRequestMessages.includes(String(removedMessage.content)),
+      false,
+      "compressed request must not contain the original text of a removed message",
+    );
+  }
 });
 
 test("merges leading system messages and a summary for strict chat templates", () => {

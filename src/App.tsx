@@ -484,6 +484,60 @@ type ChatMessage = {
   extra?: Record<string, unknown>;
 };
 
+type ContextRuntimeUsage = {
+  sessionId: string;
+  modelId: string;
+  currentTokens: number;
+  compressed: boolean;
+  removedMessageCount: number;
+  chatMessageSignatures: string[];
+  mutableChatMessageId?: string;
+  mutableChatMessageIndex?: number;
+  mutableChatMessageTokens?: number;
+  compressionEnabled: boolean;
+  updatedAt: number;
+};
+
+function getContextRuntimeUsageKey(sessionId: string, modelId: string) {
+  return `${sessionId}\u0000${modelId.trim().toLowerCase()}`;
+}
+
+function getChatMessageContextSignature(message: ChatMessage) {
+  const source = JSON.stringify({
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    reasoning: message.reasoning ?? "",
+    sender: message.sender ?? null,
+    source: message.source ?? null,
+    choiceRequest: message.choiceRequest ?? null,
+    attachments: (message.attachments ?? []).map((attachment) => ({
+      id: attachment.id,
+      name: attachment.name,
+      type: attachment.type,
+      size: attachment.size,
+      dataUrlLength: attachment.dataUrl?.length ?? 0,
+      dataUrlStart: attachment.dataUrl?.slice(0, 64) ?? "",
+      dataUrlEnd: attachment.dataUrl?.slice(-64) ?? "",
+      downloadUrl: attachment.downloadUrl ?? "",
+      textContent: attachment.textContent ?? "",
+    })),
+  });
+  let hash = 2166136261;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${(hash >>> 0).toString(16)}:${source.length}`;
+}
+
+function estimateChatMessageRuntimeTokens(message: ChatMessage) {
+  return Math.max(
+    0,
+    estimateContextMessagesTokens([{ role: message.role, content: message.content }]) - 2,
+  );
+}
+
 type MultiAgentResponseResult = {
   assistantMessages: ChatMessage[];
   finalMessage: ChatMessage;
@@ -11120,6 +11174,9 @@ export function App() {
   const [contextCompressionSettings, setContextCompressionSettings] =
     useState<ContextCompressionSettings>(loadContextCompressionSettings);
   const contextSummaryCacheRef = useRef(new Map<string, string>());
+  const [contextRuntimeUsageByKey, setContextRuntimeUsageByKey] = useState<
+    Record<string, ContextRuntimeUsage>
+  >({});
   const [chatPersonalization, setChatPersonalization] =
     useState<ChatPersonalizationSettings>(loadChatPersonalization);
   const [chatSender, setChatSender] = useState<ChatSenderIdentity>(loadChatSender);
@@ -14310,6 +14367,8 @@ export function App() {
     signal,
     sessionId = activeChatSessionIdRef.current,
     quiet = false,
+    trackUsage = false,
+    mutableChatMessageId,
   }: {
     messages: ChatApiMessage[];
     provider: ModelProviderChannel;
@@ -14319,8 +14378,52 @@ export function App() {
     signal?: AbortSignal;
     sessionId?: string;
     quiet?: boolean;
+    trackUsage?: boolean;
+    mutableChatMessageId?: string;
   }): Promise<ChatApiMessage[]> => {
     const additionalTokens = estimateContextValueTokens(tools);
+    const recordPreparedContextUsage = (
+      preparedMessages: ChatApiMessage[],
+      removedMessageCount: number,
+    ) => {
+      if (!trackUsage || !sessionId || !modelId.trim()) return;
+      const currentTokens =
+        estimateContextMessagesTokens(preparedMessages) + additionalTokens;
+      const sessionMessages = getMessagesForSession(sessionId);
+      const mutableChatMessageIndex = mutableChatMessageId
+        ? sessionMessages.findIndex((message) => message.id === mutableChatMessageId)
+        : -1;
+      const mutableChatMessage =
+        mutableChatMessageIndex >= 0
+          ? sessionMessages[mutableChatMessageIndex]
+          : undefined;
+      const mutableChatMessageTokens = mutableChatMessage
+        ? mutableChatMessageIndex === sessionMessages.length - 1 &&
+          !mutableChatMessage.content &&
+          !mutableChatMessage.reasoning
+          ? 0
+          : estimateChatMessageRuntimeTokens(mutableChatMessage)
+        : undefined;
+      const usage: ContextRuntimeUsage = {
+        sessionId,
+        modelId,
+        currentTokens,
+        compressed: removedMessageCount > 0,
+        removedMessageCount,
+        chatMessageSignatures: sessionMessages.map(getChatMessageContextSignature),
+        ...(mutableChatMessage
+          ? {
+              mutableChatMessageId: mutableChatMessage.id,
+              mutableChatMessageIndex,
+              mutableChatMessageTokens,
+            }
+          : {}),
+        compressionEnabled: contextCompressionSettings.enabled,
+        updatedAt: Date.now(),
+      };
+      const usageKey = getContextRuntimeUsageKey(sessionId, modelId);
+      setContextRuntimeUsageByKey((current) => ({ ...current, [usageKey]: usage }));
+    };
     const plan = createContextCompressionPlan(
       messages,
       contextCompressionSettings,
@@ -14330,7 +14433,10 @@ export function App() {
         requestedOutputTokens,
       },
     );
-    if (!plan) return messages;
+    if (!plan) {
+      recordPreparedContextUsage(messages, 0);
+      return messages;
+    }
 
     const applySummaryWithinBudget = (summary: string) => {
       const keptTokens = estimateContextMessagesTokens(plan.keptMessages);
@@ -14360,6 +14466,7 @@ export function App() {
           `上下文压缩后仍需约 ${compressedTokens.toLocaleString()} Token，超过 ${modelId} 的输入预算 ${plan.inputBudgetTokens.toLocaleString()} Token。请提高该模型的上下文上限，或减少系统提示词、工具定义和最近一条消息的长度。`,
         );
       }
+      recordPreparedContextUsage(compressedMessages, plan.removedMessages.length);
       return compressedMessages;
     };
 
@@ -19243,6 +19350,10 @@ export function App() {
         limitingModelId: "",
         modelIds: [],
         missingModelIds: [],
+        usesActualRequestTokens: false,
+        compressed: false,
+        removedMessageCount: 0,
+        appendedMessageCount: 0,
       };
     }
     const modelEntries =
@@ -19435,9 +19546,51 @@ export function App() {
     const messagesWithStatus = statusBarPrompt
       ? [{ role: "system" as const, content: statusBarPrompt }, ...composedMessages]
       : composedMessages;
-    const currentTokens =
+    const estimatedCurrentTokens =
       estimateContextMessagesTokens(messagesWithStatus) +
       estimateContextValueTokens(availableTools);
+    const runtimeUsage =
+      contextRuntimeUsageByKey[
+        getContextRuntimeUsageKey(activeChatSession?.id ?? activeChatSessionId, meterModelId)
+      ];
+    const currentChatMessageSignatures = chatMessages.map(getChatMessageContextSignature);
+    const runtimeUsageMatchesCurrentHistory = Boolean(
+      runtimeUsage &&
+        runtimeUsage.compressionEnabled === contextCompressionSettings.enabled &&
+        runtimeUsage.chatMessageSignatures.length <= currentChatMessageSignatures.length &&
+        runtimeUsage.chatMessageSignatures.every(
+          (signature, index) =>
+            index === runtimeUsage.mutableChatMessageIndex
+              ? chatMessages[index]?.id === runtimeUsage.mutableChatMessageId
+              : signature === currentChatMessageSignatures[index],
+        ),
+    );
+    const trackedChatMessageCount = runtimeUsage?.chatMessageSignatures.length ?? 0;
+    const appendedMessageCount = runtimeUsageMatchesCurrentHistory
+      ? chatMessages.length - trackedChatMessageCount
+      : 0;
+    const appendedMessages = runtimeUsageMatchesCurrentHistory
+      ? baseMessages.slice(trackedChatMessageCount)
+      : [];
+    const appendedTokens =
+      appendedMessages.length > 0
+        ? Math.max(0, estimateContextMessagesTokens(appendedMessages) - 2)
+        : 0;
+    const mutableChatMessage =
+      runtimeUsageMatchesCurrentHistory && runtimeUsage?.mutableChatMessageIndex !== undefined
+        ? chatMessages[runtimeUsage.mutableChatMessageIndex]
+        : undefined;
+    const mutableMessageDeltaTokens = mutableChatMessage
+      ? Math.max(
+          0,
+          estimateChatMessageRuntimeTokens(mutableChatMessage) -
+            (runtimeUsage?.mutableChatMessageTokens ?? 0),
+        )
+      : 0;
+    const currentTokens =
+      runtimeUsage && runtimeUsageMatchesCurrentHistory
+        ? runtimeUsage.currentTokens + appendedTokens + mutableMessageDeltaTokens
+        : estimatedCurrentTokens;
     const thresholdTokens = limitingBudget?.budget.safetyThresholdTokens ?? null;
 
     return {
@@ -19447,6 +19600,15 @@ export function App() {
       limitingModelId: limitingBudget?.modelId ?? "",
       modelIds: distinctModelIds,
       missingModelIds,
+      usesActualRequestTokens: Boolean(runtimeUsage && runtimeUsageMatchesCurrentHistory),
+      compressed: Boolean(
+        runtimeUsage && runtimeUsageMatchesCurrentHistory && runtimeUsage.compressed,
+      ),
+      removedMessageCount:
+        runtimeUsage && runtimeUsageMatchesCurrentHistory
+          ? runtimeUsage.removedMessageCount
+          : 0,
+      appendedMessageCount,
     };
   }, [
     activeChatPreset,
@@ -19465,6 +19627,7 @@ export function App() {
     chatSessions,
     configuredMultiAgentPersonas,
     contextCompressionSettings,
+    contextRuntimeUsageByKey,
     currentChatSender.kind,
     effectiveChatModelId,
     enabledMcpServers,
@@ -19497,7 +19660,16 @@ export function App() {
     const compressionNote = contextCompressionSettings.enabled
       ? "上下文压缩已开启"
       : "上下文压缩当前已关闭";
-    return `当前上下文约 ${current} Token；${modelNote}，安全阈值 ${threshold} Token；${compressionNote}。点击打开 LLM 设置。`;
+    const usageNote = contextTokenMeter.usesActualRequestTokens
+      ? contextTokenMeter.compressed
+        ? `按最后一次实际发送的压缩上下文计数，已用摘要替换 ${contextTokenMeter.removedMessageCount} 条较早消息，被替换原文未进入生成请求${
+            contextTokenMeter.appendedMessageCount > 0
+              ? `，另计后续新增 ${contextTokenMeter.appendedMessageCount} 条消息`
+              : ""
+          }`
+        : "按最后一次实际发送的上下文计数"
+      : "当前尚无可复用的实际请求记录，使用发送前估算";
+    return `当前上下文约 ${current} Token；${modelNote}，安全阈值 ${threshold} Token；${compressionNote}；${usageNote}。点击打开 LLM 设置。`;
   })();
 
   const executeChatCommandBlock = async (content: string) => {
@@ -21012,6 +21184,8 @@ export function App() {
           requestedOutputTokens: activeChatPresetRequestParameters?.max_tokens ?? 0,
           signal: abortSignal,
           sessionId: requestSessionId,
+          trackUsage: true,
+          mutableChatMessageId: assistantMessageId,
         });
         const response = await fetch("/api/chat/completions", {
           method: "POST",
@@ -23547,6 +23721,8 @@ export function App() {
           requestedOutputTokens: activeChatPresetRequestParameters?.max_tokens ?? 0,
           signal: abortSignal,
           sessionId: requestSessionId,
+          trackUsage: true,
+          mutableChatMessageId: assistantMessageId,
         });
         const response = await fetch("/api/chat/completions", {
           method: "POST",
