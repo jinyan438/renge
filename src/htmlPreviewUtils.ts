@@ -13,7 +13,7 @@ export function stabilizeHtmlPreviewRuntimeCompatibility(content: string) {
 }
 
 export function stabilizeHtmlPreviewMapViewport(content: string) {
-  return content.replace(
+  let stabilized = content.replace(
     /(class\s+MapRenderer\s*\{[\s\S]*?\n\s+resize\(\)\s*\{)\s*this\.canvas\.width\s*=\s*this\.container\.clientWidth;\s*this\.canvas\.height\s*=\s*this\.container\.clientHeight;\s*this\.drawMap\(\);\s*\}/,
     `$1
             const nextWidth = this.container.clientWidth;
@@ -65,4 +65,20 @@ export function stabilizeHtmlPreviewMapViewport(content: string) {
             this.drawMap();
           }`,
   );
+
+  stabilized = stabilized.replace(
+    /(async\s+function\s+openBirthLocationSelection\s*\(\s*\)\s*\{[\s\S]*?await\s+openMapManagement\s*\(\s*\)\s*;)(\s*\})/,
+    `$1
+          const __rengeMapChoices = document.querySelectorAll(
+            '#map-list-container input[name="defaultMapSelection"]',
+          );
+          if (__rengeMapChoices.length === 1) {
+            __rengeMapChoices[0].checked = true;
+            await setDefaultMap();
+            document.getElementById('map-management-overlay')?.classList.remove('visible');
+            openMapSelection();
+          }$2`,
+  );
+
+  return stabilized;
 }

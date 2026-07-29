@@ -71,3 +71,78 @@ class MapRenderer {
   assert.equal(renderer.__rengeInitialMapFit, true);
   assert.equal(renderer.drawCount, 1);
 });
+
+test("opens the only available birthplace map without an empty chooser step", async () => {
+  const source = `
+async function openBirthLocationSelection() {
+  // 先打开地图管理弹窗让用户选择/确认地图
+  await openMapManagement();
+}
+`;
+  const transformed = stabilizeHtmlPreviewMapViewport(source);
+  const calls = [];
+  const onlyChoice = { checked: false };
+  const overlay = { classList: { remove: value => calls.push(["remove", value]) } };
+  const document = {
+    querySelectorAll: selector => {
+      calls.push(["query", selector]);
+      return [onlyChoice];
+    },
+    getElementById: id => {
+      calls.push(["get", id]);
+      return overlay;
+    },
+  };
+  const openMapManagement = async () => calls.push(["manage"]);
+  const setDefaultMap = async () => calls.push(["default"]);
+  const openMapSelection = () => calls.push(["open"]);
+  const openBirthLocationSelection = Function(
+    "document",
+    "openMapManagement",
+    "setDefaultMap",
+    "openMapSelection",
+    `${transformed}; return openBirthLocationSelection;`,
+  )(document, openMapManagement, setDefaultMap, openMapSelection);
+
+  await openBirthLocationSelection();
+
+  assert.equal(onlyChoice.checked, true);
+  assert.deepEqual(calls, [
+    ["manage"],
+    ["query", '#map-list-container input[name="defaultMapSelection"]'],
+    ["default"],
+    ["get", "map-management-overlay"],
+    ["remove", "visible"],
+    ["open"],
+  ]);
+});
+
+test("keeps the birthplace map chooser when multiple maps are available", async () => {
+  const source = `
+async function openBirthLocationSelection() {
+  await openMapManagement();
+}
+`;
+  const transformed = stabilizeHtmlPreviewMapViewport(source);
+  const calls = [];
+  const document = {
+    querySelectorAll: () => [{ checked: false }, { checked: false }],
+    getElementById: () => {
+      throw new Error("the chooser should remain open");
+    },
+  };
+  const openMapManagement = async () => calls.push("manage");
+  const setDefaultMap = async () => calls.push("default");
+  const openMapSelection = () => calls.push("open");
+  const openBirthLocationSelection = Function(
+    "document",
+    "openMapManagement",
+    "setDefaultMap",
+    "openMapSelection",
+    `${transformed}; return openBirthLocationSelection;`,
+  )(document, openMapManagement, setDefaultMap, openMapSelection);
+
+  await openBirthLocationSelection();
+
+  assert.deepEqual(calls, ["manage"]);
+});
