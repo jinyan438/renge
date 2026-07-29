@@ -19210,6 +19210,16 @@ export function App() {
   };
 
   const contextTokenMeter = useMemo(() => {
+    if (!appDataLoaded) {
+      return {
+        currentTokens: 0,
+        thresholdTokens: null,
+        usageRatio: null,
+        limitingModelId: "",
+        modelIds: [],
+        missingModelIds: [],
+      };
+    }
     const modelEntries =
       chatMode === "multi"
         ? configuredMultiAgentPersonas.map((persona) => {
@@ -19334,7 +19344,8 @@ export function App() {
       meterHistory,
       {
         userName: userProfile.nickname,
-        characterName: activeSessionRoleplayCard?.name ?? meterPersona?.name ?? chatPersona.name,
+        characterName:
+          activeSessionRoleplayCard?.name ?? meterPersona?.name ?? chatPersona?.name ?? "AI",
       },
     );
     const activeCharacterWorldBook = activeSessionRoleplayCard
@@ -19419,6 +19430,7 @@ export function App() {
     activeSessionRoleplayCard,
     activeStatusBarState,
     activeWorldBookIds,
+    appDataLoaded,
     chatChoiceToolsEnabled,
     chatMessages,
     chatMode,
