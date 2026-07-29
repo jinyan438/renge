@@ -1,5 +1,6 @@
 import {
   Activity,
+  ArrowLeft,
   ClipboardCheck,
   ChevronDown,
   ChevronUp,
@@ -68,6 +69,7 @@ type StatusBarCssProperties = CSSProperties & {
 };
 
 type RightSidebarToolId = "review" | "terminal" | "browser" | "files" | "status";
+type RightSidebarViewId = "menu" | RightSidebarToolId;
 
 const RIGHT_SIDEBAR_DEFAULT_WIDTH = 360;
 const RIGHT_SIDEBAR_MIN_WIDTH = 260;
@@ -783,7 +785,7 @@ export function StatusBarSidebar({
   manualUpdateDisabled = false,
   manualUpdateRunning = false,
 }: StatusBarSidebarProps) {
-  const [activeToolId, setActiveToolId] = useState<RightSidebarToolId>("status");
+  const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
   const [sidebarWidth, setSidebarWidth] = useState(loadRightSidebarWidth);
   const sidebarRef = useRef<HTMLElement | null>(null);
   const resizeSessionRef = useRef({
@@ -935,6 +937,10 @@ export function StatusBarSidebar({
     const resizeObserver = new ResizeObserver(keepSidebarInsideWorkspace);
     resizeObserver.observe(chatShell);
     return () => resizeObserver.disconnect();
+  }, [collapsed]);
+
+  useEffect(() => {
+    if (collapsed) setActiveToolId("menu");
   }, [collapsed]);
 
   const closeEditor = () => setEditorOpen(false);
@@ -1811,6 +1817,11 @@ export function StatusBarSidebar({
         )
       : null;
 
+  const activeRightSidebarTool =
+    activeToolId === "menu"
+      ? null
+      : RIGHT_SIDEBAR_TOOLS.find((tool) => tool.id === activeToolId) ?? null;
+
   if (collapsed) {
     return editorModal;
   }
@@ -1818,7 +1829,7 @@ export function StatusBarSidebar({
   return (
     <>
       <button
-        aria-label="关闭右侧状态栏"
+        aria-label="关闭右侧栏"
         className="status-bar-mobile-backdrop"
         onClick={() => onCollapsedChange(true)}
         type="button"
@@ -1826,7 +1837,9 @@ export function StatusBarSidebar({
       <aside
         ref={sidebarRef}
         aria-label="右侧工具栏"
-        className="status-bar-sidebar right-tools-sidebar"
+        className={`status-bar-sidebar right-tools-sidebar ${
+          activeToolId === "status" ? "is-status-view" : "is-light-view"
+        }`}
         style={sidebarStyle}
       >
         <div
@@ -1857,54 +1870,65 @@ export function StatusBarSidebar({
           <GripVertical aria-hidden="true" size={14} />
         </div>
 
-        <header className="right-tools-sidebar-header">
-          <div>
-            <span>WORKSPACE TOOLS</span>
-            <strong>工作区工具</strong>
-          </div>
-          <button
-            aria-label="关闭右侧栏"
-            onClick={() => onCollapsedChange(true)}
-            title="关闭右侧栏"
-            type="button"
-          >
-            <X size={16} />
-          </button>
-        </header>
-
-        <nav aria-label="右侧工具" className="right-tools-list">
-          {RIGHT_SIDEBAR_TOOLS.map((tool) => {
-            const ToolIcon = tool.icon;
-            const active = tool.id === activeToolId;
-            return (
+        {activeToolId === "menu" ? (
+          <section className="right-tools-menu" aria-label="工作区工具菜单">
+            <header className="right-tools-sidebar-header">
+              <div>
+                <span>WORKSPACE</span>
+                <strong>右侧栏</strong>
+              </div>
               <button
-                aria-current={active ? "page" : undefined}
-                className={active ? "active" : undefined}
-                key={tool.id}
-                onClick={() => setActiveToolId(tool.id)}
+                aria-label="关闭右侧栏"
+                onClick={() => onCollapsedChange(true)}
+                title="关闭右侧栏"
                 type="button"
               >
-                <span className="right-tool-icon" aria-hidden="true">
-                  <ToolIcon size={16} />
-                </span>
-                <span className="right-tool-copy">
-                  <strong>{tool.label}</strong>
-                  <small>{tool.description}</small>
-                </span>
-                <span className={tool.available ? "is-available" : undefined}>
-                  {tool.available ? "可用" : "待实现"}
-                </span>
+                <X size={16} />
               </button>
-            );
-          })}
-        </nav>
-
-        {activeToolId === "status" ? (
+            </header>
+            <div className="right-tools-menu-body">
+              <div className="right-tools-menu-heading">
+                <strong>工作区工具</strong>
+                <p>选择要在右侧栏中打开的工具。</p>
+              </div>
+              <nav aria-label="右侧工具" className="right-tools-list">
+                {RIGHT_SIDEBAR_TOOLS.map((tool) => {
+                  const ToolIcon = tool.icon;
+                  return (
+                    <button key={tool.id} onClick={() => setActiveToolId(tool.id)} type="button">
+                      <span className="right-tool-icon" aria-hidden="true">
+                        <ToolIcon size={17} />
+                      </span>
+                      <span className="right-tool-copy">
+                        <strong>{tool.label}</strong>
+                        <small>{tool.description}</small>
+                      </span>
+                      <span className={tool.available ? "is-available" : undefined}>
+                        {tool.available ? "打开" : "待实现"}
+                      </span>
+                    </button>
+                  );
+                })}
+              </nav>
+            </div>
+          </section>
+        ) : activeToolId === "status" ? (
           <section className="right-tool-content status-tool-content" aria-label="状态栏">
             <header className="status-bar-sidebar-header">
-              <div className="status-bar-sidebar-heading">
-                <span>SESSION STATUS</span>
-                <strong>{state.title.trim() || "状态监测终端"}</strong>
+              <div className="status-bar-sidebar-title">
+                <button
+                  aria-label="返回工作区工具"
+                  className="status-bar-back-to-tools"
+                  onClick={() => setActiveToolId("menu")}
+                  title="返回工作区工具"
+                  type="button"
+                >
+                  <ArrowLeft size={16} />
+                </button>
+                <div className="status-bar-sidebar-heading">
+                  <span>SESSION STATUS</span>
+                  <strong>{state.title.trim() || "状态监测终端"}</strong>
+                </div>
               </div>
               <div className="status-bar-sidebar-actions">
                 <label
@@ -1978,16 +2002,36 @@ export function StatusBarSidebar({
             </footer>
           </section>
         ) : (
-          <section className="right-tool-content right-tool-placeholder" aria-live="polite">
-            <span aria-hidden="true">
-              <Construction size={24} />
-            </span>
-            <strong>
-              {RIGHT_SIDEBAR_TOOLS.find((tool) => tool.id === activeToolId)?.label}功能待实现
-            </strong>
-            <p>
-              入口和面板位置已经预留，后续可在这里接入完整功能，不会影响现有状态栏。
-            </p>
+          <section
+            className="right-tool-content right-tool-placeholder-view"
+            aria-label={`${activeRightSidebarTool?.label ?? "工具"}面板`}
+            aria-live="polite"
+          >
+            <header className="right-tool-page-header">
+              <button
+                className="right-tool-page-back"
+                onClick={() => setActiveToolId("menu")}
+                type="button"
+              >
+                <ArrowLeft size={16} />
+                <span>{activeRightSidebarTool?.label ?? "工具"}</span>
+              </button>
+              <button
+                aria-label="关闭右侧栏"
+                onClick={() => onCollapsedChange(true)}
+                title="关闭右侧栏"
+                type="button"
+              >
+                <X size={16} />
+              </button>
+            </header>
+            <div className="right-tool-placeholder-body">
+              <span aria-hidden="true">
+                <Construction size={24} />
+              </span>
+              <strong>{activeRightSidebarTool?.label}功能待实现</strong>
+              <p>工具面板已经预留，后续可在这里接入完整功能。</p>
+            </div>
           </section>
         )}
         {editorModal}
