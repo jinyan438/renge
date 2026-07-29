@@ -24,6 +24,7 @@ import {
 import {
   calculateBrowserFitZoomFactor,
   buildBrowserPageReadScript,
+  buildBrowserScriptExecutionWrapper,
   normalizeBrowserAddress,
   registerBrowserSidebarController,
   type BrowserSidebarController,
@@ -415,10 +416,43 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
           case "browser_execute_script": {
             const script = getStringArg(args, "script");
             if (!script.trim()) throw new Error("script 不能为空");
+            type ScriptExecutionOutcome = {
+              __rengeBrowserScriptExecution?: boolean;
+              ok?: boolean;
+              value?: unknown;
+              error?: { name?: string; message?: string; stack?: string };
+            };
+            let outcome: ScriptExecutionOutcome;
+            try {
+              outcome = await executeInPage<ScriptExecutionOutcome>(
+                buildBrowserScriptExecutionWrapper(script),
+                true,
+              );
+            } catch {
+              try {
+                outcome = await executeInPage<ScriptExecutionOutcome>(
+                  buildBrowserScriptExecutionWrapper(script, false),
+                  true,
+                );
+              } catch (statementError) {
+                const message = statementError instanceof Error
+                  ? statementError.message
+                  : String(statementError);
+                throw new Error(`页面脚本存在语法错误或无法执行：${message}`);
+              }
+            }
+            if (!outcome?.__rengeBrowserScriptExecution) {
+              throw new Error("页面脚本没有返回可识别的执行结果");
+            }
+            if (!outcome.ok) {
+              const name = outcome.error?.name || "Error";
+              const message = outcome.error?.message || "页面脚本执行失败";
+              throw new Error(`页面脚本抛出 ${name}：${message}`);
+            }
             return {
               ok: true,
               action: "execute_script",
-              result: await executeInPage(script, true),
+              result: outcome.value,
               ...readState(),
             };
           }

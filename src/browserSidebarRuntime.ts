@@ -234,7 +234,7 @@ export const browserToolDefinitions = [
     function: {
       name: "browser_execute_script",
       description:
-        "在当前页面上下文执行 JavaScript，适合其他浏览器工具无法覆盖的读取或编辑操作。返回值应可 JSON 序列化。",
+        "在当前页面上下文执行 JavaScript，适合其他浏览器工具无法覆盖的读取或编辑操作。DOM 和循环对象会自动转换为安全结果，多语句脚本可用 return 返回值。",
       parameters: {
         type: "object",
         properties: {
@@ -357,6 +357,60 @@ export function buildBrowserPageReadScript(args: BrowserToolArguments) {
     const text = trim(cleanText(root.innerText || root.textContent || ''));
     if (mode === 'text') return { ...result, text };
     return { ...result, text, interactive: interactives };
+  })()`;
+}
+
+export function buildBrowserScriptExecutionWrapper(script: string, asExpression = true) {
+  const source = String(script ?? "").trim();
+  const expressionSource = source.replace(/;+\s*$/, "");
+  const executionSource = asExpression
+    ? `(${expressionSource})`
+    : `(async () => {\n${source}\n})()`;
+
+  return `(async () => {
+    const normalize = (value, depth = 0, seen = new WeakSet()) => {
+      if (value === null || value === undefined || typeof value === 'string' || typeof value === 'boolean') return value;
+      if (typeof value === 'number') return Number.isFinite(value) ? value : String(value);
+      if (typeof value === 'bigint' || typeof value === 'symbol' || typeof value === 'function') return String(value);
+      if (typeof Node !== 'undefined' && value instanceof Node) {
+        if (typeof Element !== 'undefined' && value instanceof Element) {
+          return {
+            type: 'element',
+            tag: value.tagName.toLowerCase(),
+            id: value.id || '',
+            className: value.getAttribute('class') || '',
+            text: String(value.innerText || value.textContent || '').trim().slice(0, 500),
+            outerHTML: String(value.outerHTML || '').slice(0, 4000),
+          };
+        }
+        return { type: 'node', name: value.nodeName, text: String(value.textContent || '').slice(0, 500) };
+      }
+      if (depth >= 5) return '[maximum depth]';
+      if (typeof value !== 'object') return String(value);
+      if (seen.has(value)) return '[circular]';
+      seen.add(value);
+      if (Array.isArray(value)) return value.slice(0, 200).map((item) => normalize(item, depth + 1, seen));
+      const output = {};
+      Object.entries(value).slice(0, 200).forEach(([key, item]) => {
+        try { output[key] = normalize(item, depth + 1, seen); }
+        catch (error) { output[key] = '[unreadable: ' + String(error?.message || error) + ']'; }
+      });
+      return output;
+    };
+    try {
+      const value = await ${executionSource};
+      return { __rengeBrowserScriptExecution: true, ok: true, value: normalize(value) };
+    } catch (error) {
+      return {
+        __rengeBrowserScriptExecution: true,
+        ok: false,
+        error: {
+          name: String(error?.name || 'Error'),
+          message: String(error?.message || error),
+          stack: String(error?.stack || '').slice(0, 6000),
+        },
+      };
+    }
   })()`;
 }
 

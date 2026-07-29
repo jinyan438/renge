@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   browserToolDefinitions,
   buildBrowserPageReadScript,
+  buildBrowserScriptExecutionWrapper,
   buildBrowserToolsSystemPrompt,
   calculateBrowserFitZoomFactor,
   isBrowserToolName,
@@ -13,6 +14,33 @@ test("builds a syntactically valid page-reading script", () => {
   const script = buildBrowserPageReadScript({ mode: "snapshot" });
   assert.doesNotThrow(() => new Function(`return ${script};`));
   assert.match(script, /replace\(\/\\n\{3,\}\/g, '\\n\\n'\)/);
+});
+
+test("captures page-script errors and normalizes non-JSON results", async () => {
+  const expressionWrapper = buildBrowserScriptExecutionWrapper(
+    `(() => { const value = { answer: 42 }; value.self = value; return value; })()`,
+  );
+  const expressionResult = await new Function(`return ${expressionWrapper};`)();
+  assert.deepEqual(expressionResult, {
+    __rengeBrowserScriptExecution: true,
+    ok: true,
+    value: { answer: 42, self: "[circular]" },
+  });
+
+  const statementWrapper = buildBrowserScriptExecutionWrapper(
+    `const items = [1, 2, 3]; return { count: items.length };`,
+    false,
+  );
+  const statementResult = await new Function(`return ${statementWrapper};`)();
+  assert.deepEqual(statementResult.value, { count: 3 });
+
+  const errorWrapper = buildBrowserScriptExecutionWrapper(
+    `(() => { throw new TypeError("logo missing"); })()`,
+  );
+  const errorResult = await new Function(`return ${errorWrapper};`)();
+  assert.equal(errorResult.ok, false);
+  assert.equal(errorResult.error.name, "TypeError");
+  assert.equal(errorResult.error.message, "logo missing");
 });
 
 test("fits horizontally overflowing pages into the sidebar viewport", () => {
