@@ -2,11 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   browserToolDefinitions,
+  buildBrowserPageReadScript,
   buildBrowserToolsSystemPrompt,
   calculateBrowserFitZoomFactor,
   isBrowserToolName,
   normalizeBrowserAddress,
 } from "../src/browserSidebarRuntime.ts";
+
+test("builds a syntactically valid page-reading script", () => {
+  const script = buildBrowserPageReadScript({ mode: "snapshot" });
+  assert.doesNotThrow(() => new Function(`return ${script};`));
+  assert.match(script, /replace\(\/\\n\{3,\}\/g, '\\n\\n'\)/);
+});
 
 test("fits horizontally overflowing pages into the sidebar viewport", () => {
   assert.equal(calculateBrowserFitZoomFactor(720, 1200), 0.6);
