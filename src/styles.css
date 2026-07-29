@@ -2177,6 +2177,110 @@ summary:focus-visible {
   flex: 0 0 auto;
 }
 
+.context-compression-card {
+  align-items: start;
+}
+
+.context-compression-limits {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #dfe4ec;
+  border-radius: 9px;
+  background: #ffffff;
+}
+
+.context-compression-limits-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.context-compression-limits-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.context-compression-limits-heading strong {
+  color: #172033;
+  font-size: 13px;
+}
+
+.context-compression-limits-heading span,
+.context-compression-note,
+.context-compression-empty {
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.context-compression-limit-list {
+  display: grid;
+  gap: 9px;
+}
+
+.context-compression-limit-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(170px, 0.55fr) 36px;
+  gap: 10px;
+  align-items: end;
+}
+
+.context-compression-limit-row label {
+  display: grid;
+  gap: 5px;
+  color: #475467;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.context-compression-limit-row input {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid #d4d9e2;
+  border-radius: 8px;
+  outline: none;
+  background: #ffffff;
+  color: #172033;
+  font: inherit;
+}
+
+.context-compression-limit-row input:focus {
+  border-color: #7aa7ff;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.context-compression-limit-row input[aria-invalid="true"] {
+  border-color: #f59e0b;
+}
+
+.context-compression-delete {
+  width: 36px;
+  height: 36px;
+}
+
+.context-compression-limit-error {
+  grid-column: 1 / 3;
+  margin-top: -4px;
+  color: #b54708;
+  font-size: 11px;
+}
+
+.context-compression-empty {
+  padding: 14px;
+  border: 1px dashed #cfd6e2;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.context-compression-note {
+  margin: 0;
+}
+
 @media (max-width: 720px) {
   .llm-setting-card {
     grid-template-columns: minmax(0, 1fr);
@@ -2186,6 +2290,23 @@ summary:focus-visible {
     grid-column: 1;
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .context-compression-limits-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .context-compression-limit-row {
+    grid-template-columns: minmax(0, 1fr) 36px;
+  }
+
+  .context-compression-limit-row label:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .context-compression-limit-error {
+    grid-column: 1 / -1;
   }
 }
 

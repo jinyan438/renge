@@ -208,6 +208,21 @@ import {
   type ProviderReasoningEffort,
   type ReasoningMessageStreamMode,
 } from "./reasoningUtils";
+import {
+  applyContextCompressionSummary,
+  buildFallbackContextSummary,
+  createContextCompressionPlan,
+  createContextSummaryCacheKey,
+  DEFAULT_CONTEXT_COMPRESSION_SETTINGS,
+  estimateContextMessagesTokens,
+  estimateContextValueTokens,
+  normalizeContextCompressionSettings,
+  renderContextMessagesForSummary,
+  resolveContextCompressionLimit,
+  splitContextSummaryTranscript,
+  truncateContextSummary,
+  type ContextCompressionSettings,
+} from "./contextCompressionUtils";
 import { StatusBarSidebar } from "./StatusBarSidebar";
 import {
   buildStatusBarConversationSystemPrompt,
@@ -702,6 +717,7 @@ type RengeAppData = {
   chatDialogueRewriteEnabled?: boolean;
   chatRenderedEditingEnabled?: boolean;
   llmFullAccessEnabled?: boolean;
+  contextCompressionSettings?: ContextCompressionSettings;
   chatPersonalization?: ChatPersonalizationSettings;
   mcpServers?: McpServerConfig[];
   skills?: SkillProfile[];
@@ -962,6 +978,7 @@ const CHAT_CHOICE_TOOLS_ENABLED_STORAGE_KEY = "renge_chat_choice_tools_enabled";
 const CHAT_DIALOGUE_REWRITE_ENABLED_STORAGE_KEY = "renge_chat_dialogue_rewrite_enabled";
 const CHAT_RENDERED_EDITING_ENABLED_STORAGE_KEY = "renge_chat_rendered_editing_enabled";
 const LLM_FULL_ACCESS_ENABLED_STORAGE_KEY = "renge_llm_full_access_enabled";
+const CONTEXT_COMPRESSION_SETTINGS_STORAGE_KEY = "renge_context_compression_settings";
 const CHAT_PERSONALIZATION_STORAGE_KEY = "renge_chat_personalization";
 const MCP_SERVERS_STORAGE_KEY = "renge_mcp_servers";
 const SKILLS_STORAGE_KEY = "renge_skills";
@@ -1144,6 +1161,17 @@ function loadProviderChannels() {
     return providers.length > 0 ? providers : createDefaultProviderChannels();
   } catch {
     return createDefaultProviderChannels();
+  }
+}
+
+function loadContextCompressionSettings() {
+  try {
+    const rawValue = localStorage.getItem(CONTEXT_COMPRESSION_SETTINGS_STORAGE_KEY);
+    return rawValue
+      ? normalizeContextCompressionSettings(JSON.parse(rawValue))
+      : { ...DEFAULT_CONTEXT_COMPRESSION_SETTINGS };
+  } catch {
+    return { ...DEFAULT_CONTEXT_COMPRESSION_SETTINGS };
   }
 }
 
@@ -2497,6 +2525,10 @@ function persistAppDataToLocalStores(
   setLocalStorageValueSafely(
     LLM_FULL_ACCESS_ENABLED_STORAGE_KEY,
     String(data.llmFullAccessEnabled ?? false),
+  );
+  setLocalStorageJsonSafely(
+    CONTEXT_COMPRESSION_SETTINGS_STORAGE_KEY,
+    data.contextCompressionSettings ?? DEFAULT_CONTEXT_COMPRESSION_SETTINGS,
   );
   setLocalStorageJsonSafely(
     CHAT_PERSONALIZATION_STORAGE_KEY,
@@ -11059,6 +11091,9 @@ export function App() {
   const [llmFullAccessEnabled, setLlmFullAccessEnabled] = useState(
     () => localStorage.getItem(LLM_FULL_ACCESS_ENABLED_STORAGE_KEY) === "true",
   );
+  const [contextCompressionSettings, setContextCompressionSettings] =
+    useState<ContextCompressionSettings>(loadContextCompressionSettings);
+  const contextSummaryCacheRef = useRef(new Map<string, string>());
   const [chatPersonalization, setChatPersonalization] =
     useState<ChatPersonalizationSettings>(loadChatPersonalization);
   const [chatSender, setChatSender] = useState<ChatSenderIdentity>(loadChatSender);
@@ -12143,6 +12178,7 @@ export function App() {
       chatDialogueRewriteEnabled,
       chatRenderedEditingEnabled,
       llmFullAccessEnabled,
+      contextCompressionSettings,
       chatPersonalization,
       mcpServers,
       skills,
@@ -12150,7 +12186,7 @@ export function App() {
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     };
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, extensions, llmFullAccessEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, contextCompressionSettings, extensions, llmFullAccessEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -12339,6 +12375,9 @@ export function App() {
         typeof persistentData?.llmFullAccessEnabled === "boolean"
           ? persistentData.llmFullAccessEnabled
           : localStorage.getItem(LLM_FULL_ACCESS_ENABLED_STORAGE_KEY) === "true";
+      const nextContextCompressionSettings = normalizeContextCompressionSettings(
+        persistentData?.contextCompressionSettings ?? loadContextCompressionSettings(),
+      );
       const nextChatPersonalization = persistentData?.chatPersonalization
         ? normalizeChatPersonalization(persistentData.chatPersonalization)
         : loadChatPersonalization();
@@ -12503,6 +12542,7 @@ export function App() {
       setChatDialogueRewriteEnabled(nextChatDialogueRewriteEnabled);
       setChatRenderedEditingEnabled(nextChatRenderedEditingEnabled);
       setLlmFullAccessEnabled(nextLlmFullAccessEnabled);
+      setContextCompressionSettings(nextContextCompressionSettings);
       setChatPersonalization(nextChatPersonalization);
       setMcpServers(nextMcpServers);
       setActiveMcpServerId(nextMcpServers[0]?.id ?? "");
@@ -14235,6 +14275,208 @@ export function App() {
     chatPresetEnabled && activeChatPreset
       ? buildChatPresetRequestParameters(activeChatPreset)
       : null;
+  const prepareContextCompressedMessages = async ({
+    messages,
+    provider,
+    modelId,
+    tools = [],
+    requestedOutputTokens = 0,
+    signal,
+    sessionId = activeChatSessionIdRef.current,
+    quiet = false,
+  }: {
+    messages: ChatApiMessage[];
+    provider: ModelProviderChannel;
+    modelId: string;
+    tools?: unknown[];
+    requestedOutputTokens?: number;
+    signal?: AbortSignal;
+    sessionId?: string;
+    quiet?: boolean;
+  }): Promise<ChatApiMessage[]> => {
+    const additionalTokens = estimateContextValueTokens(tools);
+    const plan = createContextCompressionPlan(
+      messages,
+      contextCompressionSettings,
+      modelId,
+      {
+        additionalTokens,
+        requestedOutputTokens,
+      },
+    );
+    if (!plan) return messages;
+
+    const applySummaryWithinBudget = (summary: string) => {
+      const keptTokens = estimateContextMessagesTokens(plan.keptMessages);
+      const summaryEnvelopeTokens =
+        estimateContextMessagesTokens(
+          applyContextCompressionSummary({ ...plan, summaryTokenBudget: 1 }, ""),
+        ) - keptTokens;
+      const availableSummaryTokens = Math.max(
+        1,
+        plan.inputBudgetTokens -
+          additionalTokens -
+          keptTokens -
+          summaryEnvelopeTokens -
+          16,
+      );
+      const compressedMessages = applyContextCompressionSummary(
+        {
+          ...plan,
+          summaryTokenBudget: Math.min(plan.summaryTokenBudget, availableSummaryTokens),
+        },
+        summary,
+      );
+      const compressedTokens =
+        estimateContextMessagesTokens(compressedMessages) + additionalTokens;
+      if (compressedTokens > plan.inputBudgetTokens) {
+        throw new Error(
+          `上下文压缩后仍需约 ${compressedTokens.toLocaleString()} Token，超过 ${modelId} 的输入预算 ${plan.inputBudgetTokens.toLocaleString()} Token。请提高该模型的上下文上限，或减少系统提示词、工具定义和最近一条消息的长度。`,
+        );
+      }
+      return compressedMessages;
+    };
+
+    throwIfChatAborted(signal);
+    const cacheKey = createContextSummaryCacheKey(modelId, plan.removedMessages);
+    const cachedSummary = contextSummaryCacheRef.current.get(cacheKey);
+    if (cachedSummary) {
+      if (!quiet) {
+        setChatStatus({
+          status: "loading",
+          message: `已复用上下文摘要，正在继续生成（压缩 ${plan.removedMessages.length} 条较早消息）...`,
+        });
+      }
+      return applySummaryWithinBudget(cachedSummary);
+    }
+
+    if (!quiet) {
+      setChatStatus({
+        status: "loading",
+        message: `上下文接近 ${plan.maxContextTokens.toLocaleString()} Token 上限，正在压缩 ${plan.removedMessages.length} 条较早消息...`,
+      });
+    }
+
+    const requestSummary = async (transcript: string, instruction: string) => {
+      throwIfChatAborted(signal);
+      const response = await fetch("/api/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal,
+        body: JSON.stringify({
+          apiBaseUrl: trimTrailingSlash(provider.apiBaseUrl),
+          apiKey: provider.apiKey,
+          sessionId,
+          request: {
+            model: modelId,
+            messages: [
+              {
+                role: "system",
+                content: [
+                  "你是对话上下文压缩器。请把较早对话整理成紧凑、可继续使用的事实摘要。",
+                  "必须保留用户目标、约束、决定、角色关系、专有名词、关键数字、未完成事项、工具结果、文件路径和错误信息。",
+                  "合并重复信息，忽略寒暄和无用措辞；不要虚构，不要回答原对话，也不要描述你正在摘要。",
+                  instruction,
+                ].join("\n"),
+              },
+              { role: "user", content: transcript },
+            ],
+            ...(provider.reasoningEnabled
+              ? buildProviderReasoningDisableRequest({ ...provider, modelId })
+              : {}),
+            temperature: 0.1,
+            max_tokens: plan.summaryTokenBudget,
+            stream: false,
+          },
+        }),
+      });
+      const payload = (await response.json()) as {
+        error?: string | { message?: string };
+        choices?: Array<{ message?: ChatApiMessage }>;
+        output_text?: string;
+      };
+      throwIfChatAborted(signal);
+      if (!response.ok) {
+        const errorMessage =
+          typeof payload.error === "string" ? payload.error : payload.error?.message;
+        throw new Error(errorMessage || `摘要请求失败：${response.status}`);
+      }
+      const summary =
+        getChatApiMessageText(payload.choices?.[0]?.message).trim() ||
+        payload.output_text?.trim() ||
+        "";
+      if (!summary) throw new Error("摘要响应为空。");
+      return truncateContextSummary(summary, plan.summaryTokenBudget);
+    };
+
+    let summary = "";
+    let usedFallback = false;
+    try {
+      if (isImageGenerationModelId(modelId)) {
+        usedFallback = true;
+        summary = buildFallbackContextSummary(
+          plan.removedMessages,
+          plan.summaryTokenBudget,
+        );
+      } else {
+        const transcript = renderContextMessagesForSummary(plan.removedMessages);
+        const chunkTokenBudget = Math.max(
+          1_024,
+          Math.min(32_000, Math.floor(plan.inputBudgetTokens * 0.55)),
+        );
+        const chunks = splitContextSummaryTranscript(transcript, chunkTokenBudget);
+        if (chunks.length > 4) {
+          usedFallback = true;
+          summary = buildFallbackContextSummary(
+            plan.removedMessages,
+            plan.summaryTokenBudget,
+          );
+        } else {
+          const partialSummaries: string[] = [];
+          for (let index = 0; index < chunks.length; index += 1) {
+            partialSummaries.push(
+              await requestSummary(
+                chunks[index],
+                chunks.length > 1
+                  ? `这是第 ${index + 1}/${chunks.length} 段，输出可与其他分段合并的摘要。`
+                  : "输出分点清晰但尽量紧凑的摘要。",
+              ),
+            );
+          }
+          summary =
+            partialSummaries.length === 1
+              ? partialSummaries[0]
+              : await requestSummary(
+                  partialSummaries
+                    .map((partial, index) => `分段摘要 ${index + 1}：\n${partial}`)
+                    .join("\n\n"),
+                  "合并所有分段摘要，去重后输出一份按时间与主题组织的最终摘要。",
+                );
+        }
+      }
+    } catch (error) {
+      throwIfChatAborted(signal);
+      console.warn("模型上下文摘要失败，使用本地提取式压缩", error);
+      usedFallback = true;
+      summary = buildFallbackContextSummary(plan.removedMessages, plan.summaryTokenBudget);
+    }
+
+    contextSummaryCacheRef.current.set(cacheKey, summary);
+    while (contextSummaryCacheRef.current.size > 24) {
+      const oldestKey = contextSummaryCacheRef.current.keys().next().value;
+      if (typeof oldestKey !== "string") break;
+      contextSummaryCacheRef.current.delete(oldestKey);
+    }
+    if (!quiet) {
+      setChatStatus({
+        status: "loading",
+        message: usedFallback
+          ? `模型摘要不可用，已用本地方式压缩 ${plan.removedMessages.length} 条消息，正在继续生成...`
+          : `已压缩 ${plan.removedMessages.length} 条较早消息，正在继续生成...`,
+      });
+    }
+    return applySummaryWithinBudget(summary);
+  };
   const effectiveChatModelId = getEffectiveProviderModelId(chatProvider);
   const effectiveChatModelIdRef = useRef(effectiveChatModelId);
   effectiveChatModelIdRef.current = effectiveChatModelId;
@@ -16672,6 +16914,20 @@ export function App() {
   const selectedReasoningEffortLabel = chatProvider
     ? getProviderReasoningEffortLabel(chatProvider.reasoningEffort)
     : "中";
+  const contextCompressionModelOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(providers.flatMap((provider) => getProviderModelIds(provider))),
+      ),
+    [providers],
+  );
+  const configuredContextCompressionLimits = contextCompressionSettings.modelLimits.filter(
+    (limit) => limit.modelId.trim(),
+  );
+  const selectedModelContextLimit = resolveContextCompressionLimit(
+    { ...contextCompressionSettings, enabled: true },
+    selectedModelValue,
+  );
 
   const activeTypes = activePersona?.entryTypes ?? [];
   const selectedEntryType =
@@ -16718,6 +16974,48 @@ export function App() {
       ),
     );
     setProviderPullState({ status: "idle", message: "" });
+  };
+
+  const addContextCompressionModelLimit = () => {
+    const configuredModelIds = new Set(
+      contextCompressionSettings.modelLimits.map((limit) => limit.modelId.trim().toLowerCase()),
+    );
+    const suggestedModelId =
+      [selectedModelValue, ...contextCompressionModelOptions].find(
+        (modelId) => modelId && !configuredModelIds.has(modelId.trim().toLowerCase()),
+      ) ?? "";
+    setContextCompressionSettings((current) => ({
+      ...current,
+      modelLimits: [
+        ...current.modelLimits,
+        {
+          id: crypto.randomUUID(),
+          modelId: suggestedModelId,
+          maxContextTokens: activeChatPreset?.maxContext || 128_000,
+        },
+      ],
+    }));
+  };
+
+  const updateContextCompressionModelLimit = (
+    id: string,
+    patch: Partial<ContextCompressionSettings["modelLimits"][number]>,
+  ) => {
+    setContextCompressionSettings((current) => ({
+      ...current,
+      modelLimits: current.modelLimits.map((limit) =>
+        limit.id === id ? { ...limit, ...patch } : limit,
+      ),
+    }));
+    contextSummaryCacheRef.current.clear();
+  };
+
+  const deleteContextCompressionModelLimit = (id: string) => {
+    setContextCompressionSettings((current) => ({
+      ...current,
+      modelLimits: current.modelLimits.filter((limit) => limit.id !== id),
+    }));
+    contextSummaryCacheRef.current.clear();
   };
 
   const addProvider = () => {
@@ -20407,10 +20705,6 @@ export function App() {
         onReasoningDelta?: (delta: string) => void;
       }) => {
         throwIfChatAborted(abortSignal);
-        const requestMessages = substituteUserNicknameInApiMessages(
-          messages,
-          userProfile.nickname,
-        );
         const chatToolsForRequest = options.includeTools
           ? availableChatTools.filter(
               (tool) =>
@@ -20418,6 +20712,15 @@ export function App() {
                 tool.function.name !== "multi_agent_delegate_task",
             )
           : [];
+        const requestMessages = await prepareContextCompressedMessages({
+          messages: substituteUserNicknameInApiMessages(messages, userProfile.nickname),
+          provider: requestProvider,
+          modelId: requestModelId,
+          tools: chatToolsForRequest,
+          requestedOutputTokens: activeChatPresetRequestParameters?.max_tokens ?? 0,
+          signal: abortSignal,
+          sessionId: requestSessionId,
+        });
         const response = await fetch("/api/chat/completions", {
           method: "POST",
           headers: {
@@ -20670,6 +20973,18 @@ export function App() {
         for (let subToolRound = 0; subToolRound < MAX_SUB_AGENT_TOOL_ROUNDS; subToolRound += 1) {
           throwIfChatAborted(abortSignal);
           const subAgentShouldStream = subAgentProvider.reasoningEnabled;
+          const subAgentRequestMessages = await prepareContextCompressedMessages({
+            messages: substituteUserNicknameInApiMessages(
+              subAgentApiMessages,
+              userProfile.nickname,
+            ),
+            provider: subAgentProvider,
+            modelId: subAgentModelId,
+            tools: subAgentToolDefinitions,
+            requestedOutputTokens: activeChatPresetRequestParameters?.max_tokens ?? 0,
+            signal: abortSignal,
+            sessionId: requestSessionId,
+          });
           const response = await fetch("/api/chat/completions", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -20680,10 +20995,7 @@ export function App() {
               sessionId: activeChatSessionId,
               request: {
                 model: subAgentModelId,
-                messages: substituteUserNicknameInApiMessages(
-                  subAgentApiMessages,
-                  userProfile.nickname,
-                ),
+                messages: subAgentRequestMessages,
                 ...(subAgentToolDefinitions.length > 0
                   ? {
                       tools: subAgentToolDefinitions,
@@ -22470,10 +22782,29 @@ export function App() {
           ? undefined
           : normalizedConfig.tool_choice;
 
-      const requestMessages = substituteUserNicknameInApiMessages(
-        apiMessages,
-        userProfile.nickname,
+      const requestedOutputTokens = Number(
+        normalizedConfig.max_tokens ?? normalizedConfig.length ?? customApi.max_tokens,
       );
+      const requestMessages = await prepareContextCompressedMessages({
+        messages: substituteUserNicknameInApiMessages(apiMessages, userProfile.nickname),
+        provider: {
+          id: chatProvider?.id ?? "custom-api",
+          name: chatProvider?.name ?? "Custom API",
+          apiBaseUrl: requestApiBaseUrl,
+          apiKey: requestApiKey,
+          modelId: requestModelId,
+          models: chatProvider?.models ?? [requestModelId],
+          reasoningEnabled: hasCustomApi ? false : chatProvider?.reasoningEnabled === true,
+          reasoningEffort: chatProvider?.reasoningEffort ?? "medium",
+          updatedAt: chatProvider?.updatedAt ?? new Date().toISOString(),
+        },
+        modelId: requestModelId,
+        tools: requestedTools,
+        requestedOutputTokens: Number.isFinite(requestedOutputTokens)
+          ? requestedOutputTokens
+          : activeChatPresetRequestParameters?.max_tokens ?? 0,
+        signal: abortSignal,
+      });
       const response = await fetch("/api/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -22915,10 +23246,16 @@ export function App() {
         onReasoningDelta?: (delta: string) => void;
       }) => {
         throwIfChatAborted(abortSignal);
-        const requestMessages = substituteUserNicknameInApiMessages(
-          messages,
-          userProfile.nickname,
-        );
+        const requestTools = options.includeTools ? availableChatTools : [];
+        const requestMessages = await prepareContextCompressedMessages({
+          messages: substituteUserNicknameInApiMessages(messages, userProfile.nickname),
+          provider: chatProvider,
+          modelId: requestModelId,
+          tools: requestTools,
+          requestedOutputTokens: activeChatPresetRequestParameters?.max_tokens ?? 0,
+          signal: abortSignal,
+          sessionId: requestSessionId,
+        });
         const response = await fetch("/api/chat/completions", {
           method: "POST",
           headers: {
@@ -26537,6 +26874,142 @@ export function App() {
                   <p>控制聊天中可选的语言模型交互增强能力。</p>
                 </div>
               </div>
+              <article className="llm-setting-card context-compression-card">
+                <div className="llm-setting-copy">
+                  <h3>自动上下文压缩</h3>
+                  <p>
+                    请求接近当前模型的上下文上限时，保留系统指令和最近对话，并用模型摘要较早消息。
+                    摘要失败会自动改用本地提取式压缩，不会改写聊天记录。
+                  </p>
+                </div>
+                <label className="tool-toggle llm-feature-toggle">
+                  <input
+                    type="checkbox"
+                    checked={contextCompressionSettings.enabled}
+                    onChange={(event) => {
+                      setContextCompressionSettings((current) => ({
+                        ...current,
+                        enabled: event.target.checked,
+                      }));
+                      contextSummaryCacheRef.current.clear();
+                    }}
+                  />
+                  <span>开启上下文压缩</span>
+                </label>
+                <div
+                  className={`llm-setting-status ${
+                    contextCompressionSettings.enabled ? "enabled" : "disabled"
+                  }`}
+                >
+                  <strong>
+                    {contextCompressionSettings.enabled ? "已开启" : "已关闭"}
+                  </strong>
+                  <span>
+                    {!contextCompressionSettings.enabled
+                      ? "所有请求仍发送完整上下文。"
+                      : selectedModelValue && selectedModelContextLimit
+                        ? `当前模型 ${selectedModelValue} 的上限为 ${selectedModelContextLimit.toLocaleString()} Token；达到安全阈值后自动压缩。`
+                        : selectedModelValue
+                          ? `当前模型 ${selectedModelValue} 尚未配置上限，因此不会自动压缩。`
+                          : "请先配置模型 ID 和上下文上限。"}
+                  </span>
+                </div>
+                <div className="context-compression-limits">
+                  <div className="context-compression-limits-heading">
+                    <div>
+                      <strong>模型上下文上限</strong>
+                      <span>
+                        按模型 ID 精确匹配（忽略大小写），已配置 {configuredContextCompressionLimits.length} 项。
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="ghost-action"
+                      onClick={addContextCompressionModelLimit}
+                    >
+                      <Plus size={15} />
+                      添加模型上限
+                    </button>
+                  </div>
+                  <datalist id="context-compression-model-options">
+                    {contextCompressionModelOptions.map((modelId) => (
+                      <option key={modelId} value={modelId} />
+                    ))}
+                  </datalist>
+                  {contextCompressionSettings.modelLimits.length > 0 ? (
+                    <div className="context-compression-limit-list">
+                      {contextCompressionSettings.modelLimits.map((limit) => {
+                        const duplicate = contextCompressionSettings.modelLimits.some(
+                          (candidate) =>
+                            candidate.id !== limit.id &&
+                            candidate.modelId.trim() &&
+                            candidate.modelId.trim().toLowerCase() ===
+                              limit.modelId.trim().toLowerCase(),
+                        );
+                        return (
+                          <div className="context-compression-limit-row" key={limit.id}>
+                            <label>
+                              <span>模型 ID</span>
+                              <input
+                                type="text"
+                                list="context-compression-model-options"
+                                value={limit.modelId}
+                                placeholder="例如 gpt-5.4"
+                                aria-invalid={duplicate || !limit.modelId.trim()}
+                                onChange={(event) =>
+                                  updateContextCompressionModelLimit(limit.id, {
+                                    modelId: event.target.value,
+                                  })
+                                }
+                              />
+                            </label>
+                            <label>
+                              <span>上下文上限（Token）</span>
+                              <input
+                                type="number"
+                                min={512}
+                                max={4_000_000}
+                                step={1_024}
+                                value={limit.maxContextTokens}
+                                onChange={(event) => {
+                                  if (!Number.isFinite(event.target.valueAsNumber)) return;
+                                  updateContextCompressionModelLimit(limit.id, {
+                                    maxContextTokens: Math.min(
+                                      4_000_000,
+                                      Math.max(512, Math.floor(event.target.valueAsNumber)),
+                                    ),
+                                  });
+                                }}
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              className="icon-action danger context-compression-delete"
+                              title="删除此模型上限"
+                              aria-label={`删除 ${limit.modelId || "未命名模型"} 的上下文上限`}
+                              onClick={() => deleteContextCompressionModelLimit(limit.id)}
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                            {(duplicate || !limit.modelId.trim()) && (
+                              <small className="context-compression-limit-error">
+                                {duplicate ? "模型 ID 重复，将使用列表中最后一项。" : "填写模型 ID 后才会生效。"}
+                              </small>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="context-compression-empty">
+                      尚未配置模型。点击“添加模型上限”，可优先带入当前会话模型。
+                    </div>
+                  )}
+                  <p className="context-compression-note">
+                    Token 数为兼容不同供应商的安全估算；系统会预留输出空间，并在约 90% 输入预算处开始压缩。
+                  </p>
+                </div>
+              </article>
               <article className="llm-setting-card">
                 <div className="llm-setting-copy">
                   <h3>AI 选项功能</h3>
