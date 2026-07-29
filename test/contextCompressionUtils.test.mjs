@@ -4,11 +4,15 @@ import test from "node:test";
 import {
   applyContextCompressionSummary,
   buildFallbackContextSummary,
+  compactPriorityContextMessages,
+  compactPriorityMachineText,
   createContextCompressionPlan,
   estimateContextMessagesTokens,
   estimateContextTextTokens,
   getContextCompressionTokenBudget,
+  isContextSourceCodeMessage,
   normalizeContextCompressionSettings,
+  pruneContextSourceCodeWithAst,
   resolveContextCompressionLimit,
   splitContextSummaryTranscript,
   truncateContextSummary,
@@ -24,6 +28,7 @@ function settings(modelId = "demo/model", maxContextTokens = 2_048) {
 test("normalizes limits, removes duplicate model IDs, and matches IDs case-insensitively", () => {
   const normalized = normalizeContextCompressionSettings({
     enabled: true,
+    ast_pruning_enabled: true,
     model_limits: [
       { id: "old", model_id: "Demo/Model", max_context_tokens: 4_096 },
       { id: "new", modelId: " demo/model ", maxContextTokens: 8_192 },
@@ -32,6 +37,13 @@ test("normalizes limits, removes duplicate model IDs, and matches IDs case-insen
   });
 
   assert.equal(normalized.enabled, true);
+  assert.equal(normalized.astPruningEnabled, true);
+  assert.equal(normalizeContextCompressionSettings({ enabled: true }).astPruningEnabled, false);
+  assert.equal(
+    normalizeContextCompressionSettings({ enabled: false, astPruningEnabled: true })
+      .astPruningEnabled,
+    false,
+  );
   assert.deepEqual(normalized.modelLimits, [
     { id: "new", modelId: "demo/model", maxContextTokens: 8_192 },
   ]);
@@ -71,6 +83,77 @@ test("does not compress requests below the configured safety threshold", () => {
     { role: "user", content: "Short question" },
   ];
   assert.equal(createContextCompressionPlan(messages, settings(), "demo/model"), null);
+});
+
+test("compresses priority tool and log text to at most ten percent of its tokens", () => {
+  const machineText = Array.from(
+    { length: 500 },
+    (_, index) =>
+      `2026-07-29 12:${String(index % 60).padStart(2, "0")}:00 [INFO] request-${index} status=running repeated machine payload`,
+  ).join("\n");
+  const compacted = compactPriorityMachineText(machineText);
+  const originalTokens = estimateContextTextTokens(machineText);
+  const compactedTokens = estimateContextTextTokens(compacted);
+
+  assert.match(compacted, /机器文本已高压缩/);
+  assert.ok(compactedTokens <= Math.floor(originalTokens * 0.1));
+
+  const messages = [
+    { role: "system", content: "system" },
+    { role: "tool", tool_call_id: "call-1", content: machineText },
+    { role: "user", content: "latest request" },
+  ];
+  const result = compactPriorityContextMessages(messages);
+  assert.equal(result.compressedMessageCount, 1);
+  assert.equal(result.messages[1].tool_call_id, "call-1");
+  assert.ok(result.compressedTokens <= Math.floor(result.originalTokens * 0.1));
+});
+
+test("protects source code from message summarization and machine-text compaction", () => {
+  const sourceMessage = {
+    role: "tool",
+    tool_call_id: "call-code",
+    content: `\`\`\`ts\nexport function calculate(value: number) {\n${"  const next = value + 1;\n".repeat(300)}  return value;\n}\n\`\`\``,
+  };
+  assert.equal(isContextSourceCodeMessage(sourceMessage), true);
+  assert.equal(compactPriorityContextMessages([sourceMessage]).messages[0], sourceMessage);
+
+  const messages = [
+    { role: "system", content: "system" },
+    { role: "assistant", content: null, tool_calls: [{ id: "call-code", type: "function" }] },
+    sourceMessage,
+    ...Array.from({ length: 12 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: `conversation-${index} ${"history ".repeat(180)}`,
+    })),
+  ];
+  const plan = createContextCompressionPlan(messages, settings(), "demo/model");
+  assert.ok(plan);
+  assert.ok(plan.keptMessages.includes(sourceMessage));
+  assert.equal(plan.removedMessages.includes(sourceMessage), false);
+  assert.ok(plan.keptMessages.some((message) => message.tool_calls?.[0]?.id === "call-code"));
+});
+
+test("optionally prunes JavaScript and TypeScript function bodies with an AST", async () => {
+  const messages = [
+    {
+      role: "assistant",
+      content: `Before\n\n\`\`\`ts\nexport interface Result { value: number }\nexport function calculate(value: number): Result {\n  const hidden = value * 100;\n  console.log(hidden);\n  return { value: hidden };\n}\n\`\`\`\n\nAfter`,
+    },
+    {
+      role: "assistant",
+      content: `\`\`\`python\ndef calculate(value):\n    hidden = value * 100\n    return hidden\n\`\`\``,
+    },
+  ];
+  const result = await pruneContextSourceCodeWithAst(messages);
+
+  assert.equal(result.prunedMessageCount, 1);
+  assert.equal(result.prunedBlockCount, 1);
+  assert.match(result.messages[0].content, /interface Result/);
+  assert.match(result.messages[0].content, /function calculate\(value: number\): Result/);
+  assert.match(result.messages[0].content, /AST 已剪枝/);
+  assert.doesNotMatch(result.messages[0].content, /console\.log/);
+  assert.equal(result.messages[1], messages[1]);
 });
 
 test("preserves system instructions and recent turns while replacing older messages", () => {

@@ -2181,6 +2181,47 @@ summary:focus-visible {
   align-items: start;
 }
 
+.context-compression-ast-option {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid #dfe4ec;
+  border-radius: 9px;
+  background: #ffffff;
+}
+
+.context-compression-ast-option > div {
+  display: grid;
+  gap: 4px;
+}
+
+.context-compression-ast-option strong {
+  color: #172033;
+  font-size: 13px;
+}
+
+.context-compression-ast-option span {
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.context-compression-ast-option.disabled {
+  background: #f1f5f9;
+  opacity: 0.72;
+}
+
+.context-compression-ast-option .tool-toggle {
+  flex: 0 0 auto;
+}
+
+.context-compression-ast-option .tool-toggle input:disabled {
+  cursor: not-allowed;
+}
+
 .context-compression-limits {
   grid-column: 1 / -1;
   display: grid;
@@ -2293,6 +2334,11 @@ summary:focus-visible {
   }
 
   .context-compression-limits-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .context-compression-ast-option {
     align-items: stretch;
     flex-direction: column;
   }

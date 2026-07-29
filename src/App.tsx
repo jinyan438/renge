@@ -211,6 +211,7 @@ import {
 import {
   applyContextCompressionSummary,
   buildFallbackContextSummary,
+  compactPriorityContextMessages,
   createContextCompressionPlan,
   createContextSummaryCacheKey,
   DEFAULT_CONTEXT_COMPRESSION_SETTINGS,
@@ -218,6 +219,7 @@ import {
   estimateContextValueTokens,
   getContextCompressionTokenBudget,
   normalizeContextCompressionSettings,
+  pruneContextSourceCodeWithAst,
   renderContextMessagesForSummary,
   resolveContextCompressionLimit,
   splitContextSummaryTranscript,
@@ -490,11 +492,14 @@ type ContextRuntimeUsage = {
   currentTokens: number;
   compressed: boolean;
   removedMessageCount: number;
+  machineCompressedMessageCount: number;
+  astPrunedMessageCount: number;
   chatMessageSignatures: string[];
   mutableChatMessageId?: string;
   mutableChatMessageIndex?: number;
   mutableChatMessageTokens?: number;
   compressionEnabled: boolean;
+  astPruningEnabled: boolean;
   updatedAt: number;
 };
 
@@ -14384,7 +14389,11 @@ export function App() {
     const additionalTokens = estimateContextValueTokens(tools);
     const recordPreparedContextUsage = (
       preparedMessages: ChatApiMessage[],
-      removedMessageCount: number,
+      stats: {
+        removedMessageCount: number;
+        machineCompressedMessageCount: number;
+        astPrunedMessageCount: number;
+      },
     ) => {
       if (!trackUsage || !sessionId || !modelId.trim()) return;
       const currentTokens =
@@ -14408,8 +14417,11 @@ export function App() {
         sessionId,
         modelId,
         currentTokens,
-        compressed: removedMessageCount > 0,
-        removedMessageCount,
+        compressed:
+          stats.removedMessageCount > 0 ||
+          stats.machineCompressedMessageCount > 0 ||
+          stats.astPrunedMessageCount > 0,
+        ...stats,
         chatMessageSignatures: sessionMessages.map(getChatMessageContextSignature),
         ...(mutableChatMessage
           ? {
@@ -14419,13 +14431,46 @@ export function App() {
             }
           : {}),
         compressionEnabled: contextCompressionSettings.enabled,
+        astPruningEnabled: contextCompressionSettings.astPruningEnabled,
         updatedAt: Date.now(),
       };
       const usageKey = getContextRuntimeUsageKey(sessionId, modelId);
       setContextRuntimeUsageByKey((current) => ({ ...current, [usageKey]: usage }));
     };
+    const emptyCompressionStats = {
+      removedMessageCount: 0,
+      machineCompressedMessageCount: 0,
+      astPrunedMessageCount: 0,
+    };
+    const tokenBudget = getContextCompressionTokenBudget(
+      contextCompressionSettings,
+      modelId,
+      requestedOutputTokens,
+    );
+    const rawEstimatedInputTokens =
+      estimateContextMessagesTokens(messages) + additionalTokens;
+    let preparedMessages = messages;
+    let machineCompressedMessageCount = 0;
+    let astPrunedMessageCount = 0;
+    if (tokenBudget && rawEstimatedInputTokens > tokenBudget.safetyThresholdTokens) {
+      throwIfChatAborted(signal);
+      if (contextCompressionSettings.astPruningEnabled) {
+        const astResult = await pruneContextSourceCodeWithAst(preparedMessages);
+        throwIfChatAborted(signal);
+        preparedMessages = astResult.messages;
+        astPrunedMessageCount = astResult.prunedMessageCount;
+      }
+      const priorityResult = compactPriorityContextMessages(preparedMessages);
+      preparedMessages = priorityResult.messages;
+      machineCompressedMessageCount = priorityResult.compressedMessageCount;
+    }
+    const preprocessingStats = {
+      ...emptyCompressionStats,
+      machineCompressedMessageCount,
+      astPrunedMessageCount,
+    };
     const plan = createContextCompressionPlan(
-      messages,
+      preparedMessages,
       contextCompressionSettings,
       modelId,
       {
@@ -14434,8 +14479,29 @@ export function App() {
       },
     );
     if (!plan) {
-      recordPreparedContextUsage(messages, 0);
-      return messages;
+      const preparedInputTokens =
+        estimateContextMessagesTokens(preparedMessages) + additionalTokens;
+      if (tokenBudget && preparedInputTokens > tokenBudget.inputBudgetTokens) {
+        const sourceCodeAdvice = contextCompressionSettings.astPruningEnabled
+          ? "当前代码语言或结构无法继续安全剪枝；请减少代码、系统提示词及工具定义。"
+          : "源代码默认不会进入摘要；可在 LLM 设置中开启 AST 剪枝，或减少代码、系统提示词及工具定义。";
+        throw new Error(
+          `上下文仍需约 ${preparedInputTokens.toLocaleString()} Token，超过 ${modelId} 的输入预算 ${tokenBudget.inputBudgetTokens.toLocaleString()} Token。${sourceCodeAdvice}`,
+        );
+      }
+      if (
+        !quiet &&
+        (machineCompressedMessageCount > 0 || astPrunedMessageCount > 0)
+      ) {
+        setChatStatus({
+          status: "loading",
+          message: `已优先高压缩 ${machineCompressedMessageCount} 条工具/日志消息${
+            astPrunedMessageCount > 0 ? `，并对 ${astPrunedMessageCount} 条代码消息完成 AST 剪枝` : ""
+          }，正在继续生成...`,
+        });
+      }
+      recordPreparedContextUsage(preparedMessages, preprocessingStats);
+      return preparedMessages;
     }
 
     const applySummaryWithinBudget = (summary: string) => {
@@ -14466,7 +14532,11 @@ export function App() {
           `上下文压缩后仍需约 ${compressedTokens.toLocaleString()} Token，超过 ${modelId} 的输入预算 ${plan.inputBudgetTokens.toLocaleString()} Token。请提高该模型的上下文上限，或减少系统提示词、工具定义和最近一条消息的长度。`,
         );
       }
-      recordPreparedContextUsage(compressedMessages, plan.removedMessages.length);
+      recordPreparedContextUsage(compressedMessages, {
+        removedMessageCount: plan.removedMessages.length,
+        machineCompressedMessageCount,
+        astPrunedMessageCount,
+      });
       return compressedMessages;
     };
 
@@ -19353,6 +19423,8 @@ export function App() {
         usesActualRequestTokens: false,
         compressed: false,
         removedMessageCount: 0,
+        machineCompressedMessageCount: 0,
+        astPrunedMessageCount: 0,
         appendedMessageCount: 0,
       };
     }
@@ -19557,6 +19629,7 @@ export function App() {
     const runtimeUsageMatchesCurrentHistory = Boolean(
       runtimeUsage &&
         runtimeUsage.compressionEnabled === contextCompressionSettings.enabled &&
+        runtimeUsage.astPruningEnabled === contextCompressionSettings.astPruningEnabled &&
         runtimeUsage.chatMessageSignatures.length <= currentChatMessageSignatures.length &&
         runtimeUsage.chatMessageSignatures.every(
           (signature, index) =>
@@ -19607,6 +19680,14 @@ export function App() {
       removedMessageCount:
         runtimeUsage && runtimeUsageMatchesCurrentHistory
           ? runtimeUsage.removedMessageCount
+          : 0,
+      machineCompressedMessageCount:
+        runtimeUsage && runtimeUsageMatchesCurrentHistory
+          ? runtimeUsage.machineCompressedMessageCount
+          : 0,
+      astPrunedMessageCount:
+        runtimeUsage && runtimeUsageMatchesCurrentHistory
+          ? runtimeUsage.astPrunedMessageCount
           : 0,
       appendedMessageCount,
     };
@@ -19662,7 +19743,7 @@ export function App() {
       : "上下文压缩当前已关闭";
     const usageNote = contextTokenMeter.usesActualRequestTokens
       ? contextTokenMeter.compressed
-        ? `按最后一次实际发送的压缩上下文计数，已用摘要替换 ${contextTokenMeter.removedMessageCount} 条较早消息，被替换原文未进入生成请求${
+        ? `按最后一次实际发送的压缩上下文计数；高压缩工具/日志 ${contextTokenMeter.machineCompressedMessageCount} 条，AST 剪枝代码 ${contextTokenMeter.astPrunedMessageCount} 条，摘要替换较早消息 ${contextTokenMeter.removedMessageCount} 条；被替换原文未进入生成请求${
             contextTokenMeter.appendedMessageCount > 0
               ? `，另计后续新增 ${contextTokenMeter.appendedMessageCount} 条消息`
               : ""
@@ -27346,8 +27427,8 @@ export function App() {
                 <div className="llm-setting-copy">
                   <h3>自动上下文压缩</h3>
                   <p>
-                    请求接近当前模型的上下文上限时，保留系统指令和最近对话，并用模型摘要较早消息。
-                    摘要失败会自动改用本地提取式压缩，不会改写聊天记录。
+                    请求接近模型上限时，优先将工具输出、日志和冗余机器文本压缩 90% 以上，再摘要较早对话。
+                    源代码默认原样保留，压缩过程不会改写聊天记录。
                   </p>
                 </div>
                 <label className="tool-toggle llm-feature-toggle">
@@ -27355,9 +27436,11 @@ export function App() {
                     type="checkbox"
                     checked={contextCompressionSettings.enabled}
                     onChange={(event) => {
+                      const enabled = event.target.checked;
                       setContextCompressionSettings((current) => ({
                         ...current,
-                        enabled: event.target.checked,
+                        enabled,
+                        ...(enabled ? {} : { astPruningEnabled: false }),
                       }));
                       contextSummaryCacheRef.current.clear();
                     }}
@@ -27381,6 +27464,34 @@ export function App() {
                           ? `当前模型 ${selectedModelValue} 尚未配置上限，因此不会自动压缩。`
                           : "请先配置模型 ID 和上下文上限。"}
                   </span>
+                </div>
+                <div
+                  className={`context-compression-ast-option ${
+                    contextCompressionSettings.enabled ? "enabled" : "disabled"
+                  }`}
+                >
+                  <div>
+                    <strong>AST 代码剪枝</strong>
+                    <span>
+                      可选。使用语法树保留声明、类型和函数签名，仅剪除 JavaScript、TypeScript、JSX、TSX
+                      的函数体；其他语言继续原样保留。
+                    </span>
+                  </div>
+                  <label className="tool-toggle llm-feature-toggle">
+                    <input
+                      type="checkbox"
+                      disabled={!contextCompressionSettings.enabled}
+                      checked={contextCompressionSettings.astPruningEnabled}
+                      onChange={(event) => {
+                        setContextCompressionSettings((current) => ({
+                          ...current,
+                          astPruningEnabled: event.target.checked,
+                        }));
+                        contextSummaryCacheRef.current.clear();
+                      }}
+                    />
+                    <span>开启 AST 剪枝</span>
+                  </label>
                 </div>
                 <div className="context-compression-limits">
                   <div className="context-compression-limits-heading">
@@ -27475,6 +27586,7 @@ export function App() {
                   )}
                   <p className="context-compression-note">
                     Token 数为兼容不同供应商的安全估算；系统会预留输出空间，并在约 90% 输入预算处开始压缩。
+                    代码保护优先级高于工具输出压缩；包含源码的工具结果不会被文本摘要破坏。
                   </p>
                 </div>
               </article>
