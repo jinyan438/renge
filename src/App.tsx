@@ -8897,6 +8897,14 @@ function appendStreamToolFragment(current: string, next: string) {
   return `${current}${next}`;
 }
 
+function getChatApiErrorMessage(payload: unknown) {
+  if (!isObjectRecord(payload)) return "";
+  const error = payload.error;
+  if (typeof error === "string") return error.trim();
+  if (!isObjectRecord(error)) return "";
+  return typeof error.message === "string" ? error.message.trim() : "";
+}
+
 function extractStreamContent(payload: unknown): {
   content: string;
   reasoning: string;
@@ -9694,6 +9702,14 @@ async function readChatStream(
     } catch {
       throw new Error("收到的不是有效的流式响应。");
     }
+    const errorMessage = getChatApiErrorMessage(payload);
+    if (errorMessage) {
+      throw new Error(
+        response.ok
+          ? `请求失败：${errorMessage}`
+          : `请求失败：${response.status} ${errorMessage}`,
+      );
+    }
     const streamContent = extractStreamContent(payload);
     if (streamContent.content) onDelta(streamContent.content);
     if (streamContent.reasoning) onReasoningDelta(streamContent.reasoning);
@@ -9745,8 +9761,17 @@ async function readChatStream(
   const applyStreamPayload = (data: string) => {
     if (!data || data.trim() === "[DONE]") return true;
 
+    let payload: unknown;
     try {
-      const streamContent = extractStreamContent(JSON.parse(data));
+      payload = JSON.parse(data);
+    } catch {
+      return false;
+    }
+    const errorMessage = getChatApiErrorMessage(payload);
+    if (errorMessage) throw new Error(`请求失败：${errorMessage}`);
+
+    try {
+      const streamContent = extractStreamContent(payload);
       if (streamContent.finishReason) finishReason = streamContent.finishReason;
       if (streamContent.toolCallDeltas) {
         applyToolCallDeltas(streamContent.toolCallDeltas);

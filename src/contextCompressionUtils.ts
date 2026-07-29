@@ -395,14 +395,25 @@ export function applyContextCompressionSummary<T extends ContextCompressionMessa
   plan: ContextCompressionPlan<T>,
   summary: string,
 ) {
-  const summaryMessage = {
-    role: "system",
-    content: `${SUMMARY_MARKER}\n以下摘要代表已从请求中移除的较早对话。将其作为连续会话事实使用，不要向用户复述压缩过程。\n\n${truncateContextSummary(summary, plan.summaryTokenBudget)}`,
-  } as T;
+  const summaryContent = `${SUMMARY_MARKER}\n以下摘要代表已从请求中移除的较早对话。将其作为连续会话事实使用，不要向用户复述压缩过程。\n\n${truncateContextSummary(summary, plan.summaryTokenBudget)}`;
+  const leadingSystemMessages = plan.keptMessages.slice(0, plan.summaryInsertIndex);
+  if (leadingSystemMessages.length > 0) {
+    const mergedSystemMessage = {
+      ...leadingSystemMessages[0],
+      content: [
+        ...leadingSystemMessages.map((message) => contentToSummaryText(message.content)),
+        summaryContent,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    } as T;
+    return [mergedSystemMessage, ...plan.keptMessages.slice(plan.summaryInsertIndex)];
+  }
+
+  const summaryMessage = { role: "system", content: summaryContent } as T;
   return [
-    ...plan.keptMessages.slice(0, plan.summaryInsertIndex),
     summaryMessage,
-    ...plan.keptMessages.slice(plan.summaryInsertIndex),
+    ...plan.keptMessages,
   ];
 }
 

@@ -90,10 +90,37 @@ test("preserves system instructions and recent turns while replacing older messa
   assert.ok(plan.estimatedInputTokens > plan.inputBudgetTokens * 0.9);
 
   const compressed = applyContextCompressionSummary(plan, "用户已确定项目目标和关键约束。");
-  assert.equal(compressed[0], messages[0]);
-  assert.match(String(compressed[1].content), /自动上下文压缩摘要/);
+  assert.equal(compressed.filter((message) => message.role === "system").length, 1);
+  assert.match(String(compressed[0].content), /Important system policy/);
+  assert.match(String(compressed[0].content), /自动上下文压缩摘要/);
   assert.equal(compressed.at(-1), messages.at(-1));
   assert.ok(estimateContextMessagesTokens(compressed) < estimateContextMessagesTokens(messages));
+});
+
+test("merges leading system messages and a summary for strict chat templates", () => {
+  const compressed = applyContextCompressionSummary(
+    {
+      maxContextTokens: 8_192,
+      inputBudgetTokens: 7_000,
+      estimatedInputTokens: 6_500,
+      summaryTokenBudget: 512,
+      removedMessages: [],
+      keptMessages: [
+        { role: "system", content: "Primary instruction" },
+        { role: "system", content: "Status context" },
+        { role: "user", content: "Latest request" },
+      ],
+      summaryInsertIndex: 2,
+    },
+    "Earlier facts",
+  );
+
+  assert.equal(compressed.length, 2);
+  assert.equal(compressed[0].role, "system");
+  assert.match(compressed[0].content, /Primary instruction/);
+  assert.match(compressed[0].content, /Status context/);
+  assert.match(compressed[0].content, /自动上下文压缩摘要/);
+  assert.equal(compressed[1].role, "user");
 });
 
 test("keeps assistant tool calls together with their following tool results", () => {
