@@ -27,6 +27,13 @@ export type ContextCompressionPlan<T extends ContextCompressionMessage> = {
   summaryInsertIndex: number;
 };
 
+export type ContextCompressionTokenBudget = {
+  maxContextTokens: number;
+  outputReserveTokens: number;
+  inputBudgetTokens: number;
+  safetyThresholdTokens: number;
+};
+
 export const MIN_CONTEXT_LIMIT_TOKENS = 512;
 export const MAX_CONTEXT_LIMIT_TOKENS = 4_000_000;
 export const DEFAULT_CONTEXT_COMPRESSION_SETTINGS: ContextCompressionSettings = {
@@ -171,6 +178,23 @@ function getOutputReserve(maxContextTokens: number, requestedOutputTokens: numbe
   );
 }
 
+export function getContextCompressionTokenBudget(
+  settings: ContextCompressionSettings,
+  modelId: string,
+  requestedOutputTokens = 0,
+): ContextCompressionTokenBudget | null {
+  const maxContextTokens = resolveContextCompressionLimit(settings, modelId);
+  if (!maxContextTokens) return null;
+  const outputReserveTokens = getOutputReserve(maxContextTokens, requestedOutputTokens);
+  const inputBudgetTokens = Math.max(256, maxContextTokens - outputReserveTokens);
+  return {
+    maxContextTokens,
+    outputReserveTokens,
+    inputBudgetTokens,
+    safetyThresholdTokens: Math.floor(inputBudgetTokens * INPUT_TRIGGER_RATIO),
+  };
+}
+
 function findLeadingSystemCount(messages: ContextCompressionMessage[]) {
   let count = 0;
   while (count < messages.length && messages[count].role === "system") count += 1;
@@ -195,17 +219,17 @@ export function createContextCompressionPlan<T extends ContextCompressionMessage
   modelId: string,
   options: { additionalTokens?: number; requestedOutputTokens?: number } = {},
 ): ContextCompressionPlan<T> | null {
-  const maxContextTokens = resolveContextCompressionLimit(settings, modelId);
-  if (!maxContextTokens || messages.length < 2) return null;
-
-  const additionalTokens = Math.max(0, Math.floor(options.additionalTokens ?? 0));
-  const outputReserve = getOutputReserve(
-    maxContextTokens,
+  const tokenBudget = getContextCompressionTokenBudget(
+    settings,
+    modelId,
     Number(options.requestedOutputTokens ?? 0),
   );
-  const inputBudgetTokens = Math.max(256, maxContextTokens - outputReserve);
+  if (!tokenBudget || messages.length < 2) return null;
+
+  const additionalTokens = Math.max(0, Math.floor(options.additionalTokens ?? 0));
+  const { inputBudgetTokens, maxContextTokens, safetyThresholdTokens } = tokenBudget;
   const estimatedInputTokens = estimateContextMessagesTokens(messages) + additionalTokens;
-  if (estimatedInputTokens <= Math.floor(inputBudgetTokens * INPUT_TRIGGER_RATIO)) return null;
+  if (estimatedInputTokens <= safetyThresholdTokens) return null;
 
   const systemIndexes = new Set<number>();
   const conversationIndexes: number[] = [];

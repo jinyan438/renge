@@ -216,6 +216,7 @@ import {
   DEFAULT_CONTEXT_COMPRESSION_SETTINGS,
   estimateContextMessagesTokens,
   estimateContextValueTokens,
+  getContextCompressionTokenBudget,
   normalizeContextCompressionSettings,
   renderContextMessagesForSummary,
   resolveContextCompressionLimit,
@@ -19208,6 +19209,260 @@ export function App() {
     ];
   };
 
+  const contextTokenMeter = useMemo(() => {
+    const modelEntries =
+      chatMode === "multi"
+        ? configuredMultiAgentPersonas.map((persona) => {
+            const requestConfig = getMultiAgentRequestConfig(persona.id);
+            return { persona, ...requestConfig };
+          })
+        : [
+            {
+              persona: chatMode === "persona" ? chatPersona : undefined,
+              provider: chatProvider,
+              modelId: effectiveChatModelId,
+            },
+          ];
+    const distinctModelIds = Array.from(
+      new Set(modelEntries.map((entry) => entry.modelId.trim()).filter(Boolean)),
+    );
+    const requestedOutputTokens = Number(
+      activeChatPresetRequestParameters?.max_tokens ?? 0,
+    );
+    const displaySettings = { ...contextCompressionSettings, enabled: true };
+    const budgets = distinctModelIds.map((modelId) => ({
+      modelId,
+      budget: getContextCompressionTokenBudget(
+        displaySettings,
+        modelId,
+        requestedOutputTokens,
+      ),
+    }));
+    const missingModelIds = budgets
+      .filter((entry) => !entry.budget)
+      .map((entry) => entry.modelId);
+    const configuredBudgets = budgets
+      .filter(
+        (
+          entry,
+        ): entry is {
+          modelId: string;
+          budget: NonNullable<typeof entry.budget>;
+        } => Boolean(entry.budget),
+      )
+      .sort(
+        (left, right) =>
+          left.budget.safetyThresholdTokens - right.budget.safetyThresholdTokens,
+      );
+    const limitingBudget =
+      missingModelIds.length === 0 ? configuredBudgets[0] ?? null : null;
+
+    const meterEntry = modelEntries.reduce<(typeof modelEntries)[number] | null>(
+      (selected, entry) => {
+        if (!selected) return entry;
+        const selectedPromptTokens = selected.persona
+          ? estimateContextValueTokens(buildPersonaPrompt(selected.persona))
+          : 0;
+        const entryPromptTokens = entry.persona
+          ? estimateContextValueTokens(buildPersonaPrompt(entry.persona))
+          : 0;
+        return entryPromptTokens > selectedPromptTokens ? entry : selected;
+      },
+      null,
+    );
+    const meterPersona = meterEntry?.persona;
+    const meterProvider = meterEntry?.provider ?? chatProvider;
+    const meterModelId = meterEntry?.modelId ?? effectiveChatModelId;
+    const replayReasoningContent = meterProvider
+      ? providerRequiresReasoningContentReplay(meterProvider)
+      : false;
+    const sendImageAttachmentsToProvider = meterProvider
+      ? canProviderReceiveImageUrl(meterProvider, meterModelId)
+      : false;
+    const baseMessages = chatMessages.map((message) =>
+      buildChatMessageForApi(message, personas, userProfile, meterPersona, {
+        sendImageAttachmentsToProvider,
+        hasImageRecognitionMcp: false,
+        replayReasoningContent,
+      }),
+    );
+    const meterHistory = chatMessages.map((message) => ({
+      role: message.role,
+      content: message.content,
+    }));
+    const selectedSystemPrompt = requestSystemPrompts
+      .map((promptProfile) => promptProfile.content.trim())
+      .filter(Boolean)
+      .join("\n\n");
+    const userProfileSystemPrompt =
+      currentChatSender.kind === "user" &&
+      userProfile.sendToAi &&
+      (userProfile.nickname.trim() || userProfile.bio.trim())
+        ? [
+            "当前用户资料：",
+            userProfile.nickname.trim() ? `- 昵称：${userProfile.nickname.trim()}` : "",
+            userProfile.bio.trim() ? `- 简介：${userProfile.bio.trim()}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n")
+        : "";
+    const personaSystemPrompt = meterPersona ? buildPersonaPrompt(meterPersona) : "";
+    const roleplaySystemPrompt =
+      chatMode === "roleplay" && activeSessionRoleplayCard
+        ? buildCharacterCardPrompt(
+            activeSessionRoleplayCard,
+            userProfile.nickname.trim() || "用户",
+          )
+        : "";
+    const personaMemoryPrompt = meterPersona
+      ? buildPersonaMemoryPrompt(
+          chatSessions,
+          activeChatSessionId,
+          meterPersona,
+          personas,
+          userProfile,
+        )
+      : "";
+    const chatSenderContextPrompt = buildChatSenderContextPrompt(
+      chatMessages,
+      personas,
+      meterPersona,
+    );
+    const worldBookSystemPrompt = buildWorldBookPrompt(
+      filterPromptTemplateSpecialEntries(worldBooks, promptTemplateEnabled),
+      activeWorldBookIds,
+      meterHistory,
+      {
+        userName: userProfile.nickname,
+        characterName: activeSessionRoleplayCard?.name ?? meterPersona?.name ?? chatPersona.name,
+      },
+    );
+    const activeCharacterWorldBook = activeSessionRoleplayCard
+      ? resolveCharacterWorldBook(activeSessionRoleplayCard, worldBooks)
+      : null;
+    const characterWorldBookSystemPrompt =
+      chatMode === "roleplay" &&
+      activeSessionRoleplayCard &&
+      activeCharacterWorldBook &&
+      !activeWorldBookIds.includes(activeCharacterWorldBook.id)
+        ? buildWorldBookPrompt(
+            filterPromptTemplateSpecialEntries(
+              [activeCharacterWorldBook],
+              promptTemplateEnabled,
+            ),
+            [activeCharacterWorldBook.id],
+            meterHistory,
+            {
+              userName: userProfile.nickname,
+              characterName: activeSessionRoleplayCard.name,
+            },
+          )
+        : "";
+    const enabledMcpServerIds = new Set(enabledMcpServers.map((server) => server.id));
+    const meterMcpTools = mcpTools.filter((tool) => enabledMcpServerIds.has(tool.serverId));
+    const availableTools = isImageGenerationModelId(meterModelId)
+      ? []
+      : getAvailableChatToolDefinitions(meterMcpTools);
+    const systemPrompt = [
+      selectedSystemPrompt,
+      userProfileSystemPrompt,
+      personaSystemPrompt,
+      roleplaySystemPrompt,
+      personaMemoryPrompt,
+      chatSenderContextPrompt,
+      worldBookSystemPrompt,
+      characterWorldBookSystemPrompt,
+      localToolsEnabled && localWorkspaceHandle
+        ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
+        : "",
+      buildMcpToolsSystemPrompt(meterMcpTools),
+      availableTools.some((tool) => isChatChoiceToolName(tool.function.name))
+        ? buildChatChoiceSystemPrompt()
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    const responderContext =
+      chatMode === "roleplay" && activeSessionRoleplayCard
+        ? {
+            name: activeSessionRoleplayCard.name,
+            description: roleplaySystemPrompt,
+          }
+        : undefined;
+    const composedMessages = composeChatApiMessages(
+      systemPrompt,
+      baseMessages,
+      meterPersona,
+      responderContext,
+    );
+    const statusBarPrompt = buildStatusBarConversationSystemPrompt(activeStatusBarState);
+    const messagesWithStatus = statusBarPrompt
+      ? [{ role: "system" as const, content: statusBarPrompt }, ...composedMessages]
+      : composedMessages;
+    const currentTokens =
+      estimateContextMessagesTokens(messagesWithStatus) +
+      estimateContextValueTokens(availableTools);
+    const thresholdTokens = limitingBudget?.budget.safetyThresholdTokens ?? null;
+
+    return {
+      currentTokens,
+      thresholdTokens,
+      usageRatio: thresholdTokens ? currentTokens / thresholdTokens : null,
+      limitingModelId: limitingBudget?.modelId ?? "",
+      modelIds: distinctModelIds,
+      missingModelIds,
+    };
+  }, [
+    activeChatPreset,
+    activeChatPresetRequestParameters?.max_tokens,
+    activeChatSessionId,
+    activeSessionRoleplayCard,
+    activeStatusBarState,
+    activeWorldBookIds,
+    chatChoiceToolsEnabled,
+    chatMessages,
+    chatMode,
+    chatPersona,
+    chatPresetEnabled,
+    chatProvider,
+    chatSessions,
+    configuredMultiAgentPersonas,
+    contextCompressionSettings,
+    currentChatSender.kind,
+    effectiveChatModelId,
+    enabledMcpServers,
+    llmFullAccessEnabled,
+    localToolsEnabled,
+    localWorkspaceHandle,
+    mcpTools,
+    multiAgentModelConfigs,
+    personas,
+    promptTemplateEnabled,
+    providers,
+    requestSystemPrompts,
+    userProfile,
+    worldBooks,
+  ]);
+
+  const contextTokenMeterTitle = (() => {
+    const current = contextTokenMeter.currentTokens.toLocaleString("zh-CN");
+    if (contextTokenMeter.modelIds.length === 0) {
+      return `当前上下文约 ${current} Token；当前模型尚未配置。点击打开 LLM 设置。`;
+    }
+    if (contextTokenMeter.missingModelIds.length > 0) {
+      return `当前上下文约 ${current} Token；模型 ${contextTokenMeter.missingModelIds.join("、")} 尚未配置上下文上限。点击打开 LLM 设置。`;
+    }
+    const threshold = contextTokenMeter.thresholdTokens?.toLocaleString("zh-CN") ?? "未配置";
+    const modelNote =
+      contextTokenMeter.modelIds.length > 1
+        ? `多 Agent 按最小阈值模型 ${contextTokenMeter.limitingModelId} 计算`
+        : `模型 ${contextTokenMeter.limitingModelId}`;
+    const compressionNote = contextCompressionSettings.enabled
+      ? "上下文压缩已开启"
+      : "上下文压缩当前已关闭";
+    return `当前上下文约 ${current} Token；${modelNote}，安全阈值 ${threshold} Token；${compressionNote}。点击打开 LLM 设置。`;
+  })();
+
   const executeChatCommandBlock = async (content: string) => {
     if (!localWorkspaceHandle || !localToolsEnabled) {
       setChatStatus({ status: "error", message: "请先选择工作区，才能执行命令。" });
@@ -30247,6 +30502,39 @@ export function App() {
                           : "选择角色卡开始角色扮演"
                       : "AI Direct")}
               </h1>
+              <button
+                type="button"
+                className={`chat-context-token-meter ${
+                  contextCompressionSettings.enabled ? "compression-enabled" : "compression-disabled"
+                } ${
+                  contextTokenMeter.usageRatio !== null && contextTokenMeter.usageRatio >= 1
+                    ? "over-threshold"
+                    : contextTokenMeter.usageRatio !== null && contextTokenMeter.usageRatio >= 0.8
+                      ? "near-threshold"
+                      : ""
+                }`}
+                title={contextTokenMeterTitle}
+                aria-label={contextTokenMeterTitle}
+                onClick={() => {
+                  setSettingsTab("llm");
+                  openWindow("settings");
+                }}
+              >
+                <span className="chat-context-token-part current">
+                  <span className="chat-context-token-label">Token</span>
+                  <span aria-hidden="true">≈</span>
+                  <strong>{contextTokenMeter.currentTokens.toLocaleString("zh-CN")}</strong>
+                </span>
+                <span className="chat-context-token-separator" aria-hidden="true">
+                  /
+                </span>
+                <span className="chat-context-token-part threshold">
+                  <span className="chat-context-token-label">安全阈值</span>
+                  <strong>
+                    {contextTokenMeter.thresholdTokens?.toLocaleString("zh-CN") ?? "未配置"}
+                  </strong>
+                </span>
+              </button>
             </div>
             <div className="chat-header-actions">
               <button

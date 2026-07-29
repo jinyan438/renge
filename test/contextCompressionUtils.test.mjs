@@ -7,6 +7,7 @@ import {
   createContextCompressionPlan,
   estimateContextMessagesTokens,
   estimateContextTextTokens,
+  getContextCompressionTokenBudget,
   normalizeContextCompressionSettings,
   resolveContextCompressionLimit,
   splitContextSummaryTranscript,
@@ -38,6 +39,28 @@ test("normalizes limits, removes duplicate model IDs, and matches IDs case-insen
   assert.equal(resolveContextCompressionLimit(normalized, "other-model"), null);
   assert.equal(
     resolveContextCompressionLimit({ ...normalized, enabled: false }, "demo/model"),
+    null,
+  );
+});
+
+test("calculates the same input safety threshold used by compression", () => {
+  assert.deepEqual(getContextCompressionTokenBudget(settings(), "DEMO/MODEL"), {
+    maxContextTokens: 2_048,
+    outputReserveTokens: 1_024,
+    inputBudgetTokens: 1_024,
+    safetyThresholdTokens: 921,
+  });
+  assert.deepEqual(getContextCompressionTokenBudget(settings(), "demo/model", 1_500), {
+    maxContextTokens: 2_048,
+    outputReserveTokens: 1_500,
+    inputBudgetTokens: 548,
+    safetyThresholdTokens: 493,
+  });
+  assert.equal(
+    getContextCompressionTokenBudget(
+      { ...settings(), enabled: false },
+      "demo/model",
+    ),
     null,
   );
 });

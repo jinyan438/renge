@@ -3902,17 +3902,95 @@ summary:focus-visible {
   background: #ffffff;
 }
 
-  .chat-header > div:first-child {
-    min-width: 0;
-    flex: 1 1 auto;
-  }
+.chat-header > div:first-child {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.chat-header-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
 
 .chat-header h1 {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 26px;
   line-height: 1.15;
+}
+
+.chat-context-token-meter {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 9px;
+  border: 1px solid #d8dee9;
+  border-radius: 999px;
+  color: #526078;
+  background: #f7f9fc;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.chat-context-token-meter:hover {
+  border-color: #aeb9ca;
+  color: #27344b;
+  background: #ffffff;
+  box-shadow: 0 3px 10px rgba(29, 43, 68, 0.08);
+}
+
+.chat-context-token-meter:focus-visible {
+  outline: 2px solid #7787a2;
+  outline-offset: 2px;
+}
+
+.chat-context-token-meter.compression-disabled {
+  color: #758095;
+  background: #f4f5f7;
+}
+
+.chat-context-token-meter.near-threshold {
+  border-color: #e3b45e;
+  color: #8a5a05;
+  background: #fff9ed;
+}
+
+.chat-context-token-meter.over-threshold {
+  border-color: #e29a9a;
+  color: #a63636;
+  background: #fff3f3;
+}
+
+.chat-context-token-part {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+}
+
+.chat-context-token-part strong {
+  color: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-context-token-label,
+.chat-context-token-separator {
+  opacity: 0.72;
 }
 
 .chat-header-actions {
@@ -8591,6 +8669,25 @@ input[type="range"] {
     line-height: 1.1;
   }
 
+  .chat-header-title {
+    gap: 6px;
+  }
+
+  .chat-context-token-meter {
+    gap: 4px;
+    min-height: 28px;
+    padding: 3px 7px;
+    font-size: 10px;
+  }
+
+  .chat-context-token-meter .chat-context-token-label {
+    display: none;
+  }
+
+  .chat-context-token-part strong {
+    font-size: 11px;
+  }
+
   .chat-header-actions {
     gap: 5px;
   }
@@ -9209,6 +9306,25 @@ input[type="range"] {
 
   .inspector-api-panel {
     display: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .chat-header {
+    flex-wrap: wrap;
+  }
+
+  .chat-header > .chat-header-title {
+    flex: 1 0 100%;
+    width: 100%;
+  }
+
+  .chat-header-title h1 {
+    flex: 1 1 auto;
+  }
+
+  .chat-header-actions {
+    margin-left: auto;
   }
 }
 
