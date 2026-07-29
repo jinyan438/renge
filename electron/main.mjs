@@ -169,6 +169,15 @@ function getWhitelistedCommandExecutable(command) {
     : null;
 }
 
+function isAllowedSidebarBrowserUrl(value) {
+  try {
+    const url = new URL(String(value ?? ""));
+    return url.href === "about:blank" || url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function isLikelyTextPath(path) {
   return /\.(cjs|css|csv|env|html|js|json|jsx|md|mjs|scss|ts|tsx|txt|xml|yaml|yml)$/i.test(path);
 }
@@ -863,7 +872,32 @@ async function createMainWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      webviewTag: true,
     },
+  });
+
+  mainWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
+    delete webPreferences.preload;
+    webPreferences.nodeIntegration = false;
+    webPreferences.nodeIntegrationInSubFrames = false;
+    webPreferences.contextIsolation = true;
+    webPreferences.sandbox = true;
+    webPreferences.webSecurity = true;
+    if (!isAllowedSidebarBrowserUrl(params.src)) event.preventDefault();
+  });
+
+  mainWindow.webContents.on("did-attach-webview", (_event, guestContents) => {
+    guestContents.setWindowOpenHandler(({ url }) => {
+      if (isAllowedSidebarBrowserUrl(url)) {
+        void guestContents.loadURL(url).catch(() => undefined);
+      }
+      return { action: "deny" };
+    });
+    const preventDisallowedNavigation = (navigationEvent, url) => {
+      if (!isAllowedSidebarBrowserUrl(url)) navigationEvent.preventDefault();
+    };
+    guestContents.on("will-navigate", preventDisallowedNavigation);
+    guestContents.on("will-redirect", preventDisallowedNavigation);
   });
 
   mainWindow.removeMenu();

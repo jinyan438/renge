@@ -228,6 +228,12 @@ import {
 } from "./contextCompressionUtils";
 import { StatusBarSidebar } from "./StatusBarSidebar";
 import {
+  browserToolDefinitions,
+  buildBrowserToolsSystemPrompt,
+  executeBrowserTool,
+  isBrowserToolName,
+} from "./browserSidebarRuntime";
+import {
   buildStatusBarConversationSystemPrompt,
   buildStatusBarReducerPayload,
   buildStatusBarReducerSystemPrompt,
@@ -4243,6 +4249,18 @@ function buildHtmlPreviewPersonalizationScript(context: HtmlPreviewContext) {
   ].join("");
 }
 const toolActionTitleMap: Array<[string, string]> = [
+  ["打开网页", "浏览器导航"],
+  ["控制浏览器历史", "浏览器导航"],
+  ["读取网页", "读取网页"],
+  ["点击网页元素", "浏览器点击"],
+  ["悬浮网页元素", "浏览器悬浮"],
+  ["输入网页内容", "浏览器输入"],
+  ["选择网页选项", "浏览器选择"],
+  ["滚动网页", "浏览器滚动"],
+  ["拖拽网页元素", "浏览器拖拽"],
+  ["发送网页按键", "浏览器按键"],
+  ["编辑网页", "编辑网页"],
+  ["执行页面脚本", "页面脚本"],
   ["列出文件", "列出文件"],
   ["预览电脑图片", "预览图片"],
   ["读取二进制文件", "读取二进制"],
@@ -8489,6 +8507,30 @@ function formatToolActionMessage(
   const pathRef = path ? formatWorkspacePathReference(handle, path) : "";
 
   switch (toolCall.function.name) {
+    case "browser_navigate":
+      return `打开网页：\n${stringArg(args, "url")}`;
+    case "browser_history":
+      return `控制浏览器历史：${stringArg(args, "action")}`;
+    case "browser_read_page":
+      return `读取网页：${stringArg(args, "mode", "snapshot")}${stringArg(args, "selector") ? `\n区域：${stringArg(args, "selector")}` : ""}`;
+    case "browser_click":
+      return `点击网页元素：${stringArg(args, "ref") || stringArg(args, "selector")}`;
+    case "browser_hover":
+      return `悬浮网页元素：${stringArg(args, "ref") || stringArg(args, "selector")}`;
+    case "browser_type":
+      return `输入网页内容：${stringArg(args, "ref") || stringArg(args, "selector")}\n${stringArg(args, "text").length} 个字符`;
+    case "browser_select":
+      return `选择网页选项：${stringArg(args, "value")}`;
+    case "browser_scroll":
+      return `滚动网页：x=${Number(args.x ?? 0)} y=${Number(args.y ?? 600)}`;
+    case "browser_drag":
+      return `拖拽网页元素：${stringArg(args, "sourceRef") || stringArg(args, "sourceSelector")} -> ${stringArg(args, "targetRef") || stringArg(args, "targetSelector")}`;
+    case "browser_press_key":
+      return `发送网页按键：${stringArg(args, "key")}`;
+    case "browser_edit_page":
+      return `编辑网页：${stringArg(args, "operation")} ${stringArg(args, "ref") || stringArg(args, "selector")}`;
+    case "browser_execute_script":
+      return `执行页面脚本：${stringArg(args, "script").length} 个字符`;
     case "local_list_files":
       return `列出文件：\n${formatWorkspacePathReference(handle, path)}${args.recursive === false ? "\n仅当前目录" : "\n递归扫描"}`;
     case "local_read_file":
@@ -8778,6 +8820,30 @@ function formatToolResultMessage(toolCall: ChatToolCall, result: unknown) {
   }
 
   switch (toolCall.function.name) {
+    case "browser_navigate":
+      return `网页已打开：${String(result.title ?? "未命名页面")}\n${String(result.url ?? args.url ?? "")}`;
+    case "browser_history":
+      return `浏览器操作完成：${String(args.action ?? "")}\n${String(result.url ?? "")}`;
+    case "browser_read_page": {
+      const textResult = isObjectRecord(result.text) ? result.text : null;
+      const interactiveCount = Array.isArray(result.interactive) ? result.interactive.length : 0;
+      return [
+        `网页读取完成：${String(result.title ?? "未命名页面")}`,
+        String(result.url ?? ""),
+        textResult ? `正文 ${String(textResult.totalChars ?? 0)} 字符${textResult.truncated ? "（已截断）" : ""}` : "",
+        interactiveCount > 0 ? `可交互元素 ${interactiveCount} 个` : "",
+      ].filter(Boolean).join("\n");
+    }
+    case "browser_click":
+    case "browser_hover":
+    case "browser_type":
+    case "browser_select":
+    case "browser_scroll":
+    case "browser_drag":
+    case "browser_press_key":
+    case "browser_edit_page":
+    case "browser_execute_script":
+      return `网页操作完成：${toolCall.function.name.replace(/^browser_/, "")}\n${String(result.url ?? "")}`.trim();
     case "local_read_file": {
       const content = typeof result.content === "string" ? result.content : "";
       return `已读取文件：${String(result.path ?? path)}${content ? `（${content.length} 字符）` : ""}`;
@@ -19197,6 +19263,8 @@ export function App() {
     let result: unknown;
     if (isMcpToolName(toolName)) {
       result = await executeMcpTool(toolName, rawArguments, signal);
+    } else if (isBrowserToolName(toolName)) {
+      result = await executeBrowserTool(toolName, rawArguments, signal);
     } else if (toolName === "chat_update_heartbeat") {
       result = await executeHeartbeatTool(rawArguments);
     } else if (toolName === "multi_agent_end_rounds") {
@@ -19401,9 +19469,11 @@ export function App() {
       type: "function" as const,
       function: tool.function,
     }));
+    const browserTools = window.rengeDesktop?.isElectron ? browserToolDefinitions : [];
     return [
       ...(chatChoiceToolsEnabled ? chatChoiceToolDefinitions : []),
       ...localTools,
+      ...browserTools,
       ...externalTools,
       ...(includeHeartbeatTools ? heartbeatToolDefinitions : []),
       ...(includeMultiAgentControlTools ? multiAgentControlToolDefinitions : []),
@@ -19594,6 +19664,7 @@ export function App() {
       localToolsEnabled && localWorkspaceHandle
         ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
         : "",
+      window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
       buildMcpToolsSystemPrompt(meterMcpTools),
       availableTools.some((tool) => isChatChoiceToolName(tool.function.name))
         ? buildChatChoiceSystemPrompt()
@@ -21107,10 +21178,12 @@ export function App() {
           : "";
       const multiAgentSystemPrompt =
         supervisorMultiAgentSystemPrompt || sequenceMultiAgentSystemPrompt;
-      const toolSystemPrompt =
+      const toolSystemPrompt = [
         !isDialogueRewrite && !isLocalRewrite && localToolsEnabled && localWorkspaceHandle
           ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
-          : "";
+          : "",
+        window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
+      ].filter(Boolean).join("\n\n");
       const mcpToolsSystemPrompt = buildMcpToolsSystemPrompt(requestMcpTools);
       const chatChoiceSystemPrompt = availableChatTools.some((tool) =>
         isChatChoiceToolName(tool.function.name),
@@ -23660,10 +23733,12 @@ export function App() {
         chatMode === "persona"
           ? buildChatSenderContextPrompt(nextMessages, personas, chatPersona)
           : buildChatSenderContextPrompt(nextMessages, personas);
-      const toolSystemPrompt =
+      const toolSystemPrompt = [
         localToolsEnabled && localWorkspaceHandle
           ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
-          : "";
+          : "",
+        window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
+      ].filter(Boolean).join("\n\n");
       const mcpToolsSystemPrompt = buildMcpToolsSystemPrompt(requestMcpTools);
       const chatChoiceSystemPrompt = availableChatTools.some((tool) =>
         isChatChoiceToolName(tool.function.name),

@@ -29,6 +29,8 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { BrowserSidebarPanel } from "./BrowserSidebarPanel";
+import { registerBrowserSidebarOpener } from "./browserSidebarRuntime";
 import {
   getStatusBarItemValue,
   isDefaultStatusBarPreset,
@@ -95,9 +97,9 @@ const RIGHT_SIDEBAR_TOOLS = [
   {
     id: "browser",
     label: "浏览器",
-    description: "预览和调试网页",
+    description: "AI 读取、控制和编辑网页",
     icon: Globe,
-    available: false,
+    available: true,
   },
   {
     id: "files",
@@ -942,6 +944,15 @@ export function StatusBarSidebar({
   useEffect(() => {
     if (collapsed) setActiveToolId("menu");
   }, [collapsed]);
+
+  useEffect(
+    () =>
+      registerBrowserSidebarOpener(() => {
+        setActiveToolId("browser");
+        onCollapsedChange(false);
+      }),
+    [onCollapsedChange],
+  );
 
   const closeEditor = () => setEditorOpen(false);
 
@@ -1822,24 +1833,24 @@ export function StatusBarSidebar({
       ? null
       : RIGHT_SIDEBAR_TOOLS.find((tool) => tool.id === activeToolId) ?? null;
 
-  if (collapsed) {
-    return editorModal;
-  }
-
   return (
     <>
-      <button
-        aria-label="关闭右侧栏"
-        className="status-bar-mobile-backdrop"
-        onClick={() => onCollapsedChange(true)}
-        type="button"
-      />
+      {!collapsed ? (
+        <button
+          aria-label="关闭右侧栏"
+          className="status-bar-mobile-backdrop"
+          onClick={() => onCollapsedChange(true)}
+          type="button"
+        />
+      ) : null}
       <aside
         ref={sidebarRef}
+        aria-hidden={collapsed ? "true" : undefined}
         aria-label="右侧工具栏"
         className={`status-bar-sidebar right-tools-sidebar ${
           activeToolId === "status" ? "is-status-view" : "is-light-view"
-        }`}
+        } ${collapsed ? "is-collapsed" : ""}`}
+        inert={collapsed ? true : undefined}
         style={sidebarStyle}
       >
         <div
@@ -1912,7 +1923,7 @@ export function StatusBarSidebar({
               </nav>
             </div>
           </section>
-        ) : activeToolId === "status" ? (
+        ) : activeToolId === "browser" ? null : activeToolId === "status" ? (
           <section className="right-tool-content status-tool-content" aria-label="状态栏">
             <header className="status-bar-sidebar-header">
               <div className="status-bar-sidebar-title">
@@ -2034,6 +2045,18 @@ export function StatusBarSidebar({
             </div>
           </section>
         )}
+        <div
+          aria-hidden={activeToolId === "browser" ? undefined : "true"}
+          className={`right-tools-browser-slot ${
+            activeToolId === "browser" ? "is-active" : ""
+          }`}
+          inert={activeToolId === "browser" ? undefined : true}
+        >
+          <BrowserSidebarPanel
+            onBack={() => setActiveToolId("menu")}
+            onClose={() => onCollapsedChange(true)}
+          />
+        </div>
         {editorModal}
       </aside>
     </>
