@@ -50,6 +50,8 @@ type BrowserOverlayAnchorInput = {
   contentX: number;
   contentY: number;
   zoomFactor: number;
+  hostX?: number;
+  hostY?: number;
   webviewLeft: number;
   webviewTop: number;
   containerLeft: number;
@@ -60,11 +62,19 @@ export function calculateBrowserOverlayAnchor({
   contentX,
   contentY,
   zoomFactor,
+  hostX,
+  hostY,
   webviewLeft,
   webviewTop,
   containerLeft,
   containerTop,
 }: BrowserOverlayAnchorInput) {
+  if (Number.isFinite(hostX) && Number.isFinite(hostY)) {
+    return {
+      left: Number(hostX) - containerLeft,
+      top: Number(hostY) - containerTop,
+    };
+  }
   const zoom = Number.isFinite(zoomFactor) && zoomFactor > 0 ? zoomFactor : 1;
   return {
     left: contentX * zoom + webviewLeft - containerLeft,

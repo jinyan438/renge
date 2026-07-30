@@ -67,7 +67,24 @@ test("anchors the browser context menu at the click and flips at viewport edges"
   );
 });
 
-test("maps zoomed web content coordinates into the browser sidebar overlay", () => {
+test("prefers the host cursor position over zoomed web content coordinates", () => {
+  assert.deepEqual(
+    calculateBrowserOverlayAnchor({
+      contentX: 1_050,
+      contentY: 326,
+      zoomFactor: 0.16,
+      hostX: 165,
+      hostY: 60,
+      webviewLeft: 0,
+      webviewTop: 0,
+      containerLeft: 12,
+      containerTop: 8,
+    }),
+    { left: 153, top: 52 },
+  );
+});
+
+test("falls back to mapping zoomed web content coordinates into the sidebar overlay", () => {
   const scaled = calculateBrowserOverlayAnchor({
     contentX: 1_050,
     contentY: 326,

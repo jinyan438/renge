@@ -138,6 +138,8 @@ type BrowserContextMenuRequest = {
   sourceWebContentsId: number;
   x: number;
   y: number;
+  hostX?: number;
+  hostY?: number;
   pageUrl: string;
   frameUrl: string;
   linkUrl: string;
@@ -1058,6 +1060,8 @@ export function BrowserSidebarPanel({
           contentX: request.x,
           contentY: request.y,
           zoomFactor: node.getZoomFactor(),
+          hostX: request.hostX,
+          hostY: request.hostY,
           webviewLeft: nodeBounds.left,
           webviewTop: nodeBounds.top,
           containerLeft: pageBounds?.left ?? nodeBounds.left,

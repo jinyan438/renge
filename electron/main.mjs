@@ -7,6 +7,7 @@ import {
   Menu,
   nativeImage,
   safeStorage,
+  screen,
   session,
   shell,
   webContents,
@@ -1548,10 +1549,15 @@ async function createMainWindow() {
     guestContents.on("context-menu", (contextEvent, params) => {
       contextEvent.preventDefault();
       if (!mainWindow || mainWindow.isDestroyed()) return;
+      const cursorPoint = screen.getCursorScreenPoint();
+      const contentBounds = mainWindow.getContentBounds();
+      const rendererZoomFactor = mainWindow.webContents.getZoomFactor() || 1;
       mainWindow.webContents.send("sidebar-browser:context-menu", {
         sourceWebContentsId: guestContents.id,
         x: params.x,
         y: params.y,
+        hostX: (cursorPoint.x - contentBounds.x) / rendererZoomFactor,
+        hostY: (cursorPoint.y - contentBounds.y) / rendererZoomFactor,
         pageUrl: params.pageURL,
         frameUrl: params.frameURL,
         linkUrl: params.linkURL,

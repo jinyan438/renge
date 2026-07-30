@@ -899,6 +899,8 @@ type SidebarBrowserContextMenuRequest = {
   sourceWebContentsId: number;
   x: number;
   y: number;
+  hostX: number;
+  hostY: number;
   pageUrl: string;
   frameUrl: string;
   linkUrl: string;
