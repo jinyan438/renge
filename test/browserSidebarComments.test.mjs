@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   buildBrowserContextTargetProbeScript,
   calculateBrowserContextMenuPlacement,
+  calculateBrowserOverlayAnchor,
   parseBrowserPageComment,
   serializeBrowserPageComment,
 } from "../src/browserSidebarComments.ts";
@@ -63,5 +64,31 @@ test("anchors the browser context menu at the click and flips at viewport edges"
       viewportHeight: 600,
     }),
     { left: 280, top: 260, maxWidth: 552, maxHeight: 552 },
+  );
+});
+
+test("maps zoomed web content coordinates into the browser sidebar overlay", () => {
+  const scaled = calculateBrowserOverlayAnchor({
+    contentX: 1_050,
+    contentY: 326,
+    zoomFactor: 0.16,
+    webviewLeft: 1_200,
+    webviewTop: 90,
+    containerLeft: 1_200,
+    containerTop: 90,
+  });
+  assert.equal(scaled.left, 168);
+  assert.ok(Math.abs(scaled.top - 52.16) < Number.EPSILON * 52.16);
+  assert.deepEqual(
+    calculateBrowserOverlayAnchor({
+      contentX: 120,
+      contentY: 80,
+      zoomFactor: 1,
+      webviewLeft: 520,
+      webviewTop: 140,
+      containerLeft: 500,
+      containerTop: 100,
+    }),
+    { left: 140, top: 120 },
   );
 });

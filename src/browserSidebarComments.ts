@@ -46,6 +46,32 @@ type BrowserContextMenuPlacementInput = {
   margin?: number;
 };
 
+type BrowserOverlayAnchorInput = {
+  contentX: number;
+  contentY: number;
+  zoomFactor: number;
+  webviewLeft: number;
+  webviewTop: number;
+  containerLeft: number;
+  containerTop: number;
+};
+
+export function calculateBrowserOverlayAnchor({
+  contentX,
+  contentY,
+  zoomFactor,
+  webviewLeft,
+  webviewTop,
+  containerLeft,
+  containerTop,
+}: BrowserOverlayAnchorInput) {
+  const zoom = Number.isFinite(zoomFactor) && zoomFactor > 0 ? zoomFactor : 1;
+  return {
+    left: contentX * zoom + webviewLeft - containerLeft,
+    top: contentY * zoom + webviewTop - containerTop,
+  };
+}
+
 export function calculateBrowserContextMenuPlacement({
   anchorX,
   anchorY,

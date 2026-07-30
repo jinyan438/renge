@@ -62,6 +62,7 @@ import {
 import {
   buildBrowserContextTargetProbeScript,
   calculateBrowserContextMenuPlacement,
+  calculateBrowserOverlayAnchor,
   type BrowserContextTarget,
   type BrowserPageComment,
 } from "./browserSidebarComments";
@@ -1053,8 +1054,15 @@ export function BrowserSidebarPanel({
         if (!target.linkUrl && request.linkUrl) target.linkUrl = request.linkUrl;
         const pageBounds = pageRef.current?.getBoundingClientRect();
         const nodeBounds = node.getBoundingClientRect();
-        const anchorLeft = request.x + nodeBounds.left - (pageBounds?.left ?? nodeBounds.left);
-        const anchorTop = request.y + nodeBounds.top - (pageBounds?.top ?? nodeBounds.top);
+        const anchor = calculateBrowserOverlayAnchor({
+          contentX: request.x,
+          contentY: request.y,
+          zoomFactor: node.getZoomFactor(),
+          webviewLeft: nodeBounds.left,
+          webviewTop: nodeBounds.top,
+          containerLeft: pageBounds?.left ?? nodeBounds.left,
+          containerTop: pageBounds?.top ?? nodeBounds.top,
+        });
         selectBrowserTab(sourceTab.id);
         setPopoverView(null);
         setCommentEditor(null);
@@ -1062,10 +1070,10 @@ export function BrowserSidebarPanel({
           tabId: sourceTab.id,
           request,
           target,
-          anchorLeft,
-          anchorTop,
-          left: anchorLeft,
-          top: anchorTop,
+          anchorLeft: anchor.left,
+          anchorTop: anchor.top,
+          left: anchor.left,
+          top: anchor.top,
         });
       })().catch(reportFeatureError);
     });
