@@ -22,9 +22,10 @@ import {
   useState,
 } from "react";
 import {
-  calculateBrowserFitZoomFactor,
+  buildBrowserDocumentContentProbeScript,
   buildBrowserPageReadScript,
   buildBrowserScriptExecutionWrapper,
+  calculateBrowserFitZoomFactor,
   normalizeBrowserAddress,
   registerBrowserSidebarController,
   type BrowserSidebarController,
@@ -74,6 +75,7 @@ type BrowserTabState = BrowserPageState & {
   error: string;
   zoomFactor: number;
   autoFit: boolean;
+  hasDocumentContent: boolean;
 };
 
 const DEFAULT_PAGE_STATE: BrowserPageState = {
@@ -103,11 +105,12 @@ function createBrowserTab(url = "about:blank"): BrowserTabState {
     loading: url !== "about:blank",
     zoomFactor: 1,
     autoFit: true,
+    hasDocumentContent: false,
   };
 }
 
 function getBrowserTabLabel(tab: BrowserTabState) {
-  if (tab.url === "about:blank") return "新标签页";
+  if (tab.url === "about:blank" && !tab.hasDocumentContent) return "新标签页";
   if (tab.title && tab.title !== DEFAULT_PAGE_STATE.title) return tab.title;
   try {
     return new URL(tab.url).hostname || "网页";
@@ -229,8 +232,35 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
         ...tab,
         ...nextState,
         address: nextState.url === "about:blank" ? "" : nextState.url,
+        hasDocumentContent: nextState.url === "about:blank" && !loading
+          ? tab.hasDocumentContent
+          : false,
       }));
       return nextState;
+    },
+    [updateBrowserTab],
+  );
+
+  const refreshDocumentContentState = useCallback(
+    async (tabId: string, node: ElectronWebviewElement) => {
+      if ((node.getURL() || "about:blank") !== "about:blank") return false;
+      const hasDocumentContent = await node.executeJavaScript<boolean>(
+        buildBrowserDocumentContentProbeScript(),
+      );
+      if ((node.getURL() || "about:blank") !== "about:blank") return false;
+      const title = node.getTitle() || "新页面";
+      const currentTab = tabsRef.current.find((tab) => tab.id === tabId);
+      if (
+        currentTab?.url !== "about:blank"
+        || (currentTab.hasDocumentContent === hasDocumentContent && currentTab.title === title)
+      ) {
+        return hasDocumentContent;
+      }
+      updateBrowserTab(tabId, (tab) => {
+        if (tab.url !== "about:blank") return tab;
+        return { ...tab, hasDocumentContent, title };
+      });
+      return hasDocumentContent;
     },
     [updateBrowserTab],
   );
@@ -431,6 +461,7 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
       error: "",
       url,
       loading: true,
+      hasDocumentContent: false,
     }));
     try {
       await node.loadURL(url);
@@ -485,13 +516,35 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
     void fitPageToWidth(activeTab.id, webviewNode).catch(() => undefined);
   }, [activeTab?.id, fitPageToWidth, webviewNode]);
 
+  useEffect(() => {
+    if (
+      !activeTab
+      || !webviewNode
+      || activeTab.url !== "about:blank"
+      || activeTab.hasDocumentContent
+    ) return;
+    const probe = () => {
+      void refreshDocumentContentState(activeTab.id, webviewNode).catch(() => undefined);
+    };
+    probe();
+    const intervalId = window.setInterval(probe, 600);
+    return () => window.clearInterval(intervalId);
+  }, [
+    activeTab?.hasDocumentContent,
+    activeTab?.id,
+    activeTab?.url,
+    refreshDocumentContentState,
+    webviewNode,
+  ]);
+
   const controller = useMemo<BrowserSidebarController | null>(() => {
-    if (!webviewNode) return null;
+    if (!activeTab || !webviewNode) return null;
+    const controllerTabId = activeTab.id;
     const executeInPage = <T,>(script: string, userGesture = false) =>
       webviewNode.executeJavaScript<T>(script, userGesture);
     const readState = () => getWebviewPageState(
       webviewNode,
-      tabsRef.current.find((tab) => tab.id === activeTabIdRef.current)?.loading ?? false,
+      tabsRef.current.find((tab) => tab.id === controllerTabId)?.loading ?? false,
     );
     const targetCenter = async (args: BrowserToolArguments) =>
       executeInPage<{ x: number; y: number; label: string }>(`(() => {
@@ -612,8 +665,8 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
             webviewNode.sendInputEvent({ type: "keyUp", keyCode: key, modifiers });
             return { ok: true, action: "press_key", key, modifiers, ...readState() };
           }
-          case "browser_edit_page":
-            return executeInPage(`(() => {
+          case "browser_edit_page": {
+            const result = await executeInPage(`(() => {
               ${buildTargetPrelude(args)}
               const operation = ${JSON.stringify(getStringArg(args, "operation"))};
               const name = ${JSON.stringify(getStringArg(args, "name"))};
@@ -640,6 +693,9 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
               else throw new Error('未知页面编辑操作：' + operation);
               return { ok: true, action: 'edit_page', operation, name, valueLength: value.length };
             })()`, true);
+            await refreshDocumentContentState(controllerTabId, webviewNode).catch(() => undefined);
+            return result;
+          }
           case "browser_execute_script": {
             const script = getStringArg(args, "script");
             if (!script.trim()) throw new Error("script 不能为空");
@@ -676,6 +732,7 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
               const message = outcome.error?.message || "页面脚本执行失败";
               throw new Error(`页面脚本抛出 ${name}：${message}`);
             }
+            await refreshDocumentContentState(controllerTabId, webviewNode).catch(() => undefined);
             return {
               ok: true,
               action: "execute_script",
@@ -688,7 +745,7 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
         }
       },
     };
-  }, [webviewNode]);
+  }, [activeTab?.id, refreshDocumentContentState, webviewNode]);
 
   useEffect(() => {
     if (!controller) return;
@@ -835,7 +892,7 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
             <strong>桌面浏览器模块</strong>
             <p>完整网页控制依赖 Electron 安全隔离容器，请在桌面版中使用。</p>
           </div>
-        ) : pageState.url === "about:blank" ? (
+        ) : pageState.url === "about:blank" && !activeTab?.hasDocumentContent ? (
           <div className="browser-sidebar-empty">
             <span><Globe size={25} /></span>
             <strong>AI 可控制浏览器</strong>

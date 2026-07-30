@@ -280,6 +280,17 @@ export function calculateBrowserFitZoomFactor(viewportWidth: number, contentWidt
   return Math.max(0.25, Math.floor(ratio * 100) / 100);
 }
 
+export function buildBrowserDocumentContentProbeScript() {
+  return `(() => {
+    const body = document.body;
+    if (!body) return false;
+    const text = typeof body.innerText === 'string' ? body.innerText : body.textContent || '';
+    if (String(text).trim()) return true;
+    const ignoredTags = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'TEMPLATE', 'NOSCRIPT', 'BASE']);
+    return Array.from(body.children).some((element) => !ignoredTags.has(element.tagName));
+  })()`;
+}
+
 export function buildBrowserPageReadScript(args: BrowserToolArguments) {
   const rawMode = String(args.mode ?? "");
   const mode = ["snapshot", "interactive", "text", "html"].includes(rawMode)

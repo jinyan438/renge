@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   browserToolDefinitions,
+  buildBrowserDocumentContentProbeScript,
   buildBrowserPageReadScript,
   buildBrowserScriptExecutionWrapper,
   buildBrowserToolsSystemPrompt,
@@ -9,6 +10,24 @@ import {
   isBrowserToolName,
   normalizeBrowserAddress,
 } from "../src/browserSidebarRuntime.ts";
+
+test("detects whether an about:blank document contains user-visible content", () => {
+  const script = buildBrowserDocumentContentProbeScript();
+  const runProbe = (body) => new Function("document", `return ${script};`)({ body });
+
+  assert.equal(runProbe({ innerText: "", textContent: "", children: [] }), false);
+  assert.equal(
+    runProbe({
+      innerText: "",
+      textContent: "console.log('setup')",
+      children: [{ tagName: "SCRIPT" }, { tagName: "STYLE" }],
+    }),
+    false,
+  );
+  assert.equal(runProbe({ innerText: "开始游戏", textContent: "开始游戏", children: [] }), true);
+  assert.equal(runProbe({ innerText: "", textContent: "", children: [{ tagName: "CANVAS" }] }), true);
+  assert.equal(runProbe({ innerText: "", textContent: "", children: [{ tagName: "BUTTON" }] }), true);
+});
 
 test("builds a syntactically valid page-reading script", () => {
   const script = buildBrowserPageReadScript({ mode: "snapshot" });
