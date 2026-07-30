@@ -27,7 +27,7 @@
 
 .files-sidebar-heading > button,
 .files-sidebar-actions > button,
-.files-preview-back {
+.files-preview-file-icon {
   display: grid;
   width: 32px;
   height: 32px;
@@ -41,8 +41,7 @@
 }
 
 .files-sidebar-heading > button:hover,
-.files-sidebar-actions > button:hover:not(:disabled),
-.files-preview-back:hover {
+.files-sidebar-actions > button:hover:not(:disabled) {
   border-color: rgba(0, 102, 221, 0.3);
   color: #075bbd;
   background: #eef6ff;
@@ -80,7 +79,7 @@
   min-width: 0;
   min-height: 0;
   flex: 1 1 auto;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.5fr) minmax(160px, 1fr);
   overflow: hidden;
 }
 
@@ -94,8 +93,15 @@
   background: #fafafc;
 }
 
-.files-sidebar-layout.has-preview .files-tree-pane {
-  display: none;
+.files-tree-pane {
+  grid-column: 2;
+  grid-row: 1;
+  border-left: 1px solid #d8d8dd;
+}
+
+.files-preview-pane {
+  grid-column: 1;
+  grid-row: 1;
 }
 
 .files-tree-toolbar {
@@ -673,28 +679,6 @@
 
 @keyframes files-sidebar-spin {
   to { transform: rotate(360deg); }
-}
-
-@container files-sidebar (min-width: 660px) {
-  .files-sidebar-layout.has-preview {
-    grid-template-columns: minmax(0, 1fr) minmax(280px, 38%);
-  }
-
-  .files-sidebar-layout.has-preview .files-tree-pane {
-    display: flex;
-    grid-column: 2;
-    grid-row: 1;
-    border-left: 1px solid #d8d8dd;
-  }
-
-  .files-sidebar-layout.has-preview .files-preview-pane {
-    grid-column: 1;
-    grid-row: 1;
-  }
-
-  .files-preview-back {
-    display: none;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

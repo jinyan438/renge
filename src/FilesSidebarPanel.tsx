@@ -620,7 +620,7 @@ export function FilesSidebarPanel({
           {onChooseWorkspace ? <button onClick={() => void onChooseWorkspace()} type="button">选择工作区</button> : null}
         </div>
       ) : (
-        <div className={`files-sidebar-layout ${preview ? "has-preview" : ""}`}>
+        <div className="files-sidebar-layout">
           <section className="files-tree-pane" aria-label="文件树">
             <div className="files-tree-toolbar">
               <label>
@@ -657,27 +657,33 @@ export function FilesSidebarPanel({
             </div>
           </section>
 
-          {preview ? (
-            <section className="files-preview-pane" aria-label={`${preview.entry.name} 预览`}>
-              <header className="files-preview-header">
-                <button className="files-preview-back" onClick={() => setPreview(null)} title="返回文件树" type="button">
-                  <ArrowLeft size={15} />
+          <section className="files-preview-pane" aria-label={preview ? `${preview.entry.name} 预览` : "文件预览"}>
+            <header className="files-preview-header">
+              <span className="files-preview-file-icon" aria-hidden="true">
+                {preview ? getFileIcon(preview.entry) : <Eye size={15} />}
+              </span>
+              <div>
+                <strong title={preview?.entry.path}>{preview?.entry.name ?? "文件预览"}</strong>
+                <span>
+                  {preview
+                    ? `${getFileBrowserLanguage(preview.entry.path)}${
+                        preview.entry.size !== undefined
+                          ? ` · ${formatFileBrowserSize(preview.entry.size)}`
+                          : ""
+                      }`
+                    : "源代码 · Markdown · 图片"}
+                </span>
+              </div>
+              {preview && source.runSystemAction ? (
+                <button className="files-preview-open" onClick={() => void runSystemAction(preview.entry, "default")} type="button">
+                  <ExternalLink size={14} /> 打开
                 </button>
-                <div>
-                  <strong title={preview.entry.path}>{preview.entry.name}</strong>
-                  <span>
-                    {getFileBrowserLanguage(preview.entry.path)}
-                    {preview.entry.size !== undefined ? ` · ${formatFileBrowserSize(preview.entry.size)}` : ""}
-                  </span>
-                </div>
-                {source.runSystemAction ? (
-                  <button className="files-preview-open" onClick={() => void runSystemAction(preview.entry, "default")} type="button">
-                    <ExternalLink size={14} /> 打开
-                  </button>
-                ) : null}
-              </header>
-              <div className="files-preview-content">
-                {preview.status === "loading" ? (
+              ) : null}
+            </header>
+            <div className="files-preview-content">
+              {!preview ? (
+                <div className="files-preview-message"><Eye size={24} /><strong>选择文件以预览</strong><span>支持源代码、Markdown 文档和常见图片格式。</span></div>
+              ) : preview.status === "loading" ? (
                   <div className="files-preview-message"><RefreshCw className="is-spinning" size={22} />正在打开文件…</div>
                 ) : preview.status === "error" ? (
                   <div className="files-preview-message is-error"><File size={24} /><strong>无法预览</strong><span>{preview.error}</span></div>
@@ -692,11 +698,10 @@ export function FilesSidebarPanel({
                   <SourcePreview content={preview.content ?? ""} />
                 ) : (
                   <div className="files-preview-message"><Braces size={24} /><strong>此格式不支持侧栏预览</strong><span>可以双击或使用右键菜单交给系统应用打开。</span></div>
-                )}
-              </div>
-              {preview.truncated ? <div className="files-preview-truncated">文件较大，仅显示前 512 KB</div> : null}
-            </section>
-          ) : null}
+              )}
+            </div>
+            {preview?.truncated ? <div className="files-preview-truncated">文件较大，仅显示前 512 KB</div> : null}
+          </section>
         </div>
       )}
 
