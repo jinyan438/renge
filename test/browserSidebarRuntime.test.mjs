@@ -10,12 +10,51 @@ import {
   isBrowserAddressInputAvailable,
   isBrowserToolName,
   normalizeBrowserAddress,
+  openAndroidBrowserAddress,
 } from "../src/browserSidebarRuntime.ts";
 
 test("keeps the browser address input editable in Android and Electron shells", () => {
   assert.equal(isBrowserAddressInputAvailable(true, false), true);
   assert.equal(isBrowserAddressInputAvailable(false, true), true);
   assert.equal(isBrowserAddressInputAvailable(false, false), false);
+});
+
+test("opens Android browser addresses through the injected wrapper when available", async () => {
+  const calls = [];
+  const result = await openAndroidBrowserAddress(
+    "https://example.com/docs",
+    {
+      async openBrowser(options) {
+        calls.push(options);
+        return { ok: true, url: options.url };
+      },
+    },
+    {
+      openBrowser() {
+        throw new Error("raw bridge should not be used");
+      },
+    },
+  );
+
+  assert.deepEqual(calls, [{ url: "https://example.com/docs" }]);
+  assert.deepEqual(result, { ok: true, url: "https://example.com/docs" });
+});
+
+test("falls back to the raw Android bridge before the wrapper is injected", async () => {
+  const calls = [];
+  const result = await openAndroidBrowserAddress(
+    "https://example.com/docs",
+    {},
+    {
+      openBrowser(optionsJson) {
+        calls.push(JSON.parse(optionsJson));
+        return JSON.stringify({ ok: true, url: "https://example.com/docs" });
+      },
+    },
+  );
+
+  assert.deepEqual(calls, [{ url: "https://example.com/docs" }]);
+  assert.deepEqual(result, { ok: true, url: "https://example.com/docs" });
 });
 
 test("detects whether an about:blank document contains user-visible content", () => {

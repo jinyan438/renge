@@ -15,6 +15,43 @@ export function isBrowserAddressInputAvailable(
   return electronAvailable || androidAvailable;
 }
 
+export type AndroidBrowserApi = {
+  openBrowser?(options: { url: string }): Promise<{ ok: boolean; url: string }>;
+};
+
+export type AndroidBrowserNativeBridge = {
+  openBrowser?(optionsJson: string): string;
+};
+
+export async function openAndroidBrowserAddress(
+  url: string,
+  api?: AndroidBrowserApi,
+  nativeBridge?: AndroidBrowserNativeBridge,
+) {
+  if (api?.openBrowser) {
+    return api.openBrowser({ url });
+  }
+  if (!nativeBridge?.openBrowser) {
+    throw new Error("Android 浏览器接口尚未准备好，请稍后重试");
+  }
+
+  const rawResult = nativeBridge.openBrowser(JSON.stringify({ url }));
+  let result: unknown;
+  try {
+    result = JSON.parse(rawResult);
+  } catch {
+    throw new Error("Android 浏览器接口返回了无效结果");
+  }
+  if (!result || typeof result !== "object") {
+    throw new Error("Android 浏览器接口返回了无效结果");
+  }
+  const error = (result as { error?: unknown }).error;
+  if (typeof error === "string" && error) {
+    throw new Error(error);
+  }
+  return result as { ok: boolean; url: string };
+}
+
 const BROWSER_TOOL_NAMES = new Set([
   "browser_navigate",
   "browser_history",

@@ -51,6 +51,7 @@ import {
   calculateBrowserFitZoomFactor,
   isBrowserAddressInputAvailable,
   normalizeBrowserAddress,
+  openAndroidBrowserAddress,
   registerBrowserSidebarController,
   type BrowserSidebarController,
   type BrowserToolArguments,
@@ -1463,12 +1464,11 @@ export function BrowserSidebarPanel({
     if (activeTab) {
       updateBrowserTab(activeTab.id, (tab) => ({ ...tab, address: url, error: "" }));
     }
-    const openBrowser = window.rengeAndroid?.openBrowser;
-    if (!openBrowser) {
-      reportFeatureError(new Error("Android 浏览器接口尚未准备好，请稍后重试"));
-      return;
-    }
-    void openBrowser({ url }).catch(reportFeatureError);
+    void openAndroidBrowserAddress(
+      url,
+      window.rengeAndroid,
+      window.RengeAndroidNative,
+    ).catch(reportFeatureError);
   };
 
   const submitAddress = (event: FormEvent) => {

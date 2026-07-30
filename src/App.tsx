@@ -1013,7 +1013,7 @@ type RengeDesktopApi = {
 
 type RengeAndroidApi = {
   isAndroid: boolean;
-  openBrowser(options: { url: string }): Promise<{ ok: boolean; url: string }>;
+  openBrowser?(options: { url: string }): Promise<{ ok: boolean; url: string }>;
   saveDownload(options: {
     fileName: string;
     mimeType?: string;
@@ -1072,11 +1072,15 @@ type RengeAndroidApi = {
   exitFullscreen?(): void;
 };
 
+type RengeAndroidNativeBridge = {
+  openBrowser?(optionsJson: string): string;
+};
+
 declare global {
   interface Window {
     rengeDesktop?: RengeDesktopApi;
     rengeAndroid?: RengeAndroidApi;
-    RengeAndroidNative?: unknown;
+    RengeAndroidNative?: RengeAndroidNativeBridge;
   }
 }
 

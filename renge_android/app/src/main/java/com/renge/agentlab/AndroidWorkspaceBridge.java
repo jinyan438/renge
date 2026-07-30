@@ -80,13 +80,14 @@ public class AndroidWorkspaceBridge {
     void injectApi() {
         String script =
                 "(function(){"
-                        + "if(window.rengeAndroid&&window.rengeAndroid.isAndroid)return;"
-                        + "var pending={};"
+                        + "var pending=window.__rengeAndroidPending||{};"
+                        + "window.__rengeAndroidPending=pending;"
                         + "window.__rengeAndroidResolve=function(id,payload){if(!pending[id])return;pending[id].resolve(payload);delete pending[id];};"
                         + "window.__rengeAndroidReject=function(id,message){if(!pending[id])return;pending[id].reject(new Error(message||'Android workspace error'));delete pending[id];};"
                         + "function parse(text){var payload=JSON.parse(text);if(payload&&payload.error)throw new Error(payload.error);return payload;}"
                         + "function call(name,options){return Promise.resolve().then(function(){return parse(window.RengeAndroidNative[name](JSON.stringify(options||{})));});}"
-                        + "window.rengeAndroid={"
+                        + "var api=window.rengeAndroid||{};"
+                        + "Object.assign(api,{"
                         + "isAndroid:true,"
                         + "saveDownload:function(options){return call('saveDownload',options);},"
                         + "openBrowser:function(options){return call('openBrowser',options);},"
@@ -110,7 +111,8 @@ public class AndroidWorkspaceBridge {
                         + "getWorkspaceStatus:function(options){return call('getWorkspaceStatus',options);},"
                         + "enterFullscreen:function(){window.RengeAndroidNative.enterFullscreen();},"
                         + "exitFullscreen:function(){window.RengeAndroidNative.exitFullscreen();}"
-                        + "};"
+                        + "});"
+                        + "window.rengeAndroid=api;"
                         + "})();";
         webView.evaluateJavascript(script, null);
     }
