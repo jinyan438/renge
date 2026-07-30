@@ -16,7 +16,9 @@ import {
   createSidebarBrowserWindowOpenHandler,
   isAllowedSidebarBrowserUrl,
   SIDEBAR_BROWSER_PARTITION,
+  SIDEBAR_BROWSER_PARTITION_NAME,
 } from "./sidebar-browser-navigation.mjs";
+import { copyMissingPersistentCookies } from "./sidebar-browser-session.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const appIconPath = join(
@@ -34,6 +36,7 @@ let persistentBrowserDataFlushed = false;
 let desktopProjectPositionsWriteQueue = Promise.resolve();
 const desktopServerPort = 5191;
 const desktopProjectPositionsFilename = "desktop-project-positions.json";
+const sidebarBrowserMigrationMarkerFilename = ".sidebar-browser-global-data-v1";
 const singleInstanceLockAcquired = app.requestSingleInstanceLock();
 const highRiskGitCommands = new Set([
   "checkout",
@@ -129,6 +132,86 @@ async function flushPersistentSidebarBrowserData() {
   const browserSession = session.fromPartition(SIDEBAR_BROWSER_PARTITION);
   browserSession.flushStorageData();
   await browserSession.cookies.flushStore();
+}
+
+async function findLegacySidebarBrowserPartitionPaths() {
+  const cacheRootDir = getElectronCacheRootDir();
+  let runDirectories;
+  try {
+    runDirectories = await readdir(cacheRootDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const candidates = [];
+  for (const runDirectory of runDirectories) {
+    if (!runDirectory.isDirectory() || !runDirectory.name.startsWith("run-")) continue;
+    const runPath = join(cacheRootDir, runDirectory.name);
+    let profileDirectories;
+    try {
+      profileDirectories = await readdir(runPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const profileDirectory of profileDirectories) {
+      if (!profileDirectory.isDirectory()) continue;
+      const partitionPath = join(
+        runPath,
+        profileDirectory.name,
+        "Partitions",
+        SIDEBAR_BROWSER_PARTITION_NAME,
+      );
+      try {
+        const cookieStoreStat = await stat(join(partitionPath, "Network", "Cookies"));
+        candidates.push({ path: partitionPath, modifiedAt: cookieStoreStat.mtimeMs });
+      } catch {
+        // This legacy run did not create a sidebar-browser cookie store.
+      }
+    }
+  }
+
+  return candidates
+    .sort((left, right) => right.modifiedAt - left.modifiedAt)
+    .map((candidate) => candidate.path);
+}
+
+async function migrateLegacySidebarBrowserCookies() {
+  const sessionDataDir = getElectronSessionDataDir();
+  const markerPath = join(sessionDataDir, sidebarBrowserMigrationMarkerFilename);
+  try {
+    await stat(markerPath);
+    return;
+  } catch {
+    // Continue until a legacy store has been migrated successfully.
+  }
+
+  const targetSession = session.fromPartition(SIDEBAR_BROWSER_PARTITION);
+  const legacyPartitionPaths = await findLegacySidebarBrowserPartitionPaths();
+  let copied = 0;
+  let foundUsableLegacyStore = false;
+  for (const legacyPartitionPath of legacyPartitionPaths) {
+    try {
+      const sourceSession = session.fromPath(legacyPartitionPath);
+      const result = await copyMissingPersistentCookies(
+        sourceSession.cookies,
+        targetSession.cookies,
+      );
+      if (result.eligible === 0 || result.eligible === result.failed) continue;
+      foundUsableLegacyStore = true;
+      copied += result.copied;
+    } catch {
+      // Try an older complete legacy store when the newest one cannot be opened.
+    }
+  }
+  if (!foundUsableLegacyStore) return;
+
+  targetSession.flushStorageData();
+  await targetSession.cookies.flushStore();
+  await writeFile(
+    markerPath,
+    JSON.stringify({ migratedAt: new Date().toISOString(), copied }),
+    "utf8",
+  );
 }
 
 function assertWorkspace() {
@@ -941,10 +1024,11 @@ if (!singleInstanceLockAcquired) {
     mainWindow.focus();
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     if (process.platform === "win32") {
       app.setAppUserModelId("com.renge.agentlab");
     }
+    await migrateLegacySidebarBrowserCookies().catch(() => undefined);
     return createMainWindow();
   });
 

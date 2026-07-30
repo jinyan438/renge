@@ -87,6 +87,7 @@ const DEFAULT_PAGE_STATE: BrowserPageState = {
 const MIN_ZOOM_FACTOR = 0.25;
 const MAX_ZOOM_FACTOR = 2;
 const ZOOM_STEP = 0.1;
+// Every chat and tab uses one app-wide Electron browser profile.
 const SIDEBAR_BROWSER_PARTITION = "persist:renge-sidebar-browser";
 let browserTabSequence = 0;
 

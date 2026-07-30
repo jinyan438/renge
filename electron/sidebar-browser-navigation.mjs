@@ -1,4 +1,5 @@
-export const SIDEBAR_BROWSER_PARTITION = "persist:renge-sidebar-browser";
+export const SIDEBAR_BROWSER_PARTITION_NAME = "renge-sidebar-browser";
+export const SIDEBAR_BROWSER_PARTITION = `persist:${SIDEBAR_BROWSER_PARTITION_NAME}`;
 
 export function isAllowedSidebarBrowserUrl(value) {
   try {
