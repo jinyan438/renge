@@ -47,6 +47,14 @@ contextBridge.exposeInMainWorld("rengeDesktop", {
     ipcRenderer.invoke("sidebar-browser:profile-setting", options),
   getSidebarBrowserAutofill: (options) => ipcRenderer.invoke("sidebar-browser:autofill", options),
   clearSidebarBrowserData: (options) => ipcRenderer.invoke("sidebar-browser:clear-data", options),
+  runSidebarBrowserContextAction: (options) =>
+    ipcRenderer.invoke("sidebar-browser:context-action", options),
+  onSidebarBrowserContextMenu: (listener) => {
+    if (typeof listener !== "function") return () => undefined;
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on("sidebar-browser:context-menu", wrappedListener);
+    return () => ipcRenderer.removeListener("sidebar-browser:context-menu", wrappedListener);
+  },
   onSidebarBrowserDownloads: (listener) => {
     if (typeof listener !== "function") return () => undefined;
     const wrappedListener = (_event, payload) => listener(payload);

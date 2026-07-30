@@ -30,6 +30,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { BrowserSidebarPanel } from "./BrowserSidebarPanel";
+import type { BrowserPageComment } from "./browserSidebarComments";
 import { FilesSidebarPanel, type FileBrowserSource } from "./FilesSidebarPanel";
 import { registerBrowserSidebarOpener } from "./browserSidebarRuntime";
 import {
@@ -71,6 +72,7 @@ export type StatusBarSidebarProps = {
   manualUpdateRunning?: boolean;
   fileBrowserSource?: FileBrowserSource | null;
   onChooseWorkspace?: () => void | Promise<void>;
+  onBrowserComment?: (comment: BrowserPageComment) => void;
 };
 
 type StatusBarCssProperties = CSSProperties & {
@@ -790,6 +792,7 @@ export function StatusBarSidebar({
   manualUpdateRunning = false,
   fileBrowserSource = null,
   onChooseWorkspace,
+  onBrowserComment,
 }: StatusBarSidebarProps) {
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
   const [sidebarWidth, setSidebarWidth] = useState(loadRightSidebarWidth);
@@ -2085,6 +2088,7 @@ export function StatusBarSidebar({
           <BrowserSidebarPanel
             onBack={() => setActiveToolId("menu")}
             onClose={() => onCollapsedChange(true)}
+            onBrowserComment={onBrowserComment}
           />
         </div>
         {editorModal}

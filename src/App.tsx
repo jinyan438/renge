@@ -17,6 +17,7 @@ import {
   EyeOff,
   FileJson,
   FolderOpen,
+  Globe,
   GripVertical,
   KeyRound,
   ListPlus,
@@ -234,6 +235,12 @@ import {
   executeBrowserTool,
   isBrowserToolName,
 } from "./browserSidebarRuntime";
+import {
+  BROWSER_COMMENT_MIME_TYPE,
+  parseBrowserPageComment,
+  serializeBrowserPageComment,
+  type BrowserPageComment,
+} from "./browserSidebarComments";
 import {
   buildStatusBarConversationSystemPrompt,
   buildStatusBarReducerPayload,
@@ -888,6 +895,19 @@ type SidebarBrowserProfileSummary = {
   downloadDirectory: string;
 };
 
+type SidebarBrowserContextMenuRequest = {
+  sourceWebContentsId: number;
+  x: number;
+  y: number;
+  pageUrl: string;
+  frameUrl: string;
+  linkUrl: string;
+  sourceUrl: string;
+  mediaType: string;
+  selectionText: string;
+  isEditable: boolean;
+};
+
 type RengeDesktopApi = {
   isElectron: boolean;
   clearAppStorage?(): Promise<{ ok: boolean }>;
@@ -969,6 +989,18 @@ type RengeDesktopApi = {
   clearSidebarBrowserData?(options: {
     action: "cache" | "cookies" | "history" | "passwords" | "all";
   }): Promise<SidebarBrowserProfileSummary>;
+  runSidebarBrowserContextAction?(options: {
+    webContentsId: number;
+    action: "copy-text" | "copy-image" | "open-external" | "inspect" | "capture-element";
+    text?: string;
+    url?: string;
+    x?: number;
+    y?: number;
+    rect?: { x: number; y: number; width: number; height: number };
+  }): Promise<{ ok: boolean; dataUrl?: string }>;
+  onSidebarBrowserContextMenu?(
+    listener: (request: SidebarBrowserContextMenuRequest) => void,
+  ): () => void;
   onSidebarBrowserDownloads?(
     listener: (downloads: SidebarBrowserDownload[]) => void,
   ): () => void;
@@ -11362,6 +11394,18 @@ export function App() {
   const [composerModelMenuSection, setComposerModelMenuSection] =
     useState<ComposerModelMenuSection | null>(null);
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
+  const pendingBrowserComments = useMemo(
+    () => chatAttachments.flatMap((attachment) => {
+      if (attachment.type !== BROWSER_COMMENT_MIME_TYPE) return [];
+      const comment = parseBrowserPageComment(attachment.textContent, attachment.dataUrl);
+      return comment ? [{ attachment, comment }] : [];
+    }),
+    [chatAttachments],
+  );
+  const regularChatAttachments = useMemo(
+    () => chatAttachments.filter((attachment) => attachment.type !== BROWSER_COMMENT_MIME_TYPE),
+    [chatAttachments],
+  );
   const [chatMessageMenu, setChatMessageMenu] = useState<{
     messageId: string;
     x: number;
@@ -20375,30 +20419,50 @@ export function App() {
 
     return (
       <div className="chat-attachments">
-        {attachments.map((attachment) => (
-          <div className="chat-attachment-card" key={attachment.id}>
-            {attachment.type.startsWith("image/") && attachment.dataUrl ? (
-              <img src={attachment.dataUrl} alt={attachment.name} />
-            ) : (
-              <FileJson size={16} />
-            )}
-            <div>
-              <strong title={attachment.name}>{attachment.name}</strong>
-              <span>
-                {attachment.type || "application/octet-stream"} · {formatFileSize(attachment.size)}
-              </span>
+        {attachments.map((attachment) => {
+          const browserComment = attachment.type === BROWSER_COMMENT_MIME_TYPE
+            ? parseBrowserPageComment(attachment.textContent, attachment.dataUrl)
+            : null;
+          if (browserComment) {
+            return (
+              <div className="chat-browser-comment-sent" key={attachment.id}>
+                {browserComment.screenshotDataUrl ? (
+                  <img src={browserComment.screenshotDataUrl} alt={`网页元素 ${browserComment.tagName}`} />
+                ) : (
+                  <Globe size={18} />
+                )}
+                <div>
+                  <span><code>{browserComment.tagName}</code> · {browserComment.pageTitle || browserComment.pageUrl}</span>
+                  <strong>{browserComment.comment}</strong>
+                </div>
+              </div>
+            );
+          }
+          return (
+            <div className="chat-attachment-card" key={attachment.id}>
+              {attachment.type.startsWith("image/") && attachment.dataUrl ? (
+                <img src={attachment.dataUrl} alt={attachment.name} />
+              ) : (
+                <FileJson size={16} />
+              )}
+              <div>
+                <strong title={attachment.name}>{attachment.name}</strong>
+                <span>
+                  {attachment.type || "application/octet-stream"} · {formatFileSize(attachment.size)}
+                </span>
+              </div>
+              {attachment.downloadUrl && (
+                <a
+                  href={attachment.downloadUrl}
+                  download={attachment.name}
+                  title="下载文件"
+                >
+                  <Download size={14} />
+                </a>
+              )}
             </div>
-            {attachment.downloadUrl && (
-              <a
-                href={attachment.downloadUrl}
-                download={attachment.name}
-                title="下载文件"
-              >
-                <Download size={14} />
-              </a>
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
     );
   };
@@ -22954,6 +23018,45 @@ export function App() {
     setChatAttachments((current) =>
       current.filter((attachment) => attachment.id !== attachmentId),
     );
+  };
+
+  const addBrowserCommentToComposer = (comment: BrowserPageComment) => {
+    const textContent = serializeBrowserPageComment(comment);
+    let pageHost = "page";
+    try {
+      pageHost = new URL(comment.pageUrl).hostname || pageHost;
+    } catch {
+      // Keep a stable fallback for non-standard pages.
+    }
+    const attachment: ChatAttachment = {
+      id: `browser-comment-${comment.id}`,
+      name: `网页评论-${pageHost}-${comment.tagName}.json`,
+      type: BROWSER_COMMENT_MIME_TYPE,
+      size: new Blob([textContent]).size,
+      ...(comment.screenshotDataUrl ? { dataUrl: comment.screenshotDataUrl } : {}),
+      textContent,
+      createdAt: comment.createdAt,
+    };
+    chatAttachmentMetadataRef.current.set(attachment.id, attachment);
+    setChatAttachments((current) => [
+      ...current.filter((candidate) => candidate.id !== attachment.id),
+      attachment,
+    ]);
+    setChatStatus({
+      status: "success",
+      message: `已将 <${comment.tagName}> 元素评论添加到消息发送区。`,
+    });
+    window.setTimeout(() => chatInputRef.current?.focus(), 0);
+  };
+
+  const removeAllBrowserComments = () => {
+    const browserCommentIds = new Set(
+      chatAttachments
+        .filter((attachment) => attachment.type === BROWSER_COMMENT_MIME_TYPE)
+        .map((attachment) => attachment.id),
+    );
+    browserCommentIds.forEach((id) => chatAttachmentMetadataRef.current.delete(id));
+    setChatAttachments((current) => current.filter((attachment) => !browserCommentIds.has(attachment.id)));
   };
 
   const getMultiAgentConfigurationError = () => {
@@ -31882,9 +31985,43 @@ export function App() {
                   }
                 }}
               />
-              {chatAttachments.length > 0 && (
+              {pendingBrowserComments.length > 0 && (
+                <div className="chat-browser-comments-pending" aria-label="待发送网页评论">
+                  {pendingBrowserComments.map(({ attachment, comment }) => (
+                    <div className="chat-browser-comment-preview" key={attachment.id}>
+                      <header>
+                        {comment.screenshotDataUrl ? (
+                          <img src={comment.screenshotDataUrl} alt={`网页元素 ${comment.tagName}`} />
+                        ) : (
+                          <span><Globe size={16} /></span>
+                        )}
+                        <code>{comment.tagName}</code>
+                        <small title={comment.pageUrl}>{comment.pageTitle || comment.pageUrl}</small>
+                        <button
+                          aria-label="移除这条网页评论"
+                          onClick={() => removeChatAttachment(attachment.id)}
+                          title="移除评论"
+                          type="button"
+                        >
+                          <X size={13} />
+                        </button>
+                      </header>
+                      <strong>{comment.comment}</strong>
+                      <span title={comment.selector}>{comment.selector}</span>
+                    </div>
+                  ))}
+                  <div className="chat-browser-comment-count">
+                    <MessageSquare size={14} />
+                    <span>{pendingBrowserComments.length} 条评论</span>
+                    <button aria-label="移除全部网页评论" onClick={removeAllBrowserComments} title="移除全部评论" type="button">
+                      <X size={12} />
+                    </button>
+                  </div>
+                </div>
+              )}
+              {regularChatAttachments.length > 0 && (
                 <div className="chat-pending-attachments">
-                  {chatAttachments.map((attachment) => (
+                  {regularChatAttachments.map((attachment) => (
                     <div className="chat-pending-attachment" key={attachment.id}>
                       {attachment.type.startsWith("image/") && attachment.dataUrl ? (
                         <img src={attachment.dataUrl} alt={attachment.name} />
@@ -32554,6 +32691,7 @@ export function App() {
           manualUpdateRunning={manualStatusBarUpdateRunning}
           fileBrowserSource={fileBrowserSource}
           onChooseWorkspace={authorizeLocalWorkspace}
+          onBrowserComment={addBrowserCommentToComposer}
         />
       </PortfolioDesktopWindow>
   ) : null;

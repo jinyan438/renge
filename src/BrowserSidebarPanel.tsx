@@ -9,22 +9,27 @@ import {
   ChevronRight,
   ChevronUp,
   Code2,
+  Copy,
   Download,
   EllipsisVertical,
   ExternalLink,
   File,
   FolderOpen,
   Globe,
+  Image as ImageIcon,
   KeyRound,
   Maximize2,
   Minus,
   MonitorSmartphone,
+  MessageSquare,
   Plus,
   RefreshCw,
   RotateCcw,
+  Save,
   Search,
   Settings2,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
   X,
 } from "lucide-react";
@@ -53,6 +58,11 @@ import {
   MAX_BROWSER_TABS,
   parseBrowserOpenTabRequest,
 } from "./browserSidebarTabs";
+import {
+  buildBrowserContextTargetProbeScript,
+  type BrowserContextTarget,
+  type BrowserPageComment,
+} from "./browserSidebarComments";
 import "./browser-sidebar.css";
 
 type ElectronWebviewElement = HTMLElement & {
@@ -65,6 +75,7 @@ type ElectronWebviewElement = HTMLElement & {
   goForward(): void;
   reload(): void;
   stop(): void;
+  downloadURL(url: string): void;
   getZoomFactor(): number;
   setZoomFactor(factor: number): void;
   getWebContentsId(): number;
@@ -77,6 +88,7 @@ type ElectronWebviewElement = HTMLElement & {
 type BrowserSidebarPanelProps = {
   onBack: () => void;
   onClose: () => void;
+  onBrowserComment?: (comment: BrowserPageComment) => void;
 };
 
 type BrowserPageState = {
@@ -118,6 +130,36 @@ type BrowserProfileSummary = {
 };
 
 type BrowserPopoverView = "menu" | "downloads" | "passwords" | "clear-data" | "settings";
+
+type BrowserContextMenuRequest = {
+  sourceWebContentsId: number;
+  x: number;
+  y: number;
+  pageUrl: string;
+  frameUrl: string;
+  linkUrl: string;
+  sourceUrl: string;
+  mediaType: string;
+  selectionText: string;
+  isEditable: boolean;
+};
+
+type BrowserContextMenuState = {
+  tabId: string;
+  request: BrowserContextMenuRequest;
+  target: BrowserContextTarget;
+  left: number;
+  top: number;
+};
+
+type BrowserCommentEditorState = {
+  tabId: string;
+  target: BrowserContextTarget;
+  screenshotDataUrl?: string;
+  left: number;
+  top: number;
+  zoomFactor: number;
+};
 
 const DEFAULT_PAGE_STATE: BrowserPageState = {
   url: "about:blank",
@@ -260,7 +302,11 @@ function getWebviewPageState(webview: ElectronWebviewElement, loading: boolean):
   };
 }
 
-export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProps) {
+export function BrowserSidebarPanel({
+  onBack,
+  onClose,
+  onBrowserComment,
+}: BrowserSidebarPanelProps) {
   const electronAvailable = Boolean(window.rengeDesktop?.isElectron);
   const [tabs, setTabs] = useState<BrowserTabState[]>(() => [createBrowserTab()]);
   const [activeTabId, setActiveTabId] = useState(() => tabs[0].id);
@@ -278,6 +324,9 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState("");
   const [findResult, setFindResult] = useState({ activeMatchOrdinal: 0, matches: 0 });
+  const [contextMenu, setContextMenu] = useState<BrowserContextMenuState | null>(null);
+  const [commentEditor, setCommentEditor] = useState<BrowserCommentEditorState | null>(null);
+  const [commentText, setCommentText] = useState("");
   const tabsRef = useRef(tabs);
   const activeTabIdRef = useRef(activeTabId);
   const webviewNodesRef = useRef(new Map<string, ElectronWebviewElement>());
@@ -285,6 +334,9 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
   const fitRequestRef = useRef(new Map<string, number>());
   const popoverRootRef = useRef<HTMLDivElement | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
+  const pageRef = useRef<HTMLDivElement | null>(null);
+  const commentInputRef = useRef<HTMLInputElement | null>(null);
+  const contextRequestSequenceRef = useRef(0);
   tabsRef.current = tabs;
   activeTabIdRef.current = activeTabId;
 
@@ -317,6 +369,8 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
 
   const selectBrowserTab = useCallback((tabId: string) => {
     if (!tabsRef.current.some((tab) => tab.id === tabId)) return;
+    setContextMenu(null);
+    setCommentEditor(null);
     activeTabIdRef.current = tabId;
     setActiveTabId(tabId);
   }, []);
@@ -433,6 +487,8 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
       webviewNodesRef.current.set(tabId, node);
       setWebviewNodes((current) => new Map(current).set(tabId, node));
       const startLoading = () => {
+        setContextMenu((current) => current?.tabId === tabId ? null : current);
+        setCommentEditor((current) => current?.tabId === tabId ? null : current);
         fitRequestRef.current.set(tabId, (fitRequestRef.current.get(tabId) ?? 0) + 1);
         const tab = tabsRef.current.find((candidate) => candidate.id === tabId);
         if (tab?.autoFit) applyZoomFactor(tabId, node, 1);
@@ -532,6 +588,8 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
   const closeBrowserTab = useCallback(
     (tabId: string) => {
       const current = tabsRef.current;
+      setContextMenu((menu) => menu?.tabId === tabId ? null : menu);
+      setCommentEditor((editor) => editor?.tabId === tabId ? null : editor);
       const closingNode = webviewNodesRef.current.get(tabId);
       setDeviceEmulationTabIds((enabledIds) => {
         if (!enabledIds.has(tabId)) return enabledIds;
@@ -830,6 +888,182 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
     }
   };
 
+  const runContextAction = async (
+    action: "copy-text" | "copy-image" | "open-external" | "inspect" | "capture-element",
+    options: Record<string, unknown> = {},
+    menu = contextMenu,
+  ) => {
+    if (!menu) return null;
+    const runAction = window.rengeDesktop?.runSidebarBrowserContextAction;
+    const node = webviewNodesRef.current.get(menu.tabId);
+    if (!runAction || !node) return null;
+    try {
+      return await runAction({
+        webContentsId: node.getWebContentsId(),
+        action,
+        ...options,
+      });
+    } catch (caught) {
+      reportFeatureError(caught);
+      return null;
+    }
+  };
+
+  const openContextUrlInTab = (url: string) => {
+    if (!contextMenu || !url) return;
+    createNewBrowserTab(url, contextMenu.tabId);
+    setContextMenu(null);
+  };
+
+  const saveContextUrl = (url: string) => {
+    if (!contextMenu || !url) return;
+    const node = webviewNodesRef.current.get(contextMenu.tabId);
+    try {
+      node?.downloadURL(url);
+      setContextMenu(null);
+    } catch (caught) {
+      reportFeatureError(caught);
+    }
+  };
+
+  const copyContextText = async (text: string) => {
+    if (!text) return;
+    await runContextAction("copy-text", { text });
+    setContextMenu(null);
+  };
+
+  const startBrowserComment = async () => {
+    const menu = contextMenu;
+    if (!menu) return;
+    setContextMenu(null);
+    const node = webviewNodesRef.current.get(menu.tabId);
+    const pageBounds = pageRef.current?.getBoundingClientRect();
+    const zoom = node?.getZoomFactor() ?? 1;
+    let screenshotDataUrl: string | undefined;
+    if (node && menu.target.rect.width > 0 && menu.target.rect.height > 0) {
+      const captureResult = await runContextAction("capture-element", {
+        rect: {
+          x: menu.target.rect.x * zoom,
+          y: menu.target.rect.y * zoom,
+          width: menu.target.rect.width * zoom,
+          height: menu.target.rect.height * zoom,
+        },
+      }, menu);
+      screenshotDataUrl = captureResult?.dataUrl;
+    }
+    const editorWidth = Math.min(440, Math.max(260, (pageBounds?.width ?? 360) - 24));
+    const targetLeft = menu.target.rect.x * zoom;
+    const targetBottom = (menu.target.rect.y + menu.target.rect.height) * zoom;
+    const left = Math.max(
+      12,
+      Math.min(targetLeft + 18, (pageBounds?.width ?? 360) - editorWidth - 12),
+    );
+    const top = Math.max(
+      12,
+      Math.min(targetBottom - 62, (pageBounds?.height ?? 500) - 66),
+    );
+    setCommentText("");
+    setCommentEditor({
+      tabId: menu.tabId,
+      target: menu.target,
+      ...(screenshotDataUrl ? { screenshotDataUrl } : {}),
+      left,
+      top,
+      zoomFactor: zoom,
+    });
+    window.setTimeout(() => commentInputRef.current?.focus(), 0);
+  };
+
+  const submitBrowserComment = () => {
+    const comment = commentText.trim();
+    if (!commentEditor || !comment) return;
+    if (!onBrowserComment) {
+      reportFeatureError(new Error("当前聊天没有连接网页评论接收区"));
+      return;
+    }
+    onBrowserComment({
+      ...commentEditor.target,
+      id: crypto.randomUUID(),
+      comment,
+      createdAt: new Date().toISOString(),
+      ...(commentEditor.screenshotDataUrl
+        ? { screenshotDataUrl: commentEditor.screenshotDataUrl }
+        : {}),
+    });
+    setCommentEditor(null);
+    setCommentText("");
+  };
+
+  const handleCommentKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setCommentEditor(null);
+      setCommentText("");
+    } else if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      submitBrowserComment();
+    }
+  };
+
+  useEffect(() => {
+    const subscribe = window.rengeDesktop?.onSidebarBrowserContextMenu;
+    if (!subscribe) return;
+    return subscribe((rawRequest) => {
+      const request = rawRequest as BrowserContextMenuRequest;
+      const requestSequence = contextRequestSequenceRef.current + 1;
+      contextRequestSequenceRef.current = requestSequence;
+      void (async () => {
+        const sourceTab = tabsRef.current.find((tab) => {
+          const node = webviewNodesRef.current.get(tab.id);
+          try {
+            return node?.getWebContentsId() === request.sourceWebContentsId;
+          } catch {
+            return false;
+          }
+        });
+        if (!sourceTab) return;
+        const node = webviewNodesRef.current.get(sourceTab.id);
+        if (!node) return;
+        const probedTarget = await node.executeJavaScript<BrowserContextTarget | null>(
+          buildBrowserContextTargetProbeScript(request.x, request.y),
+        );
+        if (contextRequestSequenceRef.current !== requestSequence) return;
+        const target: BrowserContextTarget = probedTarget ?? {
+          pageUrl: request.pageUrl || node.getURL(),
+          pageTitle: node.getTitle(),
+          tagName: request.mediaType === "image" ? "img" : "body",
+          selector: request.mediaType === "image" ? "img" : "body",
+          path: request.mediaType === "image" ? "img" : "body",
+          text: request.selectionText,
+          ariaLabel: "",
+          nearbyText: request.selectionText,
+          outerHtml: "",
+          imageUrl: request.sourceUrl,
+          linkUrl: request.linkUrl,
+          rect: { x: request.x, y: request.y, width: 1, height: 1 },
+        };
+        if (!target.imageUrl && request.sourceUrl) target.imageUrl = request.sourceUrl;
+        if (!target.linkUrl && request.linkUrl) target.linkUrl = request.linkUrl;
+        const zoom = node.getZoomFactor();
+        const pageBounds = pageRef.current?.getBoundingClientRect();
+        const menuWidth = Math.min(286, Math.max(220, (pageBounds?.width ?? 360) - 16));
+        const estimatedHeight = 128 + (target.linkUrl ? 150 : 0) + (target.imageUrl ? 160 : 0);
+        const left = Math.max(
+          8,
+          Math.min(request.x * zoom, (pageBounds?.width ?? 360) - menuWidth - 8),
+        );
+        const top = Math.max(
+          8,
+          Math.min(request.y * zoom, (pageBounds?.height ?? 500) - Math.min(estimatedHeight, 470) - 8),
+        );
+        selectBrowserTab(sourceTab.id);
+        setPopoverView(null);
+        setCommentEditor(null);
+        setContextMenu({ tabId: sourceTab.id, request, target, left, top });
+      })().catch(reportFeatureError);
+    });
+  }, [reportFeatureError, selectBrowserTab]);
+
   useEffect(() => {
     let active = true;
     const desktopApi = window.rengeDesktop;
@@ -868,6 +1102,20 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [popoverView]);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const closeContextMenu = () => setContextMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setContextMenu(null);
+    };
+    document.addEventListener("pointerdown", closeContextMenu);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeContextMenu);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [contextMenu]);
 
   useEffect(() => {
     if (!findOpen || !webviewNode) return;
@@ -1515,7 +1763,7 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
         </div>
       ) : null}
 
-      <div className="browser-sidebar-page">
+      <div className="browser-sidebar-page" ref={pageRef}>
         {electronAvailable
           ? tabs.map((tab) => (
               <BrowserTabWebview
@@ -1527,6 +1775,135 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
               />
             ))
           : null}
+
+        {contextMenu ? (
+          <div
+            aria-label="网页右键菜单"
+            className="browser-context-menu"
+            onPointerDown={(event) => event.stopPropagation()}
+            role="menu"
+            style={{ left: contextMenu.left, top: contextMenu.top }}
+          >
+            <button onClick={() => void startBrowserComment()} role="menuitem" type="button">
+              <SlidersHorizontal size={16} />
+              <span>Quick annotate</span>
+            </button>
+            <button onClick={() => void startBrowserComment()} role="menuitem" type="button">
+              <MessageSquare size={16} />
+              <span>评论</span>
+            </button>
+            {contextMenu.request.selectionText ? (
+              <>
+                <div />
+                <button onClick={() => void copyContextText(contextMenu.request.selectionText)} role="menuitem" type="button">
+                  <Copy size={16} />
+                  <span>复制所选文本</span>
+                </button>
+              </>
+            ) : null}
+            {contextMenu.target.linkUrl ? (
+              <>
+                <div />
+                <button onClick={() => openContextUrlInTab(contextMenu.target.linkUrl)} role="menuitem" type="button">
+                  <ExternalLink size={16} />
+                  <span>在新标签页中打开链接</span>
+                </button>
+                <button
+                  onClick={() => void runContextAction("open-external", { url: contextMenu.target.linkUrl }).then(() => setContextMenu(null))}
+                  role="menuitem"
+                  type="button"
+                >
+                  <ExternalLink size={16} />
+                  <span>在外部浏览器中打开</span>
+                </button>
+                <button onClick={() => saveContextUrl(contextMenu.target.linkUrl)} role="menuitem" type="button">
+                  <Save size={16} />
+                  <span>链接另存为...</span>
+                </button>
+                <button onClick={() => void copyContextText(contextMenu.target.linkUrl)} role="menuitem" type="button">
+                  <Copy size={16} />
+                  <span>复制链接地址</span>
+                </button>
+              </>
+            ) : null}
+            {contextMenu.target.imageUrl ? (
+              <>
+                <div />
+                <button onClick={() => openContextUrlInTab(contextMenu.target.imageUrl)} role="menuitem" type="button">
+                  <ImageIcon size={16} />
+                  <span>在新标签页中打开图片</span>
+                </button>
+                <button onClick={() => saveContextUrl(contextMenu.target.imageUrl)} role="menuitem" type="button">
+                  <Save size={16} />
+                  <span>图片另存为...</span>
+                </button>
+                <button
+                  onClick={() => void runContextAction("copy-image", { url: contextMenu.target.imageUrl }).then(() => setContextMenu(null))}
+                  role="menuitem"
+                  type="button"
+                >
+                  <Copy size={16} />
+                  <span>复制图片</span>
+                </button>
+                <button onClick={() => void copyContextText(contextMenu.target.imageUrl)} role="menuitem" type="button">
+                  <Copy size={16} />
+                  <span>复制图片地址</span>
+                </button>
+              </>
+            ) : null}
+            <div />
+            <button
+              onClick={() => void runContextAction("inspect", {
+                x: contextMenu.request.x,
+                y: contextMenu.request.y,
+              }).then(() => setContextMenu(null))}
+              role="menuitem"
+              type="button"
+            >
+              <Search size={16} />
+              <span>检查</span>
+            </button>
+          </div>
+        ) : null}
+
+        {commentEditor ? (
+          <>
+            <div
+              aria-hidden="true"
+              className="browser-comment-highlight"
+              style={{
+                left: commentEditor.target.rect.x * commentEditor.zoomFactor,
+                top: commentEditor.target.rect.y * commentEditor.zoomFactor,
+                width: commentEditor.target.rect.width * commentEditor.zoomFactor,
+                height: commentEditor.target.rect.height * commentEditor.zoomFactor,
+              }}
+            >
+              <span>1</span>
+            </div>
+            <form
+              className="browser-comment-editor"
+              onPointerDown={(event) => event.stopPropagation()}
+              onSubmit={(event) => {
+                event.preventDefault();
+                submitBrowserComment();
+              }}
+              style={{ left: commentEditor.left, top: commentEditor.top }}
+            >
+              <SlidersHorizontal aria-hidden="true" size={18} />
+              <input
+                aria-label="评论网页元素"
+                onChange={(event) => setCommentText(event.target.value)}
+                onKeyDown={handleCommentKeyDown}
+                placeholder="评论"
+                ref={commentInputRef}
+                value={commentText}
+              />
+              <button aria-label="添加评论到消息发送区" disabled={!commentText.trim()} type="submit">
+                <Check size={21} />
+              </button>
+            </form>
+          </>
+        ) : null}
 
         {!electronAvailable ? (
           <div className="browser-sidebar-empty is-unavailable">

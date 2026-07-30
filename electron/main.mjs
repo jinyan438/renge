@@ -1,9 +1,11 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
+  nativeImage,
   safeStorage,
   session,
   shell,
@@ -176,6 +178,30 @@ function getSidebarBrowserGuest(event, rawWebContentsId) {
     throw new Error("找不到当前侧栏网页");
   }
   return target;
+}
+
+function normalizeSidebarBrowserCaptureRect(rawRect) {
+  const numberInRange = (value, minimum, maximum) => Math.min(
+    maximum,
+    Math.max(minimum, Math.round(Number(value) || 0)),
+  );
+  return {
+    x: numberInRange(rawRect?.x, 0, 100_000),
+    y: numberInRange(rawRect?.y, 0, 100_000),
+    width: numberInRange(rawRect?.width, 1, 2_048),
+    height: numberInRange(rawRect?.height, 1, 2_048),
+  };
+}
+
+function assertExternalBrowserUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(String(rawUrl ?? ""));
+  } catch {
+    throw new Error("链接地址无效");
+  }
+  if (!/^https?:$/.test(parsed.protocol)) throw new Error("只允许打开 HTTP 或 HTTPS 链接");
+  return parsed.href;
 }
 
 function serializeSidebarBrowserDownload(record) {
@@ -1072,6 +1098,57 @@ function registerIpcHandlers() {
     return { canceled: false, path: result.filePath };
   });
 
+  ipcMain.handle("sidebar-browser:context-action", async (event, options = {}) => {
+    const target = getSidebarBrowserGuest(event, options.webContentsId);
+    const action = String(options.action ?? "");
+    if (action === "copy-text") {
+      const text = String(options.text ?? "").slice(0, 2_000_000);
+      clipboard.writeText(text);
+      return { ok: true };
+    }
+    if (action === "open-external") {
+      await shell.openExternal(assertExternalBrowserUrl(options.url));
+      return { ok: true };
+    }
+    if (action === "inspect") {
+      target.inspectElement(
+        Math.max(0, Math.round(Number(options.x) || 0)),
+        Math.max(0, Math.round(Number(options.y) || 0)),
+      );
+      return { ok: true };
+    }
+    if (action === "capture-element") {
+      const image = await target.capturePage(normalizeSidebarBrowserCaptureRect(options.rect));
+      return { ok: true, dataUrl: image.toDataURL() };
+    }
+    if (action === "copy-image") {
+      const rawUrl = String(options.url ?? "");
+      if (rawUrl.startsWith("data:image/")) {
+        if (rawUrl.length > 35 * 1024 * 1024) throw new Error("图片超过 25 MB，无法复制");
+        const image = nativeImage.createFromDataURL(rawUrl);
+        if (image.isEmpty()) throw new Error("无法解析图片内容");
+        clipboard.writeImage(image);
+        return { ok: true };
+      }
+      const url = assertExternalBrowserUrl(rawUrl);
+      const response = await target.session.fetch(url, {
+        credentials: "include",
+        referrer: target.getURL(),
+      });
+      if (!response.ok) throw new Error(`图片读取失败：${response.status}`);
+      const mimeType = String(response.headers.get("content-type") ?? "").toLowerCase();
+      if (mimeType && !mimeType.startsWith("image/")) throw new Error("目标地址不是图片");
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length === 0) throw new Error("图片内容为空");
+      if (bytes.length > 25 * 1024 * 1024) throw new Error("图片超过 25 MB，无法复制");
+      const image = nativeImage.createFromBuffer(bytes);
+      if (image.isEmpty()) throw new Error("无法解析图片内容");
+      clipboard.writeImage(image);
+      return { ok: true };
+    }
+    throw new Error("未知的浏览器右键操作");
+  });
+
   ipcMain.handle("sidebar-browser:device-emulation", (event, options = {}) => {
     const target = getSidebarBrowserGuest(event, options.webContentsId);
     const enabled = Boolean(options.enabled);
@@ -1468,6 +1545,22 @@ async function createMainWindow() {
   });
 
   mainWindow.webContents.on("did-attach-webview", (_event, guestContents) => {
+    guestContents.on("context-menu", (contextEvent, params) => {
+      contextEvent.preventDefault();
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      mainWindow.webContents.send("sidebar-browser:context-menu", {
+        sourceWebContentsId: guestContents.id,
+        x: params.x,
+        y: params.y,
+        pageUrl: params.pageURL,
+        frameUrl: params.frameURL,
+        linkUrl: params.linkURL,
+        sourceUrl: params.srcURL,
+        mediaType: params.mediaType,
+        selectionText: params.selectionText,
+        isEditable: params.isEditable,
+      });
+    });
     guestContents.setWindowOpenHandler(
       createSidebarBrowserWindowOpenHandler(guestContents.id, (request) => {
         if (!mainWindow || mainWindow.isDestroyed()) return;
