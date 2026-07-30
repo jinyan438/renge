@@ -49,6 +49,7 @@ import {
   buildBrowserPageReadScript,
   buildBrowserScriptExecutionWrapper,
   calculateBrowserFitZoomFactor,
+  isBrowserAddressInputAvailable,
   normalizeBrowserAddress,
   registerBrowserSidebarController,
   type BrowserSidebarController,
@@ -317,6 +318,11 @@ export function BrowserSidebarPanel({
   onBrowserComment,
 }: BrowserSidebarPanelProps) {
   const electronAvailable = Boolean(window.rengeDesktop?.isElectron);
+  const androidAvailable = Boolean(window.rengeAndroid?.isAndroid || window.RengeAndroidNative);
+  const addressInputAvailable = isBrowserAddressInputAvailable(
+    electronAvailable,
+    androidAvailable,
+  );
   const [tabs, setTabs] = useState<BrowserTabState[]>(() => [createBrowserTab()]);
   const [activeTabId, setActiveTabId] = useState(() => tabs[0].id);
   const [webviewNodes, setWebviewNodes] = useState(
@@ -1552,11 +1558,14 @@ export function BrowserSidebarPanel({
             <Globe aria-hidden="true" size={14} />
             <input
               aria-label="浏览器地址"
-              disabled={!electronAvailable}
+              disabled={!addressInputAvailable}
               onChange={(event) => {
                 if (!activeTab) return;
                 const nextAddress = event.target.value;
                 updateBrowserTab(activeTab.id, (tab) => ({ ...tab, address: nextAddress }));
+              }}
+              onFocus={(event) => {
+                if (androidAvailable) event.currentTarget.select();
               }}
               placeholder="输入网址或搜索内容"
               spellCheck={false}

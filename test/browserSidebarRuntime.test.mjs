@@ -7,9 +7,16 @@ import {
   buildBrowserScriptExecutionWrapper,
   buildBrowserToolsSystemPrompt,
   calculateBrowserFitZoomFactor,
+  isBrowserAddressInputAvailable,
   isBrowserToolName,
   normalizeBrowserAddress,
 } from "../src/browserSidebarRuntime.ts";
+
+test("keeps the browser address input editable in Android and Electron shells", () => {
+  assert.equal(isBrowserAddressInputAvailable(true, false), true);
+  assert.equal(isBrowserAddressInputAvailable(false, true), true);
+  assert.equal(isBrowserAddressInputAvailable(false, false), false);
+});
 
 test("detects whether an about:blank document contains user-visible content", () => {
   const script = buildBrowserDocumentContentProbeScript();

@@ -8,6 +8,13 @@ export type BrowserSidebarController = {
   ): Promise<unknown>;
 };
 
+export function isBrowserAddressInputAvailable(
+  electronAvailable: boolean,
+  androidAvailable: boolean,
+) {
+  return electronAvailable || androidAvailable;
+}
+
 const BROWSER_TOOL_NAMES = new Set([
   "browser_navigate",
   "browser_history",
