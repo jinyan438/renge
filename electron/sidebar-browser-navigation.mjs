@@ -1,3 +1,5 @@
+export const SIDEBAR_BROWSER_PARTITION = "persist:renge-sidebar-browser";
+
 export function isAllowedSidebarBrowserUrl(value) {
   try {
     const url = new URL(String(value ?? ""));

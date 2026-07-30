@@ -87,6 +87,7 @@ const DEFAULT_PAGE_STATE: BrowserPageState = {
 const MIN_ZOOM_FACTOR = 0.25;
 const MAX_ZOOM_FACTOR = 2;
 const ZOOM_STEP = 0.1;
+const SIDEBAR_BROWSER_PARTITION = "persist:renge-sidebar-browser";
 let browserTabSequence = 0;
 
 function createBrowserTab(url = "about:blank"): BrowserTabState {
@@ -136,7 +137,7 @@ function BrowserTabWebview({
     allowpopups: "true",
     "aria-hidden": active ? undefined : "true",
     className: `browser-sidebar-webview ${active ? "is-active" : ""}`,
-    partition: "persist:renge-sidebar-browser",
+    partition: SIDEBAR_BROWSER_PARTITION,
     src: initialUrl,
     tabIndex: active ? 0 : -1,
     webpreferences: "contextIsolation=yes,nodeIntegration=no,sandbox=yes",

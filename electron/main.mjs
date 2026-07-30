@@ -15,6 +15,7 @@ import {
 import {
   createSidebarBrowserWindowOpenHandler,
   isAllowedSidebarBrowserUrl,
+  SIDEBAR_BROWSER_PARTITION,
 } from "./sidebar-browser-navigation.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -29,6 +30,7 @@ let serverController = null;
 let workspaceRoot = null;
 let workspaceFullAccessEnabled = false;
 let electronRuntimeCacheDir = null;
+let persistentBrowserDataFlushed = false;
 let desktopProjectPositionsWriteQueue = Promise.resolve();
 const desktopServerPort = 5191;
 const desktopProjectPositionsFilename = "desktop-project-positions.json";
@@ -93,17 +95,41 @@ function getElectronCacheRootDir() {
   return join(getPersistentDataDir(), "ElectronCache");
 }
 
-function configureElectronCache() {
+function getElectronSessionDataDir() {
+  if (process.env.RENGE_ELECTRON_SESSION_DATA_DIR) {
+    return resolve(process.env.RENGE_ELECTRON_SESSION_DATA_DIR);
+  }
+
+  if (process.env.LOCALAPPDATA) {
+    return join(process.env.LOCALAPPDATA, "Renge Agent Lab", "ElectronSessionData");
+  }
+
+  return join(getPersistentDataDir(), "ElectronSessionData");
+}
+
+function configureElectronStorage() {
   const cacheRootDir = getElectronCacheRootDir();
+  const sessionDataDir = getElectronSessionDataDir();
   electronRuntimeCacheDir = join(cacheRootDir, `run-${process.pid}`);
+  mkdirSync(sessionDataDir, { recursive: true });
   mkdirSync(electronRuntimeCacheDir, { recursive: true });
 
+  // Session data contains cookies, localStorage, IndexedDB, and service workers.
+  // Keep it independent from the per-run cache directory that is removed on exit.
+  app.setPath("sessionData", sessionDataDir);
   app.setPath("cache", electronRuntimeCacheDir);
   app.commandLine.appendSwitch("disk-cache-dir", electronRuntimeCacheDir);
   app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
 }
 
-if (singleInstanceLockAcquired) configureElectronCache();
+if (singleInstanceLockAcquired) configureElectronStorage();
+
+async function flushPersistentSidebarBrowserData() {
+  if (!app.isReady()) return;
+  const browserSession = session.fromPartition(SIDEBAR_BROWSER_PARTITION);
+  browserSession.flushStorageData();
+  await browserSession.cookies.flushStore();
+}
 
 function assertWorkspace() {
   if (!workspaceRoot) {
@@ -925,6 +951,15 @@ if (!singleInstanceLockAcquired) {
   app.on("window-all-closed", () => {
     serverController?.server.close();
     if (process.platform !== "darwin") app.quit();
+  });
+
+  app.on("before-quit", (event) => {
+    if (persistentBrowserDataFlushed || !app.isReady()) return;
+    event.preventDefault();
+    persistentBrowserDataFlushed = true;
+    void flushPersistentSidebarBrowserData()
+      .catch(() => undefined)
+      .finally(() => app.quit());
   });
 
   app.on("will-quit", () => {

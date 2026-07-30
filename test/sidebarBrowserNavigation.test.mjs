@@ -3,7 +3,12 @@ import test from "node:test";
 import {
   createSidebarBrowserWindowOpenHandler,
   isAllowedSidebarBrowserUrl,
+  SIDEBAR_BROWSER_PARTITION,
 } from "../electron/sidebar-browser-navigation.mjs";
+
+test("uses a persistent Electron partition for sidebar browser storage", () => {
+  assert.equal(SIDEBAR_BROWSER_PARTITION, "persist:renge-sidebar-browser");
+});
 
 test("routes safe webview popup requests into an application tab", () => {
   const requests = [];
