@@ -227,6 +227,7 @@ import {
   type ContextCompressionSettings,
 } from "./contextCompressionUtils";
 import { StatusBarSidebar } from "./StatusBarSidebar";
+import type { FileBrowserSource, FileBrowserSystemAction } from "./FilesSidebarPanel";
 import {
   browserToolDefinitions,
   buildBrowserToolsSystemPrompt,
@@ -872,6 +873,25 @@ type RengeDesktopApi = {
   clearAppStorage?(): Promise<{ ok: boolean }>;
   loadDesktopProjectPositions?(): Promise<unknown>;
   saveDesktopProjectPositions?(positions: unknown): Promise<{ ok: boolean }>;
+  listSidebarFiles(options: {
+    scope: "workspace" | "temporary";
+    path?: string;
+    recursive?: boolean;
+  }): Promise<unknown>;
+  readSidebarTextFile(options: {
+    scope: "workspace" | "temporary";
+    path: string;
+  }): Promise<unknown>;
+  readSidebarBinaryFile(options: {
+    scope: "workspace" | "temporary";
+    path: string;
+  }): Promise<unknown>;
+  importTemporaryFiles(): Promise<unknown>;
+  runSidebarFileAction(options: {
+    scope: "workspace" | "temporary";
+    path: string;
+    action: FileBrowserSystemAction;
+  }): Promise<unknown>;
   selectWorkspace(): Promise<ElectronWorkspaceHandle | null>;
   selectSkillFolder?(): Promise<{ path: string; name: string } | null>;
   restoreWorkspace(options: { path: string }): Promise<ElectronWorkspaceHandle>;
@@ -14800,6 +14820,105 @@ export function App() {
           ? ["继续当前场景", "说说你现在的想法", "推进接下来的剧情"]
         : ["梳理当前任务并给出下一步", "检查工作区中的潜在问题", "总结当前目标和待办事项"];
   const workspaceInfo = getWorkspaceInfo(localWorkspaceHandle);
+  const fileBrowserSource = useMemo<FileBrowserSource | null>(() => {
+    if (localWorkspaceHandle?.kind === "electron") {
+      const desktopApi = window.rengeDesktop;
+      if (!desktopApi?.isElectron) return null;
+      const scope = "workspace" as const;
+      return {
+        id: `electron:${localWorkspaceHandle.path}`,
+        kind: "workspace",
+        name: localWorkspaceHandle.name,
+        rootPath: localWorkspaceHandle.path,
+        listDirectory: (path) => desktopApi.listSidebarFiles({ scope, path }),
+        readText: (path) => desktopApi.readSidebarTextFile({ scope, path }),
+        readBinary: (path) => desktopApi.readSidebarBinaryFile({ scope, path }),
+        runSystemAction: (path, action) =>
+          desktopApi.runSidebarFileAction({ scope, path, action }),
+      };
+    }
+
+    if (localWorkspaceHandle?.kind === "android") {
+      const androidApi = window.rengeAndroid;
+      if (!androidApi?.isAndroid) return null;
+      return {
+        id: `android:${localWorkspaceHandle.uri}`,
+        kind: "workspace",
+        name: localWorkspaceHandle.name,
+        rootPath: localWorkspaceHandle.uri,
+        listDirectory: (path) => androidApi.listFiles({ path, recursive: false }),
+        readText: (path) => androidApi.readFile({ path }),
+        readBinary: (path) => androidApi.readBinaryFile({ path }),
+      };
+    }
+
+    if (localWorkspaceHandle?.kind === "pc") {
+      const request = async (pathname: string, extra: Record<string, unknown> = {}) => {
+        const response = await fetch(`${localWorkspaceHandle.baseUrl}${pathname}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            workspacePath: localWorkspaceHandle.path,
+            ...extra,
+          }),
+        });
+        const payload = await response.json() as unknown;
+        const payloadError = isObjectRecord(payload) && typeof payload.error === "string"
+          ? payload.error
+          : "";
+        if (!response.ok || payloadError) {
+          throw new Error(payloadError || `电脑文件服务请求失败：${response.status}`);
+        }
+        return payload;
+      };
+      return {
+        id: `pc:${localWorkspaceHandle.baseUrl}:${localWorkspaceHandle.path}`,
+        kind: "workspace",
+        name: localWorkspaceHandle.name,
+        rootPath: localWorkspaceHandle.path,
+        listDirectory: async (path) => {
+          const result = await request("/api/pc/list-files", { path, recursive: false });
+          if (!path || !Array.isArray(result)) return result;
+          return result.map((entry) =>
+            isObjectRecord(entry) && typeof entry.path === "string"
+              ? { ...entry, path: `${path.replace(/\/$/, "")}/${entry.path.replace(/^\//, "")}` }
+              : entry,
+          );
+        },
+        readText: (path) => request("/api/pc/read-file", { path }),
+        readBinary: (path) => request("/api/pc/read-binary-file", { path }),
+      };
+    }
+
+    if (localWorkspaceHandle?.kind === "directory") {
+      return {
+        id: `browser:${localWorkspaceHandle.name}`,
+        kind: "workspace",
+        name: localWorkspaceHandle.name,
+        listDirectory: (path) => listLocalFiles(localWorkspaceHandle, path, false, 1000),
+        readText: async (path) => ({
+          path,
+          content: await readLocalTextFile(localWorkspaceHandle, path),
+        }),
+        readBinary: (path) => readLocalBinaryFile(localWorkspaceHandle, path),
+      };
+    }
+
+    const desktopApi = window.rengeDesktop;
+    if (!desktopApi?.isElectron) return null;
+    const scope = "temporary" as const;
+    return {
+      id: "electron:temporary-files",
+      kind: "temporary",
+      name: "临时文件",
+      listDirectory: (path) => desktopApi.listSidebarFiles({ scope, path }),
+      readText: (path) => desktopApi.readSidebarTextFile({ scope, path }),
+      readBinary: (path) => desktopApi.readSidebarBinaryFile({ scope, path }),
+      importFiles: () => desktopApi.importTemporaryFiles(),
+      runSystemAction: (path, action) =>
+        desktopApi.runSidebarFileAction({ scope, path, action }),
+    };
+  }, [localWorkspaceHandle]);
   const activeChatSession = useMemo(
     () => chatSessions.find((session) => session.id === activeChatSessionId) ?? chatSessions[0],
     [activeChatSessionId, chatSessions],
@@ -32378,6 +32497,8 @@ export function App() {
           onPresetsChange={setStatusBarPresets}
           manualUpdateDisabled={chatGenerationState !== "idle"}
           manualUpdateRunning={manualStatusBarUpdateRunning}
+          fileBrowserSource={fileBrowserSource}
+          onChooseWorkspace={authorizeLocalWorkspace}
         />
       </PortfolioDesktopWindow>
   ) : null;

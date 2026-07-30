@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, session } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } from "electron";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { execFile } from "node:child_process";
@@ -19,6 +19,13 @@ import {
   SIDEBAR_BROWSER_PARTITION_NAME,
 } from "./sidebar-browser-navigation.mjs";
 import { copyMissingPersistentCookies } from "./sidebar-browser-session.mjs";
+import {
+  importTemporaryFiles,
+  listSidebarFiles,
+  readSidebarBinaryFile,
+  readSidebarTextFile,
+  resolveSidebarFilePath,
+} from "./sidebar-files.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const appIconPath = join(
@@ -37,6 +44,7 @@ let desktopProjectPositionsWriteQueue = Promise.resolve();
 const desktopServerPort = 5191;
 const desktopProjectPositionsFilename = "desktop-project-positions.json";
 const sidebarBrowserMigrationMarkerFilename = ".sidebar-browser-global-data-v1";
+const temporaryFilesDirectoryName = "Temporary Files";
 const singleInstanceLockAcquired = app.requestSingleInstanceLock();
 const highRiskGitCommands = new Set([
   "checkout",
@@ -62,6 +70,21 @@ function getPersistentDataDir() {
 
 function getDesktopProjectPositionsPath() {
   return join(getPersistentDataDir(), desktopProjectPositionsFilename);
+}
+
+function getTemporaryFilesRoot() {
+  return join(app.getPath("temp"), "Renge Agent Lab", temporaryFilesDirectoryName);
+}
+
+async function getSidebarFilesRoot(scope) {
+  if (scope === "workspace") {
+    assertWorkspace();
+    return workspaceRoot;
+  }
+  if (scope !== "temporary") throw new Error("未知的文件浏览范围");
+  const temporaryRoot = getTemporaryFilesRoot();
+  await mkdir(temporaryRoot, { recursive: true });
+  return temporaryRoot;
 }
 
 async function loadDesktopProjectPositions() {
@@ -795,6 +818,59 @@ function registerIpcHandlers() {
       .catch(() => undefined)
       .then(() => saveDesktopProjectPositions(positions));
     return desktopProjectPositionsWriteQueue;
+  });
+
+  ipcMain.handle("sidebar-files:list", async (_event, options = {}) => {
+    const rootPath = await getSidebarFilesRoot(options.scope ?? "temporary");
+    return listSidebarFiles(rootPath, options.path ?? "", {
+      recursive: Boolean(options.recursive),
+    });
+  });
+
+  ipcMain.handle("sidebar-files:read-text", async (_event, options = {}) => {
+    const rootPath = await getSidebarFilesRoot(options.scope ?? "temporary");
+    return readSidebarTextFile(rootPath, options.path ?? "");
+  });
+
+  ipcMain.handle("sidebar-files:read-binary", async (_event, options = {}) => {
+    const rootPath = await getSidebarFilesRoot(options.scope ?? "temporary");
+    return readSidebarBinaryFile(rootPath, options.path ?? "");
+  });
+
+  ipcMain.handle("sidebar-files:import-temporary", async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ["openFile", "multiSelections"],
+      title: "添加临时文件",
+    });
+    if (result.canceled || result.filePaths.length === 0) return { imported: [] };
+    const rootPath = await getSidebarFilesRoot("temporary");
+    return {
+      rootPath,
+      imported: await importTemporaryFiles(rootPath, result.filePaths),
+    };
+  });
+
+  ipcMain.handle("sidebar-files:system-action", async (_event, options = {}) => {
+    const rootPath = await getSidebarFilesRoot(options.scope ?? "temporary");
+    const targetPath = resolveSidebarFilePath(rootPath, options.path ?? "");
+    const action = String(options.action ?? "default");
+    if (action === "reveal") {
+      shell.showItemInFolder(targetPath);
+      return { ok: true, path: targetPath };
+    }
+    if (action === "openWith" && process.platform === "win32") {
+      const child = execFile(
+        "rundll32.exe",
+        ["shell32.dll,OpenAs_RunDLL", targetPath],
+        { windowsHide: false },
+        () => undefined,
+      );
+      child.unref();
+      return { ok: true, path: targetPath };
+    }
+    const errorMessage = await shell.openPath(targetPath);
+    if (errorMessage) throw new Error(errorMessage);
+    return { ok: true, path: targetPath };
   });
 
   ipcMain.handle("workspace:select", async () => {

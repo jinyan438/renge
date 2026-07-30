@@ -30,6 +30,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { BrowserSidebarPanel } from "./BrowserSidebarPanel";
+import { FilesSidebarPanel, type FileBrowserSource } from "./FilesSidebarPanel";
 import { registerBrowserSidebarOpener } from "./browserSidebarRuntime";
 import {
   clampRightSidebarWidth,
@@ -68,6 +69,8 @@ export type StatusBarSidebarProps = {
   onPresetsChange: (next: StatusBarPreset[]) => void;
   manualUpdateDisabled?: boolean;
   manualUpdateRunning?: boolean;
+  fileBrowserSource?: FileBrowserSource | null;
+  onChooseWorkspace?: () => void | Promise<void>;
 };
 
 type StatusBarCssProperties = CSSProperties & {
@@ -106,9 +109,9 @@ const RIGHT_SIDEBAR_TOOLS = [
   {
     id: "files",
     label: "文件",
-    description: "浏览当前工作区文件",
+    description: "浏览工作区或临时文件",
     icon: FolderOpen,
-    available: false,
+    available: true,
   },
   {
     id: "status",
@@ -785,6 +788,8 @@ export function StatusBarSidebar({
   onPresetsChange,
   manualUpdateDisabled = false,
   manualUpdateRunning = false,
+  fileBrowserSource = null,
+  onChooseWorkspace,
 }: StatusBarSidebarProps) {
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
   const [sidebarWidth, setSidebarWidth] = useState(loadRightSidebarWidth);
@@ -1941,7 +1946,14 @@ export function StatusBarSidebar({
               </nav>
             </div>
           </section>
-        ) : activeToolId === "browser" ? null : activeToolId === "status" ? (
+        ) : activeToolId === "browser" ? null : activeToolId === "files" ? (
+          <FilesSidebarPanel
+            onBack={() => setActiveToolId("menu")}
+            onChooseWorkspace={onChooseWorkspace}
+            onClose={() => onCollapsedChange(true)}
+            source={fileBrowserSource}
+          />
+        ) : activeToolId === "status" ? (
           <section className="right-tool-content status-tool-content" aria-label="状态栏">
             <header className="status-bar-sidebar-header">
               <div className="status-bar-sidebar-title">
