@@ -1013,6 +1013,7 @@ type RengeDesktopApi = {
 
 type RengeAndroidApi = {
   isAndroid: boolean;
+  openBrowser(options: { url: string }): Promise<{ ok: boolean; url: string }>;
   saveDownload(options: {
     fileName: string;
     mimeType?: string;

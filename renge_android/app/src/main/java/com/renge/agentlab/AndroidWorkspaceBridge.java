@@ -89,6 +89,7 @@ public class AndroidWorkspaceBridge {
                         + "window.rengeAndroid={"
                         + "isAndroid:true,"
                         + "saveDownload:function(options){return call('saveDownload',options);},"
+                        + "openBrowser:function(options){return call('openBrowser',options);},"
                         + "selectWorkspace:function(){return new Promise(function(resolve,reject){var id=String(Date.now())+Math.random().toString(16).slice(2);pending[id]={resolve:resolve,reject:reject};window.RengeAndroidNative.selectWorkspace(id);});},"
                         + "selectRootWorkspace:function(options){return call('selectRootWorkspace',options);},"
                         + "restoreWorkspace:function(options){return call('restoreWorkspace',options);},"
@@ -130,6 +131,25 @@ public class AndroidWorkspaceBridge {
                 ((MainActivity) activity).exitHtmlFullscreen(false);
             }
         });
+    }
+
+    @JavascriptInterface
+    public String openBrowser(String optionsJson) {
+        try {
+            JSONObject options = parseOptions(optionsJson);
+            String url = requireBrowserUrl(options.optString("url", ""));
+            activity.runOnUiThread(() -> {
+                Intent intent = new Intent(activity, BrowserActivity.class);
+                intent.putExtra(BrowserActivity.EXTRA_URL, url);
+                activity.startActivity(intent);
+            });
+            JSONObject result = new JSONObject();
+            result.put("ok", true);
+            result.put("url", url);
+            return result.toString();
+        } catch (Exception error) {
+            return errorJson(error);
+        }
     }
 
     @JavascriptInterface
@@ -855,6 +875,17 @@ public class AndroidWorkspaceBridge {
         return optionsJson == null || optionsJson.trim().isEmpty()
                 ? new JSONObject()
                 : new JSONObject(optionsJson);
+    }
+
+    private String requireBrowserUrl(String rawUrl) throws IOException {
+        String value = rawUrl == null ? "" : rawUrl.trim();
+        if (value.isEmpty()) throw new IOException("请输入网址或搜索内容");
+        Uri uri = Uri.parse(value);
+        String scheme = uri.getScheme();
+        if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
+            throw new IOException("仅支持 HTTP 或 HTTPS 网页");
+        }
+        return uri.toString();
     }
 
     private void requireWorkspace() throws IOException {

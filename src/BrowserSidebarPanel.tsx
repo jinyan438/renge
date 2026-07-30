@@ -1452,9 +1452,34 @@ export function BrowserSidebarPanel({
     return registerBrowserSidebarController(controller);
   }, [controller]);
 
+  const openSubmittedAddress = () => {
+    if (!address.trim()) return;
+    if (electronAvailable) {
+      void openAddress(address).catch(() => undefined);
+      return;
+    }
+    if (!androidAvailable) return;
+    const url = normalizeBrowserAddress(address);
+    if (activeTab) {
+      updateBrowserTab(activeTab.id, (tab) => ({ ...tab, address: url, error: "" }));
+    }
+    const openBrowser = window.rengeAndroid?.openBrowser;
+    if (!openBrowser) {
+      reportFeatureError(new Error("Android 浏览器接口尚未准备好，请稍后重试"));
+      return;
+    }
+    void openBrowser({ url }).catch(reportFeatureError);
+  };
+
   const submitAddress = (event: FormEvent) => {
     event.preventDefault();
-    void openAddress(address).catch(() => undefined);
+    openSubmittedAddress();
+  };
+
+  const handleAddressKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    openSubmittedAddress();
   };
 
   return (
@@ -1466,10 +1491,16 @@ export function BrowserSidebarPanel({
         </button>
         <div
           className="browser-sidebar-ai-status"
-          title={electronAvailable ? "AI 可读取并控制当前页面" : "请在 Electron 桌面版中使用"}
+          title={
+            electronAvailable
+              ? "AI 可读取并控制当前页面"
+              : androidAvailable
+                ? "网页将在 Android 原生浏览器中打开"
+                : "请在 Electron 桌面版中使用"
+          }
         >
           <Bot size={13} />
-          {electronAvailable ? "AI 已连接" : "桌面版可用"}
+          {electronAvailable ? "AI 已连接" : androidAvailable ? "安卓浏览器" : "桌面版可用"}
         </div>
         <button aria-label="关闭右侧栏" onClick={onClose} title="关闭右侧栏" type="button">
           <X size={16} />
@@ -1558,7 +1589,10 @@ export function BrowserSidebarPanel({
             <Globe aria-hidden="true" size={14} />
             <input
               aria-label="浏览器地址"
+              autoCapitalize="none"
               disabled={!addressInputAvailable}
+              enterKeyHint="go"
+              inputMode="url"
               onChange={(event) => {
                 if (!activeTab) return;
                 const nextAddress = event.target.value;
@@ -1567,11 +1601,12 @@ export function BrowserSidebarPanel({
               onFocus={(event) => {
                 if (androidAvailable) event.currentTarget.select();
               }}
+              onKeyDown={handleAddressKeyDown}
               placeholder="输入网址或搜索内容"
               spellCheck={false}
               value={address}
             />
-            <button aria-label="打开" disabled={!electronAvailable || !address.trim()} title="打开" type="submit">
+            <button aria-label="打开" disabled={!addressInputAvailable || !address.trim()} title="打开" type="submit">
               <Search size={14} />
             </button>
           </form>
@@ -1964,8 +1999,12 @@ export function BrowserSidebarPanel({
         {!electronAvailable ? (
           <div className="browser-sidebar-empty is-unavailable">
             <span><ShieldCheck size={25} /></span>
-            <strong>桌面浏览器模块</strong>
-            <p>完整网页控制依赖 Electron 安全隔离容器，请在桌面版中使用。</p>
+            <strong>{androidAvailable ? "Android 原生浏览器" : "桌面浏览器模块"}</strong>
+            <p>
+              {androidAvailable
+                ? "输入网址或搜索内容，将在应用内的独立网页页面中打开。"
+                : "完整网页控制依赖 Electron 安全隔离容器，请在桌面版中使用。"}
+            </p>
           </div>
         ) : pageState.url === "about:blank" && !activeTab?.hasDocumentContent ? (
           <div className="browser-sidebar-empty">
@@ -1989,7 +2028,9 @@ export function BrowserSidebarPanel({
           }
         />
         <strong>
-          {!electronAvailable ? "桌面版可用" : pageState.loading ? "正在加载" : pageState.title || "新页面"}
+          {!electronAvailable
+            ? androidAvailable ? "Android 浏览器可用" : "桌面版可用"
+            : pageState.loading ? "正在加载" : pageState.title || "新页面"}
         </strong>
         {electronAvailable ? (
           <div className="browser-sidebar-zoom" aria-label="网页缩放">
@@ -2023,7 +2064,7 @@ export function BrowserSidebarPanel({
             </button>
           </div>
         ) : (
-          <small>仅 Electron 桌面版</small>
+          <small>{androidAvailable ? "应用内网页" : "仅 Electron 桌面版"}</small>
         )}
       </footer>
     </section>
