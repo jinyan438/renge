@@ -35,6 +35,24 @@ contextBridge.exposeInMainWorld("rengeDesktop", {
   findSymbols: (options) => ipcRenderer.invoke("workspace:find-symbols", options),
   readPackageJson: () => ipcRenderer.invoke("workspace:package-json"),
   scanTodos: (options) => ipcRenderer.invoke("workspace:todos", options),
+  listSidebarBrowserDownloads: () => ipcRenderer.invoke("sidebar-browser:downloads-list"),
+  runSidebarBrowserDownloadAction: (options) =>
+    ipcRenderer.invoke("sidebar-browser:download-action", options),
+  captureSidebarBrowserPage: (options) => ipcRenderer.invoke("sidebar-browser:capture", options),
+  setSidebarBrowserDeviceEmulation: (options) =>
+    ipcRenderer.invoke("sidebar-browser:device-emulation", options),
+  importSidebarBrowserProfile: () => ipcRenderer.invoke("sidebar-browser:import-profile"),
+  getSidebarBrowserProfile: () => ipcRenderer.invoke("sidebar-browser:profile"),
+  updateSidebarBrowserProfile: (options) =>
+    ipcRenderer.invoke("sidebar-browser:profile-setting", options),
+  getSidebarBrowserAutofill: (options) => ipcRenderer.invoke("sidebar-browser:autofill", options),
+  clearSidebarBrowserData: (options) => ipcRenderer.invoke("sidebar-browser:clear-data", options),
+  onSidebarBrowserDownloads: (listener) => {
+    if (typeof listener !== "function") return () => undefined;
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on("sidebar-browser:downloads-updated", wrappedListener);
+    return () => ipcRenderer.removeListener("sidebar-browser:downloads-updated", wrappedListener);
+  },
   onSidebarBrowserOpenTab: (listener) => {
     if (typeof listener !== "function") return () => undefined;
     const wrappedListener = (_event, payload) => listener(payload);

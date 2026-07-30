@@ -1,4 +1,14 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  safeStorage,
+  session,
+  shell,
+  webContents,
+} from "electron";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { execFile } from "node:child_process";
@@ -19,6 +29,10 @@ import {
   SIDEBAR_BROWSER_PARTITION_NAME,
 } from "./sidebar-browser-navigation.mjs";
 import { copyMissingPersistentCookies } from "./sidebar-browser-session.mjs";
+import {
+  parseSidebarBrowserImport,
+  selectCredentialForUrl,
+} from "./sidebar-browser-profile.mjs";
 import {
   importTemporaryFiles,
   listSidebarFiles,
@@ -44,6 +58,7 @@ let desktopProjectPositionsWriteQueue = Promise.resolve();
 const desktopServerPort = 5191;
 const desktopProjectPositionsFilename = "desktop-project-positions.json";
 const sidebarBrowserMigrationMarkerFilename = ".sidebar-browser-global-data-v1";
+const sidebarBrowserProfileFilename = "sidebar-browser-profile.json";
 const temporaryFilesDirectoryName = "Temporary Files";
 const singleInstanceLockAcquired = app.requestSingleInstanceLock();
 const highRiskGitCommands = new Set([
@@ -61,6 +76,12 @@ const highRiskGitCommands = new Set([
 ]);
 const whitelistedCommandNames = ["npm", "pnpm", "yarn", "node", "git"];
 const unlistedCommandApprovalSessions = createCommandApprovalSessionStore();
+const sidebarBrowserDownloads = new Map();
+const removedSidebarBrowserDownloadIds = new Set();
+let sidebarBrowserDownloadSequence = 0;
+let sidebarBrowserDownloadsConfigured = false;
+let sidebarBrowserProfileCache = null;
+let sidebarBrowserProfileWriteQueue = Promise.resolve();
 
 function getPersistentDataDir() {
   if (process.env.RENGE_DATA_DIR) return resolve(process.env.RENGE_DATA_DIR);
@@ -70,6 +91,170 @@ function getPersistentDataDir() {
 
 function getDesktopProjectPositionsPath() {
   return join(getPersistentDataDir(), desktopProjectPositionsFilename);
+}
+
+function getSidebarBrowserProfilePath() {
+  return join(getPersistentDataDir(), sidebarBrowserProfileFilename);
+}
+
+function createDefaultSidebarBrowserProfile() {
+  return {
+    version: 1,
+    settings: { autofillPasswords: true },
+    credentials: [],
+  };
+}
+
+async function loadSidebarBrowserProfile() {
+  if (sidebarBrowserProfileCache) return sidebarBrowserProfileCache;
+  let profile;
+  try {
+    profile = JSON.parse(await readFile(getSidebarBrowserProfilePath(), "utf8"));
+  } catch (error) {
+    if (!error || typeof error !== "object" || error.code !== "ENOENT") {
+      console.warn("[sidebar-browser] failed to load profile", error);
+    }
+    profile = createDefaultSidebarBrowserProfile();
+  }
+  sidebarBrowserProfileCache = {
+    version: 1,
+    settings: {
+      autofillPasswords: profile?.settings?.autofillPasswords !== false,
+    },
+    credentials: Array.isArray(profile?.credentials) ? profile.credentials : [],
+  };
+  return sidebarBrowserProfileCache;
+}
+
+async function saveSidebarBrowserProfile(profile) {
+  sidebarBrowserProfileCache = profile;
+  const serialized = JSON.stringify(profile, null, 2);
+  sidebarBrowserProfileWriteQueue = sidebarBrowserProfileWriteQueue
+    .catch(() => undefined)
+    .then(async () => {
+      await mkdir(getPersistentDataDir(), { recursive: true });
+      await writeFile(getSidebarBrowserProfilePath(), serialized, "utf8");
+    });
+  await sidebarBrowserProfileWriteQueue;
+}
+
+function encryptSidebarBrowserPassword(password) {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error("系统安全存储当前不可用，无法安全保存导入的密码");
+  }
+  return safeStorage.encryptString(password).toString("base64");
+}
+
+function decryptSidebarBrowserPassword(value) {
+  if (!safeStorage.isEncryptionAvailable() || !value) return "";
+  try {
+    return safeStorage.decryptString(Buffer.from(value, "base64"));
+  } catch {
+    return "";
+  }
+}
+
+function sidebarBrowserProfileSummary(profile) {
+  return {
+    autofillPasswords: profile.settings.autofillPasswords !== false,
+    passwordCount: profile.credentials.length,
+    downloadDirectory: app.getPath("downloads"),
+  };
+}
+
+function assertSidebarBrowserSender(event) {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
+    throw new Error("浏览器操作来源无效");
+  }
+}
+
+function getSidebarBrowserGuest(event, rawWebContentsId) {
+  assertSidebarBrowserSender(event);
+  const target = webContents.fromId(Number(rawWebContentsId));
+  const browserSession = session.fromPartition(SIDEBAR_BROWSER_PARTITION);
+  if (!target || target.isDestroyed() || target.session !== browserSession || target.getType() !== "webview") {
+    throw new Error("找不到当前侧栏网页");
+  }
+  return target;
+}
+
+function serializeSidebarBrowserDownload(record) {
+  return {
+    id: record.id,
+    fileName: record.fileName,
+    filePath: record.filePath,
+    mimeType: record.mimeType,
+    receivedBytes: record.receivedBytes,
+    totalBytes: record.totalBytes,
+    state: record.state,
+    paused: record.paused,
+    startedAt: record.startedAt,
+    updatedAt: record.updatedAt,
+    url: record.url,
+  };
+}
+
+function listSidebarBrowserDownloads() {
+  return [...sidebarBrowserDownloads.values()]
+    .sort((left, right) => right.startedAt - left.startedAt)
+    .map(serializeSidebarBrowserDownload);
+}
+
+function notifySidebarBrowserDownloads() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("sidebar-browser:downloads-updated", listSidebarBrowserDownloads());
+}
+
+function refreshSidebarBrowserDownload(record) {
+  const item = record.item;
+  record.fileName = item.getFilename() || record.fileName;
+  record.filePath = item.getSavePath() || record.filePath;
+  record.receivedBytes = item.getReceivedBytes();
+  record.totalBytes = item.getTotalBytes();
+  record.paused = item.isPaused();
+  record.updatedAt = Date.now();
+}
+
+function configureSidebarBrowserDownloads() {
+  if (sidebarBrowserDownloadsConfigured) return;
+  sidebarBrowserDownloadsConfigured = true;
+  const browserSession = session.fromPartition(SIDEBAR_BROWSER_PARTITION);
+  browserSession.on("will-download", (_event, item) => {
+    sidebarBrowserDownloadSequence += 1;
+    const id = `download-${Date.now()}-${sidebarBrowserDownloadSequence}`;
+    const record = {
+      id,
+      item,
+      fileName: item.getFilename() || "download",
+      filePath: item.getSavePath() || "",
+      mimeType: item.getMimeType() || "application/octet-stream",
+      receivedBytes: item.getReceivedBytes(),
+      totalBytes: item.getTotalBytes(),
+      state: "progressing",
+      paused: item.isPaused(),
+      startedAt: Math.round(item.getStartTime() * 1000) || Date.now(),
+      updatedAt: Date.now(),
+      url: item.getURL() || "",
+    };
+    sidebarBrowserDownloads.set(id, record);
+    while (sidebarBrowserDownloads.size > 100) {
+      const oldestId = sidebarBrowserDownloads.keys().next().value;
+      sidebarBrowserDownloads.delete(oldestId);
+    }
+    notifySidebarBrowserDownloads();
+    item.on("updated", (_downloadEvent, state) => {
+      if (removedSidebarBrowserDownloadIds.has(id)) return;
+      refreshSidebarBrowserDownload(record);
+      record.state = state || "progressing";
+      notifySidebarBrowserDownloads();
+    });
+    item.once("done", (_downloadEvent, state) => {
+      if (removedSidebarBrowserDownloadIds.has(id)) return;
+      refreshSidebarBrowserDownload(record);
+      record.state = state || "completed";
+      notifySidebarBrowserDownloads();
+    });
+  });
 }
 
 function getTemporaryFilesRoot() {
@@ -820,6 +1005,221 @@ function registerIpcHandlers() {
     return desktopProjectPositionsWriteQueue;
   });
 
+  ipcMain.handle("sidebar-browser:downloads-list", (event) => {
+    assertSidebarBrowserSender(event);
+    return listSidebarBrowserDownloads();
+  });
+
+  ipcMain.handle("sidebar-browser:download-action", async (event, options = {}) => {
+    assertSidebarBrowserSender(event);
+    const action = String(options.action ?? "");
+    if (action === "open-folder") {
+      const errorMessage = await shell.openPath(app.getPath("downloads"));
+      if (errorMessage) throw new Error(errorMessage);
+      return { ok: true };
+    }
+    if (action === "clear-completed") {
+      for (const [id, record] of sidebarBrowserDownloads) {
+        if (record.state !== "progressing") {
+          removedSidebarBrowserDownloadIds.add(id);
+          sidebarBrowserDownloads.delete(id);
+        }
+      }
+      notifySidebarBrowserDownloads();
+      return { ok: true };
+    }
+
+    const id = String(options.id ?? "");
+    const record = sidebarBrowserDownloads.get(id);
+    if (!record) throw new Error("找不到这条下载记录");
+    if (action === "open") {
+      if (!record.filePath) throw new Error("下载文件尚未保存");
+      const errorMessage = await shell.openPath(record.filePath);
+      if (errorMessage) throw new Error(errorMessage);
+    } else if (action === "reveal") {
+      if (!record.filePath) throw new Error("下载文件尚未保存");
+      shell.showItemInFolder(record.filePath);
+    } else if (action === "pause") record.item.pause();
+    else if (action === "resume") record.item.resume();
+    else if (action === "cancel") record.item.cancel();
+    else if (action === "remove") {
+      removedSidebarBrowserDownloadIds.add(id);
+      sidebarBrowserDownloads.delete(id);
+    } else throw new Error("未知的下载操作");
+    if (action !== "remove") refreshSidebarBrowserDownload(record);
+    notifySidebarBrowserDownloads();
+    return { ok: true };
+  });
+
+  ipcMain.handle("sidebar-browser:capture", async (event, options = {}) => {
+    const target = getSidebarBrowserGuest(event, options.webContentsId);
+    const image = await target.capturePage();
+    let host = "page";
+    try {
+      host = new URL(target.getURL()).hostname || "page";
+    } catch {
+      // Keep the safe fallback name for non-standard pages.
+    }
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const defaultName = `${host.replace(/[^a-z0-9._-]+/gi, "-")}-${timestamp}.png`;
+    const result = await dialog.showSaveDialog(mainWindow, {
+      defaultPath: join(app.getPath("pictures"), defaultName),
+      filters: [{ name: "PNG 图片", extensions: ["png"] }],
+      title: "保存网页截图",
+    });
+    if (result.canceled || !result.filePath) return { canceled: true };
+    await writeFile(result.filePath, image.toPNG());
+    return { canceled: false, path: result.filePath };
+  });
+
+  ipcMain.handle("sidebar-browser:device-emulation", (event, options = {}) => {
+    const target = getSidebarBrowserGuest(event, options.webContentsId);
+    const enabled = Boolean(options.enabled);
+    if (enabled) {
+      target.enableDeviceEmulation({
+        screenPosition: "mobile",
+        screenSize: { width: 390, height: 844 },
+        viewPosition: { x: 0, y: 0 },
+        deviceScaleFactor: 1,
+        viewSize: { width: 390, height: 844 },
+        scale: 1,
+      });
+    } else {
+      target.disableDeviceEmulation();
+    }
+    return { enabled };
+  });
+
+  ipcMain.handle("sidebar-browser:import-profile", async (event) => {
+    assertSidebarBrowserSender(event);
+    const result = await dialog.showOpenDialog(mainWindow, {
+      filters: [
+        { name: "Cookie 或密码文件", extensions: ["json", "csv"] },
+      ],
+      properties: ["openFile"],
+      title: "导入 Cookie 和密码",
+    });
+    if (result.canceled || result.filePaths.length === 0) return { canceled: true };
+    const filePath = result.filePaths[0];
+    const fileStat = await stat(filePath);
+    if (fileStat.size > 10 * 1024 * 1024) throw new Error("导入文件不能超过 10 MB");
+    const parsed = parseSidebarBrowserImport(filePath, await readFile(filePath, "utf8"));
+    if (parsed.cookies.length === 0 && parsed.credentials.length === 0) {
+      throw new Error("文件中没有可导入的 Cookie 或密码");
+    }
+
+    const browserSession = session.fromPartition(SIDEBAR_BROWSER_PARTITION);
+    let cookiesImported = 0;
+    let cookiesFailed = 0;
+    for (const cookie of parsed.cookies) {
+      try {
+        await browserSession.cookies.set(cookie);
+        cookiesImported += 1;
+      } catch {
+        cookiesFailed += 1;
+      }
+    }
+    if (cookiesImported > 0) await browserSession.cookies.flushStore();
+
+    let passwordsImported = 0;
+    if (parsed.credentials.length > 0) {
+      const profile = await loadSidebarBrowserProfile();
+      const credentials = [...profile.credentials];
+      for (const [index, credential] of parsed.credentials.entries()) {
+        const storedCredential = {
+          id: `credential-${Date.now()}-${index}`,
+          name: credential.name,
+          origin: credential.origin,
+          url: credential.url,
+          username: credential.username,
+          passwordEncrypted: encryptSidebarBrowserPassword(credential.password),
+          updatedAt: Date.now(),
+        };
+        const existingIndex = credentials.findIndex((candidate) =>
+          candidate.origin === storedCredential.origin
+          && candidate.username === storedCredential.username);
+        if (existingIndex >= 0) credentials[existingIndex] = storedCredential;
+        else credentials.push(storedCredential);
+        passwordsImported += 1;
+      }
+      await saveSidebarBrowserProfile({ ...profile, credentials });
+    }
+    return {
+      canceled: false,
+      cookiesImported,
+      cookiesFailed,
+      passwordsImported,
+    };
+  });
+
+  ipcMain.handle("sidebar-browser:profile", async (event) => {
+    assertSidebarBrowserSender(event);
+    return sidebarBrowserProfileSummary(await loadSidebarBrowserProfile());
+  });
+
+  ipcMain.handle("sidebar-browser:profile-setting", async (event, options = {}) => {
+    assertSidebarBrowserSender(event);
+    const profile = await loadSidebarBrowserProfile();
+    const nextProfile = {
+      ...profile,
+      settings: {
+        ...profile.settings,
+        autofillPasswords: options.autofillPasswords !== false,
+      },
+    };
+    await saveSidebarBrowserProfile(nextProfile);
+    return sidebarBrowserProfileSummary(nextProfile);
+  });
+
+  ipcMain.handle("sidebar-browser:autofill", async (event, options = {}) => {
+    const target = getSidebarBrowserGuest(event, options.webContentsId);
+    const profile = await loadSidebarBrowserProfile();
+    if (!profile.settings.autofillPasswords) return null;
+    const credential = selectCredentialForUrl(profile.credentials, target.getURL());
+    if (!credential) return null;
+    const password = decryptSidebarBrowserPassword(credential.passwordEncrypted);
+    if (!password) return null;
+    return {
+      name: credential.name,
+      origin: credential.origin,
+      username: credential.username,
+      password,
+    };
+  });
+
+  ipcMain.handle("sidebar-browser:clear-data", async (event, options = {}) => {
+    assertSidebarBrowserSender(event);
+    const action = String(options.action ?? "all");
+    const browserSession = session.fromPartition(SIDEBAR_BROWSER_PARTITION);
+    if (action === "cache" || action === "all") await browserSession.clearCache();
+    if (action === "cookies" || action === "all") {
+      await browserSession.clearStorageData({
+        storages: [
+          "cookies",
+          "filesystem",
+          "indexdb",
+          "localstorage",
+          "serviceworkers",
+          "cachestorage",
+          "websql",
+        ],
+      });
+    }
+    if (action === "passwords") {
+      const profile = await loadSidebarBrowserProfile();
+      await saveSidebarBrowserProfile({ ...profile, credentials: [] });
+    }
+    if (action === "history" || action === "all") {
+      for (const contents of webContents.getAllWebContents()) {
+        if (contents.getType() === "webview" && contents.session === browserSession) {
+          contents.navigationHistory?.clear?.();
+        }
+      }
+    }
+    browserSession.flushStorageData();
+    return sidebarBrowserProfileSummary(await loadSidebarBrowserProfile());
+  });
+
   ipcMain.handle("sidebar-files:list", async (_event, options = {}) => {
     const rootPath = await getSidebarFilesRoot(options.scope ?? "temporary");
     return listSidebarFiles(rootPath, options.path ?? "", {
@@ -1037,6 +1437,7 @@ async function createMainWindow() {
   }
 
   Menu.setApplicationMenu(null);
+  configureSidebarBrowserDownloads();
 
   mainWindow = new BrowserWindow({
     width: 1360,

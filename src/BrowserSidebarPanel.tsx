@@ -2,19 +2,36 @@ import {
   ArrowLeft,
   ArrowRight,
   Bot,
+  Camera,
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
   Code2,
+  Download,
+  EllipsisVertical,
+  ExternalLink,
+  File,
+  FolderOpen,
   Globe,
+  KeyRound,
   Maximize2,
   Minus,
+  MonitorSmartphone,
   Plus,
   RefreshCw,
+  RotateCcw,
   Search,
+  Settings2,
   ShieldCheck,
+  Trash2,
   X,
 } from "lucide-react";
 import {
   createElement,
   type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -51,6 +68,8 @@ type ElectronWebviewElement = HTMLElement & {
   getZoomFactor(): number;
   setZoomFactor(factor: number): void;
   getWebContentsId(): number;
+  findInPage(text: string, options?: { forward?: boolean; findNext?: boolean }): number;
+  stopFindInPage(action: "clearSelection" | "keepSelection" | "activateSelection"): void;
   executeJavaScript<T = unknown>(code: string, userGesture?: boolean): Promise<T>;
   sendInputEvent(event: Record<string, unknown>): void;
 };
@@ -77,6 +96,28 @@ type BrowserTabState = BrowserPageState & {
   autoFit: boolean;
   hasDocumentContent: boolean;
 };
+
+type BrowserDownload = {
+  id: string;
+  fileName: string;
+  filePath: string;
+  mimeType: string;
+  receivedBytes: number;
+  totalBytes: number;
+  state: string;
+  paused: boolean;
+  startedAt: number;
+  updatedAt: number;
+  url: string;
+};
+
+type BrowserProfileSummary = {
+  autofillPasswords: boolean;
+  passwordCount: number;
+  downloadDirectory: string;
+};
+
+type BrowserPopoverView = "menu" | "downloads" | "passwords" | "clear-data" | "settings";
 
 const DEFAULT_PAGE_STATE: BrowserPageState = {
   url: "about:blank",
@@ -117,6 +158,40 @@ function getBrowserTabLabel(tab: BrowserTabState) {
   } catch {
     return "网页";
   }
+}
+
+function formatDownloadBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "kB", "MB", "GB"];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / (1024 ** index);
+  return `${value >= 100 || index === 0 ? Math.round(value) : value.toFixed(1)} ${units[index]}`;
+}
+
+function formatDownloadTime(timestamp: number) {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(timestamp);
+}
+
+function getDownloadStatus(download: BrowserDownload) {
+  const size = formatDownloadBytes(download.totalBytes || download.receivedBytes);
+  if (download.state === "completed") return `已下载 · ${size}`;
+  if (download.state === "cancelled") return "已取消";
+  if (download.state === "interrupted") return "下载中断";
+  if (download.paused) return `已暂停 · ${formatDownloadBytes(download.receivedBytes)} / ${size}`;
+  if (download.totalBytes > 0) {
+    const percentage = Math.min(100, Math.round((download.receivedBytes / download.totalBytes) * 100));
+    return `正在下载 ${percentage}% · ${formatDownloadBytes(download.receivedBytes)} / ${size}`;
+  }
+  return `正在下载 · ${formatDownloadBytes(download.receivedBytes)}`;
+}
+
+function isDownloadFinished(download: BrowserDownload) {
+  return download.state === "completed";
 }
 
 function BrowserTabWebview({
@@ -192,11 +267,24 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
   const [webviewNodes, setWebviewNodes] = useState(
     () => new Map<string, ElectronWebviewElement>(),
   );
+  const [popoverView, setPopoverView] = useState<BrowserPopoverView | null>(null);
+  const [downloads, setDownloads] = useState<BrowserDownload[]>([]);
+  const [downloadActionsId, setDownloadActionsId] = useState("");
+  const [profile, setProfile] = useState<BrowserProfileSummary | null>(null);
+  const [deviceEmulationTabIds, setDeviceEmulationTabIds] = useState(
+    () => new Set<string>(),
+  );
+  const [featureNotice, setFeatureNotice] = useState("");
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findResult, setFindResult] = useState({ activeMatchOrdinal: 0, matches: 0 });
   const tabsRef = useRef(tabs);
   const activeTabIdRef = useRef(activeTabId);
   const webviewNodesRef = useRef(new Map<string, ElectronWebviewElement>());
   const webviewCleanupRef = useRef(new Map<string, () => void>());
   const fitRequestRef = useRef(new Map<string, number>());
+  const popoverRootRef = useRef<HTMLDivElement | null>(null);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
   tabsRef.current = tabs;
   activeTabIdRef.current = activeTabId;
 
@@ -207,6 +295,14 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
   const error = activeTab?.error ?? "";
   const zoomFactor = activeTab?.zoomFactor ?? 1;
   const autoFit = activeTab?.autoFit ?? true;
+  const deviceEmulationEnabled = activeTab
+    ? deviceEmulationTabIds.has(activeTab.id)
+    : false;
+  const activeDownloadCount = downloads.filter((download) =>
+    download.state === "progressing").length;
+  const pageActionAvailable = electronAvailable
+    && Boolean(webviewNode)
+    && (pageState.url !== "about:blank" || Boolean(activeTab?.hasDocumentContent));
 
   const updateBrowserTab = useCallback(
     (tabId: string, update: (tab: BrowserTabState) => BrowserTabState) => {
@@ -369,12 +465,23 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
         }));
         refreshPageState(tabId, node, false);
       };
+      const foundInPage = (event: Event) => {
+        if (activeTabIdRef.current !== tabId) return;
+        const result = (event as Event & {
+          result?: { activeMatchOrdinal?: number; matches?: number };
+        }).result;
+        setFindResult({
+          activeMatchOrdinal: Number(result?.activeMatchOrdinal ?? 0),
+          matches: Number(result?.matches ?? 0),
+        });
+      };
       node.addEventListener("did-start-loading", startLoading);
       node.addEventListener("did-stop-loading", stopLoading);
       node.addEventListener("did-navigate", navigation);
       node.addEventListener("did-navigate-in-page", navigation);
       node.addEventListener("page-title-updated", titleUpdated);
       node.addEventListener("did-fail-load", failed);
+      node.addEventListener("found-in-page", foundInPage);
 
       let resizeTimer = 0;
       const resizeObserver = new ResizeObserver(() => {
@@ -395,6 +502,7 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
         node.removeEventListener("did-navigate-in-page", navigation);
         node.removeEventListener("page-title-updated", titleUpdated);
         node.removeEventListener("did-fail-load", failed);
+        node.removeEventListener("found-in-page", foundInPage);
       });
     },
     [applyZoomFactor, fitPageToWidth, refreshPageState, updateBrowserTab],
@@ -424,14 +532,31 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
   const closeBrowserTab = useCallback(
     (tabId: string) => {
       const current = tabsRef.current;
+      const closingNode = webviewNodesRef.current.get(tabId);
+      setDeviceEmulationTabIds((enabledIds) => {
+        if (!enabledIds.has(tabId)) return enabledIds;
+        try {
+          const webContentsId = closingNode?.getWebContentsId();
+          if (webContentsId) {
+            void window.rengeDesktop?.setSidebarBrowserDeviceEmulation?.({
+              webContentsId,
+              enabled: false,
+            }).catch(() => undefined);
+          }
+        } catch {
+          // The guest may already be destroyed while its tab is closing.
+        }
+        const next = new Set(enabledIds);
+        next.delete(tabId);
+        return next;
+      });
       if (current.length === 1) {
-        const node = webviewNodesRef.current.get(tabId);
         updateBrowserTab(tabId, (tab) => ({
           ...createBrowserTab(),
           id: tab.id,
           initialUrl: tab.initialUrl,
         }));
-        void node?.loadURL("about:blank").catch(() => undefined);
+        void closingNode?.loadURL("about:blank").catch(() => undefined);
         return;
       }
       const nextActiveTabId = getBrowserTabAfterClose(
@@ -491,6 +616,286 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
     updateBrowserTab(activeTab.id, (tab) => ({ ...tab, autoFit: true }));
     void fitPageToWidth(activeTab.id, webviewNode, true).catch(() => undefined);
   };
+
+  const resetZoom = () => {
+    if (!activeTab || !webviewNode) return;
+    fitRequestRef.current.set(
+      activeTab.id,
+      (fitRequestRef.current.get(activeTab.id) ?? 0) + 1,
+    );
+    updateBrowserTab(activeTab.id, (tab) => ({ ...tab, autoFit: false }));
+    applyZoomFactor(activeTab.id, webviewNode, 1);
+  };
+
+  const reportFeatureError = useCallback((caught: unknown) => {
+    const message = caught instanceof Error ? caught.message : String(caught || "操作失败");
+    setFeatureNotice(message);
+    const tabId = activeTabIdRef.current;
+    updateBrowserTab(tabId, (tab) => ({ ...tab, error: message }));
+  }, [updateBrowserTab]);
+
+  const openPopover = (view: BrowserPopoverView) => {
+    setFeatureNotice("");
+    setDownloadActionsId("");
+    setPopoverView((current) => current === view ? null : view);
+  };
+
+  const openFindBar = () => {
+    setPopoverView(null);
+    setFindOpen(true);
+    window.setTimeout(() => findInputRef.current?.focus(), 0);
+  };
+
+  const closeFindBar = () => {
+    try {
+      webviewNode?.stopFindInPage("clearSelection");
+    } catch {
+      // The page may have closed while the find bar was open.
+    }
+    setFindOpen(false);
+    setFindQuery("");
+    setFindResult({ activeMatchOrdinal: 0, matches: 0 });
+  };
+
+  const findNext = (forward: boolean) => {
+    if (!webviewNode || !findQuery.trim()) return;
+    try {
+      webviewNode.findInPage(findQuery, { findNext: true, forward });
+    } catch (caught) {
+      reportFeatureError(caught);
+    }
+  };
+
+  const handleFindKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeFindBar();
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      findNext(!event.shiftKey);
+    }
+  };
+
+  const refreshBrowserProfile = useCallback(async () => {
+    const getProfile = window.rengeDesktop?.getSidebarBrowserProfile;
+    if (!getProfile) return null;
+    const nextProfile = await getProfile();
+    setProfile(nextProfile);
+    return nextProfile;
+  }, []);
+
+  const importBrowserProfile = async () => {
+    const importProfile = window.rengeDesktop?.importSidebarBrowserProfile;
+    if (!importProfile) return;
+    try {
+      const result = await importProfile();
+      if (result.canceled) return;
+      await refreshBrowserProfile();
+      const parts = [];
+      if (result.cookiesImported) parts.push(`${result.cookiesImported} 条 Cookie`);
+      if (result.passwordsImported) parts.push(`${result.passwordsImported} 个密码`);
+      if (result.cookiesFailed) parts.push(`${result.cookiesFailed} 条 Cookie 导入失败`);
+      setFeatureNotice(`已导入${parts.length ? `：${parts.join("，")}` : "浏览器数据"}`);
+    } catch (caught) {
+      reportFeatureError(caught);
+    }
+  };
+
+  const updateAutofillSetting = async (enabled: boolean) => {
+    const updateProfile = window.rengeDesktop?.updateSidebarBrowserProfile;
+    if (!updateProfile) return;
+    try {
+      setProfile(await updateProfile({ autofillPasswords: enabled }));
+      setFeatureNotice(enabled ? "已开启密码自动填充" : "已关闭密码自动填充");
+    } catch (caught) {
+      reportFeatureError(caught);
+    }
+  };
+
+  const autofillPage = useCallback(async (
+    node: ElectronWebviewElement,
+    announce: boolean,
+  ) => {
+    const getAutofill = window.rengeDesktop?.getSidebarBrowserAutofill;
+    if (!getAutofill) return false;
+    let webContentsId: number;
+    try {
+      webContentsId = node.getWebContentsId();
+    } catch {
+      return false;
+    }
+    const credential = await getAutofill({ webContentsId });
+    if (!credential) {
+      if (announce) setFeatureNotice("当前站点没有可用的已导入密码");
+      return false;
+    }
+    const result = await node.executeJavaScript<{ filled: boolean }>(`(() => {
+      const username = ${JSON.stringify(credential.username)};
+      const password = ${JSON.stringify(credential.password)};
+      const visible = (element) => {
+        const rect = element.getBoundingClientRect();
+        return !element.disabled && rect.width > 0 && rect.height > 0;
+      };
+      const passwordInput = Array.from(document.querySelectorAll('input[type="password"]')).find(visible);
+      if (!passwordInput) return { filled: false };
+      const form = passwordInput.form || passwordInput.closest('form') || document;
+      const usernameInput = Array.from(form.querySelectorAll('input')).find((input) =>
+        input !== passwordInput
+        && visible(input)
+        && ['text', 'email', 'tel', ''].includes(input.type)
+        && /user|email|login|account|phone|用户|邮箱|账号|手机/i.test([input.name, input.id, input.autocomplete, input.placeholder].join(' ')))
+      ) || Array.from(form.querySelectorAll('input')).find((input) =>
+        input !== passwordInput && visible(input) && ['text', 'email', 'tel', ''].includes(input.type));
+      const setValue = (input, value) => {
+        if (!input || input.value) return;
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        if (setter) setter.call(input, value); else input.value = value;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      setValue(usernameInput, username);
+      setValue(passwordInput, password);
+      return { filled: Boolean(passwordInput.value) };
+    })()`, true);
+    if (announce) {
+      setFeatureNotice(result.filled ? `已填充 ${credential.name}` : "当前页面没有可填充的密码框");
+    }
+    return result.filled;
+  }, []);
+
+  const toggleDeviceEmulation = async () => {
+    if (!activeTab || !webviewNode) return;
+    const setEmulation = window.rengeDesktop?.setSidebarBrowserDeviceEmulation;
+    if (!setEmulation) return;
+    try {
+      const result = await setEmulation({
+        webContentsId: webviewNode.getWebContentsId(),
+        enabled: !deviceEmulationEnabled,
+      });
+      setDeviceEmulationTabIds((current) => {
+        const next = new Set(current);
+        if (result.enabled) next.add(activeTab.id);
+        else next.delete(activeTab.id);
+        return next;
+      });
+      setFeatureNotice(result.enabled ? "已切换为 390 × 844 设备视图" : "已恢复桌面视图");
+    } catch (caught) {
+      reportFeatureError(caught);
+    }
+  };
+
+  const capturePage = async () => {
+    const capture = window.rengeDesktop?.captureSidebarBrowserPage;
+    if (!capture || !webviewNode) return;
+    try {
+      const result = await capture({ webContentsId: webviewNode.getWebContentsId() });
+      if (!result.canceled) setFeatureNotice(`截图已保存到 ${result.path ?? "所选位置"}`);
+    } catch (caught) {
+      reportFeatureError(caught);
+    }
+  };
+
+  const clearBrowserData = async (
+    action: "cache" | "cookies" | "history" | "passwords" | "all",
+  ) => {
+    const clearData = window.rengeDesktop?.clearSidebarBrowserData;
+    if (!clearData) return;
+    try {
+      setProfile(await clearData({ action }));
+      const labels = {
+        cache: "缓存",
+        cookies: "Cookie 和网站数据",
+        history: "浏览历史",
+        passwords: "已导入密码",
+        all: "全部浏览数据",
+      };
+      setFeatureNotice(`已清除${labels[action]}`);
+      if (action === "cookies" || action === "all") webviewNode?.reload();
+    } catch (caught) {
+      reportFeatureError(caught);
+    }
+  };
+
+  const runDownloadAction = async (
+    action: "open-folder" | "clear-completed" | "open" | "reveal" | "pause" | "resume" | "cancel" | "remove",
+    id?: string,
+  ) => {
+    const runAction = window.rengeDesktop?.runSidebarBrowserDownloadAction;
+    if (!runAction) return;
+    try {
+      await runAction({ action, id });
+      setDownloadActionsId("");
+    } catch (caught) {
+      reportFeatureError(caught);
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
+    const desktopApi = window.rengeDesktop;
+    void desktopApi?.listSidebarBrowserDownloads?.()
+      .then((items) => {
+        if (active) setDownloads(items);
+      })
+      .catch(() => undefined);
+    void refreshBrowserProfile().catch(() => undefined);
+    const unsubscribe = desktopApi?.onSidebarBrowserDownloads?.((items) => {
+      if (active) setDownloads(items);
+    });
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, [refreshBrowserProfile]);
+
+  useEffect(() => {
+    if (!popoverView) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (event.target instanceof Node && !popoverRootRef.current?.contains(event.target)) {
+        setPopoverView(null);
+        setDownloadActionsId("");
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setPopoverView(null);
+      setDownloadActionsId("");
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [popoverView]);
+
+  useEffect(() => {
+    if (!findOpen || !webviewNode) return;
+    const query = findQuery.trim();
+    if (!query) {
+      webviewNode.stopFindInPage("clearSelection");
+      setFindResult({ activeMatchOrdinal: 0, matches: 0 });
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      try {
+        webviewNode.findInPage(findQuery, { findNext: false, forward: true });
+      } catch (caught) {
+        reportFeatureError(caught);
+      }
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [findOpen, findQuery, reportFeatureError, webviewNode]);
+
+  useEffect(() => {
+    if (
+      !profile?.autofillPasswords
+      || !webviewNode
+      || pageState.loading
+      || pageState.url === "about:blank"
+    ) return;
+    void autofillPage(webviewNode, false).catch(() => undefined);
+  }, [autofillPage, pageState.loading, pageState.url, profile?.autofillPasswords, webviewNode]);
 
   useEffect(() => {
     const subscribe = window.rengeDesktop?.onSidebarBrowserOpenTab;
@@ -825,53 +1230,290 @@ export function BrowserSidebarPanel({ onBack, onClose }: BrowserSidebarPanelProp
         </button>
       </div>
 
-      <div className="browser-sidebar-toolbar">
-        <button
-          aria-label="后退"
-          disabled={!electronAvailable || !pageState.canGoBack}
-          onClick={() => webviewNode?.goBack()}
-          title="后退"
-          type="button"
-        >
-          <ArrowLeft size={15} />
-        </button>
-        <button
-          aria-label="前进"
-          disabled={!electronAvailable || !pageState.canGoForward}
-          onClick={() => webviewNode?.goForward()}
-          title="前进"
-          type="button"
-        >
-          <ArrowRight size={15} />
-        </button>
-        <button
-          aria-label={pageState.loading ? "停止加载" : "刷新"}
-          disabled={!electronAvailable || pageState.url === "about:blank"}
-          onClick={() => (pageState.loading ? webviewNode?.stop() : webviewNode?.reload())}
-          title={pageState.loading ? "停止加载" : "刷新"}
-          type="button"
-        >
-          {pageState.loading ? <X size={14} /> : <RefreshCw size={15} />}
-        </button>
-        <form className="browser-address-form" onSubmit={submitAddress}>
-          <Globe aria-hidden="true" size={14} />
-          <input
-            aria-label="浏览器地址"
-            disabled={!electronAvailable}
-            onChange={(event) => {
-              if (!activeTab) return;
-              const nextAddress = event.target.value;
-              updateBrowserTab(activeTab.id, (tab) => ({ ...tab, address: nextAddress }));
-            }}
-            placeholder="输入网址或搜索内容"
-            spellCheck={false}
-            value={address}
-          />
-          <button aria-label="打开" disabled={!electronAvailable || !address.trim()} title="打开" type="submit">
-            <Search size={14} />
+      <div className="browser-sidebar-toolbar-shell" ref={popoverRootRef}>
+        <div className="browser-sidebar-toolbar">
+          <button
+            aria-label="后退"
+            disabled={!electronAvailable || !pageState.canGoBack}
+            onClick={() => webviewNode?.goBack()}
+            title="后退"
+            type="button"
+          >
+            <ArrowLeft size={15} />
           </button>
-        </form>
+          <button
+            aria-label="前进"
+            disabled={!electronAvailable || !pageState.canGoForward}
+            onClick={() => webviewNode?.goForward()}
+            title="前进"
+            type="button"
+          >
+            <ArrowRight size={15} />
+          </button>
+          <button
+            aria-label={pageState.loading ? "停止加载" : "刷新"}
+            disabled={!electronAvailable || pageState.url === "about:blank"}
+            onClick={() => (pageState.loading ? webviewNode?.stop() : webviewNode?.reload())}
+            title={pageState.loading ? "停止加载" : "刷新"}
+            type="button"
+          >
+            {pageState.loading ? <X size={14} /> : <RefreshCw size={15} />}
+          </button>
+          <form className="browser-address-form" onSubmit={submitAddress}>
+            <Globe aria-hidden="true" size={14} />
+            <input
+              aria-label="浏览器地址"
+              disabled={!electronAvailable}
+              onChange={(event) => {
+                if (!activeTab) return;
+                const nextAddress = event.target.value;
+                updateBrowserTab(activeTab.id, (tab) => ({ ...tab, address: nextAddress }));
+              }}
+              placeholder="输入网址或搜索内容"
+              spellCheck={false}
+              value={address}
+            />
+            <button aria-label="打开" disabled={!electronAvailable || !address.trim()} title="打开" type="submit">
+              <Search size={14} />
+            </button>
+          </form>
+          <button
+            aria-expanded={popoverView === "downloads"}
+            aria-label="下载"
+            className={`browser-sidebar-toolbar-action ${popoverView === "downloads" ? "is-active" : ""}`}
+            disabled={!electronAvailable}
+            onClick={() => openPopover("downloads")}
+            title="下载"
+            type="button"
+          >
+            <Download size={16} />
+            {activeDownloadCount > 0 ? <small>{Math.min(activeDownloadCount, 9)}</small> : null}
+          </button>
+          <button
+            aria-expanded={popoverView !== null && popoverView !== "downloads"}
+            aria-label="更多浏览器选项"
+            className={`browser-sidebar-toolbar-action ${popoverView && popoverView !== "downloads" ? "is-active" : ""}`}
+            disabled={!electronAvailable}
+            onClick={() => openPopover("menu")}
+            title="更多"
+            type="button"
+          >
+            <EllipsisVertical size={17} />
+          </button>
+        </div>
+
+        {popoverView ? (
+          <div
+            aria-label={popoverView === "downloads" ? "下载" : "浏览器菜单"}
+            className={`browser-sidebar-popover ${popoverView === "downloads" ? "is-downloads" : ""}`}
+            role="dialog"
+          >
+            {popoverView === "downloads" ? (
+              <>
+                <header className="browser-popover-header">
+                  <strong>下载</strong>
+                  <div>
+                    {downloads.some((download) => download.state !== "progressing") ? (
+                      <button
+                        aria-label="清除已完成记录"
+                        onClick={() => void runDownloadAction("clear-completed")}
+                        title="清除已完成记录"
+                        type="button"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    ) : null}
+                    <button
+                      aria-label="打开下载文件夹"
+                      onClick={() => void runDownloadAction("open-folder")}
+                      title="打开下载文件夹"
+                      type="button"
+                    >
+                      <FolderOpen size={18} />
+                    </button>
+                  </div>
+                </header>
+                <div className="browser-download-list">
+                  {downloads.length === 0 ? (
+                    <div className="browser-download-empty">
+                      <Download size={24} />
+                      <span>还没有下载记录</span>
+                    </div>
+                  ) : downloads.map((download) => (
+                    <div className="browser-download-item" key={download.id}>
+                      <span className="browser-download-file-icon"><File size={20} /></span>
+                      <button
+                        className="browser-download-main"
+                        disabled={!isDownloadFinished(download)}
+                        onClick={() => void runDownloadAction("open", download.id)}
+                        title={download.fileName}
+                        type="button"
+                      >
+                        <strong>{download.fileName}</strong>
+                        <small>
+                          {getDownloadStatus(download)}
+                          {formatDownloadTime(download.startedAt) ? ` · ${formatDownloadTime(download.startedAt)}` : ""}
+                        </small>
+                        {download.state === "progressing" && download.totalBytes > 0 ? (
+                          <span className="browser-download-progress">
+                            <i style={{ width: `${Math.min(100, (download.receivedBytes / download.totalBytes) * 100)}%` }} />
+                          </span>
+                        ) : null}
+                      </button>
+                      <button
+                        aria-expanded={downloadActionsId === download.id}
+                        aria-label={`下载操作：${download.fileName}`}
+                        className="browser-download-more"
+                        onClick={() => setDownloadActionsId((current) => current === download.id ? "" : download.id)}
+                        title="更多操作"
+                        type="button"
+                      >
+                        <EllipsisVertical size={17} />
+                      </button>
+                      {downloadActionsId === download.id ? (
+                        <div className="browser-download-actions">
+                          {isDownloadFinished(download) ? (
+                            <>
+                              <button onClick={() => void runDownloadAction("open", download.id)} type="button">
+                                <ExternalLink size={14} /> 打开
+                              </button>
+                              <button onClick={() => void runDownloadAction("reveal", download.id)} type="button">
+                                <FolderOpen size={14} /> 在文件夹中显示
+                              </button>
+                            </>
+                          ) : download.state === "progressing" ? (
+                            <>
+                              <button onClick={() => void runDownloadAction(download.paused ? "resume" : "pause", download.id)} type="button">
+                                {download.paused ? "继续下载" : "暂停下载"}
+                              </button>
+                              <button onClick={() => void runDownloadAction("cancel", download.id)} type="button">取消下载</button>
+                            </>
+                          ) : null}
+                          <button onClick={() => void runDownloadAction("remove", download.id)} type="button">
+                            <Trash2 size={14} /> 从列表中移除
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : popoverView === "menu" ? (
+              <div className="browser-menu-list">
+                <button disabled={!pageActionAvailable} onClick={openFindBar} type="button">
+                  <span>在页面中查找</span><Search size={16} />
+                </button>
+                <div className="browser-menu-divider" />
+                <div className="browser-menu-zoom-row">
+                  <span>缩放</span>
+                  <div>
+                    <button aria-label="缩小网页" disabled={zoomFactor <= MIN_ZOOM_FACTOR} onClick={() => changeZoom(-ZOOM_STEP)} type="button"><Minus size={15} /></button>
+                    <button aria-label="重置网页缩放" onClick={resetZoom} type="button">{Math.round(zoomFactor * 100)}%</button>
+                    <button aria-label="放大网页" disabled={zoomFactor >= MAX_ZOOM_FACTOR} onClick={() => changeZoom(ZOOM_STEP)} type="button"><Plus size={16} /></button>
+                  </div>
+                  <button aria-label="适应侧栏宽度" className={autoFit ? "is-active" : ""} onClick={activateAutoFit} title="适应侧栏宽度" type="button"><RotateCcw size={16} /></button>
+                </div>
+                <div className="browser-menu-divider" />
+                <button disabled={!pageActionAvailable} onClick={() => void toggleDeviceEmulation()} type="button">
+                  <span>显示设备工具栏</span>
+                  {deviceEmulationEnabled ? <Check size={17} /> : <MonitorSmartphone size={17} />}
+                </button>
+                <button disabled={!pageActionAvailable} onClick={() => void capturePage()} type="button">
+                  <span>截取屏幕截图</span><Camera size={17} />
+                </button>
+                <div className="browser-menu-divider" />
+                <button onClick={() => void importBrowserProfile()} type="button">
+                  <span>导入 Cookie 和密码...</span>
+                </button>
+                <button onClick={() => setPopoverView("passwords")} type="button">
+                  <span>密码和自动填充</span><ChevronRight size={18} />
+                </button>
+                <button onClick={() => setPopoverView("downloads")} type="button">
+                  <span>下载</span>{activeDownloadCount > 0 ? <small>{activeDownloadCount}</small> : null}
+                </button>
+                <button onClick={() => setPopoverView("clear-data")} type="button">
+                  <span>清除浏览数据</span><ChevronRight size={18} />
+                </button>
+                <div className="browser-menu-divider" />
+                <button onClick={() => setPopoverView("settings")} type="button">
+                  <span>浏览器设置</span><Settings2 size={17} />
+                </button>
+              </div>
+            ) : (
+              <>
+                <header className="browser-popover-subheader">
+                  <button aria-label="返回浏览器菜单" onClick={() => setPopoverView("menu")} type="button"><ChevronLeft size={18} /></button>
+                  <strong>
+                    {popoverView === "passwords" ? "密码和自动填充" : popoverView === "clear-data" ? "清除浏览数据" : "浏览器设置"}
+                  </strong>
+                </header>
+                {popoverView === "passwords" ? (
+                  <div className="browser-popover-settings">
+                    <button className="browser-setting-row" onClick={() => void updateAutofillSetting(!profile?.autofillPasswords)} type="button">
+                      <span><strong>自动填充已导入密码</strong><small>仅对网址来源完全匹配的站点生效</small></span>
+                      <i className={profile?.autofillPasswords ? "is-on" : ""}><b /></i>
+                    </button>
+                    <button className="browser-setting-action" disabled={!pageActionAvailable || !profile?.passwordCount} onClick={() => webviewNode && void autofillPage(webviewNode, true).catch(reportFeatureError)} type="button">
+                      <KeyRound size={16} /> 填充当前页面
+                    </button>
+                    <button className="browser-setting-action" onClick={() => void importBrowserProfile()} type="button">
+                      导入密码文件
+                    </button>
+                    <button className="browser-setting-action is-danger" disabled={!profile?.passwordCount} onClick={() => void clearBrowserData("passwords")} type="button">
+                      删除 {profile?.passwordCount ?? 0} 个已导入密码
+                    </button>
+                  </div>
+                ) : popoverView === "clear-data" ? (
+                  <div className="browser-clear-list">
+                    <button onClick={() => void clearBrowserData("cache")} type="button"><span>缓存文件</span><small>保留登录状态</small></button>
+                    <button onClick={() => void clearBrowserData("cookies")} type="button"><span>Cookie 和网站数据</span><small>会退出已登录的网站</small></button>
+                    <button onClick={() => void clearBrowserData("history")} type="button"><span>浏览历史</span><small>清空侧栏标签页历史</small></button>
+                    <button className="is-danger" onClick={() => void clearBrowserData("all")} type="button"><span>全部浏览数据</span><small>缓存、Cookie、网站数据和历史</small></button>
+                  </div>
+                ) : (
+                  <div className="browser-popover-settings">
+                    <div className="browser-settings-card">
+                      <Download size={17} />
+                      <span><strong>下载位置</strong><small title={profile?.downloadDirectory}>{profile?.downloadDirectory || "系统下载文件夹"}</small></span>
+                      <button aria-label="打开下载文件夹" onClick={() => void runDownloadAction("open-folder")} type="button"><ExternalLink size={15} /></button>
+                    </div>
+                    <div className="browser-settings-card">
+                      <ShieldCheck size={17} />
+                      <span><strong>独立浏览器资料</strong><small>Cookie、缓存和登录状态与应用页面隔离</small></span>
+                    </div>
+                    <button className="browser-setting-row" onClick={() => void updateAutofillSetting(!profile?.autofillPasswords)} type="button">
+                      <span><strong>密码自动填充</strong><small>已安全保存 {profile?.passwordCount ?? 0} 个密码</small></span>
+                      <i className={profile?.autofillPasswords ? "is-on" : ""}><b /></i>
+                    </button>
+                    <button className="browser-setting-action" onClick={activateAutoFit} type="button">
+                      <Maximize2 size={16} /> 当前页面适应侧栏宽度
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+            {featureNotice ? <div className="browser-popover-notice">{featureNotice}</div> : null}
+          </div>
+        ) : null}
       </div>
+
+      {findOpen ? (
+        <div className="browser-sidebar-find" role="search">
+          <Search aria-hidden="true" size={15} />
+          <input
+            aria-label="在页面中查找"
+            onChange={(event) => setFindQuery(event.target.value)}
+            onKeyDown={handleFindKeyDown}
+            placeholder="在页面中查找"
+            ref={findInputRef}
+            value={findQuery}
+          />
+          <small>{findQuery ? `${findResult.activeMatchOrdinal}/${findResult.matches}` : ""}</small>
+          <button aria-label="上一个匹配项" disabled={!findResult.matches} onClick={() => findNext(false)} type="button"><ChevronUp size={16} /></button>
+          <button aria-label="下一个匹配项" disabled={!findResult.matches} onClick={() => findNext(true)} type="button"><ChevronDown size={16} /></button>
+          <button aria-label="关闭查找" onClick={closeFindBar} type="button"><X size={16} /></button>
+        </div>
+      ) : null}
 
       <div className="browser-sidebar-page">
         {electronAvailable

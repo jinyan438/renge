@@ -868,6 +868,26 @@ type PcFileEntry = {
   modifiedAt?: string;
 };
 
+type SidebarBrowserDownload = {
+  id: string;
+  fileName: string;
+  filePath: string;
+  mimeType: string;
+  receivedBytes: number;
+  totalBytes: number;
+  state: "progressing" | "completed" | "cancelled" | "interrupted" | string;
+  paused: boolean;
+  startedAt: number;
+  updatedAt: number;
+  url: string;
+};
+
+type SidebarBrowserProfileSummary = {
+  autofillPasswords: boolean;
+  passwordCount: number;
+  downloadDirectory: string;
+};
+
 type RengeDesktopApi = {
   isElectron: boolean;
   clearAppStorage?(): Promise<{ ok: boolean }>;
@@ -917,6 +937,41 @@ type RengeDesktopApi = {
   findSymbols(options: { query?: string; path?: string; maxMatches?: number }): Promise<unknown>;
   readPackageJson(): Promise<unknown>;
   scanTodos(options: { path?: string; maxMatches?: number }): Promise<unknown>;
+  listSidebarBrowserDownloads?(): Promise<SidebarBrowserDownload[]>;
+  runSidebarBrowserDownloadAction?(options: {
+    action: "open-folder" | "clear-completed" | "open" | "reveal" | "pause" | "resume" | "cancel" | "remove";
+    id?: string;
+  }): Promise<{ ok: boolean }>;
+  captureSidebarBrowserPage?(options: { webContentsId: number }): Promise<{
+    canceled: boolean;
+    path?: string;
+  }>;
+  setSidebarBrowserDeviceEmulation?(options: {
+    webContentsId: number;
+    enabled: boolean;
+  }): Promise<{ enabled: boolean }>;
+  importSidebarBrowserProfile?(): Promise<{
+    canceled: boolean;
+    cookiesImported?: number;
+    cookiesFailed?: number;
+    passwordsImported?: number;
+  }>;
+  getSidebarBrowserProfile?(): Promise<SidebarBrowserProfileSummary>;
+  updateSidebarBrowserProfile?(options: {
+    autofillPasswords: boolean;
+  }): Promise<SidebarBrowserProfileSummary>;
+  getSidebarBrowserAutofill?(options: { webContentsId: number }): Promise<{
+    name: string;
+    origin: string;
+    username: string;
+    password: string;
+  } | null>;
+  clearSidebarBrowserData?(options: {
+    action: "cache" | "cookies" | "history" | "passwords" | "all";
+  }): Promise<SidebarBrowserProfileSummary>;
+  onSidebarBrowserDownloads?(
+    listener: (downloads: SidebarBrowserDownload[]) => void,
+  ): () => void;
   onSidebarBrowserOpenTab?(
     listener: (request: { sourceWebContentsId: number; url: string }) => void,
   ): () => void;
