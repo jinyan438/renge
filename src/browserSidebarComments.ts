@@ -29,6 +29,65 @@ export type BrowserPageComment = BrowserContextTarget & {
   screenshotDataUrl?: string;
 };
 
+export type BrowserContextMenuPlacement = {
+  left: number;
+  top: number;
+  maxWidth: number;
+  maxHeight: number;
+};
+
+type BrowserContextMenuPlacementInput = {
+  anchorX: number;
+  anchorY: number;
+  menuWidth: number;
+  menuHeight: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  margin?: number;
+};
+
+export function calculateBrowserContextMenuPlacement({
+  anchorX,
+  anchorY,
+  menuWidth,
+  menuHeight,
+  viewportWidth,
+  viewportHeight,
+  margin = 8,
+}: BrowserContextMenuPlacementInput): BrowserContextMenuPlacement {
+  const safeMargin = Math.max(0, margin);
+  const safeWidth = Math.max(1, viewportWidth);
+  const safeHeight = Math.max(1, viewportHeight);
+  const pointX = Math.min(Math.max(anchorX, safeMargin), Math.max(safeMargin, safeWidth - safeMargin));
+  const pointY = Math.min(Math.max(anchorY, safeMargin), Math.max(safeMargin, safeHeight - safeMargin));
+  const roomRight = Math.max(1, safeWidth - safeMargin - pointX);
+  const roomLeft = Math.max(1, pointX - safeMargin);
+  const roomBelow = Math.max(1, safeHeight - safeMargin - pointY);
+  const roomAbove = Math.max(1, pointY - safeMargin);
+  const desiredWidth = Math.max(1, menuWidth);
+  const desiredHeight = Math.max(1, menuHeight);
+
+  let left = pointX;
+  let maxWidth = roomRight;
+  if (desiredWidth > roomRight) {
+    if (desiredWidth <= roomLeft || roomLeft > roomRight) {
+      maxWidth = roomLeft;
+      left = pointX - Math.min(desiredWidth, roomLeft);
+    }
+  }
+
+  let top = pointY;
+  let maxHeight = roomBelow;
+  if (desiredHeight > roomBelow) {
+    if (desiredHeight <= roomAbove || roomAbove > roomBelow) {
+      maxHeight = roomAbove;
+      top = pointY - Math.min(desiredHeight, roomAbove);
+    }
+  }
+
+  return { left, top, maxWidth, maxHeight };
+}
+
 function safeCoordinate(value: number) {
   return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
 }

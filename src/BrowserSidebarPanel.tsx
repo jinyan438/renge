@@ -39,6 +39,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -60,6 +61,7 @@ import {
 } from "./browserSidebarTabs";
 import {
   buildBrowserContextTargetProbeScript,
+  calculateBrowserContextMenuPlacement,
   type BrowserContextTarget,
   type BrowserPageComment,
 } from "./browserSidebarComments";
@@ -148,8 +150,12 @@ type BrowserContextMenuState = {
   tabId: string;
   request: BrowserContextMenuRequest;
   target: BrowserContextTarget;
+  anchorLeft: number;
+  anchorTop: number;
   left: number;
   top: number;
+  maxWidth?: number;
+  maxHeight?: number;
 };
 
 type BrowserCommentEditorState = {
@@ -335,6 +341,7 @@ export function BrowserSidebarPanel({
   const popoverRootRef = useRef<HTMLDivElement | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const pageRef = useRef<HTMLDivElement | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const commentInputRef = useRef<HTMLInputElement | null>(null);
   const contextRequestSequenceRef = useRef(0);
   tabsRef.current = tabs;
@@ -1044,25 +1051,47 @@ export function BrowserSidebarPanel({
         };
         if (!target.imageUrl && request.sourceUrl) target.imageUrl = request.sourceUrl;
         if (!target.linkUrl && request.linkUrl) target.linkUrl = request.linkUrl;
-        const zoom = node.getZoomFactor();
         const pageBounds = pageRef.current?.getBoundingClientRect();
-        const menuWidth = Math.min(286, Math.max(220, (pageBounds?.width ?? 360) - 16));
-        const estimatedHeight = 128 + (target.linkUrl ? 150 : 0) + (target.imageUrl ? 160 : 0);
-        const left = Math.max(
-          8,
-          Math.min(request.x * zoom, (pageBounds?.width ?? 360) - menuWidth - 8),
-        );
-        const top = Math.max(
-          8,
-          Math.min(request.y * zoom, (pageBounds?.height ?? 500) - Math.min(estimatedHeight, 470) - 8),
-        );
+        const nodeBounds = node.getBoundingClientRect();
+        const anchorLeft = request.x + nodeBounds.left - (pageBounds?.left ?? nodeBounds.left);
+        const anchorTop = request.y + nodeBounds.top - (pageBounds?.top ?? nodeBounds.top);
         selectBrowserTab(sourceTab.id);
         setPopoverView(null);
         setCommentEditor(null);
-        setContextMenu({ tabId: sourceTab.id, request, target, left, top });
+        setContextMenu({
+          tabId: sourceTab.id,
+          request,
+          target,
+          anchorLeft,
+          anchorTop,
+          left: anchorLeft,
+          top: anchorTop,
+        });
       })().catch(reportFeatureError);
     });
   }, [reportFeatureError, selectBrowserTab]);
+
+  useLayoutEffect(() => {
+    if (!contextMenu) return;
+    const page = pageRef.current;
+    const menu = contextMenuRef.current;
+    if (!page || !menu) return;
+    const placement = calculateBrowserContextMenuPlacement({
+      anchorX: contextMenu.anchorLeft,
+      anchorY: contextMenu.anchorTop,
+      menuWidth: menu.scrollWidth,
+      menuHeight: menu.scrollHeight,
+      viewportWidth: page.clientWidth,
+      viewportHeight: page.clientHeight,
+    });
+    if (
+      placement.left === contextMenu.left
+      && placement.top === contextMenu.top
+      && placement.maxWidth === contextMenu.maxWidth
+      && placement.maxHeight === contextMenu.maxHeight
+    ) return;
+    setContextMenu((current) => current === contextMenu ? { ...current, ...placement } : current);
+  }, [contextMenu]);
 
   useEffect(() => {
     let active = true;
@@ -1781,8 +1810,14 @@ export function BrowserSidebarPanel({
             aria-label="网页右键菜单"
             className="browser-context-menu"
             onPointerDown={(event) => event.stopPropagation()}
+            ref={contextMenuRef}
             role="menu"
-            style={{ left: contextMenu.left, top: contextMenu.top }}
+            style={{
+              left: contextMenu.left,
+              top: contextMenu.top,
+              maxWidth: contextMenu.maxWidth,
+              maxHeight: contextMenu.maxHeight,
+            }}
           >
             <button onClick={() => void startBrowserComment()} role="menuitem" type="button">
               <SlidersHorizontal size={16} />

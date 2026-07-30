@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildBrowserContextTargetProbeScript,
+  calculateBrowserContextMenuPlacement,
   parseBrowserPageComment,
   serializeBrowserPageComment,
 } from "../src/browserSidebarComments.ts";
@@ -37,5 +38,30 @@ test("round-trips structured browser comments without embedding screenshot data"
   assert.deepEqual(
     parseBrowserPageComment(serialized, comment.screenshotDataUrl),
     comment,
+  );
+});
+
+test("anchors the browser context menu at the click and flips at viewport edges", () => {
+  assert.deepEqual(
+    calculateBrowserContextMenuPlacement({
+      anchorX: 120,
+      anchorY: 100,
+      menuWidth: 280,
+      menuHeight: 300,
+      viewportWidth: 600,
+      viewportHeight: 600,
+    }),
+    { left: 120, top: 100, maxWidth: 472, maxHeight: 492 },
+  );
+  assert.deepEqual(
+    calculateBrowserContextMenuPlacement({
+      anchorX: 560,
+      anchorY: 560,
+      menuWidth: 280,
+      menuHeight: 300,
+      viewportWidth: 600,
+      viewportHeight: 600,
+    }),
+    { left: 280, top: 260, maxWidth: 552, maxHeight: 552 },
   );
 });
