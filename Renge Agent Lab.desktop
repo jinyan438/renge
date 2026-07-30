@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Renge Agent Lab
+Comment=安装、构建并启动 Renge Agent Lab
+Exec=bash -c "cd \"\\$(dirname \"\\$1\")\" && exec ./start-renge.sh" launcher %k
+Terminal=true
+Categories=Utility;
+StartupNotify=true
