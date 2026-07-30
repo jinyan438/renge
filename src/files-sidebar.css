@@ -474,23 +474,113 @@
   background: #ffffff;
 }
 
-.files-source-line-number {
+.files-source-line-numbers {
+  display: flex;
   min-width: 44px;
+  flex-direction: column;
   padding: 0 10px 0 7px;
+  border-right: 1px solid #f0f0f2;
   color: #9b9ba2;
   text-align: right;
   user-select: none;
 }
 
-.files-source-preview > code {
+.files-source-line-numbers > span {
   display: block;
-  padding-right: 18px;
-  white-space: pre;
+  height: 1.7em;
+  flex: 0 0 1.7em;
 }
 
-.files-source-preview > code:hover,
-.files-source-preview > code:hover + .files-source-line-number {
-  background: #f5f8fc;
+.files-source-preview > pre {
+  min-width: max-content;
+  margin: 0;
+  padding: 0 18px 30px 14px;
+  overflow: visible;
+  font: inherit;
+  line-height: inherit;
+}
+
+.files-source-preview > pre > code {
+  display: block;
+  min-height: 1.7em;
+  padding: 0;
+  color: #25252a;
+  white-space: pre;
+  background: transparent;
+}
+
+.files-source-preview .hljs-comment,
+.files-source-preview .hljs-quote {
+  color: #8a8f98;
+  font-style: italic;
+}
+
+.files-source-preview .hljs-keyword,
+.files-source-preview .hljs-selector-tag,
+.files-source-preview .hljs-doctag,
+.files-source-preview .hljs-formula {
+  color: #ef454d;
+}
+
+.files-source-preview .hljs-string,
+.files-source-preview .hljs-regexp,
+.files-source-preview .hljs-addition,
+.files-source-preview .hljs-attribute {
+  color: #0b932f;
+}
+
+.files-source-preview .hljs-attr,
+.files-source-preview .hljs-property,
+.files-source-preview .hljs-selector-attr,
+.files-source-preview .hljs-selector-pseudo {
+  color: #e34d59;
+}
+
+.files-source-preview .hljs-number,
+.files-source-preview .hljs-literal,
+.files-source-preview .hljs-symbol,
+.files-source-preview .hljs-bullet {
+  color: #087de1;
+}
+
+.files-source-preview .hljs-title,
+.files-source-preview .hljs-title.function_,
+.files-source-preview .hljs-title.class_,
+.files-source-preview .hljs-built_in,
+.files-source-preview .hljs-type,
+.files-source-preview .hljs-name {
+  color: #ce6500;
+}
+
+.files-source-preview .hljs-variable,
+.files-source-preview .hljs-template-variable,
+.files-source-preview .hljs-params {
+  color: #7c3aed;
+}
+
+.files-source-preview .hljs-meta,
+.files-source-preview .hljs-meta .hljs-keyword {
+  color: #b25900;
+}
+
+.files-source-preview .hljs-section,
+.files-source-preview .hljs-selector-id,
+.files-source-preview .hljs-selector-class {
+  color: #7c3aed;
+  font-weight: 650;
+}
+
+.files-source-preview .hljs-deletion {
+  color: #c82f3d;
+  background: #fff0f1;
+}
+
+.files-source-preview .hljs-emphasis {
+  font-style: italic;
+}
+
+.files-source-preview .hljs-strong {
+  font-weight: 750;
 }
 
 .files-source-render-limit {

@@ -27,6 +27,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -43,6 +44,7 @@ import {
   type FileBrowserEntry,
   type FileBrowserPreviewKind,
 } from "./fileBrowserUtils";
+import { highlightSourceCode } from "./syntaxHighlighting";
 import "./files-sidebar.css";
 
 export type FileBrowserSystemAction = "default" | "openWith" | "reveal";
@@ -250,17 +252,20 @@ function MarkdownPreview({ content }: { content: string }) {
   return <article className="files-markdown-preview">{nodes}</article>;
 }
 
-function SourcePreview({ content }: { content: string }) {
+function SourcePreview({ content, path }: { content: string; path: string }) {
   const allLines = content.replace(/\r\n/g, "\n").split("\n");
   const lines = allLines.slice(0, 4000);
+  const visibleContent = lines.join("\n");
+  const highlighted = useMemo(
+    () => highlightSourceCode(visibleContent, path),
+    [path, visibleContent],
+  );
   return (
     <div className="files-source-preview">
-      {lines.map((line, index) => (
-        <Fragment key={index}>
-          <span className="files-source-line-number">{index + 1}</span>
-          <code>{line || " "}</code>
-        </Fragment>
-      ))}
+      <div className="files-source-line-numbers" aria-hidden="true">
+        {lines.map((_line, index) => <span key={index}>{index + 1}</span>)}
+      </div>
+      <pre><code className={`hljs language-${highlighted.language}`} dangerouslySetInnerHTML={{ __html: highlighted.html || " " }} /></pre>
       {allLines.length > lines.length ? (
         <div className="files-source-render-limit">仅渲染前 {lines.length} 行</div>
       ) : null}
@@ -695,7 +700,7 @@ export function FilesSidebarPanel({
                 ) : preview.kind === "markdown" ? (
                   <MarkdownPreview content={preview.content ?? ""} />
                 ) : preview.kind === "text" ? (
-                  <SourcePreview content={preview.content ?? ""} />
+                  <SourcePreview content={preview.content ?? ""} path={preview.entry.path} />
                 ) : (
                   <div className="files-preview-message"><Braces size={24} /><strong>此格式不支持侧栏预览</strong><span>可以双击或使用右键菜单交给系统应用打开。</span></div>
               )}
