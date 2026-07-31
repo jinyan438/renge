@@ -9,6 +9,33 @@ export type FileBrowserEntry = {
   absolutePath?: string;
 };
 
+export type WorkspaceHandleIdentity =
+  | { kind: "electron"; path: string }
+  | { kind: "android"; uri: string }
+  | { kind: "pc"; baseUrl: string; path: string }
+  | { kind: "directory"; name: string };
+
+export function getWorkspaceHandleKey(handle: WorkspaceHandleIdentity) {
+  switch (handle.kind) {
+    case "electron":
+      return handle.path;
+    case "android":
+      return `android:${handle.uri}`;
+    case "pc":
+      return `pc:${handle.baseUrl}:${handle.path}`;
+    case "directory":
+      return `browser:${handle.name}`;
+  }
+}
+
+export function scopeWorkspaceHandleToSession<T extends WorkspaceHandleIdentity>(
+  handle: T | null,
+  workspaceKey: string,
+) {
+  if (!handle || !workspaceKey || workspaceKey === "default") return null;
+  return getWorkspaceHandleKey(handle) === workspaceKey ? handle : null;
+}
+
 const IMAGE_EXTENSIONS = new Set([
   "avif",
   "bmp",

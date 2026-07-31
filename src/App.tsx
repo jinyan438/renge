@@ -229,6 +229,7 @@ import {
 } from "./contextCompressionUtils";
 import { StatusBarSidebar } from "./StatusBarSidebar";
 import type { FileBrowserSource, FileBrowserSystemAction } from "./FilesSidebarPanel";
+import { scopeWorkspaceHandleToSession } from "./fileBrowserUtils";
 import {
   browserToolDefinitions,
   buildBrowserToolsSystemPrompt,
@@ -8347,6 +8348,22 @@ function buildLocalToolsSystemPrompt(
   ].join("\n");
 }
 
+function buildUnavailableLocalToolsSystemPrompt(workspaceKey: string) {
+  if (workspaceKey === DEFAULT_WORKSPACE_KEY) {
+    return [
+      "当前会话属于默认工作区，没有授权任何项目目录，也不得继承应用中仍保留的其他工作区目录。",
+      "禁止调用或声称调用任何 local_* / project_* 文件工具来读取、创建、修改或删除文件。",
+      "用户要求生成代码、SVG、HTML、配置或其他文本内容时，直接在消息区使用对应语言的 Markdown 代码块完整展示；不得声称内容已保存到文件。",
+      "桌面端右侧文件模块此时只显示隔离的临时文件区。只有用户选择并授权工作区后，才可以把生成内容写入项目目录。",
+    ].join("\n");
+  }
+
+  return [
+    "当前会话关联的工作区尚未恢复或与当前授权目录不匹配。",
+    "不得调用 local_* / project_* 文件工具，也不得使用应用中其他工作区的目录作为替代；需要文件操作时应说明当前工作区不可用。",
+  ].join("\n");
+}
+
 function buildMcpToolsSystemPrompt(tools: McpToolDefinition[]) {
   if (tools.length === 0) return "";
 
@@ -15040,17 +15057,30 @@ export function App() {
         : chatMode === "roleplay"
           ? ["继续当前场景", "说说你现在的想法", "推进接下来的剧情"]
         : ["梳理当前任务并给出下一步", "检查工作区中的潜在问题", "总结当前目标和待办事项"];
+  const activeChatSession = useMemo(
+    () => chatSessions.find((session) => session.id === activeChatSessionId) ?? chatSessions[0],
+    [activeChatSessionId, chatSessions],
+  );
+  const activeWorkspaceKey = activeChatSession?.workspaceKey ?? DEFAULT_WORKSPACE_KEY;
+  const activeLocalWorkspaceHandle = useMemo(
+    () => scopeWorkspaceHandleToSession(localWorkspaceHandle, activeWorkspaceKey),
+    [activeWorkspaceKey, localWorkspaceHandle],
+  );
+  const activeLocalToolsEnabled = localToolsEnabled && Boolean(activeLocalWorkspaceHandle);
+  const activeLocalToolsSystemPrompt = activeLocalWorkspaceHandle && activeLocalToolsEnabled
+    ? buildLocalToolsSystemPrompt(activeLocalWorkspaceHandle, llmFullAccessEnabled)
+    : buildUnavailableLocalToolsSystemPrompt(activeWorkspaceKey);
   const workspaceInfo = getWorkspaceInfo(localWorkspaceHandle);
   const fileBrowserSource = useMemo<FileBrowserSource | null>(() => {
-    if (localWorkspaceHandle?.kind === "electron") {
+    if (activeLocalWorkspaceHandle?.kind === "electron") {
       const desktopApi = window.rengeDesktop;
       if (!desktopApi?.isElectron) return null;
       const scope = "workspace" as const;
       return {
-        id: `electron:${localWorkspaceHandle.path}`,
+        id: `electron:${activeLocalWorkspaceHandle.path}`,
         kind: "workspace",
-        name: localWorkspaceHandle.name,
-        rootPath: localWorkspaceHandle.path,
+        name: activeLocalWorkspaceHandle.name,
+        rootPath: activeLocalWorkspaceHandle.path,
         listDirectory: (path) => desktopApi.listSidebarFiles({ scope, path }),
         readText: (path) => desktopApi.readSidebarTextFile({ scope, path }),
         readBinary: (path) => desktopApi.readSidebarBinaryFile({ scope, path }),
@@ -15059,27 +15089,27 @@ export function App() {
       };
     }
 
-    if (localWorkspaceHandle?.kind === "android") {
+    if (activeLocalWorkspaceHandle?.kind === "android") {
       const androidApi = window.rengeAndroid;
       if (!androidApi?.isAndroid) return null;
       return {
-        id: `android:${localWorkspaceHandle.uri}`,
+        id: `android:${activeLocalWorkspaceHandle.uri}`,
         kind: "workspace",
-        name: localWorkspaceHandle.name,
-        rootPath: localWorkspaceHandle.uri,
+        name: activeLocalWorkspaceHandle.name,
+        rootPath: activeLocalWorkspaceHandle.uri,
         listDirectory: (path) => androidApi.listFiles({ path, recursive: false }),
         readText: (path) => androidApi.readFile({ path }),
         readBinary: (path) => androidApi.readBinaryFile({ path }),
       };
     }
 
-    if (localWorkspaceHandle?.kind === "pc") {
+    if (activeLocalWorkspaceHandle?.kind === "pc") {
       const request = async (pathname: string, extra: Record<string, unknown> = {}) => {
-        const response = await fetch(`${localWorkspaceHandle.baseUrl}${pathname}`, {
+        const response = await fetch(`${activeLocalWorkspaceHandle.baseUrl}${pathname}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            workspacePath: localWorkspaceHandle.path,
+            workspacePath: activeLocalWorkspaceHandle.path,
             ...extra,
           }),
         });
@@ -15093,10 +15123,10 @@ export function App() {
         return payload;
       };
       return {
-        id: `pc:${localWorkspaceHandle.baseUrl}:${localWorkspaceHandle.path}`,
+        id: `pc:${activeLocalWorkspaceHandle.baseUrl}:${activeLocalWorkspaceHandle.path}`,
         kind: "workspace",
-        name: localWorkspaceHandle.name,
-        rootPath: localWorkspaceHandle.path,
+        name: activeLocalWorkspaceHandle.name,
+        rootPath: activeLocalWorkspaceHandle.path,
         listDirectory: async (path) => {
           const result = await request("/api/pc/list-files", { path, recursive: false });
           if (!path || !Array.isArray(result)) return result;
@@ -15111,20 +15141,21 @@ export function App() {
       };
     }
 
-    if (localWorkspaceHandle?.kind === "directory") {
+    if (activeLocalWorkspaceHandle?.kind === "directory") {
       return {
-        id: `browser:${localWorkspaceHandle.name}`,
+        id: `browser:${activeLocalWorkspaceHandle.name}`,
         kind: "workspace",
-        name: localWorkspaceHandle.name,
-        listDirectory: (path) => listLocalFiles(localWorkspaceHandle, path, false, 1000),
+        name: activeLocalWorkspaceHandle.name,
+        listDirectory: (path) => listLocalFiles(activeLocalWorkspaceHandle, path, false, 1000),
         readText: async (path) => ({
           path,
-          content: await readLocalTextFile(localWorkspaceHandle, path),
+          content: await readLocalTextFile(activeLocalWorkspaceHandle, path),
         }),
-        readBinary: (path) => readLocalBinaryFile(localWorkspaceHandle, path),
+        readBinary: (path) => readLocalBinaryFile(activeLocalWorkspaceHandle, path),
       };
     }
 
+    if (activeWorkspaceKey !== DEFAULT_WORKSPACE_KEY) return null;
     const desktopApi = window.rengeDesktop;
     if (!desktopApi?.isElectron) return null;
     const scope = "temporary" as const;
@@ -15139,11 +15170,7 @@ export function App() {
       runSystemAction: (path, action) =>
         desktopApi.runSidebarFileAction({ scope, path, action }),
     };
-  }, [localWorkspaceHandle]);
-  const activeChatSession = useMemo(
-    () => chatSessions.find((session) => session.id === activeChatSessionId) ?? chatSessions[0],
-    [activeChatSessionId, chatSessions],
-  );
+  }, [activeLocalWorkspaceHandle, activeWorkspaceKey]);
   useEffect(() => {
     setTerminalWorkspaceContext({
       workspaceKey: activeChatSession?.workspaceKey ?? DEFAULT_WORKSPACE_KEY,
@@ -18834,8 +18861,14 @@ export function App() {
   };
 
   const executeLocalFileTool = async (toolName: string, rawArguments: string) => {
-    if (!localWorkspaceHandle || !localToolsEnabled) {
-      throw new Error("本地文件工具未启用或未授权工作区");
+    if (activeWorkspaceKey === DEFAULT_WORKSPACE_KEY) {
+      throw new Error("默认工作区没有授权项目目录；请直接在消息中展示代码或先让用户选择工作区");
+    }
+    if (!localWorkspaceHandle || !activeLocalWorkspaceHandle || !activeLocalToolsEnabled) {
+      throw new Error("当前聊天工作区尚未恢复或与已授权目录不匹配，拒绝使用其他工作区的文件工具");
+    }
+    if (localWorkspaceHandle !== activeLocalWorkspaceHandle) {
+      throw new Error("当前文件句柄不属于这个聊天工作区");
     }
 
     const args = parseToolArguments(rawArguments);
@@ -19810,8 +19843,8 @@ export function App() {
     delegationRoster: DelegationRoster = { entries: [] },
   ) => {
     const localToolsBase =
-      localToolsEnabled && localWorkspaceHandle
-        ? getAvailableLocalToolDefinitions(localWorkspaceHandle)
+      activeLocalToolsEnabled && activeLocalWorkspaceHandle
+        ? getAvailableLocalToolDefinitions(activeLocalWorkspaceHandle)
         : [];
     const localTools = suppressAttachmentTransferTool
       ? localToolsBase.filter((tool) => tool.function.name !== "local_transfer_attachment_file")
@@ -20020,9 +20053,7 @@ export function App() {
       chatSenderContextPrompt,
       worldBookSystemPrompt,
       characterWorldBookSystemPrompt,
-      localToolsEnabled && localWorkspaceHandle
-        ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
-        : "",
+      activeLocalToolsSystemPrompt,
       window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
       isTerminalSidebarAvailable() ? buildTerminalToolsSystemPrompt() : "",
       buildMcpToolsSystemPrompt(meterMcpTools),
@@ -21559,8 +21590,8 @@ export function App() {
       const multiAgentSystemPrompt =
         supervisorMultiAgentSystemPrompt || sequenceMultiAgentSystemPrompt;
       const toolSystemPrompt = [
-        !isDialogueRewrite && !isLocalRewrite && localToolsEnabled && localWorkspaceHandle
-          ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
+        !isDialogueRewrite && !isLocalRewrite
+          ? activeLocalToolsSystemPrompt
           : "",
         window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
         isTerminalSidebarAvailable() ? buildTerminalToolsSystemPrompt() : "",
@@ -24154,9 +24185,7 @@ export function App() {
           ? buildChatSenderContextPrompt(nextMessages, personas, chatPersona)
           : buildChatSenderContextPrompt(nextMessages, personas);
       const toolSystemPrompt = [
-        localToolsEnabled && localWorkspaceHandle
-          ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
-          : "",
+        activeLocalToolsSystemPrompt,
         window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
         isTerminalSidebarAvailable() ? buildTerminalToolsSystemPrompt() : "",
       ].filter(Boolean).join("\n\n");
