@@ -345,6 +345,8 @@ public class MainActivity extends Activity {
         }
         if (androidBrowserHost != null) androidBrowserHost.destroy();
         androidBrowserHost = null;
+        if (androidWorkspaceBridge != null) androidWorkspaceBridge.dispose();
+        androidWorkspaceBridge = null;
         if (webView != null) {
             webView.destroy();
         }

@@ -13,18 +13,12 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  getTerminalSidebarApi,
+  type SidebarTerminalSession,
+} from "./terminalSidebarRuntime";
 
-export type SidebarTerminalSession = {
-  id: string;
-  title: string;
-  shell: string;
-  cwd: string;
-  createdAt: number;
-  exited: boolean;
-  exitCode: number | null;
-  buffer: string;
-  outputOffset: number;
-};
+export type { SidebarTerminalSession } from "./terminalSidebarRuntime";
 
 type TerminalPaneProps = {
   active: boolean;
@@ -42,8 +36,8 @@ function TerminalPane({ active, session, onReady, onDispose }: TerminalPaneProps
 
   useEffect(() => {
     const host = hostRef.current;
-    const desktopApi = window.rengeDesktop;
-    if (!host || !desktopApi?.writeSidebarTerminal) return;
+    const terminalApi = getTerminalSidebarApi();
+    if (!host || !terminalApi) return;
 
     const terminal = new Terminal({
       allowProposedApi: false,
@@ -87,7 +81,7 @@ function TerminalPane({ active, session, onReady, onDispose }: TerminalPaneProps
     if (session.buffer) terminal.write(session.buffer);
 
     const inputDisposable = terminal.onData((data) => {
-      void desktopApi.writeSidebarTerminal?.({ id: session.id, data }).catch(() => undefined);
+      void terminalApi.writeSidebarTerminal({ id: session.id, data }).catch(() => undefined);
     });
     terminal.attachCustomKeyEventHandler((event) => {
       const modifier = event.ctrlKey || event.metaKey;
@@ -114,7 +108,7 @@ function TerminalPane({ active, session, onReady, onDispose }: TerminalPaneProps
       if (!host.isConnected || host.clientWidth === 0 || host.clientHeight === 0) return;
       try {
         fitAddon.fit();
-        void desktopApi.resizeSidebarTerminal?.({
+        void terminalApi.resizeSidebarTerminal({
           id: session.id,
           cols: terminal.cols,
           rows: terminal.rows,
@@ -183,12 +177,12 @@ export function TerminalSidebarPanel({
   }, []);
 
   const createTerminal = useCallback(async () => {
-    const desktopApi = window.rengeDesktop;
-    if (!desktopApi?.createSidebarTerminal || creatingRef.current) return;
+    const terminalApi = getTerminalSidebarApi();
+    if (!terminalApi || creatingRef.current) return;
     creatingRef.current = true;
     setError("");
     try {
-      const session = await desktopApi.createSidebarTerminal({ cols: 80, rows: 24 });
+      const session = await terminalApi.createSidebarTerminal({ cols: 80, rows: 24 });
       setSessions((current) => current.some((item) => item.id === session.id)
         ? current.map((item) => item.id === session.id ? session : item)
         : [...current, session]);
@@ -202,14 +196,14 @@ export function TerminalSidebarPanel({
   }, []);
 
   useEffect(() => {
-    const desktopApi = window.rengeDesktop;
-    if (!desktopApi?.listSidebarTerminals) {
+    const terminalApi = getTerminalSidebarApi();
+    if (!terminalApi) {
       setLoading(false);
-      setError("交互式终端仅支持 Electron 桌面版");
+      setError("当前平台未提供交互式终端");
       return;
     }
     let cancelled = false;
-    void desktopApi.listSidebarTerminals()
+    void terminalApi.listSidebarTerminals()
       .then((current) => {
         if (cancelled) return;
         if (current.length === 0) return createTerminal();
@@ -229,8 +223,8 @@ export function TerminalSidebarPanel({
   }, [createTerminal]);
 
   useEffect(() => {
-    const desktopApi = window.rengeDesktop;
-    const stopData = desktopApi?.onSidebarTerminalData?.((payload) => {
+    const terminalApi = getTerminalSidebarApi();
+    const stopData = terminalApi?.onSidebarTerminalData?.((payload) => {
       const terminal = terminalRefs.current.get(payload.id)?.terminal;
       if (terminal) terminal.write(payload.data);
       else pendingDataRef.current.set(
@@ -238,7 +232,7 @@ export function TerminalSidebarPanel({
         (pendingDataRef.current.get(payload.id) || "") + payload.data,
       );
     });
-    const stopRestart = desktopApi?.onSidebarTerminalRestarted?.((payload) => {
+    const stopRestart = terminalApi?.onSidebarTerminalRestarted?.((payload) => {
       const current = terminalRefs.current.get(payload.id);
       pendingDataRef.current.delete(payload.id);
       if (current) {
@@ -247,19 +241,19 @@ export function TerminalSidebarPanel({
         window.requestAnimationFrame(() => current.fitAddon.fit());
       }
     });
-    const stopExit = desktopApi?.onSidebarTerminalExit?.((payload) => {
+    const stopExit = terminalApi?.onSidebarTerminalExit?.((payload) => {
       setSessions((current) => current.map((session) =>
         session.id === payload.id
           ? { ...session, exited: true, exitCode: payload.exitCode }
           : session));
     });
-    const stopCreated = desktopApi?.onSidebarTerminalCreated?.((payload) => {
+    const stopCreated = terminalApi?.onSidebarTerminalCreated?.((payload) => {
       setSessions((current) => current.some((session) => session.id === payload.id)
         ? current.map((session) => session.id === payload.id ? payload : session)
         : [...current, payload]);
       setActiveId(payload.id);
     });
-    const stopClosed = desktopApi?.onSidebarTerminalClosed?.((payload) => {
+    const stopClosed = terminalApi?.onSidebarTerminalClosed?.((payload) => {
       pendingDataRef.current.delete(payload.id);
       setSessions((current) => {
         const next = current.filter((session) => session.id !== payload.id);
@@ -313,7 +307,9 @@ export function TerminalSidebarPanel({
     const sessionIndex = sessions.findIndex((session) => session.id === id);
     setError("");
     try {
-      await window.rengeDesktop?.closeSidebarTerminal?.({ id });
+      const terminalApi = getTerminalSidebarApi();
+      if (!terminalApi) throw new Error("终端接口不可用");
+      await terminalApi.closeSidebarTerminal({ id });
       pendingDataRef.current.delete(id);
       const next = sessions.filter((session) => session.id !== id);
       setSessions(next);
@@ -329,14 +325,14 @@ export function TerminalSidebarPanel({
     const current = terminalRefs.current.get(activeId);
     setError("");
     try {
-      const session = await window.rengeDesktop?.restartSidebarTerminal?.({
+      const terminalApi = getTerminalSidebarApi();
+      if (!terminalApi) throw new Error("终端接口不可用");
+      const session = await terminalApi.restartSidebarTerminal({
         id: activeId,
         cols: current?.terminal.cols ?? 80,
         rows: current?.terminal.rows ?? 24,
       });
-      if (session) {
-        setSessions((items) => items.map((item) => item.id === session.id ? session : item));
-      }
+      setSessions((items) => items.map((item) => item.id === session.id ? session : item));
     } catch (restartError) {
       setError(getErrorMessage(restartError));
     }

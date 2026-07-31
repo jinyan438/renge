@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   buildTerminalToolsSystemPrompt,
   executeTerminalTool,
+  getTerminalSidebarApi,
+  isTerminalSidebarAvailable,
   isTerminalToolName,
   registerTerminalSidebarOpener,
   stripTerminalControlSequences,
@@ -30,6 +32,32 @@ test("exposes the complete terminal control tool set", () => {
 test("removes terminal control sequences while preserving readable output", () => {
   const raw = "\u001b[32mREADY\u001b[0m\r\n\u001b]0;PowerShell\u0007PS> ";
   assert.equal(stripTerminalControlSequences(raw), "READY\nPS> ");
+});
+
+test("selects the Android terminal contract when Electron is unavailable", async () => {
+  const androidApi = {
+    isAndroid: true,
+    async listSidebarTerminals() { return []; },
+    async createSidebarTerminal() { return {}; },
+    async readSidebarTerminal() { return {}; },
+    async writeSidebarTerminal() { return { ok: true }; },
+    async resizeSidebarTerminal() { return { ok: true }; },
+    async restartSidebarTerminal() { return {}; },
+    async closeSidebarTerminal({ id }) { return { ok: true, id }; },
+  };
+  const previousWindow = globalThis.window;
+  globalThis.window = { rengeAndroid: androidApi };
+  try {
+    assert.equal(getTerminalSidebarApi(), androidApi);
+    assert.equal(isTerminalSidebarAvailable(), true);
+    assert.deepEqual(await executeTerminalTool("terminal_list", "{}"), []);
+    assert.deepEqual(
+      await executeTerminalTool("terminal_close", JSON.stringify({ id: "android-1" })),
+      { ok: true, id: "android-1" },
+    );
+  } finally {
+    globalThis.window = previousWindow;
+  }
 });
 
 test("routes AI terminal tools through the Electron bridge and opens the sidebar", async () => {

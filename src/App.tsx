@@ -240,6 +240,7 @@ import {
 import {
   buildTerminalToolsSystemPrompt,
   executeTerminalTool,
+  isTerminalSidebarAvailable,
   isTerminalToolName,
   terminalToolDefinitions,
 } from "./terminalSidebarRuntime";
@@ -1123,6 +1124,18 @@ type RengeAndroidApi = {
     path?: string;
     message?: string;
   }>;
+  listSidebarTerminals?(options?: { includeBuffer?: boolean }): Promise<SidebarTerminalSession[]>;
+  createSidebarTerminal?(options?: { cols?: number; rows?: number; title?: string }): Promise<SidebarTerminalSession>;
+  writeSidebarTerminal?(options: { id: string; data: string }): Promise<{ ok: boolean }>;
+  resizeSidebarTerminal?(options: { id: string; cols: number; rows: number }): Promise<{ ok: boolean }>;
+  readSidebarTerminal?(options: { id: string; from?: number; maxChars?: number }): Promise<SidebarTerminalReadResult>;
+  restartSidebarTerminal?(options: { id: string; cols?: number; rows?: number }): Promise<SidebarTerminalSession>;
+  closeSidebarTerminal?(options: { id: string }): Promise<{ ok: boolean; id: string }>;
+  onSidebarTerminalData?(listener: (payload: { id: string; data: string }) => void): () => void;
+  onSidebarTerminalExit?(listener: (payload: { id: string; exitCode: number; signal: number }) => void): () => void;
+  onSidebarTerminalRestarted?(listener: (payload: SidebarTerminalSession) => void): () => void;
+  onSidebarTerminalCreated?(listener: (payload: SidebarTerminalSession) => void): () => void;
+  onSidebarTerminalClosed?(listener: (payload: { id: string }) => void): () => void;
   enterFullscreen?(): void;
   exitFullscreen?(): void;
 };
@@ -19806,7 +19819,7 @@ export function App() {
         || isAndroidAppShell(window.location.search, window.navigator.userAgent),
       ),
     ) ? browserToolDefinitions : [];
-    const terminalTools = window.rengeDesktop?.isElectron ? terminalToolDefinitions : [];
+    const terminalTools = isTerminalSidebarAvailable() ? terminalToolDefinitions : [];
     return [
       ...(chatChoiceToolsEnabled ? chatChoiceToolDefinitions : []),
       ...localTools,
@@ -20003,7 +20016,7 @@ export function App() {
         ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
         : "",
       window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
-      window.rengeDesktop?.isElectron ? buildTerminalToolsSystemPrompt() : "",
+      isTerminalSidebarAvailable() ? buildTerminalToolsSystemPrompt() : "",
       buildMcpToolsSystemPrompt(meterMcpTools),
       availableTools.some((tool) => isChatChoiceToolName(tool.function.name))
         ? buildChatChoiceSystemPrompt()
@@ -21542,7 +21555,7 @@ export function App() {
           ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
           : "",
         window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
-        window.rengeDesktop?.isElectron ? buildTerminalToolsSystemPrompt() : "",
+        isTerminalSidebarAvailable() ? buildTerminalToolsSystemPrompt() : "",
       ].filter(Boolean).join("\n\n");
       const mcpToolsSystemPrompt = buildMcpToolsSystemPrompt(requestMcpTools);
       const chatChoiceSystemPrompt = availableChatTools.some((tool) =>
@@ -24137,7 +24150,7 @@ export function App() {
           ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
           : "",
         window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
-        window.rengeDesktop?.isElectron ? buildTerminalToolsSystemPrompt() : "",
+        isTerminalSidebarAvailable() ? buildTerminalToolsSystemPrompt() : "",
       ].filter(Boolean).join("\n\n");
       const mcpToolsSystemPrompt = buildMcpToolsSystemPrompt(requestMcpTools);
       const chatChoiceSystemPrompt = availableChatTools.some((tool) =>

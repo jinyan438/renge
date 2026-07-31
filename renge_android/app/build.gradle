@@ -27,7 +27,7 @@ android {
 
     defaultConfig {
         applicationId "com.renge.agentlab"
-        minSdk 23
+        minSdk 24
         targetSdk 35
         versionCode 4
         versionName "0.1.3"
@@ -37,6 +37,10 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
+
+dependencies {
+    implementation "com.github.termux.termux-app:terminal-emulator:0.118.3"
 }
 
 tasks.named("preBuild") {

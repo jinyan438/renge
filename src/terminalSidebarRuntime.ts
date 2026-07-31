@@ -1,5 +1,89 @@
 type TerminalToolArguments = Record<string, unknown>;
 
+export type SidebarTerminalSession = {
+  id: string;
+  title: string;
+  shell: string;
+  cwd: string;
+  createdAt: number;
+  exited: boolean;
+  exitCode: number | null;
+  buffer: string;
+  outputOffset: number;
+};
+
+export type SidebarTerminalReadResult = Omit<SidebarTerminalSession, "buffer"> & {
+  output: string;
+  cursor: number;
+  nextCursor: number;
+  truncated: boolean;
+  hasMore: boolean;
+};
+
+export type SidebarTerminalApi = {
+  listSidebarTerminals(options?: { includeBuffer?: boolean }): Promise<SidebarTerminalSession[]>;
+  createSidebarTerminal(options?: {
+    cols?: number;
+    rows?: number;
+    title?: string;
+  }): Promise<SidebarTerminalSession>;
+  writeSidebarTerminal(options: { id: string; data: string }): Promise<{ ok: boolean }>;
+  resizeSidebarTerminal(options: {
+    id: string;
+    cols: number;
+    rows: number;
+  }): Promise<{ ok: boolean }>;
+  readSidebarTerminal(options: {
+    id: string;
+    from?: number;
+    maxChars?: number;
+  }): Promise<SidebarTerminalReadResult>;
+  restartSidebarTerminal(options: {
+    id: string;
+    cols?: number;
+    rows?: number;
+  }): Promise<SidebarTerminalSession>;
+  closeSidebarTerminal(options: { id: string }): Promise<{ ok: boolean; id: string }>;
+  onSidebarTerminalData?(listener: (payload: { id: string; data: string }) => void): () => void;
+  onSidebarTerminalExit?(listener: (payload: {
+    id: string;
+    exitCode: number;
+    signal: number;
+  }) => void): () => void;
+  onSidebarTerminalRestarted?(listener: (payload: SidebarTerminalSession) => void): () => void;
+  onSidebarTerminalCreated?(listener: (payload: SidebarTerminalSession) => void): () => void;
+  onSidebarTerminalClosed?(listener: (payload: { id: string }) => void): () => void;
+};
+
+function hasTerminalContract(value: Partial<SidebarTerminalApi>) {
+  return (
+    typeof value.listSidebarTerminals === "function"
+    && typeof value.createSidebarTerminal === "function"
+    && typeof value.readSidebarTerminal === "function"
+    && typeof value.writeSidebarTerminal === "function"
+    && typeof value.resizeSidebarTerminal === "function"
+    && typeof value.restartSidebarTerminal === "function"
+    && typeof value.closeSidebarTerminal === "function"
+  );
+}
+
+export function getTerminalSidebarApi(): SidebarTerminalApi | null {
+  const desktop = window.rengeDesktop as (Partial<SidebarTerminalApi> & {
+    isElectron?: boolean;
+  }) | undefined;
+  if (desktop?.isElectron && hasTerminalContract(desktop)) return desktop as SidebarTerminalApi;
+
+  const android = window.rengeAndroid as (Partial<SidebarTerminalApi> & {
+    isAndroid?: boolean;
+  }) | undefined;
+  if (android?.isAndroid && hasTerminalContract(android)) return android as SidebarTerminalApi;
+  return null;
+}
+
+export function isTerminalSidebarAvailable() {
+  return getTerminalSidebarApi() !== null;
+}
+
 const TERMINAL_TOOL_NAMES = new Set([
   "terminal_list",
   "terminal_create",
@@ -138,7 +222,7 @@ export function isTerminalToolName(toolName: string) {
 
 export function buildTerminalToolsSystemPrompt() {
   return [
-    "你拥有完全控制 Electron 右侧栏交互式终端的权限，可以同时新建、读取、输入、运行、调整、重启和关闭多个终端。",
+    "你拥有完全控制当前应用右侧栏交互式终端的权限，可以同时新建、读取、输入、运行、调整、重启和关闭多个终端。",
     "需要操作终端时先调用 terminal_list；没有合适终端时调用 terminal_create，并在后续调用中使用返回的准确 id。",
     "执行普通命令优先调用 terminal_run，它会返回本次新增输出；持续运行的任务可稍后用 terminal_read 增量读取。",
     "需要回答交互式提示、发送控制键或终止前台任务时调用 terminal_write；Ctrl+C 的 data 为 \\u0003，回车为 \\r。",
@@ -207,17 +291,14 @@ function waitForPoll(delayMs: number, signal?: AbortSignal) {
 }
 
 async function runTerminalCommand(
-  api: NonNullable<Window["rengeDesktop"]>,
+  api: SidebarTerminalApi,
   args: TerminalToolArguments,
   signal?: AbortSignal,
 ) {
   const id = requireString(args, "id");
   const command = requireString(args, "command");
   const waitMs = clampNumber(args.waitMs, 1500, 250, 30_000);
-  const before = await api.readSidebarTerminal?.({ id, maxChars: 1 });
-  if (!before || !api.writeSidebarTerminal || !api.readSidebarTerminal) {
-    throw new Error("终端读取或输入接口不可用");
-  }
+  const before = await api.readSidebarTerminal({ id, maxChars: 1 });
   let cursor = before.nextCursor;
   let output = "";
   let sawOutput = false;
@@ -264,8 +345,8 @@ export async function executeTerminalTool(
 ) {
   if (!isTerminalToolName(toolName)) throw new Error(`未知终端工具：${toolName}`);
   if (signal?.aborted) throw new DOMException("操作已停止", "AbortError");
-  const api = window.rengeDesktop;
-  if (!api?.isElectron) throw new Error("右侧栏交互式终端仅支持 Electron 桌面版");
+  const api = getTerminalSidebarApi();
+  if (!api) throw new Error("当前平台未提供右侧栏交互式终端");
   const args = parseTerminalToolArguments(rawArguments);
   terminalSidebarOpener?.(
     typeof args.id === "string" && args.id ? args.id : undefined,
@@ -273,19 +354,16 @@ export async function executeTerminalTool(
 
   switch (toolName) {
     case "terminal_list": {
-      if (!api.listSidebarTerminals) throw new Error("终端列表接口不可用");
       const sessions = await api.listSidebarTerminals({ includeBuffer: false });
       return sessions.map(({ buffer: _buffer, ...session }) => session);
     }
     case "terminal_create":
-      if (!api.createSidebarTerminal) throw new Error("终端创建接口不可用");
       return api.createSidebarTerminal({
         title: String(args.title ?? ""),
         cols: clampNumber(args.cols, 80, 1, 500),
         rows: clampNumber(args.rows, 24, 1, 300),
       });
     case "terminal_read": {
-      if (!api.readSidebarTerminal) throw new Error("终端读取接口不可用");
       const result = await api.readSidebarTerminal({
         id: requireString(args, "id"),
         ...(args.cursor === undefined ? {} : { from: Number(args.cursor) }),
@@ -297,7 +375,6 @@ export async function executeTerminalTool(
       };
     }
     case "terminal_write":
-      if (!api.writeSidebarTerminal) throw new Error("终端输入接口不可用");
       return api.writeSidebarTerminal({
         id: requireString(args, "id"),
         data: requireString(args, "data"),
@@ -305,21 +382,18 @@ export async function executeTerminalTool(
     case "terminal_run":
       return runTerminalCommand(api, args, signal);
     case "terminal_resize":
-      if (!api.resizeSidebarTerminal) throw new Error("终端尺寸接口不可用");
       return api.resizeSidebarTerminal({
         id: requireString(args, "id"),
         cols: clampNumber(args.cols, 80, 1, 500),
         rows: clampNumber(args.rows, 24, 1, 300),
       });
     case "terminal_restart":
-      if (!api.restartSidebarTerminal) throw new Error("终端重启接口不可用");
       return api.restartSidebarTerminal({
         id: requireString(args, "id"),
         cols: clampNumber(args.cols, 80, 1, 500),
         rows: clampNumber(args.rows, 24, 1, 300),
       });
     case "terminal_close":
-      if (!api.closeSidebarTerminal) throw new Error("终端关闭接口不可用");
       return api.closeSidebarTerminal({ id: requireString(args, "id") });
     default:
       throw new Error(`未知终端工具：${toolName}`);
