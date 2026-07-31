@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   browserToolDefinitions,
+  buildAndroidBrowserCommandIntentUrl,
   buildAndroidBrowserIntentUrl,
   buildBrowserDocumentContentProbeScript,
   buildBrowserPageReadScript,
@@ -13,6 +14,7 @@ import {
   isBrowserToolName,
   normalizeBrowserAddress,
   openAndroidBrowserAddress,
+  scaleAndroidBrowserBounds,
 } from "../src/browserSidebarRuntime.ts";
 
 test("keeps the browser address input editable in Android and Electron shells", () => {
@@ -28,7 +30,7 @@ test("detects the Android app shell before the JavaScript bridge is injected", (
 });
 
 test("routes Android app navigation through the native intent scheme", async () => {
-  const intentUrls = [];
+  const openedUrls = [];
   const result = await openAndroidBrowserAddress(
     "https://www.bilibili.com",
     {
@@ -37,16 +39,24 @@ test("routes Android app navigation through the native intent scheme", async () 
       },
     },
     undefined,
-    (intentUrl) => intentUrls.push(intentUrl),
+    (url) => openedUrls.push(url),
   );
 
-  assert.equal(
-    buildAndroidBrowserIntentUrl("https://www.bilibili.com"),
-    "renge-browser://open?url=https%3A%2F%2Fwww.bilibili.com",
+  const bounds = scaleAndroidBrowserBounds(
+    { left: 10, top: 20, width: 300, height: 400 },
+    2,
   );
-  assert.deepEqual(intentUrls, [
-    "renge-browser://open?url=https%3A%2F%2Fwww.bilibili.com",
-  ]);
+  assert.deepEqual(bounds, { left: 20, top: 40, width: 600, height: 800 });
+  assert.equal(
+    buildAndroidBrowserIntentUrl("https://www.bilibili.com", bounds),
+    "renge-browser://open?url=https%3A%2F%2Fwww.bilibili.com&left=20&top=40&width=600&height=800",
+  );
+  assert.equal(
+    buildAndroidBrowserCommandIntentUrl("layout", { bounds }),
+    "renge-browser://layout?left=20&top=40&width=600&height=800",
+  );
+  assert.equal(buildAndroidBrowserCommandIntentUrl("back"), "renge-browser://back");
+  assert.deepEqual(openedUrls, ["https://www.bilibili.com"]);
   assert.deepEqual(result, { ok: true, url: "https://www.bilibili.com" });
 });
 

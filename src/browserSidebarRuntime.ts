@@ -21,7 +21,24 @@ export type AndroidBrowserApi = {
 
 export type AndroidBrowserNativeBridge = {
   openBrowser?(optionsJson: string): string;
+  browserCommand?(optionsJson: string): string;
 };
+
+export type AndroidBrowserBounds = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
+export type AndroidBrowserCommand =
+  | "open"
+  | "layout"
+  | "back"
+  | "forward"
+  | "reload"
+  | "stop"
+  | "close";
 
 const ANDROID_APP_USER_AGENT_TOKEN = "RengeAgentLabAndroid";
 const ANDROID_PLATFORM_QUERY_VALUE = "android";
@@ -32,18 +49,49 @@ export function isAndroidAppShell(locationSearch: string, userAgent: string) {
   return markedByQuery || userAgent.includes(ANDROID_APP_USER_AGENT_TOKEN);
 }
 
-export function buildAndroidBrowserIntentUrl(url: string) {
-  return `renge-browser://open?url=${encodeURIComponent(url)}`;
+export function scaleAndroidBrowserBounds(
+  bounds: AndroidBrowserBounds,
+  devicePixelRatio: number,
+): AndroidBrowserBounds {
+  const scale = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0
+    ? devicePixelRatio
+    : 1;
+  return {
+    left: Math.max(0, Math.round(bounds.left * scale)),
+    top: Math.max(0, Math.round(bounds.top * scale)),
+    width: Math.max(1, Math.round(bounds.width * scale)),
+    height: Math.max(1, Math.round(bounds.height * scale)),
+  };
+}
+
+export function buildAndroidBrowserCommandIntentUrl(
+  command: AndroidBrowserCommand,
+  options: { url?: string; bounds?: AndroidBrowserBounds } = {},
+) {
+  const params = new URLSearchParams();
+  if (options.url) params.set("url", options.url);
+  if (options.bounds) {
+    params.set("left", String(options.bounds.left));
+    params.set("top", String(options.bounds.top));
+    params.set("width", String(options.bounds.width));
+    params.set("height", String(options.bounds.height));
+  }
+  const query = params.toString();
+  return `renge-browser://${command}${query ? `?${query}` : ""}`;
+}
+
+export function buildAndroidBrowserIntentUrl(url: string, bounds?: AndroidBrowserBounds) {
+  return buildAndroidBrowserCommandIntentUrl("open", { url, bounds });
 }
 
 export async function openAndroidBrowserAddress(
   url: string,
   api?: AndroidBrowserApi,
   nativeBridge?: AndroidBrowserNativeBridge,
-  openAppIntent?: (intentUrl: string) => void,
+  openAppIntent?: (url: string) => void,
 ) {
   if (openAppIntent) {
-    openAppIntent(buildAndroidBrowserIntentUrl(url));
+    openAppIntent(url);
     return { ok: true, url };
   }
   if (api?.openBrowser) {

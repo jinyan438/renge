@@ -45,6 +45,8 @@ import {
   useState,
 } from "react";
 import {
+  buildAndroidBrowserCommandIntentUrl,
+  buildAndroidBrowserIntentUrl,
   buildBrowserDocumentContentProbeScript,
   buildBrowserPageReadScript,
   buildBrowserScriptExecutionWrapper,
@@ -54,6 +56,8 @@ import {
   normalizeBrowserAddress,
   openAndroidBrowserAddress,
   registerBrowserSidebarController,
+  scaleAndroidBrowserBounds,
+  type AndroidBrowserCommand,
   type BrowserSidebarController,
   type BrowserToolArguments,
 } from "./browserSidebarRuntime";
@@ -347,6 +351,7 @@ export function BrowserSidebarPanel({
   const [contextMenu, setContextMenu] = useState<BrowserContextMenuState | null>(null);
   const [commentEditor, setCommentEditor] = useState<BrowserCommentEditorState | null>(null);
   const [commentText, setCommentText] = useState("");
+  const [androidBrowserVisible, setAndroidBrowserVisible] = useState(false);
   const tabsRef = useRef(tabs);
   const activeTabIdRef = useRef(activeTabId);
   const webviewNodesRef = useRef(new Map<string, ElectronWebviewElement>());
@@ -377,6 +382,47 @@ export function BrowserSidebarPanel({
     && Boolean(webviewNode)
     && (pageState.url !== "about:blank" || Boolean(activeTab?.hasDocumentContent));
 
+  const getAndroidBrowserBounds = useCallback(() => {
+    const bounds = pageRef.current?.getBoundingClientRect();
+    if (!bounds) return undefined;
+    return scaleAndroidBrowserBounds(
+      {
+        left: bounds.left,
+        top: bounds.top,
+        width: bounds.width,
+        height: bounds.height,
+      },
+      window.devicePixelRatio,
+    );
+  }, []);
+
+  const sendAndroidBrowserCommand = useCallback((
+    command: AndroidBrowserCommand,
+    url?: string,
+  ) => {
+    if (!androidAppShell) return;
+    const bounds = command === "open" || command === "layout"
+      ? getAndroidBrowserBounds()
+      : undefined;
+    const commandOptions = { command, url, ...bounds };
+    const intentUrl = command === "open" && url
+      ? buildAndroidBrowserIntentUrl(url, bounds)
+      : buildAndroidBrowserCommandIntentUrl(command, { bounds });
+    const nativeCommand = window.RengeAndroidNative?.browserCommand;
+    if (nativeCommand) {
+      try {
+        const result = JSON.parse(
+          nativeCommand.call(window.RengeAndroidNative, JSON.stringify(commandOptions)),
+        ) as { error?: unknown };
+        if (typeof result.error === "string" && result.error) throw new Error(result.error);
+        return;
+      } catch {
+        // Fall back to the app scheme when the raw bridge is temporarily unavailable.
+      }
+    }
+    window.location.assign(intentUrl);
+  }, [androidAppShell, getAndroidBrowserBounds]);
+
   const updateBrowserTab = useCallback(
     (tabId: string, update: (tab: BrowserTabState) => BrowserTabState) => {
       setTabs((current) => {
@@ -388,13 +434,88 @@ export function BrowserSidebarPanel({
     [],
   );
 
+  useEffect(() => {
+    if (!androidAppShell) return;
+    const handleState = (event: Event) => {
+      const detail = (
+        event as CustomEvent<Partial<BrowserPageState> & { visible?: boolean }>
+      ).detail;
+      if (!detail || typeof detail !== "object") return;
+      const tabId = activeTabIdRef.current;
+      updateBrowserTab(tabId, (tab) => {
+        const url = typeof detail.url === "string" ? detail.url : tab.url;
+        return {
+          ...tab,
+          url,
+          address: url === "about:blank" ? "" : url,
+          title: typeof detail.title === "string" ? detail.title : tab.title,
+          canGoBack: Boolean(detail.canGoBack),
+          canGoForward: Boolean(detail.canGoForward),
+          loading: Boolean(detail.loading),
+          error: "",
+          hasDocumentContent: false,
+        };
+      });
+      setAndroidBrowserVisible(detail.visible !== false);
+    };
+    window.addEventListener("renge-android-browser-state", handleState);
+    return () => window.removeEventListener("renge-android-browser-state", handleState);
+  }, [androidAppShell, updateBrowserTab]);
+
+  useLayoutEffect(() => {
+    if (!androidAppShell || !androidBrowserVisible) return;
+    const page = pageRef.current;
+    if (!page) return;
+    let animationFrame = 0;
+    const syncLayout = () => {
+      window.cancelAnimationFrame(animationFrame);
+      animationFrame = window.requestAnimationFrame(() => {
+        sendAndroidBrowserCommand("layout");
+      });
+    };
+    const resizeObserver = new ResizeObserver(syncLayout);
+    resizeObserver.observe(page);
+    window.addEventListener("resize", syncLayout);
+    window.visualViewport?.addEventListener("resize", syncLayout);
+    window.visualViewport?.addEventListener("scroll", syncLayout);
+    syncLayout();
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", syncLayout);
+      window.visualViewport?.removeEventListener("resize", syncLayout);
+      window.visualViewport?.removeEventListener("scroll", syncLayout);
+    };
+  }, [androidAppShell, androidBrowserVisible, sendAndroidBrowserCommand]);
+
+  useEffect(() => {
+    if (!androidAppShell) return;
+    return () => {
+      try {
+        sendAndroidBrowserCommand("close");
+      } catch {
+        // The host page may already be navigating away while it unmounts.
+      }
+    };
+  }, [androidAppShell, sendAndroidBrowserCommand]);
+
   const selectBrowserTab = useCallback((tabId: string) => {
-    if (!tabsRef.current.some((tab) => tab.id === tabId)) return;
+    const tab = tabsRef.current.find((candidate) => candidate.id === tabId);
+    if (!tab) return;
     setContextMenu(null);
     setCommentEditor(null);
     activeTabIdRef.current = tabId;
     setActiveTabId(tabId);
-  }, []);
+    if (androidAppShell) {
+      if (tab.url !== "about:blank") {
+        setAndroidBrowserVisible(true);
+        sendAndroidBrowserCommand("open", tab.url);
+      } else {
+        setAndroidBrowserVisible(false);
+        sendAndroidBrowserCommand("close");
+      }
+    }
+  }, [androidAppShell, sendAndroidBrowserCommand]);
 
   const refreshPageState = useCallback(
     (tabId: string, node: ElectronWebviewElement, loading: boolean) => {
@@ -601,9 +722,18 @@ export function BrowserSidebarPanel({
       activeTabIdRef.current = tab.id;
       setTabs(next);
       setActiveTabId(tab.id);
+      if (androidAppShell) {
+        if (url === "about:blank") {
+          setAndroidBrowserVisible(false);
+          sendAndroidBrowserCommand("close");
+        } else {
+          setAndroidBrowserVisible(true);
+          sendAndroidBrowserCommand("open", normalizeBrowserAddress(url));
+        }
+      }
       return tab.id;
     },
-    [updateBrowserTab],
+    [androidAppShell, sendAndroidBrowserCommand, updateBrowserTab],
   );
 
   const closeBrowserTab = useCallback(
@@ -636,6 +766,10 @@ export function BrowserSidebarPanel({
           initialUrl: tab.initialUrl,
         }));
         void closingNode?.loadURL("about:blank").catch(() => undefined);
+        if (androidAppShell) {
+          setAndroidBrowserVisible(false);
+          sendAndroidBrowserCommand("close");
+        }
         return;
       }
       const nextActiveTabId = getBrowserTabAfterClose(
@@ -649,9 +783,19 @@ export function BrowserSidebarPanel({
       if (nextActiveTabId && nextActiveTabId !== activeTabIdRef.current) {
         activeTabIdRef.current = nextActiveTabId;
         setActiveTabId(nextActiveTabId);
+        if (androidAppShell) {
+          const nextActiveTab = next.find((tab) => tab.id === nextActiveTabId);
+          if (nextActiveTab && nextActiveTab.url !== "about:blank") {
+            setAndroidBrowserVisible(true);
+            sendAndroidBrowserCommand("open", nextActiveTab.url);
+          } else {
+            setAndroidBrowserVisible(false);
+            sendAndroidBrowserCommand("close");
+          }
+        }
       }
     },
-    [updateBrowserTab],
+    [androidAppShell, sendAndroidBrowserCommand, updateBrowserTab],
   );
 
   const openAddress = useCallback(async (rawAddress: string) => {
@@ -1466,14 +1610,24 @@ export function BrowserSidebarPanel({
     if (!androidAvailable) return;
     const url = normalizeBrowserAddress(address);
     if (activeTab) {
-      updateBrowserTab(activeTab.id, (tab) => ({ ...tab, address: url, error: "" }));
+      updateBrowserTab(activeTab.id, (tab) => ({
+        ...tab,
+        address: url,
+        url,
+        loading: true,
+        error: "",
+      }));
+    }
+    if (androidAppShell) {
+      (document.activeElement as HTMLElement | null)?.blur?.();
+      setAndroidBrowserVisible(true);
     }
     void openAndroidBrowserAddress(
       url,
       window.rengeAndroid,
       window.RengeAndroidNative,
       androidAppShell
-        ? (intentUrl) => window.location.assign(intentUrl)
+        ? (nextUrl) => sendAndroidBrowserCommand("open", nextUrl)
         : undefined,
     ).catch(reportFeatureError);
   };
@@ -1492,7 +1646,14 @@ export function BrowserSidebarPanel({
   return (
     <section className="right-tool-content browser-sidebar-panel" aria-label="浏览器面板">
       <header className="browser-sidebar-header">
-        <button className="browser-sidebar-back" onClick={onBack} type="button">
+        <button
+          className="browser-sidebar-back"
+          onClick={() => {
+            if (androidAppShell) sendAndroidBrowserCommand("close");
+            onBack();
+          }}
+          type="button"
+        >
           <ArrowLeft size={16} />
           <span>浏览器</span>
         </button>
@@ -1509,7 +1670,15 @@ export function BrowserSidebarPanel({
           <Bot size={13} />
           {electronAvailable ? "AI 已连接" : androidAvailable ? "安卓浏览器" : "桌面版可用"}
         </div>
-        <button aria-label="关闭右侧栏" onClick={onClose} title="关闭右侧栏" type="button">
+        <button
+          aria-label="关闭右侧栏"
+          onClick={() => {
+            if (androidAppShell) sendAndroidBrowserCommand("close");
+            onClose();
+          }}
+          title="关闭右侧栏"
+          type="button"
+        >
           <X size={16} />
         </button>
       </header>
@@ -1567,8 +1736,11 @@ export function BrowserSidebarPanel({
         <div className="browser-sidebar-toolbar">
           <button
             aria-label="后退"
-            disabled={!electronAvailable || !pageState.canGoBack}
-            onClick={() => webviewNode?.goBack()}
+            disabled={(!electronAvailable && !androidAppShell) || !pageState.canGoBack}
+            onClick={() => {
+              if (electronAvailable) webviewNode?.goBack();
+              else sendAndroidBrowserCommand("back");
+            }}
             title="后退"
             type="button"
           >
@@ -1576,8 +1748,11 @@ export function BrowserSidebarPanel({
           </button>
           <button
             aria-label="前进"
-            disabled={!electronAvailable || !pageState.canGoForward}
-            onClick={() => webviewNode?.goForward()}
+            disabled={(!electronAvailable && !androidAppShell) || !pageState.canGoForward}
+            onClick={() => {
+              if (electronAvailable) webviewNode?.goForward();
+              else sendAndroidBrowserCommand("forward");
+            }}
             title="前进"
             type="button"
           >
@@ -1585,8 +1760,17 @@ export function BrowserSidebarPanel({
           </button>
           <button
             aria-label={pageState.loading ? "停止加载" : "刷新"}
-            disabled={!electronAvailable || pageState.url === "about:blank"}
-            onClick={() => (pageState.loading ? webviewNode?.stop() : webviewNode?.reload())}
+            disabled={
+              (!electronAvailable && !androidAppShell) || pageState.url === "about:blank"
+            }
+            onClick={() => {
+              if (electronAvailable) {
+                if (pageState.loading) webviewNode?.stop();
+                else webviewNode?.reload();
+              } else {
+                sendAndroidBrowserCommand(pageState.loading ? "stop" : "reload");
+              }
+            }}
             title={pageState.loading ? "停止加载" : "刷新"}
             type="button"
           >
@@ -2009,13 +2193,13 @@ export function BrowserSidebarPanel({
           </>
         ) : null}
 
-        {!electronAvailable ? (
+        {!electronAvailable && !androidBrowserVisible ? (
           <div className="browser-sidebar-empty is-unavailable">
             <span><ShieldCheck size={25} /></span>
-            <strong>{androidAvailable ? "Android 原生浏览器" : "桌面浏览器模块"}</strong>
+            <strong>{androidAvailable ? "Android 内嵌浏览器" : "桌面浏览器模块"}</strong>
             <p>
               {androidAvailable
-                ? "输入网址或搜索内容，将在应用内的独立网页页面中打开。"
+                ? "输入网址或搜索内容，网页会直接显示在当前右侧栏中。"
                 : "完整网页控制依赖 Electron 安全隔离容器，请在桌面版中使用。"}
             </p>
           </div>
@@ -2037,7 +2221,9 @@ export function BrowserSidebarPanel({
       <footer className="browser-sidebar-footer">
         <span
           className={
-            !electronAvailable ? "is-unavailable" : pageState.loading ? "is-loading" : undefined
+            !electronAvailable && !androidAvailable
+              ? "is-unavailable"
+              : pageState.loading ? "is-loading" : undefined
           }
         />
         <strong>
@@ -2077,7 +2263,7 @@ export function BrowserSidebarPanel({
             </button>
           </div>
         ) : (
-          <small>{androidAvailable ? "应用内网页" : "仅 Electron 桌面版"}</small>
+          <small>{androidAvailable ? "右侧栏内嵌网页" : "仅 Electron 桌面版"}</small>
         )}
       </footer>
     </section>

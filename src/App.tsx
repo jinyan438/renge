@@ -1014,6 +1014,14 @@ type RengeDesktopApi = {
 type RengeAndroidApi = {
   isAndroid: boolean;
   openBrowser?(options: { url: string }): Promise<{ ok: boolean; url: string }>;
+  browserCommand?(options: {
+    command: string;
+    url?: string;
+    left?: number;
+    top?: number;
+    width?: number;
+    height?: number;
+  }): Promise<{ ok: boolean; command: string }>;
   saveDownload(options: {
     fileName: string;
     mimeType?: string;
@@ -1074,6 +1082,7 @@ type RengeAndroidApi = {
 
 type RengeAndroidNativeBridge = {
   openBrowser?(optionsJson: string): string;
+  browserCommand?(optionsJson: string): string;
 };
 
 declare global {

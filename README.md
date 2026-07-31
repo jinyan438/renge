@@ -24,7 +24,7 @@ Renge Agent Lab 是一个本地优先、跨端运行的 AI Agent 工作台。它
 | --- | --- | --- | --- |
 | Web 服务 | `npm start` | 浏览器访问、局域网共享 | 服务默认监听本机网络接口；文件能力受浏览器授权和服务设置限制 |
 | Electron 桌面端 | `npm run desktop` | 本地完整工作区、脚本和 Git 操作 | 当前离线安装辅助脚本面向 Windows x64 |
-| Android App | `npm run android:apk` | 手机端 Agent、手机工作区、连接电脑传输文件 | 需要 Android SDK；ROOT 工作区能力取决于设备权限 |
+| Android App | `npm run android:apk` | 手机端 Agent、手机工作区、右侧栏内嵌网页、连接电脑传输文件 | 需要 Android SDK；ROOT 工作区能力取决于设备权限 |
 
 ## 技术栈
 
