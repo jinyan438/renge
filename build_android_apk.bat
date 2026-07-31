@@ -8,7 +8,8 @@ set "INSTALL_APK=%ROOT_DIR%Renge-Agent-Lab-debug.apk"
 set "NO_PAUSE="
 if /I "%~1"=="--no-pause" set "NO_PAUSE=1"
 
-echo [1/4] Building frontend and a clean Android debug APK...
+echo [1/4] Removing any stale APK and building a clean Android debug APK...
+if exist "%INSTALL_APK%" del /Q "%INSTALL_APK%" >nul 2>&1
 cd /d "%ANDROID_DIR%"
 call gradlew.bat clean assembleDebug
 if errorlevel 1 goto failed
@@ -19,18 +20,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT_DIR%scripts\verify-an
 if errorlevel 1 goto failed
 
 echo.
-echo [3/4] Copying installable APK to the project root...
-copy /Y "%APK_PATH%" "%INSTALL_APK%" >nul
+echo [3/4] Moving the only installable APK to the project root...
+move /Y "%APK_PATH%" "%INSTALL_APK%" >nul
 if errorlevel 1 goto failed
+if exist "%APK_PATH%" goto failed
 
 echo.
 echo [4/4] Done.
-echo Installable APK: %INSTALL_APK%
+echo Only installable APK: %INSTALL_APK%
 echo.
 if not defined NO_PAUSE pause
 exit /b 0
 
 :failed
+if exist "%INSTALL_APK%" del /Q "%INSTALL_APK%" >nul 2>&1
+if exist "%APK_PATH%" del /Q "%APK_PATH%" >nul 2>&1
 echo.
 echo Build failed. See the error above.
 echo.

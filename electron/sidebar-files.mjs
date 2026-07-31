@@ -1,4 +1,4 @@
-import { copyFile, mkdir, open, readdir, stat } from "node:fs/promises";
+import { copyFile, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, parse, relative, resolve } from "node:path";
 
 const DEFAULT_LIST_LIMIT = 2000;
@@ -16,6 +16,13 @@ export function resolveSidebarFilePath(rootPath, inputPath = "") {
   if (isOutsideRoot(relative(root, target))) {
     throw new Error("路径超出文件浏览范围");
   }
+  return target;
+}
+
+function resolveSidebarChildPath(rootPath, inputPath) {
+  const root = resolve(String(rootPath ?? ""));
+  const target = resolveSidebarFilePath(root, inputPath);
+  if (target === root) throw new Error("path 不能为空");
   return target;
 }
 
@@ -111,6 +118,81 @@ export async function readSidebarBinaryFile(
     absolutePath: targetPath,
     size: info.size,
     base64: buffer.toString("base64"),
+  };
+}
+
+export async function writeSidebarTextFile(rootPath, inputPath, content) {
+  const targetPath = resolveSidebarChildPath(rootPath, inputPath);
+  const serialized = String(content ?? "");
+  await mkdir(dirname(targetPath), { recursive: true });
+  await writeFile(targetPath, serialized, "utf8");
+  return {
+    ok: true,
+    path: String(inputPath ?? ""),
+    absolutePath: targetPath,
+    operation: "write",
+    bytes: Buffer.byteLength(serialized, "utf8"),
+  };
+}
+
+export async function writeSidebarBinaryFile(rootPath, inputPath, base64) {
+  const targetPath = resolveSidebarChildPath(rootPath, inputPath);
+  const normalizedBase64 = String(base64 ?? "")
+    .replace(/^data:[^,]*,/, "")
+    .replace(/\s+/g, "");
+  const content = Buffer.from(normalizedBase64, "base64");
+  await mkdir(dirname(targetPath), { recursive: true });
+  await writeFile(targetPath, content);
+  return {
+    ok: true,
+    path: String(inputPath ?? ""),
+    absolutePath: targetPath,
+    operation: "writeBinary",
+    bytes: content.length,
+  };
+}
+
+export async function createSidebarDirectory(rootPath, inputPath) {
+  const targetPath = resolveSidebarChildPath(rootPath, inputPath);
+  await mkdir(targetPath, { recursive: true });
+  return {
+    ok: true,
+    path: String(inputPath ?? ""),
+    absolutePath: targetPath,
+    operation: "mkdir",
+  };
+}
+
+export async function editSidebarTextFile(rootPath, inputPath, find, replacement) {
+  const targetPath = resolveSidebarChildPath(rootPath, inputPath);
+  const searchText = String(find ?? "");
+  if (!searchText) throw new Error("find 不能为空");
+  const originalContent = await readFile(targetPath, "utf8");
+  if (!originalContent.includes(searchText)) throw new Error("没有找到要替换的文本");
+  const nextContent = originalContent.split(searchText).join(String(replacement ?? ""));
+  await writeFile(targetPath, nextContent, "utf8");
+  return {
+    ok: true,
+    path: String(inputPath ?? ""),
+    absolutePath: targetPath,
+    operation: "edit",
+    replacements: originalContent.split(searchText).length - 1,
+    bytes: Buffer.byteLength(nextContent, "utf8"),
+  };
+}
+
+export async function deleteSidebarPath(rootPath, inputPath, recursive = false) {
+  const targetPath = resolveSidebarChildPath(rootPath, inputPath);
+  const targetStat = await stat(targetPath);
+  await rm(targetPath, {
+    recursive: Boolean(recursive) && targetStat.isDirectory(),
+    force: false,
+  });
+  return {
+    ok: true,
+    path: String(inputPath ?? ""),
+    absolutePath: targetPath,
+    operation: "delete",
   };
 }
 

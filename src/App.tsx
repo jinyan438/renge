@@ -196,6 +196,12 @@ import {
   type ChatLiveStreamTextItem,
 } from "./chatLiveStreamUtils";
 import {
+  parseToolProgressContent,
+  stripMarkdownLinks,
+  toolActionTitleMap,
+  type ChatToolProgressBlock,
+} from "./chatToolProgressUtils";
+import {
   buildProviderReasoningDisableRequest,
   buildProviderReasoningReplay,
   buildProviderReasoningRequest,
@@ -227,14 +233,36 @@ import {
   truncateContextSummary,
   type ContextCompressionSettings,
 } from "./contextCompressionUtils";
+import {
+  DEFAULT_LLM_CONTEXT_SETTINGS,
+  LLM_CONTEXT_MODES,
+  LLM_CONTEXT_SOURCES,
+  normalizeLlmContextSettings,
+  updateLlmContextSource,
+  type LlmContextMode,
+  type LlmContextModeSettings,
+  type LlmContextSettings,
+  type LlmContextSource,
+} from "./llmContextSettings";
 import { StatusBarSidebar } from "./StatusBarSidebar";
 import type { FileBrowserSource, FileBrowserSystemAction } from "./FilesSidebarPanel";
+import { scopeWorkspaceHandleToSession } from "./fileBrowserUtils";
 import {
   browserToolDefinitions,
   buildBrowserToolsSystemPrompt,
   executeBrowserTool,
+  isAndroidAppShell,
+  isBrowserAddressInputAvailable,
   isBrowserToolName,
 } from "./browserSidebarRuntime";
+import {
+  buildTerminalToolsSystemPrompt,
+  executeTerminalTool,
+  isTerminalSidebarAvailable,
+  isTerminalToolName,
+  setTerminalWorkspaceContext,
+  terminalToolDefinitions,
+} from "./terminalSidebarRuntime";
 import {
   BROWSER_COMMENT_MIME_TYPE,
   parseBrowserPageComment,
@@ -400,7 +428,7 @@ type ExtensionRuntimeState = {
   status: "idle" | "loading" | "active" | "error";
   message: string;
 };
-type ChatMode = "ai" | "persona" | "multi" | "roleplay";
+type ChatMode = LlmContextMode;
 type ComposerModelMenuSection = "provider" | "model" | "reasoning";
 type ChatRole = "user" | "assistant";
 type ChatApiRole = "system" | "user" | "assistant" | "tool";
@@ -791,6 +819,7 @@ type RengeAppData = {
   chatDialogueRewriteEnabled?: boolean;
   chatRenderedEditingEnabled?: boolean;
   llmFullAccessEnabled?: boolean;
+  llmContextSettings?: LlmContextSettings;
   contextCompressionSettings?: ContextCompressionSettings;
   chatPersonalization?: ChatPersonalizationSettings;
   mcpServers?: McpServerConfig[];
@@ -867,6 +896,18 @@ type PcWorkspaceHandle = {
   path: string;
 };
 
+type TemporaryWorkspaceHandle = {
+  kind: "temporary";
+  name: string;
+};
+
+type LocalToolsWorkspaceHandle =
+  | LocalDirectoryHandle
+  | ElectronWorkspaceHandle
+  | AndroidWorkspaceHandle
+  | PcWorkspaceHandle
+  | TemporaryWorkspaceHandle;
+
 type PcFileEntry = {
   name: string;
   path: string;
@@ -910,6 +951,27 @@ type SidebarBrowserContextMenuRequest = {
   isEditable: boolean;
 };
 
+type SidebarTerminalSession = {
+  id: string;
+  workspaceKey: string;
+  title: string;
+  shell: string;
+  cwd: string;
+  createdAt: number;
+  exited: boolean;
+  exitCode: number | null;
+  buffer: string;
+  outputOffset: number;
+};
+
+type SidebarTerminalReadResult = Omit<SidebarTerminalSession, "buffer"> & {
+  output: string;
+  cursor: number;
+  nextCursor: number;
+  truncated: boolean;
+  hasMore: boolean;
+};
+
 type RengeDesktopApi = {
   isElectron: boolean;
   clearAppStorage?(): Promise<{ ok: boolean }>;
@@ -928,6 +990,19 @@ type RengeDesktopApi = {
     scope: "workspace" | "temporary";
     path: string;
   }): Promise<unknown>;
+  writeTemporaryTextFile(options: { path: string; content: string }): Promise<unknown>;
+  writeTemporaryBinaryFile(options: {
+    path: string;
+    base64: string;
+    mimeType?: string;
+  }): Promise<unknown>;
+  createTemporaryDirectory(options: { path: string }): Promise<unknown>;
+  editTemporaryTextFile(options: {
+    path: string;
+    find: string;
+    replace: string;
+  }): Promise<unknown>;
+  deleteTemporaryPath(options: { path: string; recursive?: boolean }): Promise<unknown>;
   importTemporaryFiles(): Promise<unknown>;
   runSidebarFileAction(options: {
     scope: "workspace" | "temporary";
@@ -959,6 +1034,18 @@ type RengeDesktopApi = {
   findSymbols(options: { query?: string; path?: string; maxMatches?: number }): Promise<unknown>;
   readPackageJson(): Promise<unknown>;
   scanTodos(options: { path?: string; maxMatches?: number }): Promise<unknown>;
+  listSidebarTerminals?(options?: { includeBuffer?: boolean; workspaceKey?: string }): Promise<SidebarTerminalSession[]>;
+  createSidebarTerminal?(options?: { cols?: number; rows?: number; title?: string; workspaceKey?: string; cwd?: string }): Promise<SidebarTerminalSession>;
+  writeSidebarTerminal?(options: { id: string; workspaceKey?: string; data: string }): Promise<{ ok: boolean }>;
+  resizeSidebarTerminal?(options: { id: string; workspaceKey?: string; cols: number; rows: number }): Promise<{ ok: boolean }>;
+  readSidebarTerminal?(options: { id: string; workspaceKey?: string; from?: number; maxChars?: number }): Promise<SidebarTerminalReadResult>;
+  restartSidebarTerminal?(options: { id: string; workspaceKey?: string; cols?: number; rows?: number }): Promise<SidebarTerminalSession>;
+  closeSidebarTerminal?(options: { id: string; workspaceKey?: string }): Promise<{ ok: boolean; id: string }>;
+  onSidebarTerminalData?(listener: (payload: { id: string; workspaceKey: string; data: string }) => void): () => void;
+  onSidebarTerminalExit?(listener: (payload: { id: string; workspaceKey: string; exitCode: number; signal: number }) => void): () => void;
+  onSidebarTerminalRestarted?(listener: (payload: SidebarTerminalSession) => void): () => void;
+  onSidebarTerminalCreated?(listener: (payload: SidebarTerminalSession) => void): () => void;
+  onSidebarTerminalClosed?(listener: (payload: { id: string; workspaceKey: string }) => void): () => void;
   listSidebarBrowserDownloads?(): Promise<SidebarBrowserDownload[]>;
   runSidebarBrowserDownloadAction?(options: {
     action: "open-folder" | "clear-completed" | "open" | "reveal" | "pause" | "resume" | "cancel" | "remove";
@@ -1014,6 +1101,21 @@ type RengeDesktopApi = {
 type RengeAndroidApi = {
   isAndroid: boolean;
   openBrowser?(options: { url: string }): Promise<{ ok: boolean; url: string }>;
+  browserCommand?(options: {
+    command: string;
+    tabId?: string;
+    url?: string;
+    left?: number;
+    top?: number;
+    width?: number;
+    height?: number;
+    [key: string]: unknown;
+  }): Promise<{ ok: boolean; command: string }>;
+  browserRequest?(options: {
+    operation: string;
+    tabId?: string;
+    [key: string]: unknown;
+  }): Promise<unknown>;
   saveDownload(options: {
     fileName: string;
     mimeType?: string;
@@ -1068,12 +1170,26 @@ type RengeAndroidApi = {
     path?: string;
     message?: string;
   }>;
+  listSidebarTerminals?(options?: { includeBuffer?: boolean; workspaceKey?: string }): Promise<SidebarTerminalSession[]>;
+  createSidebarTerminal?(options?: { cols?: number; rows?: number; title?: string; workspaceKey?: string; cwd?: string }): Promise<SidebarTerminalSession>;
+  writeSidebarTerminal?(options: { id: string; workspaceKey?: string; data: string }): Promise<{ ok: boolean }>;
+  resizeSidebarTerminal?(options: { id: string; workspaceKey?: string; cols: number; rows: number }): Promise<{ ok: boolean }>;
+  readSidebarTerminal?(options: { id: string; workspaceKey?: string; from?: number; maxChars?: number }): Promise<SidebarTerminalReadResult>;
+  restartSidebarTerminal?(options: { id: string; workspaceKey?: string; cols?: number; rows?: number }): Promise<SidebarTerminalSession>;
+  closeSidebarTerminal?(options: { id: string; workspaceKey?: string }): Promise<{ ok: boolean; id: string }>;
+  onSidebarTerminalData?(listener: (payload: { id: string; workspaceKey: string; data: string }) => void): () => void;
+  onSidebarTerminalExit?(listener: (payload: { id: string; workspaceKey: string; exitCode: number; signal: number }) => void): () => void;
+  onSidebarTerminalRestarted?(listener: (payload: SidebarTerminalSession) => void): () => void;
+  onSidebarTerminalCreated?(listener: (payload: SidebarTerminalSession) => void): () => void;
+  onSidebarTerminalClosed?(listener: (payload: { id: string; workspaceKey: string }) => void): () => void;
   enterFullscreen?(): void;
   exitFullscreen?(): void;
 };
 
 type RengeAndroidNativeBridge = {
   openBrowser?(optionsJson: string): string;
+  browserCommand?(optionsJson: string): string;
+  browserRequest?(requestId: string, optionsJson: string): void;
 };
 
 declare global {
@@ -1161,6 +1277,7 @@ const CHAT_CHOICE_TOOLS_ENABLED_STORAGE_KEY = "renge_chat_choice_tools_enabled";
 const CHAT_DIALOGUE_REWRITE_ENABLED_STORAGE_KEY = "renge_chat_dialogue_rewrite_enabled";
 const CHAT_RENDERED_EDITING_ENABLED_STORAGE_KEY = "renge_chat_rendered_editing_enabled";
 const LLM_FULL_ACCESS_ENABLED_STORAGE_KEY = "renge_llm_full_access_enabled";
+const LLM_CONTEXT_SETTINGS_STORAGE_KEY = "renge_llm_context_settings";
 const CONTEXT_COMPRESSION_SETTINGS_STORAGE_KEY = "renge_context_compression_settings";
 const CHAT_PERSONALIZATION_STORAGE_KEY = "renge_chat_personalization";
 const MCP_SERVERS_STORAGE_KEY = "renge_mcp_servers";
@@ -1172,6 +1289,10 @@ const PC_WORKSPACE_PATH_STORAGE_KEY = "renge_pc_workspace_path";
 const PC_WORKSPACE_NAME_STORAGE_KEY = "renge_pc_workspace_name";
 const DEFAULT_WORKSPACE_KEY = "default";
 const DEFAULT_WORKSPACE_NAME = "默认工作区";
+const TEMPORARY_WORKSPACE_HANDLE: TemporaryWorkspaceHandle = {
+  kind: "temporary",
+  name: "临时文件",
+};
 const CHAT_TIME_GROUP_MS = 5 * 60 * 1000;
 const DEFAULT_HEARTBEAT_INTERVAL_MINUTES = 5;
 const MIN_HEARTBEAT_INTERVAL_MINUTES = 1;
@@ -1202,6 +1323,37 @@ const DEFAULT_CHAT_PERSONALIZATION: ChatPersonalizationSettings = {
   italicStyleColor: "#808080",
   wallpaperMaskOpacity: 70,
   bubbleOpacity: 100,
+};
+const LLM_CONTEXT_MODE_LABELS: Record<LlmContextMode, string> = {
+  ai: "AI",
+  persona: "人格 Agent",
+  multi: "多 Agent",
+  roleplay: "角色扮演",
+};
+const LLM_CONTEXT_SOURCE_META: Record<
+  LlmContextSource,
+  { label: string; description: string }
+> = {
+  skills: {
+    label: "Skills 提示词",
+    description: "注入所有已启用 Skill 的完整说明。",
+  },
+  workspaceTools: {
+    label: "工作区文件工具",
+    description: "提供文件读取、写入、搜索、项目分析及其使用说明。",
+  },
+  browserTools: {
+    label: "浏览器工具",
+    description: "提供右侧栏浏览器的导航、检查和交互能力。",
+  },
+  terminalTools: {
+    label: "终端工具",
+    description: "提供终端创建、输入、读取、调整和关闭能力。",
+  },
+  mcpTools: {
+    label: "MCP 工具",
+    description: "发现并注入所有已启用 MCP 服务器的工具。",
+  },
 };
 const CHAT_MESSAGE_FONT_OPTIONS: Array<{
   value: ChatMessageFontFamily;
@@ -1355,6 +1507,15 @@ function loadContextCompressionSettings() {
       : { ...DEFAULT_CONTEXT_COMPRESSION_SETTINGS };
   } catch {
     return { ...DEFAULT_CONTEXT_COMPRESSION_SETTINGS };
+  }
+}
+
+function loadLlmContextSettings() {
+  try {
+    const rawValue = localStorage.getItem(LLM_CONTEXT_SETTINGS_STORAGE_KEY);
+    return normalizeLlmContextSettings(rawValue ? JSON.parse(rawValue) : null);
+  } catch {
+    return normalizeLlmContextSettings(null);
   }
 }
 
@@ -2710,6 +2871,10 @@ function persistAppDataToLocalStores(
     String(data.llmFullAccessEnabled ?? false),
   );
   setLocalStorageJsonSafely(
+    LLM_CONTEXT_SETTINGS_STORAGE_KEY,
+    normalizeLlmContextSettings(data.llmContextSettings),
+  );
+  setLocalStorageJsonSafely(
     CONTEXT_COMPRESSION_SETTINGS_STORAGE_KEY,
     data.contextCompressionSettings ?? DEFAULT_CONTEXT_COMPRESSION_SETTINGS,
   );
@@ -3284,19 +3449,6 @@ type HtmlPreviewContext = {
     ChatPersonalizationSettings,
     "quoteStyleEnabled" | "quoteStyleColor"
   >;
-};
-
-type ChatToolProgressLink = {
-  label: string;
-  href?: string;
-};
-
-type ChatToolProgressBlock = {
-  variant: "action" | "success" | "error";
-  title: string;
-  badge: string;
-  links: ChatToolProgressLink[];
-  details: string[];
 };
 
 const executableCommandNames = new Set(["npm", "pnpm", "yarn", "node", "git"]);
@@ -4365,48 +4517,6 @@ function buildHtmlPreviewPersonalizationScript(context: HtmlPreviewContext) {
     "</script>",
   ].join("");
 }
-const toolActionTitleMap: Array<[string, string]> = [
-  ["打开网页", "浏览器导航"],
-  ["控制浏览器历史", "浏览器导航"],
-  ["读取网页", "读取网页"],
-  ["点击网页元素", "浏览器点击"],
-  ["悬浮网页元素", "浏览器悬浮"],
-  ["输入网页内容", "浏览器输入"],
-  ["选择网页选项", "浏览器选择"],
-  ["滚动网页", "浏览器滚动"],
-  ["拖拽网页元素", "浏览器拖拽"],
-  ["发送网页按键", "浏览器按键"],
-  ["编辑网页", "编辑网页"],
-  ["执行页面脚本", "页面脚本"],
-  ["列出文件", "列出文件"],
-  ["预览电脑图片", "预览图片"],
-  ["读取二进制文件", "读取二进制"],
-  ["读取文件片段", "读取文件片段"],
-  ["读取文件", "读取文件"],
-  ["查看路径信息", "查看路径信息"],
-  ["搜索文件", "搜索文件"],
-  ["创建目录", "创建目录"],
-  ["重命名/移动", "重命名/移动"],
-  ["运行脚本", "运行脚本"],
-  ["运行命令", "运行命令"],
-  ["查看 Git 状态", "查看 Git 状态"],
-  ["查看 Git diff", "查看 Git diff"],
-  ["检测项目技术栈", "检测项目技术栈"],
-  ["查找符号", "查找符号"],
-  ["正则搜索", "正则搜索"],
-  ["读取 package.json", "读取 package.json"],
-  ["扫描 TODO/FIXME", "扫描 TODO/FIXME"],
-  ["写入文件", "写入文件"],
-  ["写入二进制文件", "写入二进制"],
-  ["上传附件直传电脑", "附件直传"],
-  ["手机传到电脑", "文件直传"],
-  ["电脑传到手机", "文件直传"],
-  ["发送电脑文件给用户", "发送文件"],
-  ["修改文件", "修改文件"],
-  ["删除路径", "删除路径"],
-  ["主 Agent 正在委派给", "委派子任务"],
-];
-
 function getCommandName(line: string) {
   return line.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
 }
@@ -4451,171 +4561,6 @@ function appendTextPart(parts: ChatContentPart[], content: string) {
     return;
   }
   parts.push({ type: "text", content });
-}
-
-function parseMarkdownLinks(content: string) {
-  const links: ChatToolProgressLink[] = [];
-  const linkPattern = /\[([^\]]+)\]\(([^)]+)\)/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = linkPattern.exec(content))) {
-    links.push({
-      label: match[1],
-      href: match[2],
-    });
-  }
-
-  return links;
-}
-
-function stripMarkdownLinks(content: string) {
-  return content.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1");
-}
-
-function uniqueToolLinks(links: ChatToolProgressLink[]) {
-  const seenLinks = new Set<string>();
-  return links.filter((link) => {
-    const key = `${link.label}\n${link.href ?? ""}`;
-    if (seenLinks.has(key)) return false;
-    seenLinks.add(key);
-    return true;
-  });
-}
-
-function isLikelyToolPath(value: string) {
-  const trimmedValue = value.trim();
-  if (!trimmedValue || trimmedValue.length > 180) return false;
-  if (trimmedValue === ".") return true;
-  return /[\\/]/.test(trimmedValue) || /\.[A-Za-z0-9]{1,12}$/.test(trimmedValue);
-}
-
-function parseToolPathFromLine(line: string) {
-  const normalizedLine = stripMarkdownLinks(line).trim();
-  const colonValue = normalizedLine.includes("：")
-    ? normalizedLine.slice(normalizedLine.indexOf("：") + 1).trim()
-    : "";
-  const candidates = [
-    colonValue,
-    normalizedLine.replace(/^已修改\s+/, "").split(/[，(（]/)[0]?.trim() ?? "",
-    normalizedLine.replace(/^已删除路径：/, "").trim(),
-    normalizedLine.replace(/^已创建目录：/, "").trim(),
-    normalizedLine.replace(/^已写入文件：/, "").trim(),
-    normalizedLine.replace(/^已写入二进制文件：/, "").split(/[，(（]/)[0]?.trim() ?? "",
-    normalizedLine.replace(/^已读取二进制文件：/, "").split(/[，(（]/)[0]?.trim() ?? "",
-    normalizedLine.replace(/^已生成图片预览：/, "").split(/[，(（]/)[0]?.trim() ?? "",
-    normalizedLine.replace(/^已读取文件：/, "").split(/[，(（]/)[0]?.trim() ?? "",
-  ];
-  return candidates.find(isLikelyToolPath) ?? "";
-}
-
-function parseToolProgressContent(content: string): ChatToolProgressBlock | null {
-  const lines = content
-    .replace(/\r\n/g, "\n")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (lines.length === 0) return null;
-
-  const firstLine = lines[0];
-  const links = uniqueToolLinks(parseMarkdownLinks(content));
-  const details = lines
-    .map(stripMarkdownLinks)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  if (firstLine.startsWith("执行 MCP 工具：")) {
-    const toolLabel = firstLine.replace("执行 MCP 工具：", "").trim();
-    return {
-      variant: "action",
-      title: "MCP 工具",
-      badge: "执行中",
-      links: toolLabel ? [{ label: toolLabel }] : links,
-      details: details.slice(1),
-    };
-  }
-
-  if (firstLine.startsWith("MCP 工具失败：")) {
-    const toolLabel = firstLine.replace("MCP 工具失败：", "").trim();
-    return {
-      variant: "error",
-      title: "MCP 工具失败",
-      badge: "失败",
-      links: toolLabel ? [{ label: toolLabel }] : links,
-      details: details.slice(1),
-    };
-  }
-
-  if (firstLine.startsWith("操作失败：")) {
-    const toolLabel = firstLine.replace("操作失败：", "").trim();
-    return {
-      variant: "error",
-      title: "操作失败",
-      badge: "失败",
-      links: toolLabel ? [{ label: toolLabel }, ...links] : links,
-      details: details.slice(1),
-    };
-  }
-
-  const actionTitle = toolActionTitleMap.find(([prefix]) => firstLine.startsWith(prefix))?.[1];
-  if (actionTitle) {
-    const inlineDetail = firstLine.includes("：")
-      ? stripMarkdownLinks(firstLine.slice(firstLine.indexOf("：") + 1)).trim()
-      : "";
-    const actionDetails = [
-      inlineDetail && inlineDetail !== actionTitle ? inlineDetail : "",
-      ...details.slice(1),
-    ].filter(Boolean);
-
-    return {
-      variant: "action",
-      title: actionTitle,
-      badge: "执行中",
-      links,
-      details: actionDetails,
-    };
-  }
-
-  let title = "";
-  if (/^列出 \d+ 个条目。?$/.test(firstLine)) title = "列出文件";
-  else if (/^找到 \d+ 条结果。?$/.test(firstLine)) title = "搜索结果";
-  else if (firstLine.startsWith("已生成图片预览：")) title = "预览图片";
-  else if (firstLine.startsWith("已读取二进制文件：")) title = "读取二进制";
-  else if (firstLine.startsWith("已写入二进制文件：")) title = "写入二进制";
-  else if (firstLine.startsWith("附件直传完成：")) title = "附件直传";
-  else if (firstLine.startsWith("文件直传完成：")) title = "文件直传";
-  else if (firstLine.startsWith("已读取文件：") || /^已读取 .+ 第 /.test(firstLine)) title = "读取文件";
-  else if (firstLine.startsWith("已查看路径信息：")) title = "查看路径信息";
-  else if (firstLine.startsWith("已创建目录：")) title = "创建目录";
-  else if (firstLine.startsWith("已重命名/移动：")) title = "重命名/移动";
-  else if (firstLine.startsWith("已写入文件：")) title = "写入文件";
-  else if (firstLine.startsWith("编辑了 ")) title = "修改文件";
-  else if (firstLine.startsWith("已删除路径：")) title = "删除路径";
-  else if (firstLine.startsWith("脚本执行完成：")) title = "运行脚本";
-  else if (firstLine.startsWith("命令执行完成：")) title = "运行命令";
-  else if (firstLine.startsWith("命令执行失败")) title = "运行命令";
-  else if (firstLine.startsWith("用户取消授权")) title = "运行命令";
-  else if (firstLine.startsWith("Git 状态读取完成")) title = "Git 状态";
-  else if (firstLine.startsWith("Git diff 读取完成")) title = "Git diff";
-  else if (firstLine.startsWith("技术栈检测完成：")) title = "技术栈检测";
-  else if (firstLine.startsWith("已读取 package.json")) title = "读取 package.json";
-  else if (firstLine.startsWith("MCP 工具执行完成")) title = "MCP 工具";
-
-  if (!title) return null;
-
-  const inferredLinks = lines
-    .map(parseToolPathFromLine)
-    .filter(Boolean)
-    .map((label) => ({ label }));
-
-  return {
-    variant: firstLine.startsWith("命令执行失败") || firstLine.startsWith("用户取消授权")
-      ? "error"
-      : "success",
-    title,
-    badge: firstLine.startsWith("命令执行失败") ? "失败" : "完成",
-    links: uniqueToolLinks([...links, ...inferredLinks]),
-    details,
-  };
 }
 
 function formatProcessingDuration(startedAt: string, endedAt: string) {
@@ -7938,9 +7883,23 @@ function buildPersonaMemoryPrompt(
 }
 
 function getAvailableLocalToolDefinitions(
-  handle: LocalDirectoryHandle | ElectronWorkspaceHandle | AndroidWorkspaceHandle | PcWorkspaceHandle | null,
+  handle: LocalToolsWorkspaceHandle | null,
 ) {
   if (!handle) return [];
+  if (handle.kind === "temporary") {
+    const temporaryToolNames = new Set([
+      "local_list_files",
+      "local_read_file",
+      "local_read_binary_file",
+      "local_create_directory",
+      "local_write_file",
+      "local_write_binary_file",
+      "local_edit_file",
+      "local_delete_path",
+    ]);
+    return localFileToolDefinitions.filter((tool) =>
+      temporaryToolNames.has(tool.function.name));
+  }
   if (handle.kind === "electron") {
     return localFileToolDefinitions.filter(
       (tool) =>
@@ -8198,10 +8157,30 @@ function buildHeartbeatSystemPrompt(heartbeat: ChatHeartbeatConfig | undefined) 
 }
 
 function buildLocalToolsSystemPrompt(
-  handle: LocalDirectoryHandle | ElectronWorkspaceHandle | AndroidWorkspaceHandle | PcWorkspaceHandle | null,
+  handle: LocalToolsWorkspaceHandle | null,
   fullAccessEnabled = false,
 ) {
   if (!handle) return "";
+  if (handle.kind === "temporary") {
+    return [
+      "当前会话属于默认工作区，没有项目目录权限；你只能操作与其他工作区完全隔离的「临时文件」区域。",
+      "所有 path 必须是临时文件区内的相对路径，禁止使用绝对路径或 ..。不得读取、写入或声称访问任何已连接项目工作区。",
+      "当用户要求生成可独立使用的 SVG、HTML、代码文件、配置或其他文件成品时，应调用 local_write_file 将完整内容写入临时文件区，除非用户明确要求只在消息中展示。",
+      "当用户要求把临时文件区内生成的 HTML、SVG、图片或文本在浏览器中打开、展示或给他看，并且 browser_open_temporary_file 可用时，写入成功后必须直接调用该工具并传入同一个相对路径；禁止为此读取 Base64、使用 file:/data: URL、向搜索页注入内容或启动临时 HTTP 服务。",
+      "写入成功后可以用 local_read_file 核对内容，并明确告诉用户文件位于右侧栏的临时文件区；未收到工具成功结果前不得声称已保存。",
+      "短小示例、解释性代码或用户明确要求直接查看源码时，可以直接使用 Markdown 代码块，不必创建文件。",
+      "临时文件区不支持命令执行、Git、项目扫描、重命名、电脑文件发送或跨设备传输，不得尝试相关工具。",
+      "当前可用工具：",
+      "- local_list_files：列出临时文件。",
+      "- local_read_file：读取临时文本文件。",
+      "- local_read_binary_file：读取临时二进制文件的 Base64。",
+      "- local_create_directory：在临时区创建目录。",
+      "- local_write_file：在临时区创建或覆盖文本文件。",
+      "- local_write_binary_file：把完整 Base64 写入临时二进制文件。",
+      "- local_edit_file：查找替换临时文本文件。",
+      "- local_delete_path：删除临时文件或目录。",
+    ].join("\n");
+  }
   const hasDesktopFullAccess = handle.kind === "electron" && fullAccessEnabled;
 
   const commonTools = [
@@ -8272,6 +8251,20 @@ function buildLocalToolsSystemPrompt(
     ...commonTools,
     ...browserProjectTools,
     ...electronTools,
+  ].join("\n");
+}
+
+function buildUnavailableLocalToolsSystemPrompt(workspaceKey: string) {
+  if (workspaceKey === DEFAULT_WORKSPACE_KEY) {
+    return [
+      "当前会话属于默认工作区，没有授权任何项目目录，也不得继承应用中仍保留的其他工作区目录。",
+      "当前平台没有提供临时文件写入工具；用户要求生成代码、SVG、HTML、配置或其他文本内容时，直接在消息区使用对应语言的 Markdown 代码块完整展示，不得声称内容已保存到文件。",
+    ].join("\n");
+  }
+
+  return [
+    "当前会话关联的工作区尚未恢复或与当前授权目录不匹配。",
+    "不得调用 local_* / project_* 文件工具，也不得使用应用中其他工作区的目录作为替代；需要文件操作时应说明当前工作区不可用。",
   ].join("\n");
 }
 
@@ -8626,6 +8619,8 @@ function formatToolActionMessage(
   switch (toolCall.function.name) {
     case "browser_navigate":
       return `打开网页：\n${stringArg(args, "url")}`;
+    case "browser_open_temporary_file":
+      return `预览临时文件：${stringArg(args, "path")}`;
     case "browser_history":
       return `控制浏览器历史：${stringArg(args, "action")}`;
     case "browser_read_page":
@@ -8648,6 +8643,22 @@ function formatToolActionMessage(
       return `编辑网页：${stringArg(args, "operation")} ${stringArg(args, "ref") || stringArg(args, "selector")}`;
     case "browser_execute_script":
       return `执行页面脚本：${stringArg(args, "script").length} 个字符`;
+    case "terminal_list":
+      return "列出右侧栏终端。";
+    case "terminal_create":
+      return `新建终端：${stringArg(args, "title", "自动命名")}`;
+    case "terminal_read":
+      return `读取终端：${stringArg(args, "id")}`;
+    case "terminal_write":
+      return `输入终端：${stringArg(args, "id")}\n${stringArg(args, "data").length} 个字符`;
+    case "terminal_run":
+      return `在终端运行：${stringArg(args, "id")}\n${stringArg(args, "command")}`;
+    case "terminal_resize":
+      return `调整终端：${stringArg(args, "id")}（${Number(args.cols ?? 80)}x${Number(args.rows ?? 24)}）`;
+    case "terminal_restart":
+      return `重启终端：${stringArg(args, "id")}`;
+    case "terminal_close":
+      return `关闭终端：${stringArg(args, "id")}`;
     case "local_list_files":
       return `列出文件：\n${formatWorkspacePathReference(handle, path)}${args.recursive === false ? "\n仅当前目录" : "\n递归扫描"}`;
     case "local_read_file":
@@ -8924,6 +8935,9 @@ function formatToolResultMessage(toolCall: ChatToolCall, result: unknown) {
   const path = stringArg(args, "path");
 
   if (Array.isArray(result)) {
+    if (toolCall.function.name === "terminal_list") {
+      return `已列出 ${result.length} 个终端。`;
+    }
     const preview = formatResultListPreview(result);
     const title =
       toolCall.function.name === "local_list_files"
@@ -8939,6 +8953,12 @@ function formatToolResultMessage(toolCall: ChatToolCall, result: unknown) {
   switch (toolCall.function.name) {
     case "browser_navigate":
       return `网页已打开：${String(result.title ?? "未命名页面")}\n${String(result.url ?? args.url ?? "")}`;
+    case "browser_open_temporary_file":
+      return [
+        `临时文件已在浏览器打开：${String(result.path ?? args.path ?? "")}`,
+        String(result.title ?? ""),
+        String(result.url ?? ""),
+      ].filter(Boolean).join("\n");
     case "browser_history":
       return `浏览器操作完成：${String(args.action ?? "")}\n${String(result.url ?? "")}`;
     case "browser_read_page": {
@@ -8961,6 +8981,33 @@ function formatToolResultMessage(toolCall: ChatToolCall, result: unknown) {
     case "browser_edit_page":
     case "browser_execute_script":
       return `网页操作完成：${toolCall.function.name.replace(/^browser_/, "")}\n${String(result.url ?? "")}`.trim();
+    case "terminal_list":
+      return `已列出 ${Array.isArray(result) ? result.length : 0} 个终端。`;
+    case "terminal_create":
+      return `已新建终端：${String(result.title ?? result.id ?? "")}\nID：${String(result.id ?? "")}`;
+    case "terminal_read":
+      return [
+        `已读取终端：${String(result.title ?? result.id ?? "")}`,
+        typeof result.output === "string" && result.output
+          ? `输出：\n${trimBlock(result.output, 700)}`
+          : "没有新的输出。",
+      ].join("\n");
+    case "terminal_write":
+      return `已向终端 ${String(args.id ?? "")} 发送输入。`;
+    case "terminal_run":
+      return [
+        `终端命令已发送：${String(args.command ?? "")}`,
+        result.timedOut ? "等待结束，进程可能仍在后台运行。" : "",
+        typeof result.output === "string" && result.output
+          ? `输出：\n${trimBlock(result.output, 700)}`
+          : "本次暂未产生输出。",
+      ].filter(Boolean).join("\n");
+    case "terminal_resize":
+      return `已调整终端 ${String(args.id ?? "")} 的尺寸。`;
+    case "terminal_restart":
+      return `已重启终端：${String(result.title ?? result.id ?? args.id ?? "")}`;
+    case "terminal_close":
+      return `已关闭终端：${String(result.id ?? args.id ?? "")}`;
     case "local_read_file": {
       const content = typeof result.content === "string" ? result.content : "";
       return `已读取文件：${String(result.path ?? path)}${content ? `（${content.length} 字符）` : ""}`;
@@ -9909,6 +9956,87 @@ function createStreamingWordWriter(
       return finishPromise;
     },
     cancel,
+  };
+}
+
+function createStreamingAssistantMessage(
+  setChatMessages: Dispatch<SetStateAction<ChatMessage[]>>,
+  signal?: AbortSignal,
+  sender?: ChatSenderIdentity,
+) {
+  const messageId = crypto.randomUUID();
+  const appendContent = (delta: string) => {
+    setChatMessages((current) =>
+      current.map((message) =>
+        message.id === messageId
+          ? { ...message, content: `${message.content}${delta}` }
+          : message,
+      ),
+    );
+  };
+  const appendReasoning = (delta: string) => {
+    setChatMessages((current) =>
+      current.map((message) =>
+        message.id === messageId
+          ? { ...message, reasoning: `${message.reasoning ?? ""}${delta}` }
+          : message,
+      ),
+    );
+  };
+  const contentWriter = createStreamingWordWriter(appendContent, signal);
+  const reasoningWriter = createStreamingWordWriter(appendReasoning, signal);
+
+  setChatMessages((current) => [
+    ...current,
+    {
+      id: messageId,
+      role: "assistant",
+      content: "",
+      renderAsPlainText: true,
+      ...(sender ? { sender } : {}),
+      createdAt: new Date().toISOString(),
+    },
+  ]);
+
+  const remove = () => {
+    contentWriter.cancel();
+    reasoningWriter.cancel();
+    setChatMessages((current) => current.filter((message) => message.id !== messageId));
+  };
+
+  return {
+    messageId,
+    pushContent: contentWriter.push,
+    pushReasoning: reasoningWriter.push,
+    async finish() {
+      await Promise.all([contentWriter.finish(), reasoningWriter.finish()]);
+    },
+    complete(content: string, reasoning = "") {
+      contentWriter.cancel();
+      reasoningWriter.cancel();
+      if (!content.trim()) {
+        setChatMessages((current) => current.filter((message) => message.id !== messageId));
+        return false;
+      }
+      setChatMessages((current) =>
+        current.map((message) =>
+          message.id === messageId
+            ? {
+                ...message,
+                content,
+                renderAsPlainText: false,
+                ...(reasoning.trim() ? { reasoning } : {}),
+              }
+            : message,
+        ),
+      );
+      return true;
+    },
+    cancel() {
+      contentWriter.cancel();
+      reasoningWriter.cancel();
+    },
+    remove,
   };
 }
 
@@ -11359,6 +11487,10 @@ export function App() {
   const [llmFullAccessEnabled, setLlmFullAccessEnabled] = useState(
     () => localStorage.getItem(LLM_FULL_ACCESS_ENABLED_STORAGE_KEY) === "true",
   );
+  const [llmContextSettings, setLlmContextSettings] =
+    useState<LlmContextSettings>(loadLlmContextSettings);
+  const [llmContextSettingsMode, setLlmContextSettingsMode] =
+    useState<LlmContextMode>("ai");
   const [contextCompressionSettings, setContextCompressionSettings] =
     useState<ContextCompressionSettings>(loadContextCompressionSettings);
   const contextSummaryCacheRef = useRef(new Map<string, string>());
@@ -11461,6 +11593,7 @@ export function App() {
     LocalDirectoryHandle | ElectronWorkspaceHandle | AndroidWorkspaceHandle | PcWorkspaceHandle | null
   >(null);
   const [localToolsEnabled, setLocalToolsEnabled] = useState(false);
+  const [temporaryFilesRevision, setTemporaryFilesRevision] = useState(0);
   const [personas, setPersonas] = useState<AgentPersona[]>([]);
   const [activePersonaId, setActivePersonaId] = useState<string>(
     () => localStorage.getItem(ACTIVE_PERSONA_STORAGE_KEY) ?? "",
@@ -12461,6 +12594,7 @@ export function App() {
       chatDialogueRewriteEnabled,
       chatRenderedEditingEnabled,
       llmFullAccessEnabled,
+      llmContextSettings,
       contextCompressionSettings,
       chatPersonalization,
       mcpServers,
@@ -12469,7 +12603,7 @@ export function App() {
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     };
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, contextCompressionSettings, extensions, llmFullAccessEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, contextCompressionSettings, extensions, llmContextSettings, llmFullAccessEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -12658,6 +12792,9 @@ export function App() {
         typeof persistentData?.llmFullAccessEnabled === "boolean"
           ? persistentData.llmFullAccessEnabled
           : localStorage.getItem(LLM_FULL_ACCESS_ENABLED_STORAGE_KEY) === "true";
+      const nextLlmContextSettings = normalizeLlmContextSettings(
+        persistentData?.llmContextSettings ?? loadLlmContextSettings(),
+      );
       const nextContextCompressionSettings = normalizeContextCompressionSettings(
         persistentData?.contextCompressionSettings ?? loadContextCompressionSettings(),
       );
@@ -12825,6 +12962,7 @@ export function App() {
       setChatDialogueRewriteEnabled(nextChatDialogueRewriteEnabled);
       setChatRenderedEditingEnabled(nextChatRenderedEditingEnabled);
       setLlmFullAccessEnabled(nextLlmFullAccessEnabled);
+      setLlmContextSettings(nextLlmContextSettings);
       setContextCompressionSettings(nextContextCompressionSettings);
       setChatPersonalization(nextChatPersonalization);
       setMcpServers(nextMcpServers);
@@ -14925,17 +15063,44 @@ export function App() {
         : chatMode === "roleplay"
           ? ["继续当前场景", "说说你现在的想法", "推进接下来的剧情"]
         : ["梳理当前任务并给出下一步", "检查工作区中的潜在问题", "总结当前目标和待办事项"];
+  const activeChatSession = useMemo(
+    () => chatSessions.find((session) => session.id === activeChatSessionId) ?? chatSessions[0],
+    [activeChatSessionId, chatSessions],
+  );
+  const activeWorkspaceKey = activeChatSession?.workspaceKey ?? DEFAULT_WORKSPACE_KEY;
+  const activeLocalWorkspaceHandle = useMemo(
+    () => scopeWorkspaceHandleToSession(localWorkspaceHandle, activeWorkspaceKey),
+    [activeWorkspaceKey, localWorkspaceHandle],
+  );
+  const temporaryFileToolsAvailable = Boolean(
+    window.rengeDesktop?.isElectron
+    && typeof window.rengeDesktop.writeTemporaryTextFile === "function"
+    && typeof window.rengeDesktop.writeTemporaryBinaryFile === "function"
+    && typeof window.rengeDesktop.createTemporaryDirectory === "function"
+    && typeof window.rengeDesktop.editTemporaryTextFile === "function"
+    && typeof window.rengeDesktop.deleteTemporaryPath === "function",
+  );
+  const activeFileToolsWorkspaceHandle: LocalToolsWorkspaceHandle | null =
+    activeWorkspaceKey === DEFAULT_WORKSPACE_KEY && temporaryFileToolsAvailable
+      ? TEMPORARY_WORKSPACE_HANDLE
+      : activeLocalWorkspaceHandle;
+  const activeLocalToolsEnabled = activeFileToolsWorkspaceHandle?.kind === "temporary"
+    || (localToolsEnabled && Boolean(activeLocalWorkspaceHandle));
+  const activeLocalToolsSystemPrompt = activeFileToolsWorkspaceHandle && activeLocalToolsEnabled
+    ? buildLocalToolsSystemPrompt(activeFileToolsWorkspaceHandle, llmFullAccessEnabled)
+    : buildUnavailableLocalToolsSystemPrompt(activeWorkspaceKey);
+  const activeLlmContextSettings = llmContextSettings[chatMode];
   const workspaceInfo = getWorkspaceInfo(localWorkspaceHandle);
   const fileBrowserSource = useMemo<FileBrowserSource | null>(() => {
-    if (localWorkspaceHandle?.kind === "electron") {
+    if (activeLocalWorkspaceHandle?.kind === "electron") {
       const desktopApi = window.rengeDesktop;
       if (!desktopApi?.isElectron) return null;
       const scope = "workspace" as const;
       return {
-        id: `electron:${localWorkspaceHandle.path}`,
+        id: `electron:${activeLocalWorkspaceHandle.path}`,
         kind: "workspace",
-        name: localWorkspaceHandle.name,
-        rootPath: localWorkspaceHandle.path,
+        name: activeLocalWorkspaceHandle.name,
+        rootPath: activeLocalWorkspaceHandle.path,
         listDirectory: (path) => desktopApi.listSidebarFiles({ scope, path }),
         readText: (path) => desktopApi.readSidebarTextFile({ scope, path }),
         readBinary: (path) => desktopApi.readSidebarBinaryFile({ scope, path }),
@@ -14944,27 +15109,27 @@ export function App() {
       };
     }
 
-    if (localWorkspaceHandle?.kind === "android") {
+    if (activeLocalWorkspaceHandle?.kind === "android") {
       const androidApi = window.rengeAndroid;
       if (!androidApi?.isAndroid) return null;
       return {
-        id: `android:${localWorkspaceHandle.uri}`,
+        id: `android:${activeLocalWorkspaceHandle.uri}`,
         kind: "workspace",
-        name: localWorkspaceHandle.name,
-        rootPath: localWorkspaceHandle.uri,
+        name: activeLocalWorkspaceHandle.name,
+        rootPath: activeLocalWorkspaceHandle.uri,
         listDirectory: (path) => androidApi.listFiles({ path, recursive: false }),
         readText: (path) => androidApi.readFile({ path }),
         readBinary: (path) => androidApi.readBinaryFile({ path }),
       };
     }
 
-    if (localWorkspaceHandle?.kind === "pc") {
+    if (activeLocalWorkspaceHandle?.kind === "pc") {
       const request = async (pathname: string, extra: Record<string, unknown> = {}) => {
-        const response = await fetch(`${localWorkspaceHandle.baseUrl}${pathname}`, {
+        const response = await fetch(`${activeLocalWorkspaceHandle.baseUrl}${pathname}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            workspacePath: localWorkspaceHandle.path,
+            workspacePath: activeLocalWorkspaceHandle.path,
             ...extra,
           }),
         });
@@ -14978,10 +15143,10 @@ export function App() {
         return payload;
       };
       return {
-        id: `pc:${localWorkspaceHandle.baseUrl}:${localWorkspaceHandle.path}`,
+        id: `pc:${activeLocalWorkspaceHandle.baseUrl}:${activeLocalWorkspaceHandle.path}`,
         kind: "workspace",
-        name: localWorkspaceHandle.name,
-        rootPath: localWorkspaceHandle.path,
+        name: activeLocalWorkspaceHandle.name,
+        rootPath: activeLocalWorkspaceHandle.path,
         listDirectory: async (path) => {
           const result = await request("/api/pc/list-files", { path, recursive: false });
           if (!path || !Array.isArray(result)) return result;
@@ -14996,25 +15161,26 @@ export function App() {
       };
     }
 
-    if (localWorkspaceHandle?.kind === "directory") {
+    if (activeLocalWorkspaceHandle?.kind === "directory") {
       return {
-        id: `browser:${localWorkspaceHandle.name}`,
+        id: `browser:${activeLocalWorkspaceHandle.name}`,
         kind: "workspace",
-        name: localWorkspaceHandle.name,
-        listDirectory: (path) => listLocalFiles(localWorkspaceHandle, path, false, 1000),
+        name: activeLocalWorkspaceHandle.name,
+        listDirectory: (path) => listLocalFiles(activeLocalWorkspaceHandle, path, false, 1000),
         readText: async (path) => ({
           path,
-          content: await readLocalTextFile(localWorkspaceHandle, path),
+          content: await readLocalTextFile(activeLocalWorkspaceHandle, path),
         }),
-        readBinary: (path) => readLocalBinaryFile(localWorkspaceHandle, path),
+        readBinary: (path) => readLocalBinaryFile(activeLocalWorkspaceHandle, path),
       };
     }
 
+    if (activeWorkspaceKey !== DEFAULT_WORKSPACE_KEY) return null;
     const desktopApi = window.rengeDesktop;
     if (!desktopApi?.isElectron) return null;
     const scope = "temporary" as const;
     return {
-      id: "electron:temporary-files",
+      id: `electron:temporary-files:${temporaryFilesRevision}`,
       kind: "temporary",
       name: "临时文件",
       listDirectory: (path) => desktopApi.listSidebarFiles({ scope, path }),
@@ -15024,11 +15190,13 @@ export function App() {
       runSystemAction: (path, action) =>
         desktopApi.runSidebarFileAction({ scope, path, action }),
     };
-  }, [localWorkspaceHandle]);
-  const activeChatSession = useMemo(
-    () => chatSessions.find((session) => session.id === activeChatSessionId) ?? chatSessions[0],
-    [activeChatSessionId, chatSessions],
-  );
+  }, [activeLocalWorkspaceHandle, activeWorkspaceKey, temporaryFilesRevision]);
+  useEffect(() => {
+    setTerminalWorkspaceContext({
+      workspaceKey: activeChatSession?.workspaceKey ?? DEFAULT_WORKSPACE_KEY,
+      ...(activeChatSession?.workspacePath ? { cwd: activeChatSession.workspacePath } : {}),
+    });
+  }, [activeChatSession?.workspaceKey, activeChatSession?.workspacePath]);
   const activeStatusBarState = useMemo(
     () => normalizeStatusBarState(activeChatSession?.statusBar),
     [activeChatSession?.statusBar],
@@ -17425,6 +17593,10 @@ export function App() {
     { ...contextCompressionSettings, enabled: true },
     selectedModelValue,
   );
+  const editedLlmContextSettings = llmContextSettings[llmContextSettingsMode];
+  const enabledLlmContextSourceCount = LLM_CONTEXT_SOURCES.filter(
+    (source) => editedLlmContextSettings[source],
+  ).length;
 
   const activeTypes = activePersona?.entryTypes ?? [];
   const selectedEntryType =
@@ -17471,6 +17643,22 @@ export function App() {
       ),
     );
     setProviderPullState({ status: "idle", message: "" });
+  };
+
+  const setLlmContextSourceEnabled = (
+    mode: LlmContextMode,
+    source: LlmContextSource,
+    enabled: boolean,
+  ) => {
+    setLlmContextSettings((current) =>
+      updateLlmContextSource(current, mode, source, enabled),
+    );
+    setContextRuntimeUsageByKey({});
+  };
+
+  const resetLlmContextSettings = () => {
+    setLlmContextSettings(normalizeLlmContextSettings(DEFAULT_LLM_CONTEXT_SETTINGS));
+    setContextRuntimeUsageByKey({});
   };
 
   const addContextCompressionModelLimit = () => {
@@ -18713,11 +18901,71 @@ export function App() {
   };
 
   const executeLocalFileTool = async (toolName: string, rawArguments: string) => {
-    if (!localWorkspaceHandle || !localToolsEnabled) {
-      throw new Error("本地文件工具未启用或未授权工作区");
+    const args = parseToolArguments(rawArguments);
+    if (activeWorkspaceKey === DEFAULT_WORKSPACE_KEY) {
+      const desktopApi = window.rengeDesktop;
+      if (!temporaryFileToolsAvailable || !desktopApi?.isElectron) {
+        throw new Error("当前平台没有提供默认工作区临时文件工具；请直接在消息中展示代码");
+      }
+      const commitTemporaryFileMutation = async (operation: Promise<unknown>) => {
+        const result = await operation;
+        setTemporaryFilesRevision((current) => current + 1);
+        return result;
+      };
+      switch (toolName) {
+        case "local_list_files":
+          return desktopApi.listSidebarFiles({
+            scope: "temporary",
+            path: String(args.path ?? ""),
+            recursive: args.recursive === undefined ? true : Boolean(args.recursive),
+          });
+        case "local_read_file":
+          return desktopApi.readSidebarTextFile({
+            scope: "temporary",
+            path: String(args.path ?? ""),
+          });
+        case "local_read_binary_file":
+          return desktopApi.readSidebarBinaryFile({
+            scope: "temporary",
+            path: String(args.path ?? ""),
+          });
+        case "local_create_directory":
+          return commitTemporaryFileMutation(desktopApi.createTemporaryDirectory({
+            path: String(args.path ?? ""),
+          }));
+        case "local_write_file":
+          return commitTemporaryFileMutation(desktopApi.writeTemporaryTextFile({
+            path: String(args.path ?? ""),
+            content: String(args.content ?? ""),
+          }));
+        case "local_write_binary_file":
+          return commitTemporaryFileMutation(desktopApi.writeTemporaryBinaryFile({
+            path: String(args.path ?? ""),
+            base64: String(args.base64 ?? ""),
+            mimeType: String(args.mimeType ?? ""),
+          }));
+        case "local_edit_file":
+          return commitTemporaryFileMutation(desktopApi.editTemporaryTextFile({
+            path: String(args.path ?? ""),
+            find: String(args.find ?? ""),
+            replace: String(args.replace ?? ""),
+          }));
+        case "local_delete_path":
+          return commitTemporaryFileMutation(desktopApi.deleteTemporaryPath({
+            path: String(args.path ?? ""),
+            recursive: Boolean(args.recursive),
+          }));
+        default:
+          throw new Error(`${toolName} 不支持默认工作区的临时文件区`);
+      }
+    }
+    if (!localWorkspaceHandle || !activeLocalWorkspaceHandle || !activeLocalToolsEnabled) {
+      throw new Error("当前聊天工作区尚未恢复或与已授权目录不匹配，拒绝使用其他工作区的文件工具");
+    }
+    if (localWorkspaceHandle !== activeLocalWorkspaceHandle) {
+      throw new Error("当前文件句柄不属于这个聊天工作区");
     }
 
-    const args = parseToolArguments(rawArguments);
     const getSelectedPcTransferWorkspace = () => {
       if (localWorkspaceHandle.kind === "pc") return localWorkspaceHandle;
       return pcTransferWorkspace;
@@ -19493,6 +19741,8 @@ export function App() {
       result = await executeMcpTool(toolName, rawArguments, signal);
     } else if (isBrowserToolName(toolName)) {
       result = await executeBrowserTool(toolName, rawArguments, signal);
+    } else if (isTerminalToolName(toolName)) {
+      result = await executeTerminalTool(toolName, rawArguments, signal);
     } else if (toolName === "chat_update_heartbeat") {
       result = await executeHeartbeatTool(rawArguments);
     } else if (toolName === "multi_agent_end_rounds") {
@@ -19685,23 +19935,43 @@ export function App() {
     suppressAttachmentTransferTool = false,
     includeMultiAgentControlTools = false,
     delegationRoster: DelegationRoster = { entries: [] },
+    contextSettings: LlmContextModeSettings = DEFAULT_LLM_CONTEXT_SETTINGS.ai,
   ) => {
     const localToolsBase =
-      localToolsEnabled && localWorkspaceHandle
-        ? getAvailableLocalToolDefinitions(localWorkspaceHandle)
+      contextSettings.workspaceTools &&
+      activeLocalToolsEnabled && activeFileToolsWorkspaceHandle
+        ? getAvailableLocalToolDefinitions(activeFileToolsWorkspaceHandle)
         : [];
     const localTools = suppressAttachmentTransferTool
       ? localToolsBase.filter((tool) => tool.function.name !== "local_transfer_attachment_file")
       : localToolsBase;
-    const externalTools = mcpToolsForRequest.map((tool) => ({
-      type: "function" as const,
-      function: tool.function,
-    }));
-    const browserTools = window.rengeDesktop?.isElectron ? browserToolDefinitions : [];
+    const externalTools = contextSettings.mcpTools
+      ? mcpToolsForRequest.map((tool) => ({
+          type: "function" as const,
+          function: tool.function,
+        }))
+      : [];
+    const browserTools = contextSettings.browserTools && isBrowserAddressInputAvailable(
+      Boolean(window.rengeDesktop?.isElectron),
+      Boolean(
+        window.rengeAndroid?.isAndroid
+        || isAndroidAppShell(window.location.search, window.navigator.userAgent),
+      ),
+    )
+      ? browserToolDefinitions.filter(
+          (tool) =>
+            tool.function.name !== "browser_open_temporary_file"
+            || temporaryFileToolsAvailable,
+        )
+      : [];
+    const terminalTools = contextSettings.terminalTools && isTerminalSidebarAvailable()
+      ? terminalToolDefinitions
+      : [];
     return [
       ...(chatChoiceToolsEnabled ? chatChoiceToolDefinitions : []),
       ...localTools,
       ...browserTools,
+      ...terminalTools,
       ...externalTools,
       ...(includeHeartbeatTools ? heartbeatToolDefinitions : []),
       ...(includeMultiAgentControlTools ? multiAgentControlToolDefinitions : []),
@@ -19876,10 +20146,19 @@ export function App() {
           )
         : "";
     const enabledMcpServerIds = new Set(enabledMcpServers.map((server) => server.id));
-    const meterMcpTools = mcpTools.filter((tool) => enabledMcpServerIds.has(tool.serverId));
+    const meterMcpTools = activeLlmContextSettings.mcpTools
+      ? mcpTools.filter((tool) => enabledMcpServerIds.has(tool.serverId))
+      : [];
     const availableTools = isImageGenerationModelId(meterModelId)
       ? []
-      : getAvailableChatToolDefinitions(meterMcpTools);
+      : getAvailableChatToolDefinitions(
+          meterMcpTools,
+          false,
+          false,
+          false,
+          { entries: [] },
+          activeLlmContextSettings,
+        );
     const systemPrompt = [
       selectedSystemPrompt,
       userProfileSystemPrompt,
@@ -19889,11 +20168,14 @@ export function App() {
       chatSenderContextPrompt,
       worldBookSystemPrompt,
       characterWorldBookSystemPrompt,
-      localToolsEnabled && localWorkspaceHandle
-        ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
+      activeLlmContextSettings.workspaceTools ? activeLocalToolsSystemPrompt : "",
+      activeLlmContextSettings.browserTools && window.rengeDesktop?.isElectron
+        ? buildBrowserToolsSystemPrompt()
         : "",
-      window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
-      buildMcpToolsSystemPrompt(meterMcpTools),
+      activeLlmContextSettings.terminalTools && isTerminalSidebarAvailable()
+        ? buildTerminalToolsSystemPrompt()
+        : "",
+      activeLlmContextSettings.mcpTools ? buildMcpToolsSystemPrompt(meterMcpTools) : "",
       availableTools.some((tool) => isChatChoiceToolName(tool.function.name))
         ? buildChatChoiceSystemPrompt()
         : "",
@@ -19994,6 +20276,7 @@ export function App() {
     activeChatPreset,
     activeChatPresetRequestParameters?.max_tokens,
     activeChatSessionId,
+    activeLlmContextSettings,
     activeSessionRoleplayCard,
     activeStatusBarState,
     activeWorldBookIds,
@@ -21188,6 +21471,11 @@ export function App() {
     const responseMode =
       options.responseMode ??
       (chatMode === "ai" ? "ai" : chatMode === "roleplay" ? "roleplay" : "persona");
+    const requestContextMode: LlmContextMode =
+      options.multiAgentIndex !== undefined || options.multiAgentSupervisorMode
+        ? "multi"
+        : responseMode;
+    const requestContextSettings = llmContextSettings[requestContextMode];
     const responderPersona = options.responderPersona ?? chatPersona;
     const responderCharacterCard =
       responseMode === "roleplay" ? activeSessionRoleplayCard : undefined;
@@ -21264,6 +21552,7 @@ export function App() {
         !isContinuation &&
         !isDialogueRewrite &&
         !isLocalRewrite &&
+        requestContextSettings.mcpTools &&
         enabledMcpServers.length > 0
           ? await refreshMcpTools({ silent: true })
           : [];
@@ -21295,6 +21584,7 @@ export function App() {
             false,
             options.multiAgentAutoStopEnabled === true,
             delegationRoster,
+            requestContextSettings,
           );
       let messagesForApi = nextMessages;
       if (useImageRecognitionMcp && imageRecognitionMcpTool && latestImageUserMessage) {
@@ -21320,7 +21610,9 @@ export function App() {
         .map((promptProfile) => promptProfile.content.trim())
         .filter(Boolean)
         .join("\n\n");
-      const skillSystemPrompt = await loadEnabledSkillPrompt();
+      const skillSystemPrompt = requestContextSettings.skills
+        ? await loadEnabledSkillPrompt()
+        : "";
       throwIfChatAborted(abortSignal);
       const userProfileSystemPrompt =
         requestSender.kind === "user" &&
@@ -21427,12 +21719,19 @@ export function App() {
       const multiAgentSystemPrompt =
         supervisorMultiAgentSystemPrompt || sequenceMultiAgentSystemPrompt;
       const toolSystemPrompt = [
-        !isDialogueRewrite && !isLocalRewrite && localToolsEnabled && localWorkspaceHandle
-          ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
+        requestContextSettings.workspaceTools && !isDialogueRewrite && !isLocalRewrite
+          ? activeLocalToolsSystemPrompt
           : "",
-        window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
+        requestContextSettings.browserTools && window.rengeDesktop?.isElectron
+          ? buildBrowserToolsSystemPrompt()
+          : "",
+        requestContextSettings.terminalTools && isTerminalSidebarAvailable()
+          ? buildTerminalToolsSystemPrompt()
+          : "",
       ].filter(Boolean).join("\n\n");
-      const mcpToolsSystemPrompt = buildMcpToolsSystemPrompt(requestMcpTools);
+      const mcpToolsSystemPrompt = requestContextSettings.mcpTools
+        ? buildMcpToolsSystemPrompt(requestMcpTools)
+        : "";
       const chatChoiceSystemPrompt = availableChatTools.some((tool) =>
         isChatChoiceToolName(tool.function.name),
       )
@@ -21548,8 +21847,7 @@ export function App() {
       let hasVisibleToolResult = false;
       let hasSuccessfulVisibleToolResult = false;
       let multiAgentDelegationDisabled = false;
-      let preferStreamingSupervisorToolCalls =
-        chatStreamEnabled && requestProvider.reasoningEnabled;
+      let preferStreamingSupervisorToolCalls = chatStreamEnabled;
       let pendingMcpObservationPrompt = "";
       let pendingMcpObservationRetries = 0;
       let pendingMcpObservationPromptSent = false;
@@ -21660,6 +21958,11 @@ export function App() {
       };
       const subAgentToolDefinitions = getAvailableChatToolDefinitions(
         requestMcpTools,
+        false,
+        false,
+        false,
+        { entries: [] },
+        requestContextSettings,
       ).filter((tool) => !isChatChoiceToolName(tool.function.name));
       let multiAgentDelegationCount = 0;
       let invalidMultiAgentDelegationCount = 0;
@@ -22403,11 +22706,31 @@ export function App() {
             });
             pendingMcpObservationPromptSent = true;
           }
-          let completionResult = await requestChatCompletion(apiMessages, {
-            includeTools: availableChatTools.length > 0,
-            stream: preferStreamingSupervisorToolCalls,
-            toolChoice: "auto",
-          });
+          const streamingRound = chatStreamEnabled
+            ? createStreamingAssistantMessage(
+                commitChatMessages,
+                abortSignal,
+                assistantSender,
+              )
+            : null;
+          if (streamingRound) {
+            assistantMessageId = streamingRound.messageId;
+            streamingAssistantInserted = true;
+          }
+          let completionResult;
+          try {
+            completionResult = await requestChatCompletion(apiMessages, {
+              includeTools: availableChatTools.length > 0,
+              stream: preferStreamingSupervisorToolCalls,
+              toolChoice: "auto",
+              onDelta: streamingRound?.pushContent,
+              onReasoningDelta: streamingRound?.pushReasoning,
+            });
+            await streamingRound?.finish();
+          } catch (error) {
+            streamingRound?.cancel();
+            throw error;
+          }
           throwIfChatAborted(abortSignal);
 
           let assistantMessage = completionResult.payload?.choices?.[0]?.message;
@@ -22475,6 +22798,7 @@ export function App() {
             assistantContent =
               assistantMessageContent || presentedChoice.prompt;
             assistantReasoning = assistantMessageReasoning;
+            streamingRound?.complete(assistantContent, assistantReasoning);
             toolLoopCompleted = true;
             break;
           }
@@ -22505,6 +22829,7 @@ export function App() {
               pendingMcpObservationPromptSent = true;
               assistantContent = "";
               assistantReasoning = "";
+              streamingRound?.remove();
               continue;
             }
 
@@ -22514,13 +22839,17 @@ export function App() {
               toolRound < 98 &&
               shouldAutoContinueLocalTask(assistantContent)
             ) {
-              appendAssistantTimelineMessage(
-                commitChatMessages,
-                assistantContent,
-                [],
-                assistantReasoning,
-                assistantSender,
-              );
+              if (!streamingRound) {
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  assistantContent,
+                  [],
+                  assistantReasoning,
+                  assistantSender,
+                );
+              } else {
+                streamingRound.complete(assistantContent, assistantReasoning);
+              }
               apiMessages.push({
                 role: "assistant",
                 content: assistantContent,
@@ -22540,17 +22869,24 @@ export function App() {
             }
 
             toolLoopCompleted = true;
+            streamingRound?.complete(assistantContent, assistantReasoning);
             break;
           }
 
           if (assistantMessageContent && !hasSilentControlTool) {
-            appendAssistantTimelineMessage(
-              commitChatMessages,
-              assistantMessageContent,
-              [],
-              assistantMessageReasoning,
-              assistantSender,
-            );
+            if (!streamingRound) {
+              appendAssistantTimelineMessage(
+                commitChatMessages,
+                assistantMessageContent,
+                [],
+                assistantMessageReasoning,
+                assistantSender,
+              );
+            } else {
+              streamingRound.complete(assistantMessageContent, assistantMessageReasoning);
+            }
+          } else {
+            streamingRound?.remove();
           }
 
           apiMessages.push({
@@ -22726,26 +23062,50 @@ export function App() {
           status: "loading",
           message: "主 Agent 正在基于已完成的子任务整理最终答复...",
         });
-        const summaryResult = await requestChatCompletion(
-          [
-            ...apiMessages,
+        const summaryStreamingRound = chatStreamEnabled
+          ? createStreamingAssistantMessage(
+              commitChatMessages,
+              abortSignal,
+              assistantSender,
+            )
+          : null;
+        if (summaryStreamingRound) {
+          assistantMessageId = summaryStreamingRound.messageId;
+          streamingAssistantInserted = true;
+        }
+        let summaryResult;
+        try {
+          summaryResult = await requestChatCompletion(
+            [
+              ...apiMessages,
+              {
+                role: "user",
+                content:
+                  "请现在完成主任务验收并输出给用户的最终答复。综合所有已返回的子任务结果，明确说明已完成内容、关键证据和仍存在的真实阻塞；不要再调用工具，也不要只输出计划。",
+              },
+            ],
             {
-              role: "user",
-              content:
-                "请现在完成主任务验收并输出给用户的最终答复。综合所有已返回的子任务结果，明确说明已完成内容、关键证据和仍存在的真实阻塞；不要再调用工具，也不要只输出计划。",
+              includeTools: false,
+              stream: chatStreamEnabled,
+              onDelta: summaryStreamingRound?.pushContent,
+              onReasoningDelta: summaryStreamingRound?.pushReasoning,
             },
-          ],
-          { includeTools: false, stream: false },
-        );
+          );
+          await summaryStreamingRound?.finish();
+        } catch (error) {
+          summaryStreamingRound?.cancel();
+          throw error;
+        }
         const summaryMessage = summaryResult.payload?.choices?.[0]?.message;
         assistantContent =
           getChatApiMessageText(summaryMessage).trim() ||
           summaryResult.payload?.output_text?.trim() ||
-          "";
+          summaryResult.content.trim();
         assistantReasoning =
           getChatApiMessageReasoning(summaryMessage) ||
           summaryResult.reasoning ||
           assistantReasoning;
+        summaryStreamingRound?.complete(assistantContent, assistantReasoning);
         if (assistantContent) {
           const summaryTemplateResult = await applyPromptTemplateToRenderedMessage(
             assistantContent,
@@ -23512,7 +23872,9 @@ export function App() {
         .map((promptProfile) => promptProfile.content.trim())
         .filter(Boolean)
         .join("\n\n");
-      const skillSystemPrompt = await loadEnabledSkillPrompt();
+      const skillSystemPrompt = activeLlmContextSettings.skills
+        ? await loadEnabledSkillPrompt()
+        : "";
       throwIfChatAborted(abortSignal);
       const userProfileSystemPrompt =
         userProfile.sendToAi && (userProfile.nickname.trim() || userProfile.bio.trim())
@@ -23939,7 +24301,9 @@ export function App() {
       throwIfChatAborted(abortSignal);
       setChatStatus({ status: "loading", message: "正在生成回复..." });
       const requestMcpTools =
-        enabledMcpServers.length > 0 ? await refreshMcpTools({ silent: true }) : [];
+        activeLlmContextSettings.mcpTools && enabledMcpServers.length > 0
+          ? await refreshMcpTools({ silent: true })
+          : [];
       throwIfChatAborted(abortSignal);
       const imageRecognitionMcpTool = findImageRecognitionMcpTool(requestMcpTools);
       const hasImageRecognitionMcp = Boolean(imageRecognitionMcpTool);
@@ -23978,12 +24342,17 @@ export function App() {
             requestMcpTools,
             exposeHeartbeatTools,
             suppressAttachmentTransferTool,
+            false,
+            { entries: [] },
+            activeLlmContextSettings,
           );
       const selectedSystemPrompt = requestSystemPrompts
         .map((promptProfile) => promptProfile.content.trim())
         .filter(Boolean)
         .join("\n\n");
-      const skillSystemPrompt = await loadEnabledSkillPrompt();
+      const skillSystemPrompt = activeLlmContextSettings.skills
+        ? await loadEnabledSkillPrompt()
+        : "";
       throwIfChatAborted(abortSignal);
       const userProfileSystemPrompt =
         currentChatSender.kind === "user" &&
@@ -24021,12 +24390,17 @@ export function App() {
           ? buildChatSenderContextPrompt(nextMessages, personas, chatPersona)
           : buildChatSenderContextPrompt(nextMessages, personas);
       const toolSystemPrompt = [
-        localToolsEnabled && localWorkspaceHandle
-          ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
+        activeLlmContextSettings.workspaceTools ? activeLocalToolsSystemPrompt : "",
+        activeLlmContextSettings.browserTools && window.rengeDesktop?.isElectron
+          ? buildBrowserToolsSystemPrompt()
           : "",
-        window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
+        activeLlmContextSettings.terminalTools && isTerminalSidebarAvailable()
+          ? buildTerminalToolsSystemPrompt()
+          : "",
       ].filter(Boolean).join("\n\n");
-      const mcpToolsSystemPrompt = buildMcpToolsSystemPrompt(requestMcpTools);
+      const mcpToolsSystemPrompt = activeLlmContextSettings.mcpTools
+        ? buildMcpToolsSystemPrompt(requestMcpTools)
+        : "";
       const chatChoiceSystemPrompt = availableChatTools.some((tool) =>
         isChatChoiceToolName(tool.function.name),
       )
@@ -24313,8 +24687,7 @@ export function App() {
           reasoningWriter.cancel();
         }
       } else {
-        const useStreamingToolCompletion =
-          chatStreamEnabled && chatProvider.reasoningEnabled;
+        const useStreamingToolCompletion = chatStreamEnabled;
         for (let toolRound = 0; toolRound < 99; toolRound += 1) {
           setChatStatus({
             status: "loading",
@@ -24327,11 +24700,27 @@ export function App() {
             });
             pendingMcpObservationPromptSent = true;
           }
-          const completionResult = await requestChatCompletion(apiMessages, {
-            includeTools: availableChatTools.length > 0,
-            stream: useStreamingToolCompletion,
-            toolChoice: "auto",
-          });
+          const streamingRound = chatStreamEnabled
+            ? createStreamingAssistantMessage(commitChatMessages, abortSignal)
+            : null;
+          if (streamingRound) {
+            assistantMessageId = streamingRound.messageId;
+            streamingAssistantInserted = true;
+          }
+          let completionResult;
+          try {
+            completionResult = await requestChatCompletion(apiMessages, {
+              includeTools: availableChatTools.length > 0,
+              stream: useStreamingToolCompletion,
+              toolChoice: "auto",
+              onDelta: streamingRound?.pushContent,
+              onReasoningDelta: streamingRound?.pushReasoning,
+            });
+            await streamingRound?.finish();
+          } catch (error) {
+            streamingRound?.cancel();
+            throw error;
+          }
           throwIfChatAborted(abortSignal);
 
           const { payload } = completionResult;
@@ -24360,6 +24749,7 @@ export function App() {
             assistantContent =
               assistantMessageContent || presentedChoice.prompt;
             assistantReasoning = assistantMessageReasoning;
+            streamingRound?.complete(assistantContent, assistantReasoning);
             break;
           }
           if (hasSilentControlTool) {
@@ -24389,6 +24779,7 @@ export function App() {
               pendingMcpObservationPromptSent = true;
               assistantContent = "";
               assistantReasoning = "";
+              streamingRound?.remove();
               continue;
             }
 
@@ -24398,12 +24789,16 @@ export function App() {
               toolRound < 98 &&
               shouldAutoContinueLocalTask(assistantContent)
             ) {
-              appendAssistantTimelineMessage(
-                commitChatMessages,
-                assistantContent,
-                [],
-                assistantReasoning,
-              );
+              if (!streamingRound) {
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  assistantContent,
+                  [],
+                  assistantReasoning,
+                );
+              } else {
+                streamingRound.complete(assistantContent, assistantReasoning);
+              }
               apiMessages.push({
                 role: "assistant",
                 content: assistantContent,
@@ -24422,16 +24817,23 @@ export function App() {
               continue;
             }
 
+            streamingRound?.complete(assistantContent, assistantReasoning);
             break;
           }
 
           if (assistantMessageContent && !hasSilentControlTool) {
-            appendAssistantTimelineMessage(
-              commitChatMessages,
-              assistantMessageContent,
-              [],
-              assistantMessageReasoning,
-            );
+            if (!streamingRound) {
+              appendAssistantTimelineMessage(
+                commitChatMessages,
+                assistantMessageContent,
+                [],
+                assistantMessageReasoning,
+              );
+            } else {
+              streamingRound.complete(assistantMessageContent, assistantMessageReasoning);
+            }
+          } else {
+            streamingRound?.remove();
           }
 
           apiMessages.push({
@@ -27436,6 +27838,7 @@ export function App() {
             type="button"
             className={`settings-tab ${settingsTab === "llm" ? "active" : ""}`}
             onClick={() => {
+              setLlmContextSettingsMode(chatMode);
               setSettingsTab("llm");
               closeMobileSidebar();
             }}
@@ -27785,6 +28188,77 @@ export function App() {
                   <p>控制聊天中可选的语言模型交互增强能力。</p>
                 </div>
               </div>
+              <article className="llm-setting-card llm-context-settings-card">
+                <div className="llm-setting-copy">
+                  <h3>按会话模式注入上下文</h3>
+                  <p>
+                    关闭一项会同时移除对应系统说明和工具 JSON 定义，直接减少每次请求的 Token。
+                    角色卡、人格和多 Agent 核心指令不受影响。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="ghost-action llm-context-reset"
+                  onClick={resetLlmContextSettings}
+                >
+                  <RefreshCw size={15} />
+                  恢复推荐设置
+                </button>
+                <div className="llm-context-mode-switch" role="tablist" aria-label="会话模式">
+                  {LLM_CONTEXT_MODES.map((mode) => (
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={llmContextSettingsMode === mode}
+                      className={llmContextSettingsMode === mode ? "active" : ""}
+                      key={mode}
+                      onClick={() => setLlmContextSettingsMode(mode)}
+                    >
+                      {LLM_CONTEXT_MODE_LABELS[mode]}
+                    </button>
+                  ))}
+                </div>
+                <div className="llm-context-source-list">
+                  {LLM_CONTEXT_SOURCES.map((source) => {
+                    const meta = LLM_CONTEXT_SOURCE_META[source];
+                    return (
+                      <label className="llm-context-source-row" key={source}>
+                        <span className="llm-context-source-copy">
+                          <strong>{meta.label}</strong>
+                          <span>{meta.description}</span>
+                        </span>
+                        <span className="tool-toggle llm-feature-toggle">
+                          <input
+                            type="checkbox"
+                            checked={editedLlmContextSettings[source]}
+                            onChange={(event) =>
+                              setLlmContextSourceEnabled(
+                                llmContextSettingsMode,
+                                source,
+                                event.target.checked,
+                              )
+                            }
+                          />
+                          <span>{editedLlmContextSettings[source] ? "开启" : "关闭"}</span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <div
+                  className={`llm-setting-status ${
+                    enabledLlmContextSourceCount > 0 ? "enabled" : "disabled"
+                  }`}
+                >
+                  <strong>{LLM_CONTEXT_MODE_LABELS[llmContextSettingsMode]}</strong>
+                  <span>
+                    当前注入 {enabledLlmContextSourceCount}/{LLM_CONTEXT_SOURCES.length} 项附加上下文。
+                    {llmContextSettingsMode === "roleplay" && enabledLlmContextSourceCount === 0
+                      ? " 使用精简上下文，不会向模型发送文件、浏览器、终端、MCP 或 Skills 信息。"
+                      : " 只启用当前模式确实需要的能力可以降低基础 Token。"}
+                  </span>
+                </div>
+              </article>
               <article className="llm-setting-card context-compression-card">
                 <div className="llm-setting-copy">
                   <h3>自动上下文压缩</h3>
@@ -31203,6 +31677,7 @@ export function App() {
                 title={contextTokenMeterTitle}
                 aria-label={contextTokenMeterTitle}
                 onClick={() => {
+                  setLlmContextSettingsMode(chatMode);
                   setSettingsTab("llm");
                   openWindow("settings");
                 }}
@@ -32699,6 +33174,8 @@ export function App() {
           fileBrowserSource={fileBrowserSource}
           onChooseWorkspace={authorizeLocalWorkspace}
           onBrowserComment={addBrowserCommentToComposer}
+          terminalWorkspaceKey={activeChatSession?.workspaceKey ?? DEFAULT_WORKSPACE_KEY}
+          terminalWorkspacePath={activeChatSession?.workspacePath ?? ""}
         />
       </PortfolioDesktopWindow>
   ) : null;

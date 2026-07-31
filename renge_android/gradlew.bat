@@ -17,19 +17,19 @@
 @rem
 
 @rem Renge convenience mode: double-clicking the wrapper without arguments
-@rem builds the debug APK and keeps the console open so errors stay visible.
+@rem delegates to the repository's single APK packaging entry point.
 @if not "%~1"=="" @goto rengeGradleStart
 @echo off
 @setlocal
 echo Renge Android debug build
-echo Running: gradlew.bat :app:assembleDebug
+echo Running the repository APK packaging script...
 echo.
-call "%~f0" :app:assembleDebug --console=plain
+call "%~dp0..\build_android_apk.bat" --no-pause
 set "RENGE_EXIT_CODE=%ERRORLEVEL%"
 echo.
 if "%RENGE_EXIT_CODE%"=="0" (
     echo Build succeeded.
-    echo APK: %~dp0app\build\outputs\apk\debug\app-debug.apk
+    echo Only installable APK: %~dp0..\Renge-Agent-Lab-debug.apk
 ) else (
     echo Build failed with exit code %RENGE_EXIT_CODE%.
     echo Review the error output above.

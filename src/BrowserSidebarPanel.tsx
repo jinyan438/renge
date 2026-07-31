@@ -45,14 +45,20 @@ import {
   useState,
 } from "react";
 import {
+  buildAndroidBrowserCommandIntentUrl,
+  buildAndroidBrowserIntentUrl,
   buildBrowserDocumentContentProbeScript,
   buildBrowserPageReadScript,
   buildBrowserScriptExecutionWrapper,
+  buildTemporaryFilePreviewUrl,
   calculateBrowserFitZoomFactor,
+  isAndroidAppShell,
   isBrowserAddressInputAvailable,
   normalizeBrowserAddress,
   openAndroidBrowserAddress,
   registerBrowserSidebarController,
+  scaleAndroidBrowserBounds,
+  type AndroidBrowserCommand,
   type BrowserSidebarController,
   type BrowserToolArguments,
 } from "./browserSidebarRuntime";
@@ -68,9 +74,14 @@ import {
   type BrowserContextTarget,
   type BrowserPageComment,
 } from "./browserSidebarComments";
+import {
+  ANDROID_BROWSER_EVENT_NAME,
+  AndroidBrowserAdapter,
+  type AndroidBrowserEventDetail,
+} from "./androidBrowserAdapter";
 import "./browser-sidebar.css";
 
-type ElectronWebviewElement = HTMLElement & {
+type ElectronWebviewElement = {
   loadURL(url: string): Promise<void>;
   getURL(): string;
   getTitle(): string;
@@ -88,6 +99,9 @@ type ElectronWebviewElement = HTMLElement & {
   stopFindInPage(action: "clearSelection" | "keepSelection" | "activateSelection"): void;
   executeJavaScript<T = unknown>(code: string, userGesture?: boolean): Promise<T>;
   sendInputEvent(event: Record<string, unknown>): void;
+  getBoundingClientRect(): DOMRect;
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject): void;
+  removeEventListener(type: string, listener: EventListenerOrEventListenerObject): void;
 };
 
 type BrowserSidebarPanelProps = {
@@ -247,6 +261,69 @@ function isDownloadFinished(download: BrowserDownload) {
   return download.state === "completed";
 }
 
+function normalizeAndroidDownloads(value: unknown): BrowserDownload[] {
+  const items = value && typeof value === "object"
+    ? (value as { items?: unknown }).items
+    : undefined;
+  if (!Array.isArray(items)) return [];
+  return items.map((item) => {
+    const record = item && typeof item === "object"
+      ? item as Record<string, unknown>
+      : {};
+    return {
+      id: String(record.id ?? ""),
+      fileName: String(record.fileName ?? "download"),
+      filePath: String(record.filePath ?? ""),
+      mimeType: String(record.mimeType ?? "application/octet-stream"),
+      receivedBytes: Number(record.receivedBytes ?? 0),
+      totalBytes: Number(record.totalBytes ?? 0),
+      state: String(record.state ?? "progressing"),
+      paused: Boolean(record.paused),
+      startedAt: Number(record.startedAt ?? 0),
+      updatedAt: Number(record.updatedAt ?? record.startedAt ?? 0),
+      url: String(record.url ?? ""),
+    };
+  });
+}
+
+async function cropBrowserScreenshot(
+  dataUrl: string,
+  rect: { x: number; y: number; width: number; height: number },
+  viewport: { width: number; height: number },
+) {
+  const image = new Image();
+  image.src = dataUrl;
+  await image.decode();
+  const scaleX = image.naturalWidth / Math.max(1, viewport.width);
+  const scaleY = image.naturalHeight / Math.max(1, viewport.height);
+  const sourceX = Math.max(0, Math.round(rect.x * scaleX));
+  const sourceY = Math.max(0, Math.round(rect.y * scaleY));
+  const sourceWidth = Math.min(
+    image.naturalWidth - sourceX,
+    Math.max(1, Math.round(rect.width * scaleX)),
+  );
+  const sourceHeight = Math.min(
+    image.naturalHeight - sourceY,
+    Math.max(1, Math.round(rect.height * scaleY)),
+  );
+  if (sourceWidth <= 0 || sourceHeight <= 0) return undefined;
+  const canvas = document.createElement("canvas");
+  canvas.width = sourceWidth;
+  canvas.height = sourceHeight;
+  canvas.getContext("2d")?.drawImage(
+    image,
+    sourceX,
+    sourceY,
+    sourceWidth,
+    sourceHeight,
+    0,
+    0,
+    sourceWidth,
+    sourceHeight,
+  );
+  return canvas.toDataURL("image/png");
+}
+
 function BrowserTabWebview({
   active,
   initialUrl,
@@ -319,7 +396,10 @@ export function BrowserSidebarPanel({
   onBrowserComment,
 }: BrowserSidebarPanelProps) {
   const electronAvailable = Boolean(window.rengeDesktop?.isElectron);
-  const androidAvailable = Boolean(window.rengeAndroid?.isAndroid || window.RengeAndroidNative);
+  const androidAppShell = isAndroidAppShell(window.location.search, window.navigator.userAgent);
+  const androidAvailable = Boolean(
+    androidAppShell || window.rengeAndroid?.isAndroid || window.RengeAndroidNative,
+  );
   const addressInputAvailable = isBrowserAddressInputAvailable(
     electronAvailable,
     androidAvailable,
@@ -343,10 +423,15 @@ export function BrowserSidebarPanel({
   const [contextMenu, setContextMenu] = useState<BrowserContextMenuState | null>(null);
   const [commentEditor, setCommentEditor] = useState<BrowserCommentEditorState | null>(null);
   const [commentText, setCommentText] = useState("");
+  const [androidBrowserVisible, setAndroidBrowserVisible] = useState(false);
+  const [androidOverlaySnapshot, setAndroidOverlaySnapshot] = useState("");
   const tabsRef = useRef(tabs);
   const activeTabIdRef = useRef(activeTabId);
   const webviewNodesRef = useRef(new Map<string, ElectronWebviewElement>());
   const webviewCleanupRef = useRef(new Map<string, () => void>());
+  const androidAdaptersRef = useRef(new Map<string, AndroidBrowserAdapter>());
+  const androidContextTabIdRef = useRef("");
+  const androidPopoverTabIdRef = useRef("");
   const fitRequestRef = useRef(new Map<string, number>());
   const popoverRootRef = useRef<HTMLDivElement | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
@@ -369,9 +454,51 @@ export function BrowserSidebarPanel({
     : false;
   const activeDownloadCount = downloads.filter((download) =>
     download.state === "progressing").length;
-  const pageActionAvailable = electronAvailable
+  const pageActionAvailable = (electronAvailable || androidAppShell)
     && Boolean(webviewNode)
     && (pageState.url !== "about:blank" || Boolean(activeTab?.hasDocumentContent));
+
+  const getAndroidBrowserBounds = useCallback(() => {
+    const bounds = pageRef.current?.getBoundingClientRect();
+    if (!bounds) return undefined;
+    return scaleAndroidBrowserBounds(
+      {
+        left: bounds.left,
+        top: bounds.top,
+        width: bounds.width,
+        height: bounds.height,
+      },
+      window.devicePixelRatio,
+    );
+  }, []);
+
+  const sendAndroidBrowserCommand = useCallback((
+    command: AndroidBrowserCommand,
+    url?: string,
+    tabId = activeTabIdRef.current,
+  ) => {
+    if (!androidAppShell) return;
+    const bounds = command === "open" || command === "layout"
+      ? getAndroidBrowserBounds()
+      : undefined;
+    const commandOptions = { command, tabId, url, ...bounds };
+    const intentUrl = command === "open" && url
+      ? buildAndroidBrowserIntentUrl(url, bounds)
+      : buildAndroidBrowserCommandIntentUrl(command, { bounds });
+    const nativeCommand = window.RengeAndroidNative?.browserCommand;
+    if (nativeCommand) {
+      try {
+        const result = JSON.parse(
+          nativeCommand.call(window.RengeAndroidNative, JSON.stringify(commandOptions)),
+        ) as { error?: unknown };
+        if (typeof result.error === "string" && result.error) throw new Error(result.error);
+        return;
+      } catch {
+        // Fall back to the app scheme when the raw bridge is temporarily unavailable.
+      }
+    }
+    window.location.assign(intentUrl);
+  }, [androidAppShell, getAndroidBrowserBounds]);
 
   const updateBrowserTab = useCallback(
     (tabId: string, update: (tab: BrowserTabState) => BrowserTabState) => {
@@ -384,13 +511,76 @@ export function BrowserSidebarPanel({
     [],
   );
 
+  useLayoutEffect(() => {
+    if (!androidAppShell || !androidBrowserVisible) return;
+    const page = pageRef.current;
+    if (!page) return;
+    let animationFrame = 0;
+    const syncLayout = () => {
+      window.cancelAnimationFrame(animationFrame);
+      animationFrame = window.requestAnimationFrame(() => {
+        const adapter = androidAdaptersRef.current.get(activeTabIdRef.current);
+        if (adapter) void adapter.layout().catch(() => undefined);
+        else sendAndroidBrowserCommand("layout");
+      });
+    };
+    const resizeObserver = new ResizeObserver(syncLayout);
+    resizeObserver.observe(page);
+    window.addEventListener("resize", syncLayout);
+    window.visualViewport?.addEventListener("resize", syncLayout);
+    window.visualViewport?.addEventListener("scroll", syncLayout);
+    syncLayout();
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", syncLayout);
+      window.visualViewport?.removeEventListener("resize", syncLayout);
+      window.visualViewport?.removeEventListener("scroll", syncLayout);
+    };
+  }, [androidAppShell, androidBrowserVisible, sendAndroidBrowserCommand]);
+
+  useEffect(() => {
+    if (!androidAppShell) return;
+    return () => {
+      try {
+        sendAndroidBrowserCommand("close");
+      } catch {
+        // The host page may already be navigating away while it unmounts.
+      }
+    };
+  }, [androidAppShell, sendAndroidBrowserCommand]);
+
   const selectBrowserTab = useCallback((tabId: string) => {
-    if (!tabsRef.current.some((tab) => tab.id === tabId)) return;
+    const tab = tabsRef.current.find((candidate) => candidate.id === tabId);
+    if (!tab) return;
+    if (androidAppShell && androidContextTabIdRef.current
+        && androidContextTabIdRef.current !== tabId) {
+      androidContextTabIdRef.current = "";
+      setAndroidOverlaySnapshot("");
+    }
+    if (androidAppShell && androidPopoverTabIdRef.current
+        && androidPopoverTabIdRef.current !== tabId) {
+      androidPopoverTabIdRef.current = "";
+      setAndroidOverlaySnapshot("");
+    }
+    setPopoverView(null);
     setContextMenu(null);
     setCommentEditor(null);
     activeTabIdRef.current = tabId;
     setActiveTabId(tabId);
-  }, []);
+    if (androidAppShell) {
+      const adapter = androidAdaptersRef.current.get(tabId);
+      if (tab.url !== "about:blank") {
+        setAndroidBrowserVisible(true);
+        if (adapter) void adapter.select(true).catch(() => undefined);
+        else sendAndroidBrowserCommand("open", tab.url, tabId);
+      } else {
+        setAndroidBrowserVisible(false);
+        if (adapter) void adapter.select(false).catch(() => undefined);
+        else sendAndroidBrowserCommand("close", undefined, tabId);
+      }
+    }
+  }, [androidAppShell, sendAndroidBrowserCommand]);
 
   const refreshPageState = useCallback(
     (tabId: string, node: ElectronWebviewElement, loading: boolean) => {
@@ -557,18 +747,20 @@ export function BrowserSidebarPanel({
       node.addEventListener("found-in-page", foundInPage);
 
       let resizeTimer = 0;
-      const resizeObserver = new ResizeObserver(() => {
-        window.clearTimeout(resizeTimer);
-        resizeTimer = window.setTimeout(() => {
-          if (activeTabIdRef.current === tabId) {
-            void fitPageToWidth(tabId, node).catch(() => undefined);
-          }
-        }, 160);
-      });
-      resizeObserver.observe(node);
+      const resizeObserver = electronAvailable
+        ? new ResizeObserver(() => {
+            window.clearTimeout(resizeTimer);
+            resizeTimer = window.setTimeout(() => {
+              if (activeTabIdRef.current === tabId) {
+                void fitPageToWidth(tabId, node).catch(() => undefined);
+              }
+            }, 160);
+          })
+        : null;
+      if (resizeObserver) resizeObserver.observe(node as unknown as Element);
       webviewCleanupRef.current.set(tabId, () => {
         window.clearTimeout(resizeTimer);
-        resizeObserver.disconnect();
+        resizeObserver?.disconnect();
         node.removeEventListener("did-start-loading", startLoading);
         node.removeEventListener("did-stop-loading", stopLoading);
         node.removeEventListener("did-navigate", navigation);
@@ -578,12 +770,54 @@ export function BrowserSidebarPanel({
         node.removeEventListener("found-in-page", foundInPage);
       });
     },
-    [applyZoomFactor, fitPageToWidth, refreshPageState, updateBrowserTab],
+    [applyZoomFactor, electronAvailable, fitPageToWidth, refreshPageState, updateBrowserTab],
   );
+
+  useEffect(() => {
+    if (!androidAppShell) return;
+    const tabIds = new Set(tabs.map((tab) => tab.id));
+    for (const tab of tabs) {
+      if (androidAdaptersRef.current.has(tab.id)) continue;
+      const adapter = new AndroidBrowserAdapter({
+        tabId: tab.id,
+        getBounds: getAndroidBrowserBounds,
+        getClientRect: () => pageRef.current?.getBoundingClientRect()
+          ?? new DOMRect(0, 0, 1, 1),
+      });
+      androidAdaptersRef.current.set(tab.id, adapter);
+      captureWebviewNode(tab.id, adapter);
+      if (tab.url !== "about:blank") {
+        setAndroidBrowserVisible(true);
+        void adapter.loadURL(normalizeBrowserAddress(tab.url)).catch(() => undefined);
+      }
+    }
+    for (const [tabId, adapter] of androidAdaptersRef.current) {
+      if (tabIds.has(tabId)) continue;
+      captureWebviewNode(tabId, null);
+      adapter.destroy();
+      androidAdaptersRef.current.delete(tabId);
+    }
+  }, [androidAppShell, captureWebviewNode, getAndroidBrowserBounds, tabs]);
+
+  useEffect(() => {
+    if (!androidAppShell) return;
+    return () => {
+      for (const [tabId, adapter] of androidAdaptersRef.current) {
+        captureWebviewNode(tabId, null);
+        adapter.destroy();
+      }
+      androidAdaptersRef.current.clear();
+    };
+  }, [androidAppShell, captureWebviewNode]);
 
   const createNewBrowserTab = useCallback(
     (url = "about:blank", sourceTabId = activeTabIdRef.current) => {
       const current = tabsRef.current;
+      if (androidAppShell && androidPopoverTabIdRef.current) {
+        androidPopoverTabIdRef.current = "";
+        setAndroidOverlaySnapshot("");
+      }
+      setPopoverView(null);
       if (current.length >= MAX_BROWSER_TABS) {
         updateBrowserTab(sourceTabId, (tab) => ({
           ...tab,
@@ -597,14 +831,30 @@ export function BrowserSidebarPanel({
       activeTabIdRef.current = tab.id;
       setTabs(next);
       setActiveTabId(tab.id);
+      if (androidAppShell) {
+        if (url === "about:blank") {
+          setAndroidBrowserVisible(false);
+          sendAndroidBrowserCommand("close", undefined, tab.id);
+        } else {
+          setAndroidBrowserVisible(true);
+        }
+      }
       return tab.id;
     },
-    [updateBrowserTab],
+    [androidAppShell, sendAndroidBrowserCommand, updateBrowserTab],
   );
 
   const closeBrowserTab = useCallback(
     (tabId: string) => {
       const current = tabsRef.current;
+      if (androidContextTabIdRef.current === tabId) {
+        androidContextTabIdRef.current = "";
+        setAndroidOverlaySnapshot("");
+      }
+      if (androidPopoverTabIdRef.current === tabId) {
+        androidPopoverTabIdRef.current = "";
+        setAndroidOverlaySnapshot("");
+      }
       setContextMenu((menu) => menu?.tabId === tabId ? null : menu);
       setCommentEditor((editor) => editor?.tabId === tabId ? null : editor);
       const closingNode = webviewNodesRef.current.get(tabId);
@@ -632,6 +882,10 @@ export function BrowserSidebarPanel({
           initialUrl: tab.initialUrl,
         }));
         void closingNode?.loadURL("about:blank").catch(() => undefined);
+        if (androidAppShell) {
+          setAndroidBrowserVisible(false);
+          sendAndroidBrowserCommand("close");
+        }
         return;
       }
       const nextActiveTabId = getBrowserTabAfterClose(
@@ -645,9 +899,22 @@ export function BrowserSidebarPanel({
       if (nextActiveTabId && nextActiveTabId !== activeTabIdRef.current) {
         activeTabIdRef.current = nextActiveTabId;
         setActiveTabId(nextActiveTabId);
+        if (androidAppShell) {
+          const nextActiveTab = next.find((tab) => tab.id === nextActiveTabId);
+          const nextAdapter = androidAdaptersRef.current.get(nextActiveTabId);
+          if (nextActiveTab && nextActiveTab.url !== "about:blank") {
+            setAndroidBrowserVisible(true);
+            if (nextAdapter) void nextAdapter.select(true).catch(() => undefined);
+            else sendAndroidBrowserCommand("open", nextActiveTab.url, nextActiveTabId);
+          } else {
+            setAndroidBrowserVisible(false);
+            if (nextAdapter) void nextAdapter.select(false).catch(() => undefined);
+            else sendAndroidBrowserCommand("close", undefined, nextActiveTabId);
+          }
+        }
       }
     },
-    [updateBrowserTab],
+    [androidAppShell, sendAndroidBrowserCommand, updateBrowserTab],
   );
 
   const openAddress = useCallback(async (rawAddress: string) => {
@@ -752,14 +1019,25 @@ export function BrowserSidebarPanel({
   };
 
   const refreshBrowserProfile = useCallback(async () => {
+    if (androidAppShell) {
+      const adapter = androidAdaptersRef.current.get(activeTabIdRef.current);
+      if (!adapter) return null;
+      const nextProfile = await adapter.request<BrowserProfileSummary>("profile");
+      setProfile(nextProfile);
+      return nextProfile;
+    }
     const getProfile = window.rengeDesktop?.getSidebarBrowserProfile;
     if (!getProfile) return null;
     const nextProfile = await getProfile();
     setProfile(nextProfile);
     return nextProfile;
-  }, []);
+  }, [androidAppShell]);
 
   const importBrowserProfile = async () => {
+    if (androidAppShell) {
+      setFeatureNotice("Android 网页使用系统 WebView 的 Cookie 和系统密码管理器，无需单独导入。");
+      return;
+    }
     const importProfile = window.rengeDesktop?.importSidebarBrowserProfile;
     if (!importProfile) return;
     try {
@@ -777,6 +1055,10 @@ export function BrowserSidebarPanel({
   };
 
   const updateAutofillSetting = async (enabled: boolean) => {
+    if (androidAppShell) {
+      setFeatureNotice("Android 的密码填充由系统密码管理器和 WebView 自动填充服务控制。");
+      return;
+    }
     const updateProfile = window.rengeDesktop?.updateSidebarBrowserProfile;
     if (!updateProfile) return;
     try {
@@ -840,6 +1122,22 @@ export function BrowserSidebarPanel({
 
   const toggleDeviceEmulation = async () => {
     if (!activeTab || !webviewNode) return;
+    if (androidAppShell && webviewNode instanceof AndroidBrowserAdapter) {
+      try {
+        const enabled = !deviceEmulationEnabled;
+        await webviewNode.runCommand("device_mode", { enabled });
+        setDeviceEmulationTabIds((current) => {
+          const next = new Set(current);
+          if (enabled) next.add(activeTab.id);
+          else next.delete(activeTab.id);
+          return next;
+        });
+        setFeatureNotice(enabled ? "已切换为桌面网站模式" : "已恢复移动网站模式");
+      } catch (caught) {
+        reportFeatureError(caught);
+      }
+      return;
+    }
     const setEmulation = window.rengeDesktop?.setSidebarBrowserDeviceEmulation;
     if (!setEmulation) return;
     try {
@@ -860,6 +1158,25 @@ export function BrowserSidebarPanel({
   };
 
   const capturePage = async () => {
+    if (androidAppShell && webviewNode instanceof AndroidBrowserAdapter) {
+      try {
+        const dataUrl = androidOverlaySnapshot
+          || (await webviewNode.request<{ dataUrl?: string }>("capture")).dataUrl;
+        if (!dataUrl) throw new Error("Android 网页截图失败");
+        const saveDownload = window.rengeAndroid?.saveDownload;
+        if (!saveDownload) throw new Error("Android 下载接口尚未准备好，请稍后重试");
+        const fileName = `Renge-browser-${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
+        await saveDownload({
+          fileName,
+          mimeType: "image/png",
+          base64: dataUrl,
+        });
+        setFeatureNotice(`截图已保存到系统下载目录：${fileName}`);
+      } catch (caught) {
+        reportFeatureError(caught);
+      }
+      return;
+    }
     const capture = window.rengeDesktop?.captureSidebarBrowserPage;
     if (!capture || !webviewNode) return;
     try {
@@ -873,6 +1190,27 @@ export function BrowserSidebarPanel({
   const clearBrowserData = async (
     action: "cache" | "cookies" | "history" | "passwords" | "all",
   ) => {
+    if (androidAppShell) {
+      const adapter = androidAdaptersRef.current.get(activeTabIdRef.current);
+      if (!adapter) return;
+      try {
+        await adapter.runCommand("clear_data", { action });
+        const nextProfile = await adapter.request<BrowserProfileSummary>("profile");
+        setProfile(nextProfile);
+        const labels = {
+          cache: "缓存",
+          cookies: "Cookie 和网站数据",
+          history: "浏览历史",
+          passwords: "系统保存的密码（请在 Android 密码管理器中管理）",
+          all: "全部浏览数据",
+        };
+        setFeatureNotice(`已处理${labels[action]}`);
+        if (action === "cookies" || action === "all") webviewNode?.reload();
+      } catch (caught) {
+        reportFeatureError(caught);
+      }
+      return;
+    }
     const clearData = window.rengeDesktop?.clearSidebarBrowserData;
     if (!clearData) return;
     try {
@@ -895,6 +1233,18 @@ export function BrowserSidebarPanel({
     action: "open-folder" | "clear-completed" | "open" | "reveal" | "pause" | "resume" | "cancel" | "remove",
     id?: string,
   ) => {
+    if (androidAppShell) {
+      const adapter = androidAdaptersRef.current.get(activeTabIdRef.current);
+      if (!adapter) return;
+      try {
+        await adapter.runCommand("download_action", { action, id });
+        setDownloads(normalizeAndroidDownloads(await adapter.request("downloads")));
+        setDownloadActionsId("");
+      } catch (caught) {
+        reportFeatureError(caught);
+      }
+      return;
+    }
     const runAction = window.rengeDesktop?.runSidebarBrowserDownloadAction;
     if (!runAction) return;
     try {
@@ -909,11 +1259,32 @@ export function BrowserSidebarPanel({
     action: "copy-text" | "copy-image" | "open-external" | "inspect" | "capture-element",
     options: Record<string, unknown> = {},
     menu = contextMenu,
-  ) => {
+  ): Promise<{ ok: boolean; dataUrl?: string } | null> => {
     if (!menu) return null;
-    const runAction = window.rengeDesktop?.runSidebarBrowserContextAction;
     const node = webviewNodesRef.current.get(menu.tabId);
-    if (!runAction || !node) return null;
+    if (!node) return null;
+    if (androidAppShell && node instanceof AndroidBrowserAdapter) {
+      try {
+        if (action === "capture-element") {
+          return await node.request("capture", options);
+        }
+        if (action === "copy-text") {
+          await node.runCommand("copy_text", options);
+        } else if (action === "copy-image") {
+          await node.runCommand("copy_image", options);
+        } else if (action === "open-external") {
+          await node.runCommand("open_external", options);
+        } else if (action === "inspect") {
+          setFeatureNotice(`元素：${menu.target.selector || menu.target.tagName}`);
+        }
+        return { ok: true };
+      } catch (caught) {
+        reportFeatureError(caught);
+        return null;
+      }
+    }
+    const runAction = window.rengeDesktop?.runSidebarBrowserContextAction;
+    if (!runAction) return null;
     try {
       return await runAction({
         webContentsId: node.getWebContentsId(),
@@ -928,6 +1299,10 @@ export function BrowserSidebarPanel({
 
   const openContextUrlInTab = (url: string) => {
     if (!contextMenu || !url) return;
+    if (androidAppShell) {
+      androidContextTabIdRef.current = "";
+      setAndroidOverlaySnapshot("");
+    }
     createNewBrowserTab(url, contextMenu.tabId);
     setContextMenu(null);
   };
@@ -952,21 +1327,30 @@ export function BrowserSidebarPanel({
   const startBrowserComment = async () => {
     const menu = contextMenu;
     if (!menu) return;
-    setContextMenu(null);
+    if (!androidAppShell) setContextMenu(null);
     const node = webviewNodesRef.current.get(menu.tabId);
     const pageBounds = pageRef.current?.getBoundingClientRect();
     const zoom = node?.getZoomFactor() ?? 1;
     let screenshotDataUrl: string | undefined;
     if (node && menu.target.rect.width > 0 && menu.target.rect.height > 0) {
-      const captureResult = await runContextAction("capture-element", {
-        rect: {
-          x: menu.target.rect.x * zoom,
-          y: menu.target.rect.y * zoom,
-          width: menu.target.rect.width * zoom,
-          height: menu.target.rect.height * zoom,
-        },
-      }, menu);
-      screenshotDataUrl = captureResult?.dataUrl;
+      const scaledRect = {
+        x: menu.target.rect.x * zoom,
+        y: menu.target.rect.y * zoom,
+        width: menu.target.rect.width * zoom,
+        height: menu.target.rect.height * zoom,
+      };
+      if (androidAppShell && androidOverlaySnapshot && pageBounds) {
+        screenshotDataUrl = await cropBrowserScreenshot(
+          androidOverlaySnapshot,
+          scaledRect,
+          { width: pageBounds.width, height: pageBounds.height },
+        ).catch(() => undefined);
+      } else {
+        const captureResult = await runContextAction("capture-element", {
+          rect: scaledRect,
+        }, menu);
+        screenshotDataUrl = captureResult?.dataUrl;
+      }
     }
     const editorWidth = Math.min(440, Math.max(260, (pageBounds?.width ?? 360) - 24));
     const targetLeft = menu.target.rect.x * zoom;
@@ -988,6 +1372,7 @@ export function BrowserSidebarPanel({
       top,
       zoomFactor: zoom,
     });
+    setContextMenu(null);
     window.setTimeout(() => commentInputRef.current?.focus(), 0);
   };
 
@@ -1089,6 +1474,169 @@ export function BrowserSidebarPanel({
       })().catch(reportFeatureError);
     });
   }, [reportFeatureError, selectBrowserTab]);
+
+  useEffect(() => {
+    if (!androidAppShell) return;
+    const handleAndroidBrowserEvent = (event: Event) => {
+      const detail = (event as CustomEvent<AndroidBrowserEventDetail>).detail;
+      if (!detail || typeof detail !== "object") return;
+      if (detail.type === "downloads") {
+        setDownloads(normalizeAndroidDownloads(detail));
+        return;
+      }
+      if (detail.type === "open-tab") {
+        const url = typeof detail.url === "string" ? detail.url : "";
+        if (url) createNewBrowserTab(url, String(detail.tabId ?? activeTabIdRef.current));
+        return;
+      }
+      const tabId = String(detail.tabId ?? "");
+      if (!tabId) return;
+      if (detail.type === "dismiss-overlays") {
+        setContextMenu(null);
+        setCommentEditor(null);
+        setPopoverView(null);
+        return;
+      }
+      if (detail.type === "state") {
+        const node = androidAdaptersRef.current.get(tabId);
+        if (node) {
+          updateBrowserTab(tabId, (tab) => {
+            const url = typeof detail.url === "string" ? detail.url : tab.url;
+            return {
+              ...tab,
+              url,
+              address: url === "about:blank" ? "" : url,
+              title: typeof detail.title === "string" ? detail.title : tab.title,
+              canGoBack: Boolean(detail.canGoBack),
+              canGoForward: Boolean(detail.canGoForward),
+              loading: Boolean(detail.loading),
+              zoomFactor: typeof detail.zoomFactor === "number"
+                ? detail.zoomFactor
+                : tab.zoomFactor,
+              error: "",
+              hasDocumentContent: false,
+            };
+          });
+        }
+        if (activeTabIdRef.current === tabId) {
+          setAndroidBrowserVisible(detail.visible !== false);
+        }
+        return;
+      }
+      if (detail.type !== "context-menu") return;
+      const node = androidAdaptersRef.current.get(tabId);
+      if (!node) return;
+      const target = detail.target as BrowserContextTarget | undefined;
+      if (!target?.rect) return;
+      const request: BrowserContextMenuRequest = {
+        sourceWebContentsId: node.getWebContentsId(),
+        x: Number(detail.x ?? 0),
+        y: Number(detail.y ?? 0),
+        hostX: Number(detail.hostX ?? 0),
+        hostY: Number(detail.hostY ?? 0),
+        pageUrl: target.pageUrl || node.getURL(),
+        frameUrl: target.pageUrl || node.getURL(),
+        linkUrl: String(detail.linkUrl ?? target.linkUrl ?? ""),
+        sourceUrl: String(detail.sourceUrl ?? target.imageUrl ?? ""),
+        mediaType: target.imageUrl ? "image" : "none",
+        selectionText: String(detail.selectionText ?? ""),
+        isEditable: ["input", "textarea"].includes(target.tagName),
+      };
+      const pageBounds = pageRef.current?.getBoundingClientRect();
+      const nodeBounds = node.getBoundingClientRect();
+      const anchor = calculateBrowserOverlayAnchor({
+        contentX: request.x,
+        contentY: request.y,
+        zoomFactor: node.getZoomFactor(),
+        hostX: request.hostX,
+        hostY: request.hostY,
+        webviewLeft: nodeBounds.left,
+        webviewTop: nodeBounds.top,
+        containerLeft: pageBounds?.left ?? nodeBounds.left,
+        containerTop: pageBounds?.top ?? nodeBounds.top,
+      });
+      androidContextTabIdRef.current = tabId;
+      setAndroidOverlaySnapshot(String(detail.pageScreenshotDataUrl ?? ""));
+      setPopoverView(null);
+      setCommentEditor(null);
+      setContextMenu({
+        tabId,
+        request,
+        target,
+        anchorLeft: anchor.left,
+        anchorTop: anchor.top,
+        left: anchor.left,
+        top: anchor.top,
+      });
+    };
+    window.addEventListener(ANDROID_BROWSER_EVENT_NAME, handleAndroidBrowserEvent);
+    return () => window.removeEventListener(
+      ANDROID_BROWSER_EVENT_NAME,
+      handleAndroidBrowserEvent,
+    );
+  }, [androidAppShell, createNewBrowserTab, updateBrowserTab]);
+
+  useEffect(() => {
+    if (!androidAppShell || contextMenu || commentEditor) return;
+    const tabId = androidContextTabIdRef.current;
+    if (!tabId) return;
+    androidContextTabIdRef.current = "";
+    setAndroidOverlaySnapshot("");
+    void androidAdaptersRef.current.get(tabId)?.contextDone().catch(() => undefined);
+  }, [androidAppShell, commentEditor, contextMenu]);
+
+  useEffect(() => {
+    if (!androidAppShell) return;
+    if (!popoverView) {
+      const tabId = androidPopoverTabIdRef.current;
+      if (!tabId) return;
+      androidPopoverTabIdRef.current = "";
+      if (!androidContextTabIdRef.current && !commentEditor) {
+        setAndroidOverlaySnapshot("");
+        void androidAdaptersRef.current.get(tabId)?.select(true).catch(() => undefined);
+      }
+      return;
+    }
+    const tabId = activeTabIdRef.current;
+    const adapter = androidAdaptersRef.current.get(tabId);
+    if (!adapter || pageState.url === "about:blank") return;
+    if (androidPopoverTabIdRef.current === tabId) return;
+    let active = true;
+    void adapter.request<{ dataUrl?: string }>("capture")
+      .then((result) => {
+        if (!active || !popoverView) return;
+        androidPopoverTabIdRef.current = tabId;
+        setAndroidOverlaySnapshot(result.dataUrl ?? "");
+        return adapter.runCommand("suspend");
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [androidAppShell, commentEditor, pageState.url, popoverView]);
+
+  useEffect(() => {
+    if (!androidAppShell || !(webviewNode instanceof AndroidBrowserAdapter)) return;
+    let active = true;
+    const refreshDownloads = () => {
+      void webviewNode.request("downloads")
+        .then((value) => {
+          if (active) setDownloads(normalizeAndroidDownloads(value));
+        })
+        .catch(() => undefined);
+    };
+    refreshDownloads();
+    const intervalId = window.setInterval(refreshDownloads, 1500);
+    void webviewNode.request<BrowserProfileSummary>("profile")
+      .then((value) => {
+        if (active) setProfile(value);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+    };
+  }, [androidAppShell, webviewNode]);
 
   useLayoutEffect(() => {
     if (!contextMenu) return;
@@ -1268,6 +1816,20 @@ export function BrowserSidebarPanel({
         switch (toolName) {
           case "browser_navigate":
             return openAddress(getStringArg(args, "url"));
+          case "browser_open_temporary_file": {
+            if (!electronAvailable) {
+              throw new Error("临时文件浏览器预览仅支持 Electron 桌面版");
+            }
+            const path = getStringArg(args, "path");
+            const previewUrl = buildTemporaryFilePreviewUrl(path, window.location.href);
+            const state = await openAddress(previewUrl);
+            return {
+              ...state,
+              ok: true,
+              action: "open_temporary_file",
+              path,
+            };
+          }
           case "browser_history": {
             const action = getStringArg(args, "action");
             if (action === "back") {
@@ -1446,7 +2008,7 @@ export function BrowserSidebarPanel({
         }
       },
     };
-  }, [activeTab?.id, refreshDocumentContentState, webviewNode]);
+  }, [activeTab?.id, electronAvailable, openAddress, refreshDocumentContentState, webviewNode]);
 
   useEffect(() => {
     if (!controller) return;
@@ -1455,19 +2017,36 @@ export function BrowserSidebarPanel({
 
   const openSubmittedAddress = () => {
     if (!address.trim()) return;
-    if (electronAvailable) {
+    if (webviewNode) {
+      if (androidAppShell) {
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        setAndroidBrowserVisible(true);
+      }
       void openAddress(address).catch(() => undefined);
       return;
     }
     if (!androidAvailable) return;
     const url = normalizeBrowserAddress(address);
     if (activeTab) {
-      updateBrowserTab(activeTab.id, (tab) => ({ ...tab, address: url, error: "" }));
+      updateBrowserTab(activeTab.id, (tab) => ({
+        ...tab,
+        address: url,
+        url,
+        loading: true,
+        error: "",
+      }));
+    }
+    if (androidAppShell) {
+      (document.activeElement as HTMLElement | null)?.blur?.();
+      setAndroidBrowserVisible(true);
     }
     void openAndroidBrowserAddress(
       url,
       window.rengeAndroid,
       window.RengeAndroidNative,
+      androidAppShell
+        ? (nextUrl) => sendAndroidBrowserCommand("open", nextUrl)
+        : undefined,
     ).catch(reportFeatureError);
   };
 
@@ -1485,7 +2064,14 @@ export function BrowserSidebarPanel({
   return (
     <section className="right-tool-content browser-sidebar-panel" aria-label="浏览器面板">
       <header className="browser-sidebar-header">
-        <button className="browser-sidebar-back" onClick={onBack} type="button">
+        <button
+          className="browser-sidebar-back"
+          onClick={() => {
+            if (androidAppShell) sendAndroidBrowserCommand("close");
+            onBack();
+          }}
+          type="button"
+        >
           <ArrowLeft size={16} />
           <span>浏览器</span>
         </button>
@@ -1495,14 +2081,22 @@ export function BrowserSidebarPanel({
             electronAvailable
               ? "AI 可读取并控制当前页面"
               : androidAvailable
-                ? "网页将在 Android 原生浏览器中打开"
+                ? "AI 可读取并控制 Android 内嵌网页"
                 : "请在 Electron 桌面版中使用"
           }
         >
           <Bot size={13} />
-          {electronAvailable ? "AI 已连接" : androidAvailable ? "安卓浏览器" : "桌面版可用"}
+          {electronAvailable || androidAvailable ? "AI 已连接" : "桌面版可用"}
         </div>
-        <button aria-label="关闭右侧栏" onClick={onClose} title="关闭右侧栏" type="button">
+        <button
+          aria-label="关闭右侧栏"
+          onClick={() => {
+            if (androidAppShell) sendAndroidBrowserCommand("close");
+            onClose();
+          }}
+          title="关闭右侧栏"
+          type="button"
+        >
           <X size={16} />
         </button>
       </header>
@@ -1560,8 +2154,10 @@ export function BrowserSidebarPanel({
         <div className="browser-sidebar-toolbar">
           <button
             aria-label="后退"
-            disabled={!electronAvailable || !pageState.canGoBack}
-            onClick={() => webviewNode?.goBack()}
+            disabled={!webviewNode || !pageState.canGoBack}
+            onClick={() => {
+              webviewNode?.goBack();
+            }}
             title="后退"
             type="button"
           >
@@ -1569,8 +2165,10 @@ export function BrowserSidebarPanel({
           </button>
           <button
             aria-label="前进"
-            disabled={!electronAvailable || !pageState.canGoForward}
-            onClick={() => webviewNode?.goForward()}
+            disabled={!webviewNode || !pageState.canGoForward}
+            onClick={() => {
+              webviewNode?.goForward();
+            }}
             title="前进"
             type="button"
           >
@@ -1578,8 +2176,13 @@ export function BrowserSidebarPanel({
           </button>
           <button
             aria-label={pageState.loading ? "停止加载" : "刷新"}
-            disabled={!electronAvailable || pageState.url === "about:blank"}
-            onClick={() => (pageState.loading ? webviewNode?.stop() : webviewNode?.reload())}
+            disabled={
+              !webviewNode || pageState.url === "about:blank"
+            }
+            onClick={() => {
+              if (pageState.loading) webviewNode?.stop();
+              else webviewNode?.reload();
+            }}
             title={pageState.loading ? "停止加载" : "刷新"}
             type="button"
           >
@@ -1606,7 +2209,13 @@ export function BrowserSidebarPanel({
               spellCheck={false}
               value={address}
             />
-            <button aria-label="打开" disabled={!addressInputAvailable || !address.trim()} title="打开" type="submit">
+            <button
+              aria-label="打开"
+              disabled={!addressInputAvailable || !address.trim()}
+              onClick={openSubmittedAddress}
+              title="打开"
+              type="button"
+            >
               <Search size={14} />
             </button>
           </form>
@@ -1614,7 +2223,7 @@ export function BrowserSidebarPanel({
             aria-expanded={popoverView === "downloads"}
             aria-label="下载"
             className={`browser-sidebar-toolbar-action ${popoverView === "downloads" ? "is-active" : ""}`}
-            disabled={!electronAvailable}
+            disabled={!electronAvailable && !androidAppShell}
             onClick={() => openPopover("downloads")}
             title="下载"
             type="button"
@@ -1626,7 +2235,7 @@ export function BrowserSidebarPanel({
             aria-expanded={popoverView !== null && popoverView !== "downloads"}
             aria-label="更多浏览器选项"
             className={`browser-sidebar-toolbar-action ${popoverView && popoverView !== "downloads" ? "is-active" : ""}`}
-            disabled={!electronAvailable}
+            disabled={!electronAvailable && !androidAppShell}
             onClick={() => openPopover("menu")}
             title="更多"
             type="button"
@@ -1716,9 +2325,15 @@ export function BrowserSidebarPanel({
                             </>
                           ) : download.state === "progressing" ? (
                             <>
-                              <button onClick={() => void runDownloadAction(download.paused ? "resume" : "pause", download.id)} type="button">
-                                {download.paused ? "继续下载" : "暂停下载"}
-                              </button>
+                              {androidAppShell ? (
+                                <button onClick={() => void runDownloadAction("open-folder")} type="button">
+                                  在系统下载中管理
+                                </button>
+                              ) : (
+                                <button onClick={() => void runDownloadAction(download.paused ? "resume" : "pause", download.id)} type="button">
+                                  {download.paused ? "继续下载" : "暂停下载"}
+                                </button>
+                              )}
                               <button onClick={() => void runDownloadAction("cancel", download.id)} type="button">取消下载</button>
                             </>
                           ) : null}
@@ -1861,6 +2476,15 @@ export function BrowserSidebarPanel({
             ))
           : null}
 
+        {androidOverlaySnapshot ? (
+          <img
+            alt=""
+            aria-hidden="true"
+            className="browser-android-overlay-snapshot"
+            src={androidOverlaySnapshot}
+          />
+        ) : null}
+
         {contextMenu ? (
           <div
             aria-label="网页右键菜单"
@@ -1996,13 +2620,13 @@ export function BrowserSidebarPanel({
           </>
         ) : null}
 
-        {!electronAvailable ? (
+        {!electronAvailable && !androidBrowserVisible ? (
           <div className="browser-sidebar-empty is-unavailable">
             <span><ShieldCheck size={25} /></span>
-            <strong>{androidAvailable ? "Android 原生浏览器" : "桌面浏览器模块"}</strong>
+            <strong>{androidAvailable ? "Android 内嵌浏览器" : "桌面浏览器模块"}</strong>
             <p>
               {androidAvailable
-                ? "输入网址或搜索内容，将在应用内的独立网页页面中打开。"
+                ? "输入网址或搜索内容，网页会直接显示在当前右侧栏中。"
                 : "完整网页控制依赖 Electron 安全隔离容器，请在桌面版中使用。"}
             </p>
           </div>
@@ -2024,15 +2648,17 @@ export function BrowserSidebarPanel({
       <footer className="browser-sidebar-footer">
         <span
           className={
-            !electronAvailable ? "is-unavailable" : pageState.loading ? "is-loading" : undefined
+            !electronAvailable && !androidAvailable
+              ? "is-unavailable"
+              : pageState.loading ? "is-loading" : undefined
           }
         />
         <strong>
-          {!electronAvailable
-            ? androidAvailable ? "Android 浏览器可用" : "桌面版可用"
+          {!electronAvailable && !androidAvailable
+            ? "桌面版可用"
             : pageState.loading ? "正在加载" : pageState.title || "新页面"}
         </strong>
-        {electronAvailable ? (
+        {electronAvailable || androidAppShell ? (
           <div className="browser-sidebar-zoom" aria-label="网页缩放">
             <button
               aria-label="缩小网页"
@@ -2064,7 +2690,7 @@ export function BrowserSidebarPanel({
             </button>
           </div>
         ) : (
-          <small>{androidAvailable ? "应用内网页" : "仅 Electron 桌面版"}</small>
+          <small>{androidAvailable ? "右侧栏内嵌网页" : "仅 Electron 桌面版"}</small>
         )}
       </footer>
     </section>

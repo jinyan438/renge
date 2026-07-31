@@ -8,6 +8,11 @@ contextBridge.exposeInMainWorld("rengeDesktop", {
   listSidebarFiles: (options) => ipcRenderer.invoke("sidebar-files:list", options),
   readSidebarTextFile: (options) => ipcRenderer.invoke("sidebar-files:read-text", options),
   readSidebarBinaryFile: (options) => ipcRenderer.invoke("sidebar-files:read-binary", options),
+  writeTemporaryTextFile: (options) => ipcRenderer.invoke("sidebar-files:write-temporary-text", options),
+  writeTemporaryBinaryFile: (options) => ipcRenderer.invoke("sidebar-files:write-temporary-binary", options),
+  createTemporaryDirectory: (options) => ipcRenderer.invoke("sidebar-files:create-temporary-directory", options),
+  editTemporaryTextFile: (options) => ipcRenderer.invoke("sidebar-files:edit-temporary-text", options),
+  deleteTemporaryPath: (options) => ipcRenderer.invoke("sidebar-files:delete-temporary-path", options),
   importTemporaryFiles: () => ipcRenderer.invoke("sidebar-files:import-temporary"),
   runSidebarFileAction: (options) => ipcRenderer.invoke("sidebar-files:system-action", options),
   selectWorkspace: () => ipcRenderer.invoke("workspace:select"),
@@ -35,6 +40,43 @@ contextBridge.exposeInMainWorld("rengeDesktop", {
   findSymbols: (options) => ipcRenderer.invoke("workspace:find-symbols", options),
   readPackageJson: () => ipcRenderer.invoke("workspace:package-json"),
   scanTodos: (options) => ipcRenderer.invoke("workspace:todos", options),
+  listSidebarTerminals: (options) => ipcRenderer.invoke("sidebar-terminal:list", options),
+  createSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:create", options),
+  writeSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:write", options),
+  resizeSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:resize", options),
+  readSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:read", options),
+  restartSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:restart", options),
+  closeSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:close", options),
+  onSidebarTerminalData: (listener) => {
+    if (typeof listener !== "function") return () => undefined;
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on("sidebar-terminal:data", wrappedListener);
+    return () => ipcRenderer.removeListener("sidebar-terminal:data", wrappedListener);
+  },
+  onSidebarTerminalExit: (listener) => {
+    if (typeof listener !== "function") return () => undefined;
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on("sidebar-terminal:exit", wrappedListener);
+    return () => ipcRenderer.removeListener("sidebar-terminal:exit", wrappedListener);
+  },
+  onSidebarTerminalRestarted: (listener) => {
+    if (typeof listener !== "function") return () => undefined;
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on("sidebar-terminal:restarted", wrappedListener);
+    return () => ipcRenderer.removeListener("sidebar-terminal:restarted", wrappedListener);
+  },
+  onSidebarTerminalCreated: (listener) => {
+    if (typeof listener !== "function") return () => undefined;
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on("sidebar-terminal:created", wrappedListener);
+    return () => ipcRenderer.removeListener("sidebar-terminal:created", wrappedListener);
+  },
+  onSidebarTerminalClosed: (listener) => {
+    if (typeof listener !== "function") return () => undefined;
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on("sidebar-terminal:closed", wrappedListener);
+    return () => ipcRenderer.removeListener("sidebar-terminal:closed", wrappedListener);
+  },
   listSidebarBrowserDownloads: () => ipcRenderer.invoke("sidebar-browser:downloads-list"),
   runSidebarBrowserDownloadAction: (options) =>
     ipcRenderer.invoke("sidebar-browser:download-action", options),

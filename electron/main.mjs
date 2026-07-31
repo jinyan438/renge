@@ -37,12 +37,18 @@ import {
   selectCredentialForUrl,
 } from "./sidebar-browser-profile.mjs";
 import {
+  createSidebarDirectory,
+  deleteSidebarPath,
+  editSidebarTextFile,
   importTemporaryFiles,
   listSidebarFiles,
   readSidebarBinaryFile,
   readSidebarTextFile,
   resolveSidebarFilePath,
+  writeSidebarBinaryFile,
+  writeSidebarTextFile,
 } from "./sidebar-files.mjs";
+import { createSidebarTerminalManager } from "./sidebar-terminal.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const appIconPath = join(
@@ -85,6 +91,11 @@ let sidebarBrowserDownloadSequence = 0;
 let sidebarBrowserDownloadsConfigured = false;
 let sidebarBrowserProfileCache = null;
 let sidebarBrowserProfileWriteQueue = Promise.resolve();
+const sidebarTerminalManager = createSidebarTerminalManager({
+  getMainWindow: () => mainWindow,
+  getWorkspaceRoot: () => workspaceRoot,
+  getFallbackCwd: () => app.getPath("home"),
+});
 
 function getPersistentDataDir() {
   if (process.env.RENGE_DATA_DIR) return resolve(process.env.RENGE_DATA_DIR);
@@ -1014,6 +1025,21 @@ async function runPackageScript({ script, args = [] }) {
 }
 
 function registerIpcHandlers() {
+  ipcMain.handle("sidebar-terminal:list", (event, options = {}) =>
+    sidebarTerminalManager.list(event, options));
+  ipcMain.handle("sidebar-terminal:create", (event, options = {}) =>
+    sidebarTerminalManager.create(event, options));
+  ipcMain.handle("sidebar-terminal:write", (event, options = {}) =>
+    sidebarTerminalManager.write(event, options));
+  ipcMain.handle("sidebar-terminal:resize", (event, options = {}) =>
+    sidebarTerminalManager.resize(event, options));
+  ipcMain.handle("sidebar-terminal:read", (event, options = {}) =>
+    sidebarTerminalManager.read(event, options));
+  ipcMain.handle("sidebar-terminal:restart", (event, options = {}) =>
+    sidebarTerminalManager.restart(event, options));
+  ipcMain.handle("sidebar-terminal:close", (event, options = {}) =>
+    sidebarTerminalManager.close(event, options));
+
   ipcMain.handle("app-data:clear-storage", async () => {
     if (!serverController?.url) throw new Error("应用数据服务尚未启动");
     await session.defaultSession.clearStorageData({
@@ -1315,6 +1341,36 @@ function registerIpcHandlers() {
     return readSidebarBinaryFile(rootPath, options.path ?? "");
   });
 
+  ipcMain.handle("sidebar-files:write-temporary-text", async (_event, options = {}) => {
+    const rootPath = await getSidebarFilesRoot("temporary");
+    return writeSidebarTextFile(rootPath, options.path ?? "", options.content ?? "");
+  });
+
+  ipcMain.handle("sidebar-files:write-temporary-binary", async (_event, options = {}) => {
+    const rootPath = await getSidebarFilesRoot("temporary");
+    return writeSidebarBinaryFile(rootPath, options.path ?? "", options.base64 ?? "");
+  });
+
+  ipcMain.handle("sidebar-files:create-temporary-directory", async (_event, options = {}) => {
+    const rootPath = await getSidebarFilesRoot("temporary");
+    return createSidebarDirectory(rootPath, options.path ?? "");
+  });
+
+  ipcMain.handle("sidebar-files:edit-temporary-text", async (_event, options = {}) => {
+    const rootPath = await getSidebarFilesRoot("temporary");
+    return editSidebarTextFile(
+      rootPath,
+      options.path ?? "",
+      options.find ?? "",
+      options.replace ?? "",
+    );
+  });
+
+  ipcMain.handle("sidebar-files:delete-temporary-path", async (_event, options = {}) => {
+    const rootPath = await getSidebarFilesRoot("temporary");
+    return deleteSidebarPath(rootPath, options.path ?? "", options.recursive);
+  });
+
   ipcMain.handle("sidebar-files:import-temporary", async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ["openFile", "multiSelections"],
@@ -1503,6 +1559,7 @@ async function createMainWindow() {
   const serverOptions = {
     host: "127.0.0.1",
     dataDir: getPersistentDataDir(),
+    temporaryFilesRoot: getTemporaryFilesRoot(),
   };
   try {
     serverController = await startRengeServer({
@@ -1623,6 +1680,7 @@ if (!singleInstanceLockAcquired) {
   });
 
   app.on("will-quit", () => {
+    sidebarTerminalManager.disposeAll();
     if (!electronRuntimeCacheDir) return;
     void rm(electronRuntimeCacheDir, { recursive: true, force: true }).catch(() => undefined);
   });

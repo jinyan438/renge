@@ -32,6 +32,8 @@ import { createPortal } from "react-dom";
 import { BrowserSidebarPanel } from "./BrowserSidebarPanel";
 import type { BrowserPageComment } from "./browserSidebarComments";
 import { FilesSidebarPanel, type FileBrowserSource } from "./FilesSidebarPanel";
+import { TerminalSidebarPanel } from "./TerminalSidebarPanel";
+import { registerTerminalSidebarOpener } from "./terminalSidebarRuntime";
 import { registerBrowserSidebarOpener } from "./browserSidebarRuntime";
 import {
   clampRightSidebarWidth,
@@ -73,6 +75,8 @@ export type StatusBarSidebarProps = {
   fileBrowserSource?: FileBrowserSource | null;
   onChooseWorkspace?: () => void | Promise<void>;
   onBrowserComment?: (comment: BrowserPageComment) => void;
+  terminalWorkspaceKey?: string;
+  terminalWorkspacePath?: string;
 };
 
 type StatusBarCssProperties = CSSProperties & {
@@ -99,7 +103,7 @@ const RIGHT_SIDEBAR_TOOLS = [
     label: "终端",
     description: "运行命令并查看输出",
     icon: SquareTerminal,
-    available: false,
+    available: true,
   },
   {
     id: "browser",
@@ -793,8 +797,11 @@ export function StatusBarSidebar({
   fileBrowserSource = null,
   onChooseWorkspace,
   onBrowserComment,
+  terminalWorkspaceKey = "default",
+  terminalWorkspacePath = "",
 }: StatusBarSidebarProps) {
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
+  const [requestedTerminalId, setRequestedTerminalId] = useState("");
   const [sidebarWidth, setSidebarWidth] = useState(loadRightSidebarWidth);
   const [sidebarMaxWidth, setSidebarMaxWidth] = useState(() =>
     typeof window === "undefined"
@@ -940,6 +947,16 @@ export function StatusBarSidebar({
       document.body.classList.remove("right-sidebar-resizing");
     },
     [],
+  );
+
+  useEffect(
+    () =>
+      registerTerminalSidebarOpener((terminalId) => {
+        setRequestedTerminalId(terminalId ?? "");
+        setActiveToolId("terminal");
+        onCollapsedChange(false);
+      }),
+    [onCollapsedChange],
   );
 
   useEffect(() => {
@@ -1874,7 +1891,9 @@ export function StatusBarSidebar({
         aria-hidden={collapsed ? "true" : undefined}
         aria-label="右侧工具栏"
         className={`status-bar-sidebar right-tools-sidebar ${
-          activeToolId === "status" ? "is-status-view" : "is-light-view"
+          activeToolId === "status" || activeToolId === "terminal"
+            ? "is-status-view"
+            : "is-light-view"
         } ${collapsed ? "is-collapsed" : ""}`}
         inert={collapsed ? true : undefined}
         style={sidebarStyle}
@@ -1949,7 +1968,15 @@ export function StatusBarSidebar({
               </nav>
             </div>
           </section>
-        ) : activeToolId === "browser" ? null : activeToolId === "files" ? (
+        ) : activeToolId === "browser" ? null : activeToolId === "terminal" ? (
+          <TerminalSidebarPanel
+            onBack={() => setActiveToolId("menu")}
+            onClose={() => onCollapsedChange(true)}
+            requestedSessionId={requestedTerminalId}
+            workspaceKey={terminalWorkspaceKey}
+            workspacePath={terminalWorkspacePath}
+          />
+        ) : activeToolId === "files" ? (
           <FilesSidebarPanel
             onBack={() => setActiveToolId("menu")}
             onChooseWorkspace={onChooseWorkspace}

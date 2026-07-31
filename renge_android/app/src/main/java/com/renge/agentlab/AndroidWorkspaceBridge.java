@@ -49,6 +49,7 @@ public class AndroidWorkspaceBridge {
     private final int requestCode;
     private final ContentResolver resolver;
     private final SharedPreferences preferences;
+    private final AndroidTerminalManager terminalManager;
 
     private String pendingRequestId;
     private Uri treeUri;
@@ -64,6 +65,11 @@ public class AndroidWorkspaceBridge {
         this.resolver = activity.getContentResolver();
         this.preferences = activity.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         this.rootAccessGranted = preferences.getBoolean(PREF_ROOT_GRANTED, false);
+        this.terminalManager = new AndroidTerminalManager(
+                activity,
+                this::getTerminalLaunchConfig,
+                this::emitTerminalEvent
+        );
 
         String savedUri = preferences.getString(PREF_URI, "");
         String savedRootPath = preferences.getString(PREF_ROOT_PATH, "");
@@ -86,11 +92,15 @@ public class AndroidWorkspaceBridge {
                         + "window.__rengeAndroidReject=function(id,message){if(!pending[id])return;pending[id].reject(new Error(message||'Android workspace error'));delete pending[id];};"
                         + "function parse(text){var payload=JSON.parse(text);if(payload&&payload.error)throw new Error(payload.error);return payload;}"
                         + "function call(name,options){return Promise.resolve().then(function(){return parse(window.RengeAndroidNative[name](JSON.stringify(options||{})));});}"
+                        + "function request(name,options){return new Promise(function(resolve,reject){var id=String(Date.now())+Math.random().toString(16).slice(2);pending[id]={resolve:resolve,reject:reject};window.RengeAndroidNative[name](id,JSON.stringify(options||{}));});}"
+                        + "function subscribe(name,listener){var handler=function(event){listener(event.detail);};window.addEventListener(name,handler);return function(){window.removeEventListener(name,handler);};}"
                         + "var api=window.rengeAndroid||{};"
                         + "Object.assign(api,{"
                         + "isAndroid:true,"
                         + "saveDownload:function(options){return call('saveDownload',options);},"
                         + "openBrowser:function(options){return call('openBrowser',options);},"
+                        + "browserCommand:function(options){return call('browserCommand',options);},"
+                        + "browserRequest:function(options){return request('browserRequest',options);},"
                         + "selectWorkspace:function(){return new Promise(function(resolve,reject){var id=String(Date.now())+Math.random().toString(16).slice(2);pending[id]={resolve:resolve,reject:reject};window.RengeAndroidNative.selectWorkspace(id);});},"
                         + "selectRootWorkspace:function(options){return call('selectRootWorkspace',options);},"
                         + "restoreWorkspace:function(options){return call('restoreWorkspace',options);},"
@@ -109,12 +119,28 @@ public class AndroidWorkspaceBridge {
                         + "requestRootAccess:function(options){return call('requestRootAccess',options);},"
                         + "getRootAccessStatus:function(options){return call('getRootAccessStatus',options);},"
                         + "getWorkspaceStatus:function(options){return call('getWorkspaceStatus',options);},"
+                        + "listSidebarTerminals:function(options){return call('listSidebarTerminals',options);},"
+                        + "createSidebarTerminal:function(options){return call('createSidebarTerminal',options);},"
+                        + "readSidebarTerminal:function(options){return call('readSidebarTerminal',options);},"
+                        + "writeSidebarTerminal:function(options){return call('writeSidebarTerminal',options);},"
+                        + "resizeSidebarTerminal:function(options){return call('resizeSidebarTerminal',options);},"
+                        + "restartSidebarTerminal:function(options){return call('restartSidebarTerminal',options);},"
+                        + "closeSidebarTerminal:function(options){return call('closeSidebarTerminal',options);},"
+                        + "onSidebarTerminalData:function(listener){return subscribe('renge-android-terminal-data',listener);},"
+                        + "onSidebarTerminalExit:function(listener){return subscribe('renge-android-terminal-exit',listener);},"
+                        + "onSidebarTerminalRestarted:function(listener){return subscribe('renge-android-terminal-restarted',listener);},"
+                        + "onSidebarTerminalCreated:function(listener){return subscribe('renge-android-terminal-created',listener);},"
+                        + "onSidebarTerminalClosed:function(listener){return subscribe('renge-android-terminal-closed',listener);},"
                         + "enterFullscreen:function(){window.RengeAndroidNative.enterFullscreen();},"
                         + "exitFullscreen:function(){window.RengeAndroidNative.exitFullscreen();}"
                         + "});"
                         + "window.rengeAndroid=api;"
                         + "})();";
         webView.evaluateJavascript(script, null);
+    }
+
+    void dispose() {
+        terminalManager.disposeAll();
     }
 
     @JavascriptInterface
@@ -141,9 +167,9 @@ public class AndroidWorkspaceBridge {
             JSONObject options = parseOptions(optionsJson);
             String url = requireBrowserUrl(options.optString("url", ""));
             activity.runOnUiThread(() -> {
-                Intent intent = new Intent(activity, BrowserActivity.class);
-                intent.putExtra(BrowserActivity.EXTRA_URL, url);
-                activity.startActivity(intent);
+                if (activity instanceof MainActivity) {
+                    ((MainActivity) activity).showEmbeddedBrowser(url);
+                }
             });
             JSONObject result = new JSONObject();
             result.put("ok", true);
@@ -151,6 +177,46 @@ public class AndroidWorkspaceBridge {
             return result.toString();
         } catch (Exception error) {
             return errorJson(error);
+        }
+    }
+
+    @JavascriptInterface
+    public String browserCommand(String optionsJson) {
+        try {
+            JSONObject options = parseOptions(optionsJson);
+            String command = options.optString("command", "").trim().toLowerCase();
+            if (command.isEmpty()) throw new IOException("Android 浏览器操作不能为空");
+            activity.runOnUiThread(() -> {
+                if (activity instanceof MainActivity) {
+                    try {
+                        ((MainActivity) activity).handleAndroidBrowserCommand(options);
+                    } catch (Exception error) {
+                        Toast.makeText(activity, "浏览器操作失败：" + error.getMessage(), Toast.LENGTH_SHORT).show();
+                    }
+                }
+            });
+            JSONObject result = new JSONObject();
+            result.put("ok", true);
+            result.put("command", command);
+            return result.toString();
+        } catch (Exception error) {
+            return errorJson(error);
+        }
+    }
+
+    @JavascriptInterface
+    public void browserRequest(String requestId, String optionsJson) {
+        try {
+            JSONObject options = parseOptions(optionsJson);
+            activity.runOnUiThread(() -> {
+                if (activity instanceof MainActivity) {
+                    ((MainActivity) activity).handleAndroidBrowserRequest(requestId, options);
+                } else {
+                    reject(requestId, "Android 浏览器宿主不可用");
+                }
+            });
+        } catch (Exception error) {
+            reject(requestId, error.getMessage());
         }
     }
 
@@ -822,6 +888,98 @@ public class AndroidWorkspaceBridge {
         } catch (JSONException ignored) {
         }
         return payload.toString();
+    }
+
+    @JavascriptInterface
+    public String listSidebarTerminals(String optionsJson) {
+        try {
+            return terminalManager.list(parseOptions(optionsJson)).toString();
+        } catch (Exception error) {
+            return errorJson(error);
+        }
+    }
+
+    @JavascriptInterface
+    public String createSidebarTerminal(String optionsJson) {
+        try {
+            return terminalManager.create(parseOptions(optionsJson)).toString();
+        } catch (Exception error) {
+            return errorJson(error);
+        }
+    }
+
+    @JavascriptInterface
+    public String readSidebarTerminal(String optionsJson) {
+        try {
+            return terminalManager.read(parseOptions(optionsJson)).toString();
+        } catch (Exception error) {
+            return errorJson(error);
+        }
+    }
+
+    @JavascriptInterface
+    public String writeSidebarTerminal(String optionsJson) {
+        try {
+            return terminalManager.write(parseOptions(optionsJson)).toString();
+        } catch (Exception error) {
+            return errorJson(error);
+        }
+    }
+
+    @JavascriptInterface
+    public String resizeSidebarTerminal(String optionsJson) {
+        try {
+            return terminalManager.resize(parseOptions(optionsJson)).toString();
+        } catch (Exception error) {
+            return errorJson(error);
+        }
+    }
+
+    @JavascriptInterface
+    public String restartSidebarTerminal(String optionsJson) {
+        try {
+            return terminalManager.restart(parseOptions(optionsJson)).toString();
+        } catch (Exception error) {
+            return errorJson(error);
+        }
+    }
+
+    @JavascriptInterface
+    public String closeSidebarTerminal(String optionsJson) {
+        try {
+            return terminalManager.close(parseOptions(optionsJson)).toString();
+        } catch (Exception error) {
+            return errorJson(error);
+        }
+    }
+
+    private AndroidTerminalManager.LaunchConfig getTerminalLaunchConfig(
+            String workspaceKey,
+            String requestedCwd
+    ) {
+        if ("default".equals(workspaceKey)) {
+            return new AndroidTerminalManager.LaunchConfig(activity.getFilesDir().getAbsolutePath(), false);
+        }
+        String rootWorkspaceKeyPrefix = "android:root:";
+        String requestedRootPath = requestedCwd.startsWith("root:")
+                ? requestedCwd.substring("root:".length())
+                : requestedCwd;
+        if (workspaceKey.startsWith(rootWorkspaceKeyPrefix)) {
+            String keyedRootPath = workspaceKey.substring(rootWorkspaceKeyPrefix.length());
+            if (!keyedRootPath.trim().isEmpty()
+                    && (requestedRootPath.isEmpty() || keyedRootPath.equals(requestedRootPath))) {
+                return new AndroidTerminalManager.LaunchConfig(keyedRootPath, true);
+            }
+        }
+        return new AndroidTerminalManager.LaunchConfig(activity.getFilesDir().getAbsolutePath(), false);
+    }
+
+    private void emitTerminalEvent(String eventName, JSONObject payload) {
+        activity.runOnUiThread(() -> webView.evaluateJavascript(
+                "window.dispatchEvent(new CustomEvent(" + quote("renge-android-terminal-" + eventName)
+                        + ",{detail:" + payload.toString() + "}))",
+                null
+        ));
     }
 
     private void resolve(String requestId, JSONObject payload) {

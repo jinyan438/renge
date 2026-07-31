@@ -7,7 +7,9 @@ import {
   getFileBrowserMimeType,
   getFileBrowserPreviewKind,
   getFileBrowserRootPath,
+  getWorkspaceHandleKey,
   normalizeFileBrowserEntries,
+  scopeWorkspaceHandleToSession,
 } from "../src/fileBrowserUtils.ts";
 
 test("classifies source, markdown, image, and unsupported files", () => {
@@ -51,4 +53,19 @@ test("formats compact file sizes", () => {
   assert.equal(formatFileBrowserSize(850), "850 B");
   assert.equal(formatFileBrowserSize(1536), "1.5 KB");
   assert.equal(formatFileBrowserSize(5 * 1024 * 1024), "5.0 MB");
+});
+
+test("scopes file handles to the chat workspace and excludes the default workspace", () => {
+  const electronHandle = { kind: "electron", path: "E:\\projects\\test3" };
+  const androidHandle = { kind: "android", uri: "root:/data/project" };
+  const pcHandle = { kind: "pc", baseUrl: "http://127.0.0.1:5191", path: "E:\\pc" };
+  const browserHandle = { kind: "directory", name: "browser-project" };
+
+  assert.equal(getWorkspaceHandleKey(electronHandle), "E:\\projects\\test3");
+  assert.equal(getWorkspaceHandleKey(androidHandle), "android:root:/data/project");
+  assert.equal(getWorkspaceHandleKey(pcHandle), "pc:http://127.0.0.1:5191:E:\\pc");
+  assert.equal(getWorkspaceHandleKey(browserHandle), "browser:browser-project");
+  assert.equal(scopeWorkspaceHandleToSession(electronHandle, electronHandle.path), electronHandle);
+  assert.equal(scopeWorkspaceHandleToSession(electronHandle, "default"), null);
+  assert.equal(scopeWorkspaceHandleToSession(electronHandle, "E:\\projects\\other"), null);
 });

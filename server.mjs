@@ -3159,14 +3159,95 @@ async function serveStatic(request, response, pathname) {
   }
 }
 
+async function serveTemporaryFilePreview(
+  request,
+  response,
+  pathname,
+  temporaryFilesRoot,
+) {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    response.writeHead(405, { Allow: "GET, HEAD" });
+    response.end("Method not allowed");
+    return;
+  }
+  if (!temporaryFilesRoot) {
+    response.writeHead(404);
+    response.end("Not found");
+    return;
+  }
+
+  let requestedPath;
+  try {
+    requestedPath = decodeURIComponent(pathname.slice("/temporary-files/".length));
+  } catch {
+    response.writeHead(400);
+    response.end("Invalid path");
+    return;
+  }
+  if (!requestedPath || requestedPath.includes("\0")) {
+    response.writeHead(404);
+    response.end("Not found");
+    return;
+  }
+
+  try {
+    const rootPath = await realpath(temporaryFilesRoot);
+    const filePath = await realpath(resolve(rootPath, requestedPath));
+    const relativePath = relative(rootPath, filePath);
+    const outsideRoot =
+      relativePath === ".."
+      || relativePath.startsWith("../")
+      || relativePath.startsWith("..\\")
+      || isAbsolute(relativePath);
+    if (outsideRoot) {
+      response.writeHead(403);
+      response.end("Forbidden");
+      return;
+    }
+
+    const fileStat = await stat(filePath);
+    if (!fileStat.isFile()) {
+      response.writeHead(404);
+      response.end("Not found");
+      return;
+    }
+    const extension = extname(filePath).toLowerCase();
+    response.writeHead(200, {
+      "Content-Type": mimeTypes[extension] ?? "application/octet-stream",
+      "Content-Length": fileStat.size,
+      "Cache-Control": "no-store",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+    });
+    if (request.method === "HEAD") response.end();
+    else await pipeline(createReadStream(filePath), response);
+  } catch {
+    if (!response.headersSent) response.writeHead(404);
+    if (!response.writableEnded) response.end("Not found");
+  }
+}
+
 export function startRengeServer(options = {}) {
   const host = options.host ?? "::";
   const port = options.port ?? defaultPort;
   const dataDir = resolve(options.dataDir ?? getDefaultDataDir());
   const dataFilePath = resolve(dataDir, appDataFileName);
+  const temporaryFilesRoot = options.temporaryFilesRoot
+    ? resolve(options.temporaryFilesRoot)
+    : "";
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     const isHtmlPreviewOrigin = url.hostname.toLowerCase() === "preview.localhost";
+
+    if (isHtmlPreviewOrigin && url.pathname.startsWith("/temporary-files/")) {
+      await serveTemporaryFilePreview(
+        request,
+        response,
+        url.pathname,
+        temporaryFilesRoot,
+      );
+      return;
+    }
 
     if (
       isHtmlPreviewOrigin &&
