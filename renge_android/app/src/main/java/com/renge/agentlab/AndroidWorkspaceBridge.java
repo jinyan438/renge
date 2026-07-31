@@ -86,12 +86,14 @@ public class AndroidWorkspaceBridge {
                         + "window.__rengeAndroidReject=function(id,message){if(!pending[id])return;pending[id].reject(new Error(message||'Android workspace error'));delete pending[id];};"
                         + "function parse(text){var payload=JSON.parse(text);if(payload&&payload.error)throw new Error(payload.error);return payload;}"
                         + "function call(name,options){return Promise.resolve().then(function(){return parse(window.RengeAndroidNative[name](JSON.stringify(options||{})));});}"
+                        + "function request(name,options){return new Promise(function(resolve,reject){var id=String(Date.now())+Math.random().toString(16).slice(2);pending[id]={resolve:resolve,reject:reject};window.RengeAndroidNative[name](id,JSON.stringify(options||{}));});}"
                         + "var api=window.rengeAndroid||{};"
                         + "Object.assign(api,{"
                         + "isAndroid:true,"
                         + "saveDownload:function(options){return call('saveDownload',options);},"
                         + "openBrowser:function(options){return call('openBrowser',options);},"
                         + "browserCommand:function(options){return call('browserCommand',options);},"
+                        + "browserRequest:function(options){return request('browserRequest',options);},"
                         + "selectWorkspace:function(){return new Promise(function(resolve,reject){var id=String(Date.now())+Math.random().toString(16).slice(2);pending[id]={resolve:resolve,reject:reject};window.RengeAndroidNative.selectWorkspace(id);});},"
                         + "selectRootWorkspace:function(options){return call('selectRootWorkspace',options);},"
                         + "restoreWorkspace:function(options){return call('restoreWorkspace',options);},"
@@ -160,30 +162,14 @@ public class AndroidWorkspaceBridge {
         try {
             JSONObject options = parseOptions(optionsJson);
             String command = options.optString("command", "").trim().toLowerCase();
-            if (!("open".equals(command)
-                    || "layout".equals(command)
-                    || "back".equals(command)
-                    || "forward".equals(command)
-                    || "reload".equals(command)
-                    || "stop".equals(command)
-                    || "close".equals(command))) {
-                throw new IOException("未知 Android 浏览器操作");
-            }
-            String url = options.optString("url", "");
-            int left = Math.max(0, options.optInt("left", 0));
-            int top = Math.max(0, options.optInt("top", 0));
-            int width = Math.max(0, options.optInt("width", 0));
-            int height = Math.max(0, options.optInt("height", 0));
+            if (command.isEmpty()) throw new IOException("Android 浏览器操作不能为空");
             activity.runOnUiThread(() -> {
                 if (activity instanceof MainActivity) {
-                    ((MainActivity) activity).handleEmbeddedBrowserCommand(
-                            command,
-                            url,
-                            left,
-                            top,
-                            width,
-                            height
-                    );
+                    try {
+                        ((MainActivity) activity).handleAndroidBrowserCommand(options);
+                    } catch (Exception error) {
+                        Toast.makeText(activity, "浏览器操作失败：" + error.getMessage(), Toast.LENGTH_SHORT).show();
+                    }
                 }
             });
             JSONObject result = new JSONObject();
@@ -192,6 +178,22 @@ public class AndroidWorkspaceBridge {
             return result.toString();
         } catch (Exception error) {
             return errorJson(error);
+        }
+    }
+
+    @JavascriptInterface
+    public void browserRequest(String requestId, String optionsJson) {
+        try {
+            JSONObject options = parseOptions(optionsJson);
+            activity.runOnUiThread(() -> {
+                if (activity instanceof MainActivity) {
+                    ((MainActivity) activity).handleAndroidBrowserRequest(requestId, options);
+                } else {
+                    reject(requestId, "Android 浏览器宿主不可用");
+                }
+            });
+        } catch (Exception error) {
+            reject(requestId, error.getMessage());
         }
     }
 

@@ -20,7 +20,6 @@ import android.view.WindowInsetsController;
 import android.widget.FrameLayout;
 import android.widget.Toast;
 import android.webkit.ValueCallback;
-import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebResourceRequest;
@@ -42,8 +41,7 @@ public class MainActivity extends Activity {
 
     private WebView webView;
     private FrameLayout rootLayout;
-    private WebView embeddedBrowserWebView;
-    private boolean embeddedBrowserLoading;
+    private AndroidBrowserHost androidBrowserHost;
     private LocalWebServer localWebServer;
     private AndroidWorkspaceBridge androidWorkspaceBridge;
     private ValueCallback<Uri[]> fileChooserCallback;
@@ -69,6 +67,7 @@ public class MainActivity extends Activity {
         ));
         rootLayout.addView(webView);
         setContentView(rootLayout);
+        androidBrowserHost = new AndroidBrowserHost(this, rootLayout, webView);
 
         WebView.setWebContentsDebuggingEnabled(true);
 
@@ -179,21 +178,7 @@ public class MainActivity extends Activity {
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onShowCustomView(View view, CustomViewCallback callback) {
-                if (customFullscreenView != null) {
-                    callback.onCustomViewHidden();
-                    return;
-                }
-
-                customFullscreenView = view;
-                customFullscreenCallback = callback;
-                FrameLayout decor = (FrameLayout) getWindow().getDecorView();
-                view.setBackgroundColor(Color.BLACK);
-                decor.addView(view, new FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                ));
-                webView.setVisibility(View.GONE);
-                hideSystemBars();
+                showCustomFullscreenView(view, callback);
             }
 
             @Override
@@ -207,20 +192,7 @@ public class MainActivity extends Activity {
                     ValueCallback<Uri[]> filePathCallback,
                     FileChooserParams fileChooserParams
             ) {
-                if (fileChooserCallback != null) {
-                    fileChooserCallback.onReceiveValue(null);
-                }
-                fileChooserCallback = filePathCallback;
-
-                Intent intent = fileChooserParams.createIntent();
-                intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-                try {
-                    startActivityForResult(intent, FILE_CHOOSER_REQUEST);
-                    return true;
-                } catch (Exception ignored) {
-                    fileChooserCallback = null;
-                    return false;
-                }
+                return openFileChooser(filePathCallback, fileChooserParams);
             }
         });
 
@@ -241,216 +213,77 @@ public class MainActivity extends Activity {
 
     private void openBrowserIntent(Uri uri) {
         String action = uri.getHost() == null ? "" : uri.getHost().toLowerCase();
-        handleEmbeddedBrowserCommand(
-                action,
-                uri.getQueryParameter("url"),
-                parsePositiveInt(uri.getQueryParameter("left"), 0),
-                parsePositiveInt(uri.getQueryParameter("top"), 0),
-                parsePositiveInt(uri.getQueryParameter("width"), 0),
-                parsePositiveInt(uri.getQueryParameter("height"), 0)
-        );
-    }
-
-    void handleEmbeddedBrowserCommand(
-            String action,
-            String url,
-            int left,
-            int top,
-            int width,
-            int height
-    ) {
-        switch (action) {
-            case "open":
-                if (url == null || url.trim().isEmpty()) {
-                    Toast.makeText(this, "请输入网址或搜索内容", Toast.LENGTH_SHORT).show();
-                    return;
-                }
-                showEmbeddedBrowser(url, left, top, width, height);
-                return;
-            case "layout":
-                updateEmbeddedBrowserLayout(left, top, width, height);
-                return;
-            case "back":
-                if (embeddedBrowserWebView != null && embeddedBrowserWebView.canGoBack()) {
-                    embeddedBrowserWebView.goBack();
-                }
-                return;
-            case "forward":
-                if (embeddedBrowserWebView != null && embeddedBrowserWebView.canGoForward()) {
-                    embeddedBrowserWebView.goForward();
-                }
-                return;
-            case "reload":
-                if (embeddedBrowserWebView != null) embeddedBrowserWebView.reload();
-                return;
-            case "stop":
-                if (embeddedBrowserWebView != null) {
-                    embeddedBrowserWebView.stopLoading();
-                    embeddedBrowserLoading = false;
-                    dispatchEmbeddedBrowserState();
-                }
-                return;
-            case "close":
-                hideEmbeddedBrowser();
-                return;
-            default:
-                return;
+        try {
+            JSONObject options = new JSONObject();
+            options.put("command", action);
+            options.put("tabId", uri.getQueryParameter("tabId") == null
+                    ? "android-intent-tab"
+                    : uri.getQueryParameter("tabId"));
+            options.put("url", uri.getQueryParameter("url"));
+            options.put("left", uri.getQueryParameter("left"));
+            options.put("top", uri.getQueryParameter("top"));
+            options.put("width", uri.getQueryParameter("width"));
+            options.put("height", uri.getQueryParameter("height"));
+            handleAndroidBrowserCommand(options);
+        } catch (Exception error) {
+            Toast.makeText(this, "浏览器操作失败：" + error.getMessage(), Toast.LENGTH_SHORT).show();
         }
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
-    private WebView ensureEmbeddedBrowserWebView() {
-        if (embeddedBrowserWebView != null) return embeddedBrowserWebView;
+    JSONObject handleAndroidBrowserCommand(JSONObject options) throws Exception {
+        if (androidBrowserHost == null) throw new IllegalStateException("Android 浏览器尚未准备好");
+        return androidBrowserHost.command(options);
+    }
 
-        WebView browser = new WebView(this);
-        WebSettings settings = browser.getSettings();
-        settings.setJavaScriptEnabled(true);
-        settings.setDomStorageEnabled(true);
-        settings.setDatabaseEnabled(true);
-        settings.setAllowFileAccess(true);
-        settings.setAllowContentAccess(true);
-        settings.setMediaPlaybackRequiresUserGesture(false);
-        settings.setUseWideViewPort(true);
-        settings.setLoadWithOverviewMode(true);
-        settings.setSupportZoom(true);
-        settings.setBuiltInZoomControls(true);
-        settings.setDisplayZoomControls(false);
-        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
-        CookieManager.getInstance().setAcceptCookie(true);
-        CookieManager.getInstance().setAcceptThirdPartyCookies(browser, true);
-
-        browser.setBackgroundColor(Color.WHITE);
-        browser.setVisibility(View.GONE);
-        browser.setWebViewClient(new WebViewClient() {
-            @Override
-            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                Uri target = request.getUrl();
-                String scheme = target.getScheme();
-                if ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) {
-                    return false;
-                }
-                try {
-                    startActivity(new Intent(Intent.ACTION_VIEW, target));
-                } catch (Exception error) {
-                    Toast.makeText(MainActivity.this, "无法打开此链接", Toast.LENGTH_SHORT).show();
-                }
-                return true;
-            }
-
-            @Override
-            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
-                super.onPageStarted(view, url, favicon);
-                embeddedBrowserLoading = true;
-                dispatchEmbeddedBrowserState();
-            }
-
-            @Override
-            public void onPageFinished(WebView view, String url) {
-                super.onPageFinished(view, url);
-                embeddedBrowserLoading = false;
-                dispatchEmbeddedBrowserState();
-            }
-        });
-        browser.setWebChromeClient(new WebChromeClient() {
-            @Override
-            public void onProgressChanged(WebView view, int newProgress) {
-                embeddedBrowserLoading = newProgress < 100;
-                dispatchEmbeddedBrowserState();
-            }
-
-            @Override
-            public void onReceivedTitle(WebView view, String title) {
-                dispatchEmbeddedBrowserState();
-            }
-        });
-        rootLayout.addView(browser, new FrameLayout.LayoutParams(1, 1));
-        embeddedBrowserWebView = browser;
-        return browser;
+    void handleAndroidBrowserRequest(String requestId, JSONObject options) {
+        if (androidBrowserHost == null) return;
+        androidBrowserHost.request(requestId, options);
     }
 
     void showEmbeddedBrowser(String url) {
-        showEmbeddedBrowser(url, 0, 0, 0, 0);
+        try {
+            JSONObject options = new JSONObject();
+            options.put("command", "open");
+            options.put("tabId", "android-default-tab");
+            options.put("url", url);
+            handleAndroidBrowserCommand(options);
+        } catch (Exception error) {
+            Toast.makeText(this, "浏览器打开失败：" + error.getMessage(), Toast.LENGTH_SHORT).show();
+        }
     }
 
-    private void showEmbeddedBrowser(
-            String url,
-            int left,
-            int top,
-            int width,
-            int height
+    boolean openFileChooser(
+            ValueCallback<Uri[]> filePathCallback,
+            WebChromeClient.FileChooserParams fileChooserParams
     ) {
-        Uri target = Uri.parse(url == null ? "" : url.trim());
-        String scheme = target.getScheme();
-        if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
-            Toast.makeText(this, "仅支持 HTTP 或 HTTPS 网页", Toast.LENGTH_SHORT).show();
+        if (fileChooserCallback != null) fileChooserCallback.onReceiveValue(null);
+        fileChooserCallback = filePathCallback;
+        Intent intent = fileChooserParams.createIntent();
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        try {
+            startActivityForResult(intent, FILE_CHOOSER_REQUEST);
+            return true;
+        } catch (Exception ignored) {
+            fileChooserCallback = null;
+            return false;
+        }
+    }
+
+    void showCustomFullscreenView(View view, WebChromeClient.CustomViewCallback callback) {
+        if (customFullscreenView != null) {
+            callback.onCustomViewHidden();
             return;
         }
-        WebView browser = ensureEmbeddedBrowserWebView();
-        if (width > 0 && height > 0) {
-            updateEmbeddedBrowserLayout(left, top, width, height);
-        }
-        browser.setVisibility(View.VISIBLE);
-        browser.bringToFront();
-        browser.loadUrl(target.toString());
-    }
-
-    private void updateEmbeddedBrowserLayout(int left, int top, int width, int height) {
-        if (embeddedBrowserWebView == null || width <= 0 || height <= 0) return;
-        int safeLeft = Math.max(0, left);
-        int safeTop = Math.max(0, top);
-        int safeWidth = width;
-        int safeHeight = height;
-        if (rootLayout.getWidth() > safeLeft) {
-            safeWidth = Math.min(safeWidth, rootLayout.getWidth() - safeLeft);
-        }
-        if (rootLayout.getHeight() > safeTop) {
-            safeHeight = Math.min(safeHeight, rootLayout.getHeight() - safeTop);
-        }
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                Math.max(1, safeWidth),
-                Math.max(1, safeHeight)
-        );
-        params.leftMargin = safeLeft;
-        params.topMargin = safeTop;
-        embeddedBrowserWebView.setLayoutParams(params);
-    }
-
-    private int parsePositiveInt(String value, int fallback) {
-        try {
-            return Math.max(fallback, Integer.parseInt(value == null ? "" : value));
-        } catch (NumberFormatException ignored) {
-            return fallback;
-        }
-    }
-
-    private void hideEmbeddedBrowser() {
-        if (embeddedBrowserWebView == null) return;
-        embeddedBrowserWebView.stopLoading();
-        embeddedBrowserLoading = false;
-        embeddedBrowserWebView.setVisibility(View.GONE);
-        dispatchEmbeddedBrowserState();
-    }
-
-    private void dispatchEmbeddedBrowserState() {
-        if (webView == null || embeddedBrowserWebView == null) return;
-        try {
-            JSONObject state = new JSONObject();
-            state.put("url", embeddedBrowserWebView.getUrl() == null
-                    ? "about:blank"
-                    : embeddedBrowserWebView.getUrl());
-            state.put("title", embeddedBrowserWebView.getTitle() == null
-                    ? "新页面"
-                    : embeddedBrowserWebView.getTitle());
-            state.put("canGoBack", embeddedBrowserWebView.canGoBack());
-            state.put("canGoForward", embeddedBrowserWebView.canGoForward());
-            state.put("loading", embeddedBrowserLoading);
-            state.put("visible", embeddedBrowserWebView.getVisibility() == View.VISIBLE);
-            String script = "window.dispatchEvent(new CustomEvent('renge-android-browser-state',{detail:"
-                    + state.toString()
-                    + "}));";
-            webView.evaluateJavascript(script, null);
-        } catch (Exception ignored) {
-        }
+        customFullscreenView = view;
+        customFullscreenCallback = callback;
+        FrameLayout decor = (FrameLayout) getWindow().getDecorView();
+        view.setBackgroundColor(Color.BLACK);
+        decor.addView(view, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        webView.setVisibility(View.GONE);
+        hideSystemBars();
     }
 
     @Override
@@ -489,15 +322,7 @@ public class MainActivity extends Activity {
             exitHtmlFullscreen(true);
             return;
         }
-        if (embeddedBrowserWebView != null
-                && embeddedBrowserWebView.getVisibility() == View.VISIBLE) {
-            if (embeddedBrowserWebView.canGoBack()) {
-                embeddedBrowserWebView.goBack();
-            } else {
-                hideEmbeddedBrowser();
-            }
-            return;
-        }
+        if (androidBrowserHost != null && androidBrowserHost.handleBackPressed()) return;
         if (webView != null && webView.canGoBack()) {
             webView.goBack();
             return;
@@ -518,11 +343,8 @@ public class MainActivity extends Activity {
         if (localWebServer != null) {
             localWebServer.stop();
         }
-        if (embeddedBrowserWebView != null) {
-            embeddedBrowserWebView.stopLoading();
-            embeddedBrowserWebView.destroy();
-            embeddedBrowserWebView = null;
-        }
+        if (androidBrowserHost != null) androidBrowserHost.destroy();
+        androidBrowserHost = null;
         if (webView != null) {
             webView.destroy();
         }
@@ -546,7 +368,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void hideCustomFullscreenView() {
+    void hideCustomFullscreenView() {
         if (customFullscreenView == null) return;
         ViewGroup parent = (ViewGroup) customFullscreenView.getParent();
         if (parent != null) parent.removeView(customFullscreenView);

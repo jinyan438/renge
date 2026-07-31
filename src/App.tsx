@@ -233,6 +233,8 @@ import {
   browserToolDefinitions,
   buildBrowserToolsSystemPrompt,
   executeBrowserTool,
+  isAndroidAppShell,
+  isBrowserAddressInputAvailable,
   isBrowserToolName,
 } from "./browserSidebarRuntime";
 import {
@@ -1016,12 +1018,19 @@ type RengeAndroidApi = {
   openBrowser?(options: { url: string }): Promise<{ ok: boolean; url: string }>;
   browserCommand?(options: {
     command: string;
+    tabId?: string;
     url?: string;
     left?: number;
     top?: number;
     width?: number;
     height?: number;
+    [key: string]: unknown;
   }): Promise<{ ok: boolean; command: string }>;
+  browserRequest?(options: {
+    operation: string;
+    tabId?: string;
+    [key: string]: unknown;
+  }): Promise<unknown>;
   saveDownload(options: {
     fileName: string;
     mimeType?: string;
@@ -1083,6 +1092,7 @@ type RengeAndroidApi = {
 type RengeAndroidNativeBridge = {
   openBrowser?(optionsJson: string): string;
   browserCommand?(optionsJson: string): string;
+  browserRequest?(requestId: string, optionsJson: string): void;
 };
 
 declare global {
@@ -19706,7 +19716,13 @@ export function App() {
       type: "function" as const,
       function: tool.function,
     }));
-    const browserTools = window.rengeDesktop?.isElectron ? browserToolDefinitions : [];
+    const browserTools = isBrowserAddressInputAvailable(
+      Boolean(window.rengeDesktop?.isElectron),
+      Boolean(
+        window.rengeAndroid?.isAndroid
+        || isAndroidAppShell(window.location.search, window.navigator.userAgent),
+      ),
+    ) ? browserToolDefinitions : [];
     return [
       ...(chatChoiceToolsEnabled ? chatChoiceToolDefinitions : []),
       ...localTools,
