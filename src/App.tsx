@@ -227,6 +227,17 @@ import {
   truncateContextSummary,
   type ContextCompressionSettings,
 } from "./contextCompressionUtils";
+import {
+  DEFAULT_LLM_CONTEXT_SETTINGS,
+  LLM_CONTEXT_MODES,
+  LLM_CONTEXT_SOURCES,
+  normalizeLlmContextSettings,
+  updateLlmContextSource,
+  type LlmContextMode,
+  type LlmContextModeSettings,
+  type LlmContextSettings,
+  type LlmContextSource,
+} from "./llmContextSettings";
 import { StatusBarSidebar } from "./StatusBarSidebar";
 import type { FileBrowserSource, FileBrowserSystemAction } from "./FilesSidebarPanel";
 import { scopeWorkspaceHandleToSession } from "./fileBrowserUtils";
@@ -411,7 +422,7 @@ type ExtensionRuntimeState = {
   status: "idle" | "loading" | "active" | "error";
   message: string;
 };
-type ChatMode = "ai" | "persona" | "multi" | "roleplay";
+type ChatMode = LlmContextMode;
 type ComposerModelMenuSection = "provider" | "model" | "reasoning";
 type ChatRole = "user" | "assistant";
 type ChatApiRole = "system" | "user" | "assistant" | "tool";
@@ -802,6 +813,7 @@ type RengeAppData = {
   chatDialogueRewriteEnabled?: boolean;
   chatRenderedEditingEnabled?: boolean;
   llmFullAccessEnabled?: boolean;
+  llmContextSettings?: LlmContextSettings;
   contextCompressionSettings?: ContextCompressionSettings;
   chatPersonalization?: ChatPersonalizationSettings;
   mcpServers?: McpServerConfig[];
@@ -1259,6 +1271,7 @@ const CHAT_CHOICE_TOOLS_ENABLED_STORAGE_KEY = "renge_chat_choice_tools_enabled";
 const CHAT_DIALOGUE_REWRITE_ENABLED_STORAGE_KEY = "renge_chat_dialogue_rewrite_enabled";
 const CHAT_RENDERED_EDITING_ENABLED_STORAGE_KEY = "renge_chat_rendered_editing_enabled";
 const LLM_FULL_ACCESS_ENABLED_STORAGE_KEY = "renge_llm_full_access_enabled";
+const LLM_CONTEXT_SETTINGS_STORAGE_KEY = "renge_llm_context_settings";
 const CONTEXT_COMPRESSION_SETTINGS_STORAGE_KEY = "renge_context_compression_settings";
 const CHAT_PERSONALIZATION_STORAGE_KEY = "renge_chat_personalization";
 const MCP_SERVERS_STORAGE_KEY = "renge_mcp_servers";
@@ -1304,6 +1317,37 @@ const DEFAULT_CHAT_PERSONALIZATION: ChatPersonalizationSettings = {
   italicStyleColor: "#808080",
   wallpaperMaskOpacity: 70,
   bubbleOpacity: 100,
+};
+const LLM_CONTEXT_MODE_LABELS: Record<LlmContextMode, string> = {
+  ai: "AI",
+  persona: "人格 Agent",
+  multi: "多 Agent",
+  roleplay: "角色扮演",
+};
+const LLM_CONTEXT_SOURCE_META: Record<
+  LlmContextSource,
+  { label: string; description: string }
+> = {
+  skills: {
+    label: "Skills 提示词",
+    description: "注入所有已启用 Skill 的完整说明。",
+  },
+  workspaceTools: {
+    label: "工作区文件工具",
+    description: "提供文件读取、写入、搜索、项目分析及其使用说明。",
+  },
+  browserTools: {
+    label: "浏览器工具",
+    description: "提供右侧栏浏览器的导航、检查和交互能力。",
+  },
+  terminalTools: {
+    label: "终端工具",
+    description: "提供终端创建、输入、读取、调整和关闭能力。",
+  },
+  mcpTools: {
+    label: "MCP 工具",
+    description: "发现并注入所有已启用 MCP 服务器的工具。",
+  },
 };
 const CHAT_MESSAGE_FONT_OPTIONS: Array<{
   value: ChatMessageFontFamily;
@@ -1457,6 +1501,15 @@ function loadContextCompressionSettings() {
       : { ...DEFAULT_CONTEXT_COMPRESSION_SETTINGS };
   } catch {
     return { ...DEFAULT_CONTEXT_COMPRESSION_SETTINGS };
+  }
+}
+
+function loadLlmContextSettings() {
+  try {
+    const rawValue = localStorage.getItem(LLM_CONTEXT_SETTINGS_STORAGE_KEY);
+    return normalizeLlmContextSettings(rawValue ? JSON.parse(rawValue) : null);
+  } catch {
+    return normalizeLlmContextSettings(null);
   }
 }
 
@@ -2810,6 +2863,10 @@ function persistAppDataToLocalStores(
   setLocalStorageValueSafely(
     LLM_FULL_ACCESS_ENABLED_STORAGE_KEY,
     String(data.llmFullAccessEnabled ?? false),
+  );
+  setLocalStorageJsonSafely(
+    LLM_CONTEXT_SETTINGS_STORAGE_KEY,
+    normalizeLlmContextSettings(data.llmContextSettings),
   );
   setLocalStorageJsonSafely(
     CONTEXT_COMPRESSION_SETTINGS_STORAGE_KEY,
@@ -11551,6 +11608,10 @@ export function App() {
   const [llmFullAccessEnabled, setLlmFullAccessEnabled] = useState(
     () => localStorage.getItem(LLM_FULL_ACCESS_ENABLED_STORAGE_KEY) === "true",
   );
+  const [llmContextSettings, setLlmContextSettings] =
+    useState<LlmContextSettings>(loadLlmContextSettings);
+  const [llmContextSettingsMode, setLlmContextSettingsMode] =
+    useState<LlmContextMode>("ai");
   const [contextCompressionSettings, setContextCompressionSettings] =
     useState<ContextCompressionSettings>(loadContextCompressionSettings);
   const contextSummaryCacheRef = useRef(new Map<string, string>());
@@ -12654,6 +12715,7 @@ export function App() {
       chatDialogueRewriteEnabled,
       chatRenderedEditingEnabled,
       llmFullAccessEnabled,
+      llmContextSettings,
       contextCompressionSettings,
       chatPersonalization,
       mcpServers,
@@ -12662,7 +12724,7 @@ export function App() {
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
       updatedAt: new Date().toISOString(),
     };
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, contextCompressionSettings, extensions, llmFullAccessEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, contextCompressionSettings, extensions, llmContextSettings, llmFullAccessEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -12851,6 +12913,9 @@ export function App() {
         typeof persistentData?.llmFullAccessEnabled === "boolean"
           ? persistentData.llmFullAccessEnabled
           : localStorage.getItem(LLM_FULL_ACCESS_ENABLED_STORAGE_KEY) === "true";
+      const nextLlmContextSettings = normalizeLlmContextSettings(
+        persistentData?.llmContextSettings ?? loadLlmContextSettings(),
+      );
       const nextContextCompressionSettings = normalizeContextCompressionSettings(
         persistentData?.contextCompressionSettings ?? loadContextCompressionSettings(),
       );
@@ -13018,6 +13083,7 @@ export function App() {
       setChatDialogueRewriteEnabled(nextChatDialogueRewriteEnabled);
       setChatRenderedEditingEnabled(nextChatRenderedEditingEnabled);
       setLlmFullAccessEnabled(nextLlmFullAccessEnabled);
+      setLlmContextSettings(nextLlmContextSettings);
       setContextCompressionSettings(nextContextCompressionSettings);
       setChatPersonalization(nextChatPersonalization);
       setMcpServers(nextMcpServers);
@@ -15144,6 +15210,7 @@ export function App() {
   const activeLocalToolsSystemPrompt = activeFileToolsWorkspaceHandle && activeLocalToolsEnabled
     ? buildLocalToolsSystemPrompt(activeFileToolsWorkspaceHandle, llmFullAccessEnabled)
     : buildUnavailableLocalToolsSystemPrompt(activeWorkspaceKey);
+  const activeLlmContextSettings = llmContextSettings[chatMode];
   const workspaceInfo = getWorkspaceInfo(localWorkspaceHandle);
   const fileBrowserSource = useMemo<FileBrowserSource | null>(() => {
     if (activeLocalWorkspaceHandle?.kind === "electron") {
@@ -17647,6 +17714,10 @@ export function App() {
     { ...contextCompressionSettings, enabled: true },
     selectedModelValue,
   );
+  const editedLlmContextSettings = llmContextSettings[llmContextSettingsMode];
+  const enabledLlmContextSourceCount = LLM_CONTEXT_SOURCES.filter(
+    (source) => editedLlmContextSettings[source],
+  ).length;
 
   const activeTypes = activePersona?.entryTypes ?? [];
   const selectedEntryType =
@@ -17693,6 +17764,22 @@ export function App() {
       ),
     );
     setProviderPullState({ status: "idle", message: "" });
+  };
+
+  const setLlmContextSourceEnabled = (
+    mode: LlmContextMode,
+    source: LlmContextSource,
+    enabled: boolean,
+  ) => {
+    setLlmContextSettings((current) =>
+      updateLlmContextSource(current, mode, source, enabled),
+    );
+    setContextRuntimeUsageByKey({});
+  };
+
+  const resetLlmContextSettings = () => {
+    setLlmContextSettings(normalizeLlmContextSettings(DEFAULT_LLM_CONTEXT_SETTINGS));
+    setContextRuntimeUsageByKey({});
   };
 
   const addContextCompressionModelLimit = () => {
@@ -19969,26 +20056,32 @@ export function App() {
     suppressAttachmentTransferTool = false,
     includeMultiAgentControlTools = false,
     delegationRoster: DelegationRoster = { entries: [] },
+    contextSettings: LlmContextModeSettings = DEFAULT_LLM_CONTEXT_SETTINGS.ai,
   ) => {
     const localToolsBase =
+      contextSettings.workspaceTools &&
       activeLocalToolsEnabled && activeFileToolsWorkspaceHandle
         ? getAvailableLocalToolDefinitions(activeFileToolsWorkspaceHandle)
         : [];
     const localTools = suppressAttachmentTransferTool
       ? localToolsBase.filter((tool) => tool.function.name !== "local_transfer_attachment_file")
       : localToolsBase;
-    const externalTools = mcpToolsForRequest.map((tool) => ({
-      type: "function" as const,
-      function: tool.function,
-    }));
-    const browserTools = isBrowserAddressInputAvailable(
+    const externalTools = contextSettings.mcpTools
+      ? mcpToolsForRequest.map((tool) => ({
+          type: "function" as const,
+          function: tool.function,
+        }))
+      : [];
+    const browserTools = contextSettings.browserTools && isBrowserAddressInputAvailable(
       Boolean(window.rengeDesktop?.isElectron),
       Boolean(
         window.rengeAndroid?.isAndroid
         || isAndroidAppShell(window.location.search, window.navigator.userAgent),
       ),
     ) ? browserToolDefinitions : [];
-    const terminalTools = isTerminalSidebarAvailable() ? terminalToolDefinitions : [];
+    const terminalTools = contextSettings.terminalTools && isTerminalSidebarAvailable()
+      ? terminalToolDefinitions
+      : [];
     return [
       ...(chatChoiceToolsEnabled ? chatChoiceToolDefinitions : []),
       ...localTools,
@@ -20168,10 +20261,19 @@ export function App() {
           )
         : "";
     const enabledMcpServerIds = new Set(enabledMcpServers.map((server) => server.id));
-    const meterMcpTools = mcpTools.filter((tool) => enabledMcpServerIds.has(tool.serverId));
+    const meterMcpTools = activeLlmContextSettings.mcpTools
+      ? mcpTools.filter((tool) => enabledMcpServerIds.has(tool.serverId))
+      : [];
     const availableTools = isImageGenerationModelId(meterModelId)
       ? []
-      : getAvailableChatToolDefinitions(meterMcpTools);
+      : getAvailableChatToolDefinitions(
+          meterMcpTools,
+          false,
+          false,
+          false,
+          { entries: [] },
+          activeLlmContextSettings,
+        );
     const systemPrompt = [
       selectedSystemPrompt,
       userProfileSystemPrompt,
@@ -20181,10 +20283,14 @@ export function App() {
       chatSenderContextPrompt,
       worldBookSystemPrompt,
       characterWorldBookSystemPrompt,
-      activeLocalToolsSystemPrompt,
-      window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
-      isTerminalSidebarAvailable() ? buildTerminalToolsSystemPrompt() : "",
-      buildMcpToolsSystemPrompt(meterMcpTools),
+      activeLlmContextSettings.workspaceTools ? activeLocalToolsSystemPrompt : "",
+      activeLlmContextSettings.browserTools && window.rengeDesktop?.isElectron
+        ? buildBrowserToolsSystemPrompt()
+        : "",
+      activeLlmContextSettings.terminalTools && isTerminalSidebarAvailable()
+        ? buildTerminalToolsSystemPrompt()
+        : "",
+      activeLlmContextSettings.mcpTools ? buildMcpToolsSystemPrompt(meterMcpTools) : "",
       availableTools.some((tool) => isChatChoiceToolName(tool.function.name))
         ? buildChatChoiceSystemPrompt()
         : "",
@@ -20285,6 +20391,7 @@ export function App() {
     activeChatPreset,
     activeChatPresetRequestParameters?.max_tokens,
     activeChatSessionId,
+    activeLlmContextSettings,
     activeSessionRoleplayCard,
     activeStatusBarState,
     activeWorldBookIds,
@@ -21479,6 +21586,11 @@ export function App() {
     const responseMode =
       options.responseMode ??
       (chatMode === "ai" ? "ai" : chatMode === "roleplay" ? "roleplay" : "persona");
+    const requestContextMode: LlmContextMode =
+      options.multiAgentIndex !== undefined || options.multiAgentSupervisorMode
+        ? "multi"
+        : responseMode;
+    const requestContextSettings = llmContextSettings[requestContextMode];
     const responderPersona = options.responderPersona ?? chatPersona;
     const responderCharacterCard =
       responseMode === "roleplay" ? activeSessionRoleplayCard : undefined;
@@ -21555,6 +21667,7 @@ export function App() {
         !isContinuation &&
         !isDialogueRewrite &&
         !isLocalRewrite &&
+        requestContextSettings.mcpTools &&
         enabledMcpServers.length > 0
           ? await refreshMcpTools({ silent: true })
           : [];
@@ -21586,6 +21699,7 @@ export function App() {
             false,
             options.multiAgentAutoStopEnabled === true,
             delegationRoster,
+            requestContextSettings,
           );
       let messagesForApi = nextMessages;
       if (useImageRecognitionMcp && imageRecognitionMcpTool && latestImageUserMessage) {
@@ -21611,7 +21725,9 @@ export function App() {
         .map((promptProfile) => promptProfile.content.trim())
         .filter(Boolean)
         .join("\n\n");
-      const skillSystemPrompt = await loadEnabledSkillPrompt();
+      const skillSystemPrompt = requestContextSettings.skills
+        ? await loadEnabledSkillPrompt()
+        : "";
       throwIfChatAborted(abortSignal);
       const userProfileSystemPrompt =
         requestSender.kind === "user" &&
@@ -21718,13 +21834,19 @@ export function App() {
       const multiAgentSystemPrompt =
         supervisorMultiAgentSystemPrompt || sequenceMultiAgentSystemPrompt;
       const toolSystemPrompt = [
-        !isDialogueRewrite && !isLocalRewrite
+        requestContextSettings.workspaceTools && !isDialogueRewrite && !isLocalRewrite
           ? activeLocalToolsSystemPrompt
           : "",
-        window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
-        isTerminalSidebarAvailable() ? buildTerminalToolsSystemPrompt() : "",
+        requestContextSettings.browserTools && window.rengeDesktop?.isElectron
+          ? buildBrowserToolsSystemPrompt()
+          : "",
+        requestContextSettings.terminalTools && isTerminalSidebarAvailable()
+          ? buildTerminalToolsSystemPrompt()
+          : "",
       ].filter(Boolean).join("\n\n");
-      const mcpToolsSystemPrompt = buildMcpToolsSystemPrompt(requestMcpTools);
+      const mcpToolsSystemPrompt = requestContextSettings.mcpTools
+        ? buildMcpToolsSystemPrompt(requestMcpTools)
+        : "";
       const chatChoiceSystemPrompt = availableChatTools.some((tool) =>
         isChatChoiceToolName(tool.function.name),
       )
@@ -21952,6 +22074,11 @@ export function App() {
       };
       const subAgentToolDefinitions = getAvailableChatToolDefinitions(
         requestMcpTools,
+        false,
+        false,
+        false,
+        { entries: [] },
+        requestContextSettings,
       ).filter((tool) => !isChatChoiceToolName(tool.function.name));
       let multiAgentDelegationCount = 0;
       let invalidMultiAgentDelegationCount = 0;
@@ -23804,7 +23931,9 @@ export function App() {
         .map((promptProfile) => promptProfile.content.trim())
         .filter(Boolean)
         .join("\n\n");
-      const skillSystemPrompt = await loadEnabledSkillPrompt();
+      const skillSystemPrompt = activeLlmContextSettings.skills
+        ? await loadEnabledSkillPrompt()
+        : "";
       throwIfChatAborted(abortSignal);
       const userProfileSystemPrompt =
         userProfile.sendToAi && (userProfile.nickname.trim() || userProfile.bio.trim())
@@ -24231,7 +24360,9 @@ export function App() {
       throwIfChatAborted(abortSignal);
       setChatStatus({ status: "loading", message: "正在生成回复..." });
       const requestMcpTools =
-        enabledMcpServers.length > 0 ? await refreshMcpTools({ silent: true }) : [];
+        activeLlmContextSettings.mcpTools && enabledMcpServers.length > 0
+          ? await refreshMcpTools({ silent: true })
+          : [];
       throwIfChatAborted(abortSignal);
       const imageRecognitionMcpTool = findImageRecognitionMcpTool(requestMcpTools);
       const hasImageRecognitionMcp = Boolean(imageRecognitionMcpTool);
@@ -24270,12 +24401,17 @@ export function App() {
             requestMcpTools,
             exposeHeartbeatTools,
             suppressAttachmentTransferTool,
+            false,
+            { entries: [] },
+            activeLlmContextSettings,
           );
       const selectedSystemPrompt = requestSystemPrompts
         .map((promptProfile) => promptProfile.content.trim())
         .filter(Boolean)
         .join("\n\n");
-      const skillSystemPrompt = await loadEnabledSkillPrompt();
+      const skillSystemPrompt = activeLlmContextSettings.skills
+        ? await loadEnabledSkillPrompt()
+        : "";
       throwIfChatAborted(abortSignal);
       const userProfileSystemPrompt =
         currentChatSender.kind === "user" &&
@@ -24313,11 +24449,17 @@ export function App() {
           ? buildChatSenderContextPrompt(nextMessages, personas, chatPersona)
           : buildChatSenderContextPrompt(nextMessages, personas);
       const toolSystemPrompt = [
-        activeLocalToolsSystemPrompt,
-        window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
-        isTerminalSidebarAvailable() ? buildTerminalToolsSystemPrompt() : "",
+        activeLlmContextSettings.workspaceTools ? activeLocalToolsSystemPrompt : "",
+        activeLlmContextSettings.browserTools && window.rengeDesktop?.isElectron
+          ? buildBrowserToolsSystemPrompt()
+          : "",
+        activeLlmContextSettings.terminalTools && isTerminalSidebarAvailable()
+          ? buildTerminalToolsSystemPrompt()
+          : "",
       ].filter(Boolean).join("\n\n");
-      const mcpToolsSystemPrompt = buildMcpToolsSystemPrompt(requestMcpTools);
+      const mcpToolsSystemPrompt = activeLlmContextSettings.mcpTools
+        ? buildMcpToolsSystemPrompt(requestMcpTools)
+        : "";
       const chatChoiceSystemPrompt = availableChatTools.some((tool) =>
         isChatChoiceToolName(tool.function.name),
       )
@@ -27727,6 +27869,7 @@ export function App() {
             type="button"
             className={`settings-tab ${settingsTab === "llm" ? "active" : ""}`}
             onClick={() => {
+              setLlmContextSettingsMode(chatMode);
               setSettingsTab("llm");
               closeMobileSidebar();
             }}
@@ -28076,6 +28219,77 @@ export function App() {
                   <p>控制聊天中可选的语言模型交互增强能力。</p>
                 </div>
               </div>
+              <article className="llm-setting-card llm-context-settings-card">
+                <div className="llm-setting-copy">
+                  <h3>按会话模式注入上下文</h3>
+                  <p>
+                    关闭一项会同时移除对应系统说明和工具 JSON 定义，直接减少每次请求的 Token。
+                    角色卡、人格和多 Agent 核心指令不受影响。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="ghost-action llm-context-reset"
+                  onClick={resetLlmContextSettings}
+                >
+                  <RefreshCw size={15} />
+                  恢复推荐设置
+                </button>
+                <div className="llm-context-mode-switch" role="tablist" aria-label="会话模式">
+                  {LLM_CONTEXT_MODES.map((mode) => (
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={llmContextSettingsMode === mode}
+                      className={llmContextSettingsMode === mode ? "active" : ""}
+                      key={mode}
+                      onClick={() => setLlmContextSettingsMode(mode)}
+                    >
+                      {LLM_CONTEXT_MODE_LABELS[mode]}
+                    </button>
+                  ))}
+                </div>
+                <div className="llm-context-source-list">
+                  {LLM_CONTEXT_SOURCES.map((source) => {
+                    const meta = LLM_CONTEXT_SOURCE_META[source];
+                    return (
+                      <label className="llm-context-source-row" key={source}>
+                        <span className="llm-context-source-copy">
+                          <strong>{meta.label}</strong>
+                          <span>{meta.description}</span>
+                        </span>
+                        <span className="tool-toggle llm-feature-toggle">
+                          <input
+                            type="checkbox"
+                            checked={editedLlmContextSettings[source]}
+                            onChange={(event) =>
+                              setLlmContextSourceEnabled(
+                                llmContextSettingsMode,
+                                source,
+                                event.target.checked,
+                              )
+                            }
+                          />
+                          <span>{editedLlmContextSettings[source] ? "开启" : "关闭"}</span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <div
+                  className={`llm-setting-status ${
+                    enabledLlmContextSourceCount > 0 ? "enabled" : "disabled"
+                  }`}
+                >
+                  <strong>{LLM_CONTEXT_MODE_LABELS[llmContextSettingsMode]}</strong>
+                  <span>
+                    当前注入 {enabledLlmContextSourceCount}/{LLM_CONTEXT_SOURCES.length} 项附加上下文。
+                    {llmContextSettingsMode === "roleplay" && enabledLlmContextSourceCount === 0
+                      ? " 使用精简上下文，不会向模型发送文件、浏览器、终端、MCP 或 Skills 信息。"
+                      : " 只启用当前模式确实需要的能力可以降低基础 Token。"}
+                  </span>
+                </div>
+              </article>
               <article className="llm-setting-card context-compression-card">
                 <div className="llm-setting-copy">
                   <h3>自动上下文压缩</h3>
@@ -31494,6 +31708,7 @@ export function App() {
                 title={contextTokenMeterTitle}
                 aria-label={contextTokenMeterTitle}
                 onClick={() => {
+                  setLlmContextSettingsMode(chatMode);
                   setSettingsTab("llm");
                   openWindow("settings");
                 }}

@@ -2119,6 +2119,88 @@ summary:focus-visible {
   margin-top: 12px;
 }
 
+.llm-context-settings-card {
+  align-items: start;
+}
+
+.llm-context-reset {
+  align-self: start;
+}
+
+.llm-context-mode-switch {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 3px;
+  border: 1px solid #dfe4ec;
+  border-radius: 8px;
+  background: #eef1f5;
+}
+
+.llm-context-mode-switch button {
+  min-width: 0;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  color: #667085;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.llm-context-mode-switch button:hover {
+  color: #172033;
+}
+
+.llm-context-mode-switch button.active {
+  color: #172033;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(23, 32, 51, 0.12);
+}
+
+.llm-context-source-list {
+  grid-column: 1 / -1;
+  display: grid;
+  border-block: 1px solid #dfe4ec;
+}
+
+.llm-context-source-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 2px;
+}
+
+.llm-context-source-row + .llm-context-source-row {
+  border-top: 1px solid #e8ebf0;
+}
+
+.llm-context-source-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.llm-context-source-copy strong {
+  color: #172033;
+  font-size: 13px;
+}
+
+.llm-context-source-copy > span {
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.llm-context-source-row .tool-toggle {
+  flex: 0 0 auto;
+}
+
 .llm-setting-copy h3 {
   color: #172033;
   font-size: 15px;
@@ -2331,6 +2413,23 @@ summary:focus-visible {
     grid-column: 1;
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .llm-context-reset {
+    justify-self: start;
+  }
+
+  .llm-context-mode-switch {
+    grid-column: 1;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .llm-context-source-list {
+    grid-column: 1;
+  }
+
+  .llm-context-source-row {
+    align-items: flex-start;
   }
 
   .context-compression-limits-heading {
