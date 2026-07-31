@@ -878,6 +878,18 @@ type PcWorkspaceHandle = {
   path: string;
 };
 
+type TemporaryWorkspaceHandle = {
+  kind: "temporary";
+  name: string;
+};
+
+type LocalToolsWorkspaceHandle =
+  | LocalDirectoryHandle
+  | ElectronWorkspaceHandle
+  | AndroidWorkspaceHandle
+  | PcWorkspaceHandle
+  | TemporaryWorkspaceHandle;
+
 type PcFileEntry = {
   name: string;
   path: string;
@@ -960,6 +972,19 @@ type RengeDesktopApi = {
     scope: "workspace" | "temporary";
     path: string;
   }): Promise<unknown>;
+  writeTemporaryTextFile(options: { path: string; content: string }): Promise<unknown>;
+  writeTemporaryBinaryFile(options: {
+    path: string;
+    base64: string;
+    mimeType?: string;
+  }): Promise<unknown>;
+  createTemporaryDirectory(options: { path: string }): Promise<unknown>;
+  editTemporaryTextFile(options: {
+    path: string;
+    find: string;
+    replace: string;
+  }): Promise<unknown>;
+  deleteTemporaryPath(options: { path: string; recursive?: boolean }): Promise<unknown>;
   importTemporaryFiles(): Promise<unknown>;
   runSidebarFileAction(options: {
     scope: "workspace" | "temporary";
@@ -1245,6 +1270,10 @@ const PC_WORKSPACE_PATH_STORAGE_KEY = "renge_pc_workspace_path";
 const PC_WORKSPACE_NAME_STORAGE_KEY = "renge_pc_workspace_name";
 const DEFAULT_WORKSPACE_KEY = "default";
 const DEFAULT_WORKSPACE_NAME = "默认工作区";
+const TEMPORARY_WORKSPACE_HANDLE: TemporaryWorkspaceHandle = {
+  kind: "temporary",
+  name: "临时文件",
+};
 const CHAT_TIME_GROUP_MS = 5 * 60 * 1000;
 const DEFAULT_HEARTBEAT_INTERVAL_MINUTES = 5;
 const MIN_HEARTBEAT_INTERVAL_MINUTES = 1;
@@ -8011,9 +8040,23 @@ function buildPersonaMemoryPrompt(
 }
 
 function getAvailableLocalToolDefinitions(
-  handle: LocalDirectoryHandle | ElectronWorkspaceHandle | AndroidWorkspaceHandle | PcWorkspaceHandle | null,
+  handle: LocalToolsWorkspaceHandle | null,
 ) {
   if (!handle) return [];
+  if (handle.kind === "temporary") {
+    const temporaryToolNames = new Set([
+      "local_list_files",
+      "local_read_file",
+      "local_read_binary_file",
+      "local_create_directory",
+      "local_write_file",
+      "local_write_binary_file",
+      "local_edit_file",
+      "local_delete_path",
+    ]);
+    return localFileToolDefinitions.filter((tool) =>
+      temporaryToolNames.has(tool.function.name));
+  }
   if (handle.kind === "electron") {
     return localFileToolDefinitions.filter(
       (tool) =>
@@ -8271,10 +8314,29 @@ function buildHeartbeatSystemPrompt(heartbeat: ChatHeartbeatConfig | undefined) 
 }
 
 function buildLocalToolsSystemPrompt(
-  handle: LocalDirectoryHandle | ElectronWorkspaceHandle | AndroidWorkspaceHandle | PcWorkspaceHandle | null,
+  handle: LocalToolsWorkspaceHandle | null,
   fullAccessEnabled = false,
 ) {
   if (!handle) return "";
+  if (handle.kind === "temporary") {
+    return [
+      "当前会话属于默认工作区，没有项目目录权限；你只能操作与其他工作区完全隔离的「临时文件」区域。",
+      "所有 path 必须是临时文件区内的相对路径，禁止使用绝对路径或 ..。不得读取、写入或声称访问任何已连接项目工作区。",
+      "当用户要求生成可独立使用的 SVG、HTML、代码文件、配置或其他文件成品时，应调用 local_write_file 将完整内容写入临时文件区，除非用户明确要求只在消息中展示。",
+      "写入成功后可以用 local_read_file 核对内容，并明确告诉用户文件位于右侧栏的临时文件区；未收到工具成功结果前不得声称已保存。",
+      "短小示例、解释性代码或用户明确要求直接查看源码时，可以直接使用 Markdown 代码块，不必创建文件。",
+      "临时文件区不支持命令执行、Git、项目扫描、重命名、电脑文件发送或跨设备传输，不得尝试相关工具。",
+      "当前可用工具：",
+      "- local_list_files：列出临时文件。",
+      "- local_read_file：读取临时文本文件。",
+      "- local_read_binary_file：读取临时二进制文件的 Base64。",
+      "- local_create_directory：在临时区创建目录。",
+      "- local_write_file：在临时区创建或覆盖文本文件。",
+      "- local_write_binary_file：把完整 Base64 写入临时二进制文件。",
+      "- local_edit_file：查找替换临时文本文件。",
+      "- local_delete_path：删除临时文件或目录。",
+    ].join("\n");
+  }
   const hasDesktopFullAccess = handle.kind === "electron" && fullAccessEnabled;
 
   const commonTools = [
@@ -8352,9 +8414,7 @@ function buildUnavailableLocalToolsSystemPrompt(workspaceKey: string) {
   if (workspaceKey === DEFAULT_WORKSPACE_KEY) {
     return [
       "当前会话属于默认工作区，没有授权任何项目目录，也不得继承应用中仍保留的其他工作区目录。",
-      "禁止调用或声称调用任何 local_* / project_* 文件工具来读取、创建、修改或删除文件。",
-      "用户要求生成代码、SVG、HTML、配置或其他文本内容时，直接在消息区使用对应语言的 Markdown 代码块完整展示；不得声称内容已保存到文件。",
-      "桌面端右侧文件模块此时只显示隔离的临时文件区。只有用户选择并授权工作区后，才可以把生成内容写入项目目录。",
+      "当前平台没有提供临时文件写入工具；用户要求生成代码、SVG、HTML、配置或其他文本内容时，直接在消息区使用对应语言的 Markdown 代码块完整展示，不得声称内容已保存到文件。",
     ].join("\n");
   }
 
@@ -11593,6 +11653,7 @@ export function App() {
     LocalDirectoryHandle | ElectronWorkspaceHandle | AndroidWorkspaceHandle | PcWorkspaceHandle | null
   >(null);
   const [localToolsEnabled, setLocalToolsEnabled] = useState(false);
+  const [temporaryFilesRevision, setTemporaryFilesRevision] = useState(0);
   const [personas, setPersonas] = useState<AgentPersona[]>([]);
   const [activePersonaId, setActivePersonaId] = useState<string>(
     () => localStorage.getItem(ACTIVE_PERSONA_STORAGE_KEY) ?? "",
@@ -15066,9 +15127,22 @@ export function App() {
     () => scopeWorkspaceHandleToSession(localWorkspaceHandle, activeWorkspaceKey),
     [activeWorkspaceKey, localWorkspaceHandle],
   );
-  const activeLocalToolsEnabled = localToolsEnabled && Boolean(activeLocalWorkspaceHandle);
-  const activeLocalToolsSystemPrompt = activeLocalWorkspaceHandle && activeLocalToolsEnabled
-    ? buildLocalToolsSystemPrompt(activeLocalWorkspaceHandle, llmFullAccessEnabled)
+  const temporaryFileToolsAvailable = Boolean(
+    window.rengeDesktop?.isElectron
+    && typeof window.rengeDesktop.writeTemporaryTextFile === "function"
+    && typeof window.rengeDesktop.writeTemporaryBinaryFile === "function"
+    && typeof window.rengeDesktop.createTemporaryDirectory === "function"
+    && typeof window.rengeDesktop.editTemporaryTextFile === "function"
+    && typeof window.rengeDesktop.deleteTemporaryPath === "function",
+  );
+  const activeFileToolsWorkspaceHandle: LocalToolsWorkspaceHandle | null =
+    activeWorkspaceKey === DEFAULT_WORKSPACE_KEY && temporaryFileToolsAvailable
+      ? TEMPORARY_WORKSPACE_HANDLE
+      : activeLocalWorkspaceHandle;
+  const activeLocalToolsEnabled = activeFileToolsWorkspaceHandle?.kind === "temporary"
+    || (localToolsEnabled && Boolean(activeLocalWorkspaceHandle));
+  const activeLocalToolsSystemPrompt = activeFileToolsWorkspaceHandle && activeLocalToolsEnabled
+    ? buildLocalToolsSystemPrompt(activeFileToolsWorkspaceHandle, llmFullAccessEnabled)
     : buildUnavailableLocalToolsSystemPrompt(activeWorkspaceKey);
   const workspaceInfo = getWorkspaceInfo(localWorkspaceHandle);
   const fileBrowserSource = useMemo<FileBrowserSource | null>(() => {
@@ -15160,7 +15234,7 @@ export function App() {
     if (!desktopApi?.isElectron) return null;
     const scope = "temporary" as const;
     return {
-      id: "electron:temporary-files",
+      id: `electron:temporary-files:${temporaryFilesRevision}`,
       kind: "temporary",
       name: "临时文件",
       listDirectory: (path) => desktopApi.listSidebarFiles({ scope, path }),
@@ -15170,7 +15244,7 @@ export function App() {
       runSystemAction: (path, action) =>
         desktopApi.runSidebarFileAction({ scope, path, action }),
     };
-  }, [activeLocalWorkspaceHandle, activeWorkspaceKey]);
+  }, [activeLocalWorkspaceHandle, activeWorkspaceKey, temporaryFilesRevision]);
   useEffect(() => {
     setTerminalWorkspaceContext({
       workspaceKey: activeChatSession?.workspaceKey ?? DEFAULT_WORKSPACE_KEY,
@@ -18861,8 +18935,63 @@ export function App() {
   };
 
   const executeLocalFileTool = async (toolName: string, rawArguments: string) => {
+    const args = parseToolArguments(rawArguments);
     if (activeWorkspaceKey === DEFAULT_WORKSPACE_KEY) {
-      throw new Error("默认工作区没有授权项目目录；请直接在消息中展示代码或先让用户选择工作区");
+      const desktopApi = window.rengeDesktop;
+      if (!temporaryFileToolsAvailable || !desktopApi?.isElectron) {
+        throw new Error("当前平台没有提供默认工作区临时文件工具；请直接在消息中展示代码");
+      }
+      const commitTemporaryFileMutation = async (operation: Promise<unknown>) => {
+        const result = await operation;
+        setTemporaryFilesRevision((current) => current + 1);
+        return result;
+      };
+      switch (toolName) {
+        case "local_list_files":
+          return desktopApi.listSidebarFiles({
+            scope: "temporary",
+            path: String(args.path ?? ""),
+            recursive: args.recursive === undefined ? true : Boolean(args.recursive),
+          });
+        case "local_read_file":
+          return desktopApi.readSidebarTextFile({
+            scope: "temporary",
+            path: String(args.path ?? ""),
+          });
+        case "local_read_binary_file":
+          return desktopApi.readSidebarBinaryFile({
+            scope: "temporary",
+            path: String(args.path ?? ""),
+          });
+        case "local_create_directory":
+          return commitTemporaryFileMutation(desktopApi.createTemporaryDirectory({
+            path: String(args.path ?? ""),
+          }));
+        case "local_write_file":
+          return commitTemporaryFileMutation(desktopApi.writeTemporaryTextFile({
+            path: String(args.path ?? ""),
+            content: String(args.content ?? ""),
+          }));
+        case "local_write_binary_file":
+          return commitTemporaryFileMutation(desktopApi.writeTemporaryBinaryFile({
+            path: String(args.path ?? ""),
+            base64: String(args.base64 ?? ""),
+            mimeType: String(args.mimeType ?? ""),
+          }));
+        case "local_edit_file":
+          return commitTemporaryFileMutation(desktopApi.editTemporaryTextFile({
+            path: String(args.path ?? ""),
+            find: String(args.find ?? ""),
+            replace: String(args.replace ?? ""),
+          }));
+        case "local_delete_path":
+          return commitTemporaryFileMutation(desktopApi.deleteTemporaryPath({
+            path: String(args.path ?? ""),
+            recursive: Boolean(args.recursive),
+          }));
+        default:
+          throw new Error(`${toolName} 不支持默认工作区的临时文件区`);
+      }
     }
     if (!localWorkspaceHandle || !activeLocalWorkspaceHandle || !activeLocalToolsEnabled) {
       throw new Error("当前聊天工作区尚未恢复或与已授权目录不匹配，拒绝使用其他工作区的文件工具");
@@ -18871,7 +19000,6 @@ export function App() {
       throw new Error("当前文件句柄不属于这个聊天工作区");
     }
 
-    const args = parseToolArguments(rawArguments);
     const getSelectedPcTransferWorkspace = () => {
       if (localWorkspaceHandle.kind === "pc") return localWorkspaceHandle;
       return pcTransferWorkspace;
@@ -19843,8 +19971,8 @@ export function App() {
     delegationRoster: DelegationRoster = { entries: [] },
   ) => {
     const localToolsBase =
-      activeLocalToolsEnabled && activeLocalWorkspaceHandle
-        ? getAvailableLocalToolDefinitions(activeLocalWorkspaceHandle)
+      activeLocalToolsEnabled && activeFileToolsWorkspaceHandle
+        ? getAvailableLocalToolDefinitions(activeFileToolsWorkspaceHandle)
         : [];
     const localTools = suppressAttachmentTransferTool
       ? localToolsBase.filter((tool) => tool.function.name !== "local_transfer_attachment_file")

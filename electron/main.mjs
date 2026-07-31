@@ -37,11 +37,16 @@ import {
   selectCredentialForUrl,
 } from "./sidebar-browser-profile.mjs";
 import {
+  createSidebarDirectory,
+  deleteSidebarPath,
+  editSidebarTextFile,
   importTemporaryFiles,
   listSidebarFiles,
   readSidebarBinaryFile,
   readSidebarTextFile,
   resolveSidebarFilePath,
+  writeSidebarBinaryFile,
+  writeSidebarTextFile,
 } from "./sidebar-files.mjs";
 import { createSidebarTerminalManager } from "./sidebar-terminal.mjs";
 
@@ -1334,6 +1339,36 @@ function registerIpcHandlers() {
   ipcMain.handle("sidebar-files:read-binary", async (_event, options = {}) => {
     const rootPath = await getSidebarFilesRoot(options.scope ?? "temporary");
     return readSidebarBinaryFile(rootPath, options.path ?? "");
+  });
+
+  ipcMain.handle("sidebar-files:write-temporary-text", async (_event, options = {}) => {
+    const rootPath = await getSidebarFilesRoot("temporary");
+    return writeSidebarTextFile(rootPath, options.path ?? "", options.content ?? "");
+  });
+
+  ipcMain.handle("sidebar-files:write-temporary-binary", async (_event, options = {}) => {
+    const rootPath = await getSidebarFilesRoot("temporary");
+    return writeSidebarBinaryFile(rootPath, options.path ?? "", options.base64 ?? "");
+  });
+
+  ipcMain.handle("sidebar-files:create-temporary-directory", async (_event, options = {}) => {
+    const rootPath = await getSidebarFilesRoot("temporary");
+    return createSidebarDirectory(rootPath, options.path ?? "");
+  });
+
+  ipcMain.handle("sidebar-files:edit-temporary-text", async (_event, options = {}) => {
+    const rootPath = await getSidebarFilesRoot("temporary");
+    return editSidebarTextFile(
+      rootPath,
+      options.path ?? "",
+      options.find ?? "",
+      options.replace ?? "",
+    );
+  });
+
+  ipcMain.handle("sidebar-files:delete-temporary-path", async (_event, options = {}) => {
+    const rootPath = await getSidebarFilesRoot("temporary");
+    return deleteSidebarPath(rootPath, options.path ?? "", options.recursive);
   });
 
   ipcMain.handle("sidebar-files:import-temporary", async () => {

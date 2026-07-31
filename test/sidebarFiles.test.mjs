@@ -5,11 +5,16 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  createSidebarDirectory,
+  deleteSidebarPath,
+  editSidebarTextFile,
   importTemporaryFiles,
   listSidebarFiles,
   readSidebarBinaryFile,
   readSidebarTextFile,
   resolveSidebarFilePath,
+  writeSidebarBinaryFile,
+  writeSidebarTextFile,
 } from "../electron/sidebar-files.mjs";
 
 test("lists one directory level with workspace-relative paths", async (t) => {
@@ -70,4 +75,40 @@ test("imports duplicate temporary files without overwriting", async (t) => {
   const second = await importTemporaryFiles(targetRoot, [sourcePath]);
   assert.equal(first[0].path, "notes.md");
   assert.equal(second[0].path, "notes (2).md");
+});
+
+test("creates, edits, and deletes files inside the temporary root", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "renge-sidebar-write-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await createSidebarDirectory(root, "generated");
+  const textResult = await writeSidebarTextFile(
+    root,
+    "generated/bicycle.svg",
+    "<svg>first</svg>",
+  );
+  assert.equal(textResult.bytes, Buffer.byteLength("<svg>first</svg>"));
+
+  const editResult = await editSidebarTextFile(
+    root,
+    "generated/bicycle.svg",
+    "first",
+    "second",
+  );
+  assert.equal(editResult.replacements, 1);
+  assert.equal(
+    (await readSidebarTextFile(root, "generated/bicycle.svg")).content,
+    "<svg>second</svg>",
+  );
+
+  const bytes = Buffer.from([1, 2, 3, 4]);
+  await writeSidebarBinaryFile(root, "generated/data.bin", bytes.toString("base64"));
+  assert.equal((await readSidebarBinaryFile(root, "generated/data.bin")).base64, bytes.toString("base64"));
+
+  await deleteSidebarPath(root, "generated", true);
+  assert.deepEqual((await listSidebarFiles(root)).entries, []);
+  await assert.rejects(
+    () => writeSidebarTextFile(root, "../outside.txt", "blocked"),
+    /超出文件浏览范围/,
+  );
 });
