@@ -5,6 +5,7 @@ import * as pty from "node-pty";
 const MAX_TERMINAL_BUFFER = 2 * 1024 * 1024;
 const MAX_TERMINAL_SESSIONS = 12;
 const MAX_TERMINAL_READ = 100_000;
+const DEFAULT_TERMINAL_WORKSPACE_KEY = "default";
 
 function clampDimension(value, fallback, maximum) {
   const parsed = Math.floor(Number(value));
@@ -32,6 +33,11 @@ function appendToBuffer(buffer, data) {
   return next.length > MAX_TERMINAL_BUFFER ? next.slice(-MAX_TERMINAL_BUFFER) : next;
 }
 
+function getWorkspaceKey(options = {}) {
+  return String(options.workspaceKey ?? "").trim()
+    || DEFAULT_TERMINAL_WORKSPACE_KEY;
+}
+
 export function createSidebarTerminalManager({
   getMainWindow,
   getWorkspaceRoot,
@@ -56,6 +62,7 @@ export function createSidebarTerminalManager({
   function serialize(session, includeBuffer = false) {
     return {
       id: session.id,
+      workspaceKey: session.workspaceKey,
       title: session.title,
       shell: session.shell,
       cwd: session.cwd,
@@ -67,10 +74,13 @@ export function createSidebarTerminalManager({
     };
   }
 
-  function getSession(rawId) {
-    const id = String(rawId ?? "");
+  function getSession(options = {}) {
+    const id = String(options.id ?? "");
     const session = sessions.get(id);
     if (!session) throw new Error("找不到这个终端会话");
+    if (session.workspaceKey !== getWorkspaceKey(options)) {
+      throw new Error("这个终端属于其他工作区");
+    }
     return session;
   }
 
@@ -102,14 +112,23 @@ export function createSidebarTerminalManager({
       if (session.generation !== generation) return;
       session.buffer = appendToBuffer(session.buffer, data);
       session.outputOffset += data.length;
-      send("sidebar-terminal:data", { id: session.id, data });
+      send("sidebar-terminal:data", {
+        id: session.id,
+        workspaceKey: session.workspaceKey,
+        data,
+      });
     });
     session.process.onExit(({ exitCode, signal }) => {
       if (session.generation !== generation) return;
       session.process = null;
       session.exited = true;
       session.exitCode = exitCode;
-      send("sidebar-terminal:exit", { id: session.id, exitCode, signal });
+      send("sidebar-terminal:exit", {
+        id: session.id,
+        workspaceKey: session.workspaceKey,
+        exitCode,
+        signal,
+      });
     });
   }
 
@@ -117,10 +136,14 @@ export function createSidebarTerminalManager({
     if (sessions.size >= MAX_TERMINAL_SESSIONS) {
       throw new Error("最多同时打开 " + MAX_TERMINAL_SESSIONS + " 个终端");
     }
-    const cwd = getWorkspaceRoot?.() || getFallbackCwd();
+    const workspaceKey = getWorkspaceKey(options);
+    const cwd = workspaceKey === DEFAULT_TERMINAL_WORKSPACE_KEY
+      ? getFallbackCwd()
+      : String(options.cwd ?? "").trim() || getWorkspaceRoot?.() || getFallbackCwd();
     const id = randomUUID();
     const session = {
       id,
+      workspaceKey,
       title: String(options.title ?? "").trim().slice(0, 80) || "终端 " + (sessions.size + 1),
       shell: "Shell",
       cwd,
@@ -160,8 +183,10 @@ export function createSidebarTerminalManager({
   return {
     list(event, options = {}) {
       assertSender(event);
-      return [...sessions.values()].map((session) =>
-        serialize(session, options.includeBuffer !== false));
+      const workspaceKey = getWorkspaceKey(options);
+      return [...sessions.values()]
+        .filter((session) => session.workspaceKey === workspaceKey)
+        .map((session) => serialize(session, options.includeBuffer !== false));
     },
     create(event, options) {
       assertSender(event);
@@ -169,7 +194,7 @@ export function createSidebarTerminalManager({
     },
     write(event, options = {}) {
       assertSender(event);
-      const session = getSession(options.id);
+      const session = getSession(options);
       if (!session.process || session.exited) throw new Error("终端进程已经退出");
       const data = String(options.data ?? "");
       if (data.length > 1024 * 1024) throw new Error("单次终端输入过长");
@@ -178,7 +203,7 @@ export function createSidebarTerminalManager({
     },
     resize(event, options = {}) {
       assertSender(event);
-      const session = getSession(options.id);
+      const session = getSession(options);
       if (session.process && !session.exited) {
         session.process.resize(
           clampDimension(options.cols, 80, 500),
@@ -189,7 +214,7 @@ export function createSidebarTerminalManager({
     },
     read(event, options = {}) {
       assertSender(event);
-      const session = getSession(options.id);
+      const session = getSession(options);
       const maxChars = clampDimension(options.maxChars, 20_000, MAX_TERMINAL_READ);
       const bufferStart = Math.max(0, session.outputOffset - session.buffer.length);
       const requestedFrom = Number(options.from);
@@ -210,7 +235,7 @@ export function createSidebarTerminalManager({
     },
     restart(event, options = {}) {
       assertSender(event);
-      const session = getSession(options.id);
+      const session = getSession(options);
       disposeSession(session);
       spawnProcess(session, options);
       send("sidebar-terminal:restarted", serialize(session, true));
@@ -218,10 +243,13 @@ export function createSidebarTerminalManager({
     },
     close(event, options = {}) {
       assertSender(event);
-      const session = getSession(options.id);
+      const session = getSession(options);
       sessions.delete(session.id);
       disposeSession(session);
-      send("sidebar-terminal:closed", { id: session.id });
+      send("sidebar-terminal:closed", {
+        id: session.id,
+        workspaceKey: session.workspaceKey,
+      });
       return { ok: true, id: session.id };
     },
     disposeAll() {

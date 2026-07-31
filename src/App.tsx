@@ -242,6 +242,7 @@ import {
   executeTerminalTool,
   isTerminalSidebarAvailable,
   isTerminalToolName,
+  setTerminalWorkspaceContext,
   terminalToolDefinitions,
 } from "./terminalSidebarRuntime";
 import {
@@ -921,6 +922,7 @@ type SidebarBrowserContextMenuRequest = {
 
 type SidebarTerminalSession = {
   id: string;
+  workspaceKey: string;
   title: string;
   shell: string;
   cwd: string;
@@ -988,18 +990,18 @@ type RengeDesktopApi = {
   findSymbols(options: { query?: string; path?: string; maxMatches?: number }): Promise<unknown>;
   readPackageJson(): Promise<unknown>;
   scanTodos(options: { path?: string; maxMatches?: number }): Promise<unknown>;
-  listSidebarTerminals?(options?: { includeBuffer?: boolean }): Promise<SidebarTerminalSession[]>;
-  createSidebarTerminal?(options?: { cols?: number; rows?: number; title?: string }): Promise<SidebarTerminalSession>;
-  writeSidebarTerminal?(options: { id: string; data: string }): Promise<{ ok: boolean }>;
-  resizeSidebarTerminal?(options: { id: string; cols: number; rows: number }): Promise<{ ok: boolean }>;
-  readSidebarTerminal?(options: { id: string; from?: number; maxChars?: number }): Promise<SidebarTerminalReadResult>;
-  restartSidebarTerminal?(options: { id: string; cols?: number; rows?: number }): Promise<SidebarTerminalSession>;
-  closeSidebarTerminal?(options: { id: string }): Promise<{ ok: boolean; id: string }>;
-  onSidebarTerminalData?(listener: (payload: { id: string; data: string }) => void): () => void;
-  onSidebarTerminalExit?(listener: (payload: { id: string; exitCode: number; signal: number }) => void): () => void;
+  listSidebarTerminals?(options?: { includeBuffer?: boolean; workspaceKey?: string }): Promise<SidebarTerminalSession[]>;
+  createSidebarTerminal?(options?: { cols?: number; rows?: number; title?: string; workspaceKey?: string; cwd?: string }): Promise<SidebarTerminalSession>;
+  writeSidebarTerminal?(options: { id: string; workspaceKey?: string; data: string }): Promise<{ ok: boolean }>;
+  resizeSidebarTerminal?(options: { id: string; workspaceKey?: string; cols: number; rows: number }): Promise<{ ok: boolean }>;
+  readSidebarTerminal?(options: { id: string; workspaceKey?: string; from?: number; maxChars?: number }): Promise<SidebarTerminalReadResult>;
+  restartSidebarTerminal?(options: { id: string; workspaceKey?: string; cols?: number; rows?: number }): Promise<SidebarTerminalSession>;
+  closeSidebarTerminal?(options: { id: string; workspaceKey?: string }): Promise<{ ok: boolean; id: string }>;
+  onSidebarTerminalData?(listener: (payload: { id: string; workspaceKey: string; data: string }) => void): () => void;
+  onSidebarTerminalExit?(listener: (payload: { id: string; workspaceKey: string; exitCode: number; signal: number }) => void): () => void;
   onSidebarTerminalRestarted?(listener: (payload: SidebarTerminalSession) => void): () => void;
   onSidebarTerminalCreated?(listener: (payload: SidebarTerminalSession) => void): () => void;
-  onSidebarTerminalClosed?(listener: (payload: { id: string }) => void): () => void;
+  onSidebarTerminalClosed?(listener: (payload: { id: string; workspaceKey: string }) => void): () => void;
   listSidebarBrowserDownloads?(): Promise<SidebarBrowserDownload[]>;
   runSidebarBrowserDownloadAction?(options: {
     action: "open-folder" | "clear-completed" | "open" | "reveal" | "pause" | "resume" | "cancel" | "remove";
@@ -1124,18 +1126,18 @@ type RengeAndroidApi = {
     path?: string;
     message?: string;
   }>;
-  listSidebarTerminals?(options?: { includeBuffer?: boolean }): Promise<SidebarTerminalSession[]>;
-  createSidebarTerminal?(options?: { cols?: number; rows?: number; title?: string }): Promise<SidebarTerminalSession>;
-  writeSidebarTerminal?(options: { id: string; data: string }): Promise<{ ok: boolean }>;
-  resizeSidebarTerminal?(options: { id: string; cols: number; rows: number }): Promise<{ ok: boolean }>;
-  readSidebarTerminal?(options: { id: string; from?: number; maxChars?: number }): Promise<SidebarTerminalReadResult>;
-  restartSidebarTerminal?(options: { id: string; cols?: number; rows?: number }): Promise<SidebarTerminalSession>;
-  closeSidebarTerminal?(options: { id: string }): Promise<{ ok: boolean; id: string }>;
-  onSidebarTerminalData?(listener: (payload: { id: string; data: string }) => void): () => void;
-  onSidebarTerminalExit?(listener: (payload: { id: string; exitCode: number; signal: number }) => void): () => void;
+  listSidebarTerminals?(options?: { includeBuffer?: boolean; workspaceKey?: string }): Promise<SidebarTerminalSession[]>;
+  createSidebarTerminal?(options?: { cols?: number; rows?: number; title?: string; workspaceKey?: string; cwd?: string }): Promise<SidebarTerminalSession>;
+  writeSidebarTerminal?(options: { id: string; workspaceKey?: string; data: string }): Promise<{ ok: boolean }>;
+  resizeSidebarTerminal?(options: { id: string; workspaceKey?: string; cols: number; rows: number }): Promise<{ ok: boolean }>;
+  readSidebarTerminal?(options: { id: string; workspaceKey?: string; from?: number; maxChars?: number }): Promise<SidebarTerminalReadResult>;
+  restartSidebarTerminal?(options: { id: string; workspaceKey?: string; cols?: number; rows?: number }): Promise<SidebarTerminalSession>;
+  closeSidebarTerminal?(options: { id: string; workspaceKey?: string }): Promise<{ ok: boolean; id: string }>;
+  onSidebarTerminalData?(listener: (payload: { id: string; workspaceKey: string; data: string }) => void): () => void;
+  onSidebarTerminalExit?(listener: (payload: { id: string; workspaceKey: string; exitCode: number; signal: number }) => void): () => void;
   onSidebarTerminalRestarted?(listener: (payload: SidebarTerminalSession) => void): () => void;
   onSidebarTerminalCreated?(listener: (payload: SidebarTerminalSession) => void): () => void;
-  onSidebarTerminalClosed?(listener: (payload: { id: string }) => void): () => void;
+  onSidebarTerminalClosed?(listener: (payload: { id: string; workspaceKey: string }) => void): () => void;
   enterFullscreen?(): void;
   exitFullscreen?(): void;
 };
@@ -15142,6 +15144,12 @@ export function App() {
     () => chatSessions.find((session) => session.id === activeChatSessionId) ?? chatSessions[0],
     [activeChatSessionId, chatSessions],
   );
+  useEffect(() => {
+    setTerminalWorkspaceContext({
+      workspaceKey: activeChatSession?.workspaceKey ?? DEFAULT_WORKSPACE_KEY,
+      ...(activeChatSession?.workspacePath ? { cwd: activeChatSession.workspacePath } : {}),
+    });
+  }, [activeChatSession?.workspaceKey, activeChatSession?.workspacePath]);
   const activeStatusBarState = useMemo(
     () => normalizeStatusBarState(activeChatSession?.statusBar),
     [activeChatSession?.statusBar],
@@ -32825,6 +32833,8 @@ export function App() {
           fileBrowserSource={fileBrowserSource}
           onChooseWorkspace={authorizeLocalWorkspace}
           onBrowserComment={addBrowserCommentToComposer}
+          terminalWorkspaceKey={activeChatSession?.workspaceKey ?? DEFAULT_WORKSPACE_KEY}
+          terminalWorkspacePath={activeChatSession?.workspacePath ?? ""}
         />
       </PortfolioDesktopWindow>
   ) : null;

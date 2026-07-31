@@ -27,7 +27,7 @@ final class AndroidTerminalManager {
     }
 
     interface LaunchConfigProvider {
-        LaunchConfig getLaunchConfig();
+        LaunchConfig getLaunchConfig(String workspaceKey, String requestedCwd);
     }
 
     interface EventSink {
@@ -56,12 +56,15 @@ final class AndroidTerminalManager {
 
     JSONArray list(JSONObject options) throws JSONException {
         boolean includeBuffer = !options.has("includeBuffer") || options.optBoolean("includeBuffer", true);
+        String workspaceKey = getWorkspaceKey(options);
         List<Session> snapshot;
         synchronized (sessionsLock) {
             snapshot = new ArrayList<>(sessions.values());
         }
         JSONArray result = new JSONArray();
-        for (Session session : snapshot) result.put(serialize(session, includeBuffer));
+        for (Session session : snapshot) {
+            if (session.workspaceKey.equals(workspaceKey)) result.put(serialize(session, includeBuffer));
+        }
         return result;
     }
 
@@ -71,13 +74,17 @@ final class AndroidTerminalManager {
             if (sessions.size() >= MAX_SESSIONS) {
                 throw new IllegalStateException("最多同时打开 " + MAX_SESSIONS + " 个终端");
             }
-            LaunchConfig config = launchConfigProvider.getLaunchConfig();
+            String workspaceKey = getWorkspaceKey(options);
+            LaunchConfig config = launchConfigProvider.getLaunchConfig(
+                    workspaceKey,
+                    options.optString("cwd", "").trim()
+            );
             String id = UUID.randomUUID().toString();
             String requestedTitle = options.optString("title", "").trim();
             String title = requestedTitle.isEmpty()
                     ? "终端 " + (sessions.size() + 1)
                     : requestedTitle.substring(0, Math.min(80, requestedTitle.length()));
-            session = new Session(id, title, config.cwd, config.root);
+            session = new Session(id, workspaceKey, title, config.cwd, config.root);
             sessions.put(id, session);
         }
 
@@ -95,7 +102,7 @@ final class AndroidTerminalManager {
     }
 
     JSONObject write(JSONObject options) throws Exception {
-        Session session = getSession(options.optString("id", ""));
+        Session session = getSession(options);
         String data = options.optString("data", "");
         if (data.length() > 1024 * 1024) throw new IllegalArgumentException("单次终端输入过长");
         RengePtyProcess process;
@@ -110,7 +117,7 @@ final class AndroidTerminalManager {
     }
 
     JSONObject resize(JSONObject options) throws Exception {
-        Session session = getSession(options.optString("id", ""));
+        Session session = getSession(options);
         int columns = clampDimension(options.optInt("cols", 80), 80, 500);
         int rows = clampDimension(options.optInt("rows", 24), 24, 300);
         synchronized (session) {
@@ -120,7 +127,7 @@ final class AndroidTerminalManager {
     }
 
     JSONObject read(JSONObject options) throws Exception {
-        Session session = getSession(options.optString("id", ""));
+        Session session = getSession(options);
         int maxChars = clampDimension(options.optInt("maxChars", 20_000), 20_000, MAX_READ_CHARS);
         synchronized (session) {
             long bufferStart = Math.max(0L, session.outputOffset - session.buffer.length());
@@ -145,7 +152,7 @@ final class AndroidTerminalManager {
     }
 
     JSONObject restart(JSONObject options) throws Exception {
-        Session session = getSession(options.optString("id", ""));
+        Session session = getSession(options);
         disposeProcess(session);
         spawn(session, options);
         JSONObject payload = serialize(session, true);
@@ -154,12 +161,14 @@ final class AndroidTerminalManager {
     }
 
     JSONObject close(JSONObject options) throws Exception {
-        Session session = getSession(options.optString("id", ""));
+        Session session = getSession(options);
         synchronized (sessionsLock) {
             sessions.remove(session.id);
         }
         disposeProcess(session);
-        JSONObject event = new JSONObject().put("id", session.id);
+        JSONObject event = new JSONObject()
+                .put("id", session.id)
+                .put("workspaceKey", session.workspaceKey);
         eventSink.emit("closed", event);
         return new JSONObject().put("ok", true).put("id", session.id);
     }
@@ -255,7 +264,13 @@ final class AndroidTerminalManager {
             }
         }
         try {
-            eventSink.emit("data", new JSONObject().put("id", session.id).put("data", data));
+            eventSink.emit(
+                    "data",
+                    new JSONObject()
+                            .put("id", session.id)
+                            .put("workspaceKey", session.workspaceKey)
+                            .put("data", data)
+            );
         } catch (JSONException ignored) {
         }
     }
@@ -274,6 +289,7 @@ final class AndroidTerminalManager {
                     "exit",
                     new JSONObject()
                             .put("id", session.id)
+                            .put("workspaceKey", session.workspaceKey)
                             .put("exitCode", exitCode)
                             .put("signal", signal)
             );
@@ -291,10 +307,14 @@ final class AndroidTerminalManager {
         if (process != null) process.close();
     }
 
-    private Session getSession(String id) {
+    private Session getSession(JSONObject options) {
+        String id = options.optString("id", "");
         synchronized (sessionsLock) {
             Session session = sessions.get(id);
             if (session == null) throw new IllegalArgumentException("找不到这个终端会话");
+            if (!session.workspaceKey.equals(getWorkspaceKey(options))) {
+                throw new IllegalArgumentException("这个终端属于其他工作区");
+            }
             return session;
         }
     }
@@ -308,6 +328,7 @@ final class AndroidTerminalManager {
     private JSONObject serializeLocked(Session session, boolean includeBuffer) throws JSONException {
         JSONObject payload = new JSONObject();
         payload.put("id", session.id);
+        payload.put("workspaceKey", session.workspaceKey);
         payload.put("title", session.title);
         payload.put("shell", session.shell);
         payload.put("cwd", session.cwd);
@@ -327,8 +348,15 @@ final class AndroidTerminalManager {
         return "'" + value.replace("'", "'\\''") + "'";
     }
 
+    private String getWorkspaceKey(JSONObject options) {
+        String workspaceKey = options.optString("workspaceKey", "").trim();
+        if (workspaceKey.isEmpty()) return "default";
+        return workspaceKey;
+    }
+
     private static final class Session {
         final String id;
+        final String workspaceKey;
         final String title;
         final String cwd;
         final boolean root;
@@ -341,8 +369,9 @@ final class AndroidTerminalManager {
         int generation;
         RengePtyProcess process;
 
-        Session(String id, String title, String cwd, boolean root) {
+        Session(String id, String workspaceKey, String title, String cwd, boolean root) {
             this.id = id;
+            this.workspaceKey = workspaceKey;
             this.title = title;
             this.cwd = cwd;
             this.root = root;

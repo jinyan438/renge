@@ -953,9 +953,23 @@ public class AndroidWorkspaceBridge {
         }
     }
 
-    private AndroidTerminalManager.LaunchConfig getTerminalLaunchConfig() {
-        if (rootWorkspace && rootWorkspacePath != null && !rootWorkspacePath.trim().isEmpty()) {
-            return new AndroidTerminalManager.LaunchConfig(rootWorkspacePath, true);
+    private AndroidTerminalManager.LaunchConfig getTerminalLaunchConfig(
+            String workspaceKey,
+            String requestedCwd
+    ) {
+        if ("default".equals(workspaceKey)) {
+            return new AndroidTerminalManager.LaunchConfig(activity.getFilesDir().getAbsolutePath(), false);
+        }
+        String rootWorkspaceKeyPrefix = "android:root:";
+        String requestedRootPath = requestedCwd.startsWith("root:")
+                ? requestedCwd.substring("root:".length())
+                : requestedCwd;
+        if (workspaceKey.startsWith(rootWorkspaceKeyPrefix)) {
+            String keyedRootPath = workspaceKey.substring(rootWorkspaceKeyPrefix.length());
+            if (!keyedRootPath.trim().isEmpty()
+                    && (requestedRootPath.isEmpty() || keyedRootPath.equals(requestedRootPath))) {
+                return new AndroidTerminalManager.LaunchConfig(keyedRootPath, true);
+            }
         }
         return new AndroidTerminalManager.LaunchConfig(activity.getFilesDir().getAbsolutePath(), false);
     }

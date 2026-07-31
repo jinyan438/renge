@@ -81,7 +81,11 @@ function TerminalPane({ active, session, onReady, onDispose }: TerminalPaneProps
     if (session.buffer) terminal.write(session.buffer);
 
     const inputDisposable = terminal.onData((data) => {
-      void terminalApi.writeSidebarTerminal({ id: session.id, data }).catch(() => undefined);
+      void terminalApi.writeSidebarTerminal({
+        id: session.id,
+        workspaceKey: session.workspaceKey,
+        data,
+      }).catch(() => undefined);
     });
     terminal.attachCustomKeyEventHandler((event) => {
       const modifier = event.ctrlKey || event.metaKey;
@@ -110,6 +114,7 @@ function TerminalPane({ active, session, onReady, onDispose }: TerminalPaneProps
         fitAddon.fit();
         void terminalApi.resizeSidebarTerminal({
           id: session.id,
+          workspaceKey: session.workspaceKey,
           cols: terminal.cols,
           rows: terminal.rows,
         }).catch(() => undefined);
@@ -151,10 +156,14 @@ export function TerminalSidebarPanel({
   onBack,
   onClose,
   requestedSessionId = "",
+  workspaceKey = "default",
+  workspacePath = "",
 }: {
   onBack: () => void;
   onClose: () => void;
   requestedSessionId?: string;
+  workspaceKey?: string;
+  workspacePath?: string;
 }) {
   const [sessions, setSessions] = useState<SidebarTerminalSession[]>([]);
   const [activeId, setActiveId] = useState("");
@@ -162,7 +171,9 @@ export function TerminalSidebarPanel({
   const [error, setError] = useState("");
   const terminalRefs = useRef(new Map<string, { terminal: Terminal; fitAddon: FitAddon }>());
   const pendingDataRef = useRef(new Map<string, string>());
-  const creatingRef = useRef(false);
+  const activeWorkspaceRef = useRef(workspaceKey);
+  const creatingWorkspacesRef = useRef(new Set<string>());
+  activeWorkspaceRef.current = workspaceKey;
 
   const registerTerminal = useCallback((id: string, terminal: Terminal, fitAddon: FitAddon) => {
     terminalRefs.current.set(id, { terminal, fitAddon });
@@ -178,22 +189,30 @@ export function TerminalSidebarPanel({
 
   const createTerminal = useCallback(async () => {
     const terminalApi = getTerminalSidebarApi();
-    if (!terminalApi || creatingRef.current) return;
-    creatingRef.current = true;
+    if (!terminalApi || creatingWorkspacesRef.current.has(workspaceKey)) return;
+    creatingWorkspacesRef.current.add(workspaceKey);
     setError("");
     try {
-      const session = await terminalApi.createSidebarTerminal({ cols: 80, rows: 24 });
+      const session = await terminalApi.createSidebarTerminal({
+        cols: 80,
+        rows: 24,
+        workspaceKey,
+        ...(workspacePath ? { cwd: workspacePath } : {}),
+      });
+      if (activeWorkspaceRef.current !== workspaceKey) return;
       setSessions((current) => current.some((item) => item.id === session.id)
         ? current.map((item) => item.id === session.id ? session : item)
         : [...current, session]);
       setActiveId(session.id);
     } catch (createError) {
-      setError(getErrorMessage(createError));
+      if (activeWorkspaceRef.current === workspaceKey) {
+        setError(getErrorMessage(createError));
+      }
     } finally {
-      creatingRef.current = false;
-      setLoading(false);
+      creatingWorkspacesRef.current.delete(workspaceKey);
+      if (activeWorkspaceRef.current === workspaceKey) setLoading(false);
     }
-  }, []);
+  }, [workspaceKey, workspacePath]);
 
   useEffect(() => {
     const terminalApi = getTerminalSidebarApi();
@@ -202,8 +221,13 @@ export function TerminalSidebarPanel({
       setError("当前平台未提供交互式终端");
       return;
     }
+    setLoading(true);
+    setError("");
+    setSessions([]);
+    setActiveId("");
+    pendingDataRef.current.clear();
     let cancelled = false;
-    void terminalApi.listSidebarTerminals()
+    void terminalApi.listSidebarTerminals({ workspaceKey })
       .then((current) => {
         if (cancelled) return;
         if (current.length === 0) return createTerminal();
@@ -220,11 +244,12 @@ export function TerminalSidebarPanel({
     return () => {
       cancelled = true;
     };
-  }, [createTerminal]);
+  }, [createTerminal, workspaceKey]);
 
   useEffect(() => {
     const terminalApi = getTerminalSidebarApi();
     const stopData = terminalApi?.onSidebarTerminalData?.((payload) => {
+      if (payload.workspaceKey !== workspaceKey) return;
       const terminal = terminalRefs.current.get(payload.id)?.terminal;
       if (terminal) terminal.write(payload.data);
       else pendingDataRef.current.set(
@@ -233,6 +258,7 @@ export function TerminalSidebarPanel({
       );
     });
     const stopRestart = terminalApi?.onSidebarTerminalRestarted?.((payload) => {
+      if (payload.workspaceKey !== workspaceKey) return;
       const current = terminalRefs.current.get(payload.id);
       pendingDataRef.current.delete(payload.id);
       if (current) {
@@ -242,18 +268,21 @@ export function TerminalSidebarPanel({
       }
     });
     const stopExit = terminalApi?.onSidebarTerminalExit?.((payload) => {
+      if (payload.workspaceKey !== workspaceKey) return;
       setSessions((current) => current.map((session) =>
         session.id === payload.id
           ? { ...session, exited: true, exitCode: payload.exitCode }
           : session));
     });
     const stopCreated = terminalApi?.onSidebarTerminalCreated?.((payload) => {
+      if (payload.workspaceKey !== workspaceKey) return;
       setSessions((current) => current.some((session) => session.id === payload.id)
         ? current.map((session) => session.id === payload.id ? payload : session)
         : [...current, payload]);
       setActiveId(payload.id);
     });
     const stopClosed = terminalApi?.onSidebarTerminalClosed?.((payload) => {
+      if (payload.workspaceKey !== workspaceKey) return;
       pendingDataRef.current.delete(payload.id);
       setSessions((current) => {
         const next = current.filter((session) => session.id !== payload.id);
@@ -268,7 +297,7 @@ export function TerminalSidebarPanel({
       stopCreated?.();
       stopClosed?.();
     };
-  }, []);
+  }, [workspaceKey]);
 
   useEffect(() => {
     const handleShortcut = (event: globalThis.KeyboardEvent) => {
@@ -309,7 +338,8 @@ export function TerminalSidebarPanel({
     try {
       const terminalApi = getTerminalSidebarApi();
       if (!terminalApi) throw new Error("终端接口不可用");
-      await terminalApi.closeSidebarTerminal({ id });
+      await terminalApi.closeSidebarTerminal({ id, workspaceKey });
+      if (activeWorkspaceRef.current !== workspaceKey) return;
       pendingDataRef.current.delete(id);
       const next = sessions.filter((session) => session.id !== id);
       setSessions(next);
@@ -317,7 +347,9 @@ export function TerminalSidebarPanel({
         setActiveId(next[Math.min(sessionIndex, Math.max(0, next.length - 1))]?.id ?? "");
       }
     } catch (closeError) {
-      setError(getErrorMessage(closeError));
+      if (activeWorkspaceRef.current === workspaceKey) {
+        setError(getErrorMessage(closeError));
+      }
     }
   };
 
@@ -329,12 +361,16 @@ export function TerminalSidebarPanel({
       if (!terminalApi) throw new Error("终端接口不可用");
       const session = await terminalApi.restartSidebarTerminal({
         id: activeId,
+        workspaceKey,
         cols: current?.terminal.cols ?? 80,
         rows: current?.terminal.rows ?? 24,
       });
+      if (activeWorkspaceRef.current !== workspaceKey) return;
       setSessions((items) => items.map((item) => item.id === session.id ? session : item));
     } catch (restartError) {
-      setError(getErrorMessage(restartError));
+      if (activeWorkspaceRef.current === workspaceKey) {
+        setError(getErrorMessage(restartError));
+      }
     }
   };
 

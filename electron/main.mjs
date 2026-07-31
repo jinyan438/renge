@@ -89,7 +89,7 @@ let sidebarBrowserProfileWriteQueue = Promise.resolve();
 const sidebarTerminalManager = createSidebarTerminalManager({
   getMainWindow: () => mainWindow,
   getWorkspaceRoot: () => workspaceRoot,
-  getFallbackCwd: () => process.cwd(),
+  getFallbackCwd: () => app.getPath("home"),
 });
 
 function getPersistentDataDir() {

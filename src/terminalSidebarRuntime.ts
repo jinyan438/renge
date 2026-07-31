@@ -2,6 +2,7 @@ type TerminalToolArguments = Record<string, unknown>;
 
 export type SidebarTerminalSession = {
   id: string;
+  workspaceKey: string;
   title: string;
   shell: string;
   cwd: string;
@@ -21,39 +22,80 @@ export type SidebarTerminalReadResult = Omit<SidebarTerminalSession, "buffer"> &
 };
 
 export type SidebarTerminalApi = {
-  listSidebarTerminals(options?: { includeBuffer?: boolean }): Promise<SidebarTerminalSession[]>;
+  listSidebarTerminals(options?: {
+    includeBuffer?: boolean;
+    workspaceKey?: string;
+  }): Promise<SidebarTerminalSession[]>;
   createSidebarTerminal(options?: {
     cols?: number;
     rows?: number;
     title?: string;
+    workspaceKey?: string;
+    cwd?: string;
   }): Promise<SidebarTerminalSession>;
-  writeSidebarTerminal(options: { id: string; data: string }): Promise<{ ok: boolean }>;
+  writeSidebarTerminal(options: {
+    id: string;
+    workspaceKey?: string;
+    data: string;
+  }): Promise<{ ok: boolean }>;
   resizeSidebarTerminal(options: {
     id: string;
+    workspaceKey?: string;
     cols: number;
     rows: number;
   }): Promise<{ ok: boolean }>;
   readSidebarTerminal(options: {
     id: string;
+    workspaceKey?: string;
     from?: number;
     maxChars?: number;
   }): Promise<SidebarTerminalReadResult>;
   restartSidebarTerminal(options: {
     id: string;
+    workspaceKey?: string;
     cols?: number;
     rows?: number;
   }): Promise<SidebarTerminalSession>;
-  closeSidebarTerminal(options: { id: string }): Promise<{ ok: boolean; id: string }>;
-  onSidebarTerminalData?(listener: (payload: { id: string; data: string }) => void): () => void;
+  closeSidebarTerminal(options: {
+    id: string;
+    workspaceKey?: string;
+  }): Promise<{ ok: boolean; id: string }>;
+  onSidebarTerminalData?(listener: (payload: {
+    id: string;
+    workspaceKey: string;
+    data: string;
+  }) => void): () => void;
   onSidebarTerminalExit?(listener: (payload: {
     id: string;
+    workspaceKey: string;
     exitCode: number;
     signal: number;
   }) => void): () => void;
   onSidebarTerminalRestarted?(listener: (payload: SidebarTerminalSession) => void): () => void;
   onSidebarTerminalCreated?(listener: (payload: SidebarTerminalSession) => void): () => void;
-  onSidebarTerminalClosed?(listener: (payload: { id: string }) => void): () => void;
+  onSidebarTerminalClosed?(listener: (payload: {
+    id: string;
+    workspaceKey: string;
+  }) => void): () => void;
 };
+
+export type TerminalWorkspaceContext = {
+  workspaceKey: string;
+  cwd?: string;
+};
+
+let terminalWorkspaceContext: TerminalWorkspaceContext = { workspaceKey: "default" };
+
+export function setTerminalWorkspaceContext(context: TerminalWorkspaceContext) {
+  terminalWorkspaceContext = {
+    workspaceKey: String(context.workspaceKey || "default").trim() || "default",
+    ...(context.cwd?.trim() ? { cwd: context.cwd.trim() } : {}),
+  };
+}
+
+export function getTerminalWorkspaceContext() {
+  return terminalWorkspaceContext;
+}
 
 function hasTerminalContract(value: Partial<SidebarTerminalApi>) {
   return (
@@ -102,7 +144,7 @@ export const terminalToolDefinitions = [
     type: "function" as const,
     function: {
       name: "terminal_list",
-      description: "列出右侧栏中的全部交互式终端会话、运行状态、Shell 和工作目录。",
+      description: "仅在任务确实需要命令行操作时，列出当前工作区的交互式终端；不要把它用于一般问答、写作、绘图或内容生成。",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -110,7 +152,7 @@ export const terminalToolDefinitions = [
     type: "function" as const,
     function: {
       name: "terminal_create",
-      description: "在右侧栏新建并打开一个独立交互式终端。可同时创建多个终端。",
+      description: "仅在确实需要运行命令且没有合适终端时，在当前工作区新建交互式终端。可同时创建多个终端。",
       parameters: {
         type: "object",
         properties: {
@@ -222,8 +264,10 @@ export function isTerminalToolName(toolName: string) {
 
 export function buildTerminalToolsSystemPrompt() {
   return [
-    "你拥有完全控制当前应用右侧栏交互式终端的权限，可以同时新建、读取、输入、运行、调整、重启和关闭多个终端。",
-    "需要操作终端时先调用 terminal_list；没有合适终端时调用 terminal_create，并在后续调用中使用返回的准确 id。",
+    "右侧栏终端是严格按需使用的执行工具，不是开始任务时默认检查的环境。",
+    "只有用户明确要求操作终端/运行命令，或软件工程任务确实必须执行测试、构建、开发服务器、版本控制、进程管理或命令行诊断时，才允许调用任何 terminal_* 工具。",
+    "绘图、生成 SVG/HTML、写作、翻译、一般问答、方案设计、普通代码输出，以及可由浏览器或文件工具直接完成的任务，不得调用 terminal_list、terminal_create 或 terminal_run 来查看目录、探索环境或创建内容。能够直接回答时直接回答。",
+    "确认确实需要终端后，先调用 terminal_list；没有当前工作区的合适终端时调用 terminal_create，并在后续调用中使用返回的准确 id。不得复用其他工作区的终端。",
     "执行普通命令优先调用 terminal_run，它会返回本次新增输出；持续运行的任务可稍后用 terminal_read 增量读取。",
     "需要回答交互式提示、发送控制键或终止前台任务时调用 terminal_write；Ctrl+C 的 data 为 \\u0003，回车为 \\r。",
     "terminal_close 会终止其中的进程。用户要求关闭终端时直接调用，不要只描述操作。",
@@ -293,12 +337,13 @@ function waitForPoll(delayMs: number, signal?: AbortSignal) {
 async function runTerminalCommand(
   api: SidebarTerminalApi,
   args: TerminalToolArguments,
+  workspaceKey: string,
   signal?: AbortSignal,
 ) {
   const id = requireString(args, "id");
   const command = requireString(args, "command");
   const waitMs = clampNumber(args.waitMs, 1500, 250, 30_000);
-  const before = await api.readSidebarTerminal({ id, maxChars: 1 });
+  const before = await api.readSidebarTerminal({ id, workspaceKey, maxChars: 1 });
   let cursor = before.nextCursor;
   let output = "";
   let sawOutput = false;
@@ -306,12 +351,18 @@ async function runTerminalCommand(
   const startedAt = Date.now();
   await api.writeSidebarTerminal({
     id,
+    workspaceKey,
     data: /[\r\n]$/.test(command) ? command : `${command}\r`,
   });
 
   while (Date.now() - startedAt < waitMs) {
     await waitForPoll(100, signal);
-    const page = await api.readSidebarTerminal({ id, from: cursor, maxChars: 100_000 });
+    const page = await api.readSidebarTerminal({
+      id,
+      workspaceKey,
+      from: cursor,
+      maxChars: 100_000,
+    });
     if (page.output) {
       output += page.output;
       cursor = page.nextCursor;
@@ -328,7 +379,12 @@ async function runTerminalCommand(
     }
   }
 
-  const state = await api.readSidebarTerminal({ id, from: cursor, maxChars: 100_000 });
+  const state = await api.readSidebarTerminal({
+    id,
+    workspaceKey,
+    from: cursor,
+    maxChars: 100_000,
+  });
   if (state.output) output += state.output;
   return {
     ...state,
@@ -347,6 +403,8 @@ export async function executeTerminalTool(
   if (signal?.aborted) throw new DOMException("操作已停止", "AbortError");
   const api = getTerminalSidebarApi();
   if (!api) throw new Error("当前平台未提供右侧栏交互式终端");
+  const terminalContext = getTerminalWorkspaceContext();
+  const { workspaceKey } = terminalContext;
   const args = parseTerminalToolArguments(rawArguments);
   terminalSidebarOpener?.(
     typeof args.id === "string" && args.id ? args.id : undefined,
@@ -354,18 +412,23 @@ export async function executeTerminalTool(
 
   switch (toolName) {
     case "terminal_list": {
-      const sessions = await api.listSidebarTerminals({ includeBuffer: false });
+      const sessions = await api.listSidebarTerminals({
+        includeBuffer: false,
+        workspaceKey,
+      });
       return sessions.map(({ buffer: _buffer, ...session }) => session);
     }
     case "terminal_create":
       return api.createSidebarTerminal({
         title: String(args.title ?? ""),
+        ...terminalContext,
         cols: clampNumber(args.cols, 80, 1, 500),
         rows: clampNumber(args.rows, 24, 1, 300),
       });
     case "terminal_read": {
       const result = await api.readSidebarTerminal({
         id: requireString(args, "id"),
+        workspaceKey,
         ...(args.cursor === undefined ? {} : { from: Number(args.cursor) }),
         maxChars: clampNumber(args.maxChars, 20_000, 1, 100_000),
       });
@@ -377,24 +440,30 @@ export async function executeTerminalTool(
     case "terminal_write":
       return api.writeSidebarTerminal({
         id: requireString(args, "id"),
+        workspaceKey,
         data: requireString(args, "data"),
       });
     case "terminal_run":
-      return runTerminalCommand(api, args, signal);
+      return runTerminalCommand(api, args, workspaceKey, signal);
     case "terminal_resize":
       return api.resizeSidebarTerminal({
         id: requireString(args, "id"),
+        workspaceKey,
         cols: clampNumber(args.cols, 80, 1, 500),
         rows: clampNumber(args.rows, 24, 1, 300),
       });
     case "terminal_restart":
       return api.restartSidebarTerminal({
         id: requireString(args, "id"),
+        workspaceKey,
         cols: clampNumber(args.cols, 80, 1, 500),
         rows: clampNumber(args.rows, 24, 1, 300),
       });
     case "terminal_close":
-      return api.closeSidebarTerminal({ id: requireString(args, "id") });
+      return api.closeSidebarTerminal({
+        id: requireString(args, "id"),
+        workspaceKey,
+      });
     default:
       throw new Error(`未知终端工具：${toolName}`);
   }

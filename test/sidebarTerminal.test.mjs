@@ -90,3 +90,53 @@ test("creates, lists, resizes, writes to, restarts, and closes a PTY session", (
     manager.disposeAll();
   }
 });
+
+test("isolates terminals by workspace and uses the fallback directory for default workspace", () => {
+  const spawnCalls = [];
+  const ptyModule = {
+    spawn(_command, _args, options) {
+      spawnCalls.push(options);
+      return {
+        kill() {},
+        onData() {},
+        onExit() {},
+        resize() {},
+        write() {},
+      };
+    },
+  };
+  const webContents = { send() {} };
+  const event = { sender: webContents };
+  const manager = createSidebarTerminalManager({
+    getMainWindow: () => ({ isDestroyed: () => false, webContents }),
+    getWorkspaceRoot: () => "E:\\projects\\other",
+    getFallbackCwd: () => "C:\\Users\\tester",
+    ptyModule,
+  });
+
+  try {
+    const defaultTerminal = manager.create(event, { workspaceKey: "default" });
+    const projectTerminal = manager.create(event, {
+      workspaceKey: "electron:E:\\projects\\current",
+      cwd: "E:\\projects\\current",
+    });
+
+    assert.equal(defaultTerminal.cwd, "C:\\Users\\tester");
+    assert.equal(spawnCalls[0].cwd, "C:\\Users\\tester");
+    assert.equal(projectTerminal.cwd, "E:\\projects\\current");
+    assert.equal(manager.list(event, { workspaceKey: "default" }).length, 1);
+    assert.equal(
+      manager.list(event, { workspaceKey: "electron:E:\\projects\\current" }).length,
+      1,
+    );
+    assert.throws(
+      () => manager.read(event, {
+        id: projectTerminal.id,
+        workspaceKey: "default",
+      }),
+      /其他工作区/,
+    );
+  } finally {
+    manager.disposeAll();
+  }
+});

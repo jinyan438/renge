@@ -75,6 +75,8 @@ export type StatusBarSidebarProps = {
   fileBrowserSource?: FileBrowserSource | null;
   onChooseWorkspace?: () => void | Promise<void>;
   onBrowserComment?: (comment: BrowserPageComment) => void;
+  terminalWorkspaceKey?: string;
+  terminalWorkspacePath?: string;
 };
 
 type StatusBarCssProperties = CSSProperties & {
@@ -795,6 +797,8 @@ export function StatusBarSidebar({
   fileBrowserSource = null,
   onChooseWorkspace,
   onBrowserComment,
+  terminalWorkspaceKey = "default",
+  terminalWorkspacePath = "",
 }: StatusBarSidebarProps) {
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
   const [requestedTerminalId, setRequestedTerminalId] = useState("");
@@ -1969,6 +1973,8 @@ export function StatusBarSidebar({
             onBack={() => setActiveToolId("menu")}
             onClose={() => onCollapsedChange(true)}
             requestedSessionId={requestedTerminalId}
+            workspaceKey={terminalWorkspaceKey}
+            workspacePath={terminalWorkspacePath}
           />
         ) : activeToolId === "files" ? (
           <FilesSidebarPanel

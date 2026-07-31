@@ -7,6 +7,7 @@ import {
   isTerminalSidebarAvailable,
   isTerminalToolName,
   registerTerminalSidebarOpener,
+  setTerminalWorkspaceContext,
   stripTerminalControlSequences,
   terminalToolDefinitions,
 } from "../src/terminalSidebarRuntime.ts";
@@ -25,7 +26,9 @@ test("exposes the complete terminal control tool set", () => {
     "terminal_close",
   ]);
   assert.equal(names.every(isTerminalToolName), true);
-  assert.match(buildTerminalToolsSystemPrompt(), /完全控制/);
+  assert.match(buildTerminalToolsSystemPrompt(), /严格按需/);
+  assert.match(buildTerminalToolsSystemPrompt(), /生成 SVG\/HTML/);
+  assert.match(buildTerminalToolsSystemPrompt(), /不得调用 terminal_list/);
   assert.match(buildTerminalToolsSystemPrompt(), /terminal_close/);
 });
 
@@ -65,6 +68,7 @@ test("routes AI terminal tools through the Electron bridge and opens the sidebar
   let output = "\u001b[32mPS>\u001b[0m ";
   const session = {
     id: "terminal-1",
+    workspaceKey: "electron:E:\\workspace",
     title: "AI 终端",
     shell: "PowerShell",
     cwd: "E:\\workspace",
@@ -126,6 +130,10 @@ test("routes AI terminal tools through the Electron bridge and opens the sidebar
   const unregister = registerTerminalSidebarOpener(() => {
     opened += 1;
   });
+  setTerminalWorkspaceContext({
+    workspaceKey: "electron:E:\\workspace",
+    cwd: "E:\\workspace",
+  });
 
   try {
     const listed = await executeTerminalTool("terminal_list", "{}");
@@ -134,6 +142,16 @@ test("routes AI terminal tools through the Electron bridge and opens the sidebar
 
     const created = await executeTerminalTool("terminal_create", JSON.stringify({ title: "AI 终端" }));
     assert.equal(created.id, "terminal-1");
+    assert.deepEqual(calls.find((call) => Array.isArray(call) && call[0] === "create"), [
+      "create",
+      {
+        title: "AI 终端",
+        workspaceKey: "electron:E:\\workspace",
+        cwd: "E:\\workspace",
+        cols: 80,
+        rows: 24,
+      },
+    ]);
 
     const read = await executeTerminalTool("terminal_read", JSON.stringify({ id: "terminal-1" }));
     assert.equal(read.output, "PS> ");
@@ -148,6 +166,7 @@ test("routes AI terminal tools through the Electron bridge and opens the sidebar
     await executeTerminalTool("terminal_close", JSON.stringify({ id: "terminal-1" }));
     assert.equal(calls.some((call) => Array.isArray(call) && call[0] === "close"), true);
   } finally {
+    setTerminalWorkspaceContext({ workspaceKey: "default" });
     unregister();
     globalThis.window = previousWindow;
   }
