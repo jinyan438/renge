@@ -10161,6 +10161,87 @@ function createStreamingWordWriter(
   };
 }
 
+function createStreamingAssistantMessage(
+  setChatMessages: Dispatch<SetStateAction<ChatMessage[]>>,
+  signal?: AbortSignal,
+  sender?: ChatSenderIdentity,
+) {
+  const messageId = crypto.randomUUID();
+  const appendContent = (delta: string) => {
+    setChatMessages((current) =>
+      current.map((message) =>
+        message.id === messageId
+          ? { ...message, content: `${message.content}${delta}` }
+          : message,
+      ),
+    );
+  };
+  const appendReasoning = (delta: string) => {
+    setChatMessages((current) =>
+      current.map((message) =>
+        message.id === messageId
+          ? { ...message, reasoning: `${message.reasoning ?? ""}${delta}` }
+          : message,
+      ),
+    );
+  };
+  const contentWriter = createStreamingWordWriter(appendContent, signal);
+  const reasoningWriter = createStreamingWordWriter(appendReasoning, signal);
+
+  setChatMessages((current) => [
+    ...current,
+    {
+      id: messageId,
+      role: "assistant",
+      content: "",
+      renderAsPlainText: true,
+      ...(sender ? { sender } : {}),
+      createdAt: new Date().toISOString(),
+    },
+  ]);
+
+  const remove = () => {
+    contentWriter.cancel();
+    reasoningWriter.cancel();
+    setChatMessages((current) => current.filter((message) => message.id !== messageId));
+  };
+
+  return {
+    messageId,
+    pushContent: contentWriter.push,
+    pushReasoning: reasoningWriter.push,
+    async finish() {
+      await Promise.all([contentWriter.finish(), reasoningWriter.finish()]);
+    },
+    complete(content: string, reasoning = "") {
+      contentWriter.cancel();
+      reasoningWriter.cancel();
+      if (!content.trim()) {
+        setChatMessages((current) => current.filter((message) => message.id !== messageId));
+        return false;
+      }
+      setChatMessages((current) =>
+        current.map((message) =>
+          message.id === messageId
+            ? {
+                ...message,
+                content,
+                renderAsPlainText: false,
+                ...(reasoning.trim() ? { reasoning } : {}),
+              }
+            : message,
+        ),
+      );
+      return true;
+    },
+    cancel() {
+      contentWriter.cancel();
+      reasoningWriter.cancel();
+    },
+    remove,
+  };
+}
+
 async function readChatStream(
   response: Response,
   onDelta: (delta: string) => void,
@@ -21962,8 +22043,7 @@ export function App() {
       let hasVisibleToolResult = false;
       let hasSuccessfulVisibleToolResult = false;
       let multiAgentDelegationDisabled = false;
-      let preferStreamingSupervisorToolCalls =
-        chatStreamEnabled && requestProvider.reasoningEnabled;
+      let preferStreamingSupervisorToolCalls = chatStreamEnabled;
       let pendingMcpObservationPrompt = "";
       let pendingMcpObservationRetries = 0;
       let pendingMcpObservationPromptSent = false;
@@ -22822,11 +22902,31 @@ export function App() {
             });
             pendingMcpObservationPromptSent = true;
           }
-          let completionResult = await requestChatCompletion(apiMessages, {
-            includeTools: availableChatTools.length > 0,
-            stream: preferStreamingSupervisorToolCalls,
-            toolChoice: "auto",
-          });
+          const streamingRound = chatStreamEnabled
+            ? createStreamingAssistantMessage(
+                commitChatMessages,
+                abortSignal,
+                assistantSender,
+              )
+            : null;
+          if (streamingRound) {
+            assistantMessageId = streamingRound.messageId;
+            streamingAssistantInserted = true;
+          }
+          let completionResult;
+          try {
+            completionResult = await requestChatCompletion(apiMessages, {
+              includeTools: availableChatTools.length > 0,
+              stream: preferStreamingSupervisorToolCalls,
+              toolChoice: "auto",
+              onDelta: streamingRound?.pushContent,
+              onReasoningDelta: streamingRound?.pushReasoning,
+            });
+            await streamingRound?.finish();
+          } catch (error) {
+            streamingRound?.cancel();
+            throw error;
+          }
           throwIfChatAborted(abortSignal);
 
           let assistantMessage = completionResult.payload?.choices?.[0]?.message;
@@ -22894,6 +22994,7 @@ export function App() {
             assistantContent =
               assistantMessageContent || presentedChoice.prompt;
             assistantReasoning = assistantMessageReasoning;
+            streamingRound?.complete(assistantContent, assistantReasoning);
             toolLoopCompleted = true;
             break;
           }
@@ -22924,6 +23025,7 @@ export function App() {
               pendingMcpObservationPromptSent = true;
               assistantContent = "";
               assistantReasoning = "";
+              streamingRound?.remove();
               continue;
             }
 
@@ -22933,13 +23035,17 @@ export function App() {
               toolRound < 98 &&
               shouldAutoContinueLocalTask(assistantContent)
             ) {
-              appendAssistantTimelineMessage(
-                commitChatMessages,
-                assistantContent,
-                [],
-                assistantReasoning,
-                assistantSender,
-              );
+              if (!streamingRound) {
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  assistantContent,
+                  [],
+                  assistantReasoning,
+                  assistantSender,
+                );
+              } else {
+                streamingRound.complete(assistantContent, assistantReasoning);
+              }
               apiMessages.push({
                 role: "assistant",
                 content: assistantContent,
@@ -22959,17 +23065,24 @@ export function App() {
             }
 
             toolLoopCompleted = true;
+            streamingRound?.complete(assistantContent, assistantReasoning);
             break;
           }
 
           if (assistantMessageContent && !hasSilentControlTool) {
-            appendAssistantTimelineMessage(
-              commitChatMessages,
-              assistantMessageContent,
-              [],
-              assistantMessageReasoning,
-              assistantSender,
-            );
+            if (!streamingRound) {
+              appendAssistantTimelineMessage(
+                commitChatMessages,
+                assistantMessageContent,
+                [],
+                assistantMessageReasoning,
+                assistantSender,
+              );
+            } else {
+              streamingRound.complete(assistantMessageContent, assistantMessageReasoning);
+            }
+          } else {
+            streamingRound?.remove();
           }
 
           apiMessages.push({
@@ -23145,26 +23258,50 @@ export function App() {
           status: "loading",
           message: "主 Agent 正在基于已完成的子任务整理最终答复...",
         });
-        const summaryResult = await requestChatCompletion(
-          [
-            ...apiMessages,
+        const summaryStreamingRound = chatStreamEnabled
+          ? createStreamingAssistantMessage(
+              commitChatMessages,
+              abortSignal,
+              assistantSender,
+            )
+          : null;
+        if (summaryStreamingRound) {
+          assistantMessageId = summaryStreamingRound.messageId;
+          streamingAssistantInserted = true;
+        }
+        let summaryResult;
+        try {
+          summaryResult = await requestChatCompletion(
+            [
+              ...apiMessages,
+              {
+                role: "user",
+                content:
+                  "请现在完成主任务验收并输出给用户的最终答复。综合所有已返回的子任务结果，明确说明已完成内容、关键证据和仍存在的真实阻塞；不要再调用工具，也不要只输出计划。",
+              },
+            ],
             {
-              role: "user",
-              content:
-                "请现在完成主任务验收并输出给用户的最终答复。综合所有已返回的子任务结果，明确说明已完成内容、关键证据和仍存在的真实阻塞；不要再调用工具，也不要只输出计划。",
+              includeTools: false,
+              stream: chatStreamEnabled,
+              onDelta: summaryStreamingRound?.pushContent,
+              onReasoningDelta: summaryStreamingRound?.pushReasoning,
             },
-          ],
-          { includeTools: false, stream: false },
-        );
+          );
+          await summaryStreamingRound?.finish();
+        } catch (error) {
+          summaryStreamingRound?.cancel();
+          throw error;
+        }
         const summaryMessage = summaryResult.payload?.choices?.[0]?.message;
         assistantContent =
           getChatApiMessageText(summaryMessage).trim() ||
           summaryResult.payload?.output_text?.trim() ||
-          "";
+          summaryResult.content.trim();
         assistantReasoning =
           getChatApiMessageReasoning(summaryMessage) ||
           summaryResult.reasoning ||
           assistantReasoning;
+        summaryStreamingRound?.complete(assistantContent, assistantReasoning);
         if (assistantContent) {
           const summaryTemplateResult = await applyPromptTemplateToRenderedMessage(
             assistantContent,
@@ -24746,8 +24883,7 @@ export function App() {
           reasoningWriter.cancel();
         }
       } else {
-        const useStreamingToolCompletion =
-          chatStreamEnabled && chatProvider.reasoningEnabled;
+        const useStreamingToolCompletion = chatStreamEnabled;
         for (let toolRound = 0; toolRound < 99; toolRound += 1) {
           setChatStatus({
             status: "loading",
@@ -24760,11 +24896,27 @@ export function App() {
             });
             pendingMcpObservationPromptSent = true;
           }
-          const completionResult = await requestChatCompletion(apiMessages, {
-            includeTools: availableChatTools.length > 0,
-            stream: useStreamingToolCompletion,
-            toolChoice: "auto",
-          });
+          const streamingRound = chatStreamEnabled
+            ? createStreamingAssistantMessage(commitChatMessages, abortSignal)
+            : null;
+          if (streamingRound) {
+            assistantMessageId = streamingRound.messageId;
+            streamingAssistantInserted = true;
+          }
+          let completionResult;
+          try {
+            completionResult = await requestChatCompletion(apiMessages, {
+              includeTools: availableChatTools.length > 0,
+              stream: useStreamingToolCompletion,
+              toolChoice: "auto",
+              onDelta: streamingRound?.pushContent,
+              onReasoningDelta: streamingRound?.pushReasoning,
+            });
+            await streamingRound?.finish();
+          } catch (error) {
+            streamingRound?.cancel();
+            throw error;
+          }
           throwIfChatAborted(abortSignal);
 
           const { payload } = completionResult;
@@ -24793,6 +24945,7 @@ export function App() {
             assistantContent =
               assistantMessageContent || presentedChoice.prompt;
             assistantReasoning = assistantMessageReasoning;
+            streamingRound?.complete(assistantContent, assistantReasoning);
             break;
           }
           if (hasSilentControlTool) {
@@ -24822,6 +24975,7 @@ export function App() {
               pendingMcpObservationPromptSent = true;
               assistantContent = "";
               assistantReasoning = "";
+              streamingRound?.remove();
               continue;
             }
 
@@ -24831,12 +24985,16 @@ export function App() {
               toolRound < 98 &&
               shouldAutoContinueLocalTask(assistantContent)
             ) {
-              appendAssistantTimelineMessage(
-                commitChatMessages,
-                assistantContent,
-                [],
-                assistantReasoning,
-              );
+              if (!streamingRound) {
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  assistantContent,
+                  [],
+                  assistantReasoning,
+                );
+              } else {
+                streamingRound.complete(assistantContent, assistantReasoning);
+              }
               apiMessages.push({
                 role: "assistant",
                 content: assistantContent,
@@ -24855,16 +25013,23 @@ export function App() {
               continue;
             }
 
+            streamingRound?.complete(assistantContent, assistantReasoning);
             break;
           }
 
           if (assistantMessageContent && !hasSilentControlTool) {
-            appendAssistantTimelineMessage(
-              commitChatMessages,
-              assistantMessageContent,
-              [],
-              assistantMessageReasoning,
-            );
+            if (!streamingRound) {
+              appendAssistantTimelineMessage(
+                commitChatMessages,
+                assistantMessageContent,
+                [],
+                assistantMessageReasoning,
+              );
+            } else {
+              streamingRound.complete(assistantMessageContent, assistantMessageReasoning);
+            }
+          } else {
+            streamingRound?.remove();
           }
 
           apiMessages.push({
