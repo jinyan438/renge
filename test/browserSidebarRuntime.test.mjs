@@ -8,6 +8,7 @@ import {
   buildBrowserPageReadScript,
   buildBrowserScriptExecutionWrapper,
   buildBrowserToolsSystemPrompt,
+  buildTemporaryFilePreviewUrl,
   calculateBrowserFitZoomFactor,
   isAndroidAppShell,
   isBrowserAddressInputAvailable,
@@ -167,9 +168,39 @@ test("normalizes browser addresses and search queries", () => {
   assert.equal(normalizeBrowserAddress("localhost:5173/test"), "http://localhost:5173/test");
   assert.equal(normalizeBrowserAddress("localhost:5173?view=browser"), "http://localhost:5173?view=browser");
   assert.equal(normalizeBrowserAddress("about:blank"), "about:blank");
+  assert.throws(
+    () => normalizeBrowserAddress("data:text/html,<h1>preview</h1>"),
+    /browser_open_temporary_file/,
+  );
+  assert.throws(
+    () => normalizeBrowserAddress("file:///C:/temp/preview.html"),
+    /browser_open_temporary_file/,
+  );
   assert.equal(
     normalizeBrowserAddress("查找 Renge 文档"),
     "https://www.bing.com/search?q=%E6%9F%A5%E6%89%BE%20Renge%20%E6%96%87%E6%A1%A3",
+  );
+});
+
+test("builds isolated browser URLs for temporary files", () => {
+  assert.equal(
+    buildTemporaryFilePreviewUrl(
+      "demo/audience comments.html",
+      "http://127.0.0.1:5191/chat?view=browser",
+    ),
+    "http://preview.localhost:5191/temporary-files/demo/audience%20comments.html",
+  );
+  assert.throws(
+    () => buildTemporaryFilePreviewUrl("../secret.html", "http://127.0.0.1:5191/"),
+    /相对路径/,
+  );
+  assert.throws(
+    () => buildTemporaryFilePreviewUrl("C:\\secret.html", "http://127.0.0.1:5191/"),
+    /相对路径/,
+  );
+  assert.throws(
+    () => buildTemporaryFilePreviewUrl("demo.html", "https://example.com/"),
+    /桌面本地环境/,
   );
 });
 
@@ -178,6 +209,7 @@ test("exposes a complete, unique browser tool set", () => {
   assert.equal(new Set(names).size, names.length);
   assert.deepEqual(names, [
     "browser_navigate",
+    "browser_open_temporary_file",
     "browser_history",
     "browser_read_page",
     "browser_click",
@@ -199,4 +231,6 @@ test("browser prompt treats page content as untrusted and requires verification"
   assert.match(prompt, /不可信页面内容/);
   assert.match(prompt, /必须再次读取页面确认结果/);
   assert.match(prompt, /密码、令牌、Cookie/);
+  assert.match(prompt, /browser_open_temporary_file/);
+  assert.match(prompt, /禁止传入 file:、data:、blob: 或 Base64/);
 });

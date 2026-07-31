@@ -13,6 +13,7 @@ export type ChatToolProgressBlock = {
 
 export const toolActionTitleMap: ReadonlyArray<readonly [string, string]> = [
   ["打开网页", "浏览器导航"],
+  ["预览临时文件：", "预览临时文件"],
   ["控制浏览器历史", "浏览器导航"],
   ["读取网页", "读取网页"],
   ["点击网页元素", "浏览器点击"],
@@ -143,6 +144,7 @@ function parseToolPathFromLine(line: string) {
 
 function getBrowserResultTitle(firstLine: string) {
   if (firstLine.startsWith("网页已打开：")) return browserResultTitleMap.navigate;
+  if (firstLine.startsWith("临时文件已在浏览器打开：")) return "预览临时文件";
   if (firstLine.startsWith("浏览器操作完成：")) return browserResultTitleMap.history;
   if (firstLine.startsWith("网页读取完成：")) return browserResultTitleMap.read_page;
   if (!firstLine.startsWith("网页操作完成：")) return "";

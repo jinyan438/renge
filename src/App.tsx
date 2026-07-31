@@ -8166,6 +8166,7 @@ function buildLocalToolsSystemPrompt(
       "当前会话属于默认工作区，没有项目目录权限；你只能操作与其他工作区完全隔离的「临时文件」区域。",
       "所有 path 必须是临时文件区内的相对路径，禁止使用绝对路径或 ..。不得读取、写入或声称访问任何已连接项目工作区。",
       "当用户要求生成可独立使用的 SVG、HTML、代码文件、配置或其他文件成品时，应调用 local_write_file 将完整内容写入临时文件区，除非用户明确要求只在消息中展示。",
+      "当用户要求把临时文件区内生成的 HTML、SVG、图片或文本在浏览器中打开、展示或给他看，并且 browser_open_temporary_file 可用时，写入成功后必须直接调用该工具并传入同一个相对路径；禁止为此读取 Base64、使用 file:/data: URL、向搜索页注入内容或启动临时 HTTP 服务。",
       "写入成功后可以用 local_read_file 核对内容，并明确告诉用户文件位于右侧栏的临时文件区；未收到工具成功结果前不得声称已保存。",
       "短小示例、解释性代码或用户明确要求直接查看源码时，可以直接使用 Markdown 代码块，不必创建文件。",
       "临时文件区不支持命令执行、Git、项目扫描、重命名、电脑文件发送或跨设备传输，不得尝试相关工具。",
@@ -8618,6 +8619,8 @@ function formatToolActionMessage(
   switch (toolCall.function.name) {
     case "browser_navigate":
       return `打开网页：\n${stringArg(args, "url")}`;
+    case "browser_open_temporary_file":
+      return `预览临时文件：${stringArg(args, "path")}`;
     case "browser_history":
       return `控制浏览器历史：${stringArg(args, "action")}`;
     case "browser_read_page":
@@ -8950,6 +8953,12 @@ function formatToolResultMessage(toolCall: ChatToolCall, result: unknown) {
   switch (toolCall.function.name) {
     case "browser_navigate":
       return `网页已打开：${String(result.title ?? "未命名页面")}\n${String(result.url ?? args.url ?? "")}`;
+    case "browser_open_temporary_file":
+      return [
+        `临时文件已在浏览器打开：${String(result.path ?? args.path ?? "")}`,
+        String(result.title ?? ""),
+        String(result.url ?? ""),
+      ].filter(Boolean).join("\n");
     case "browser_history":
       return `浏览器操作完成：${String(args.action ?? "")}\n${String(result.url ?? "")}`;
     case "browser_read_page": {
@@ -19948,7 +19957,13 @@ export function App() {
         window.rengeAndroid?.isAndroid
         || isAndroidAppShell(window.location.search, window.navigator.userAgent),
       ),
-    ) ? browserToolDefinitions : [];
+    )
+      ? browserToolDefinitions.filter(
+          (tool) =>
+            tool.function.name !== "browser_open_temporary_file"
+            || temporaryFileToolsAvailable,
+        )
+      : [];
     const terminalTools = contextSettings.terminalTools && isTerminalSidebarAvailable()
       ? terminalToolDefinitions
       : [];

@@ -4,6 +4,7 @@ import { parseToolProgressContent } from "../src/chatToolProgressUtils.ts";
 
 const browserCases = [
   ["打开网页：\nhttp://localhost:8123/snake.html", "action", "浏览器导航"],
+  ["预览临时文件：audience-comments.html", "action", "预览临时文件"],
   ["控制浏览器历史：back", "action", "浏览器导航"],
   ["读取网页：snapshot", "action", "读取网页"],
   ["点击网页元素：button-start", "action", "浏览器点击"],
@@ -16,6 +17,7 @@ const browserCases = [
   ["编辑网页：set_text title", "action", "编辑网页"],
   ["执行页面脚本：42 个字符", "action", "页面脚本"],
   ["网页已打开：贪吃蛇\nhttp://localhost:8123/snake.html", "success", "浏览器导航"],
+  ["临时文件已在浏览器打开：audience-comments.html\n观众评论\nhttp://preview.localhost:5191/temporary-files/audience-comments.html", "success", "预览临时文件"],
   ["浏览器操作完成：back\nhttp://localhost:8123/", "success", "浏览器导航"],
   ["网页读取完成：贪吃蛇\nhttp://localhost:8123/snake.html\n正文 120 字符", "success", "读取网页"],
   ["网页操作完成：press_key\nhttp://localhost:8123/snake.html", "success", "浏览器按键"],

@@ -50,6 +50,7 @@ import {
   buildBrowserDocumentContentProbeScript,
   buildBrowserPageReadScript,
   buildBrowserScriptExecutionWrapper,
+  buildTemporaryFilePreviewUrl,
   calculateBrowserFitZoomFactor,
   isAndroidAppShell,
   isBrowserAddressInputAvailable,
@@ -1815,6 +1816,20 @@ export function BrowserSidebarPanel({
         switch (toolName) {
           case "browser_navigate":
             return openAddress(getStringArg(args, "url"));
+          case "browser_open_temporary_file": {
+            if (!electronAvailable) {
+              throw new Error("临时文件浏览器预览仅支持 Electron 桌面版");
+            }
+            const path = getStringArg(args, "path");
+            const previewUrl = buildTemporaryFilePreviewUrl(path, window.location.href);
+            const state = await openAddress(previewUrl);
+            return {
+              ...state,
+              ok: true,
+              action: "open_temporary_file",
+              path,
+            };
+          }
           case "browser_history": {
             const action = getStringArg(args, "action");
             if (action === "back") {
@@ -1993,7 +2008,7 @@ export function BrowserSidebarPanel({
         }
       },
     };
-  }, [activeTab?.id, refreshDocumentContentState, webviewNode]);
+  }, [activeTab?.id, electronAvailable, openAddress, refreshDocumentContentState, webviewNode]);
 
   useEffect(() => {
     if (!controller) return;

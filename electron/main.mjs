@@ -1559,6 +1559,7 @@ async function createMainWindow() {
   const serverOptions = {
     host: "127.0.0.1",
     dataDir: getPersistentDataDir(),
+    temporaryFilesRoot: getTemporaryFilesRoot(),
   };
   try {
     serverController = await startRengeServer({
