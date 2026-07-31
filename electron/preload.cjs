@@ -35,6 +35,30 @@ contextBridge.exposeInMainWorld("rengeDesktop", {
   findSymbols: (options) => ipcRenderer.invoke("workspace:find-symbols", options),
   readPackageJson: () => ipcRenderer.invoke("workspace:package-json"),
   scanTodos: (options) => ipcRenderer.invoke("workspace:todos", options),
+  listSidebarTerminals: () => ipcRenderer.invoke("sidebar-terminal:list"),
+  createSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:create", options),
+  writeSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:write", options),
+  resizeSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:resize", options),
+  restartSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:restart", options),
+  closeSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:close", options),
+  onSidebarTerminalData: (listener) => {
+    if (typeof listener !== "function") return () => undefined;
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on("sidebar-terminal:data", wrappedListener);
+    return () => ipcRenderer.removeListener("sidebar-terminal:data", wrappedListener);
+  },
+  onSidebarTerminalExit: (listener) => {
+    if (typeof listener !== "function") return () => undefined;
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on("sidebar-terminal:exit", wrappedListener);
+    return () => ipcRenderer.removeListener("sidebar-terminal:exit", wrappedListener);
+  },
+  onSidebarTerminalRestarted: (listener) => {
+    if (typeof listener !== "function") return () => undefined;
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on("sidebar-terminal:restarted", wrappedListener);
+    return () => ipcRenderer.removeListener("sidebar-terminal:restarted", wrappedListener);
+  },
   listSidebarBrowserDownloads: () => ipcRenderer.invoke("sidebar-browser:downloads-list"),
   runSidebarBrowserDownloadAction: (options) =>
     ipcRenderer.invoke("sidebar-browser:download-action", options),

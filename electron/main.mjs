@@ -43,6 +43,7 @@ import {
   readSidebarTextFile,
   resolveSidebarFilePath,
 } from "./sidebar-files.mjs";
+import { createSidebarTerminalManager } from "./sidebar-terminal.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const appIconPath = join(
@@ -85,6 +86,11 @@ let sidebarBrowserDownloadSequence = 0;
 let sidebarBrowserDownloadsConfigured = false;
 let sidebarBrowserProfileCache = null;
 let sidebarBrowserProfileWriteQueue = Promise.resolve();
+const sidebarTerminalManager = createSidebarTerminalManager({
+  getMainWindow: () => mainWindow,
+  getWorkspaceRoot: () => workspaceRoot,
+  getFallbackCwd: () => process.cwd(),
+});
 
 function getPersistentDataDir() {
   if (process.env.RENGE_DATA_DIR) return resolve(process.env.RENGE_DATA_DIR);
@@ -1014,6 +1020,18 @@ async function runPackageScript({ script, args = [] }) {
 }
 
 function registerIpcHandlers() {
+  ipcMain.handle("sidebar-terminal:list", (event) => sidebarTerminalManager.list(event));
+  ipcMain.handle("sidebar-terminal:create", (event, options = {}) =>
+    sidebarTerminalManager.create(event, options));
+  ipcMain.handle("sidebar-terminal:write", (event, options = {}) =>
+    sidebarTerminalManager.write(event, options));
+  ipcMain.handle("sidebar-terminal:resize", (event, options = {}) =>
+    sidebarTerminalManager.resize(event, options));
+  ipcMain.handle("sidebar-terminal:restart", (event, options = {}) =>
+    sidebarTerminalManager.restart(event, options));
+  ipcMain.handle("sidebar-terminal:close", (event, options = {}) =>
+    sidebarTerminalManager.close(event, options));
+
   ipcMain.handle("app-data:clear-storage", async () => {
     if (!serverController?.url) throw new Error("应用数据服务尚未启动");
     await session.defaultSession.clearStorageData({
@@ -1623,6 +1641,7 @@ if (!singleInstanceLockAcquired) {
   });
 
   app.on("will-quit", () => {
+    sidebarTerminalManager.disposeAll();
     if (!electronRuntimeCacheDir) return;
     void rm(electronRuntimeCacheDir, { recursive: true, force: true }).catch(() => undefined);
   });

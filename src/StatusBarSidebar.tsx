@@ -32,6 +32,7 @@ import { createPortal } from "react-dom";
 import { BrowserSidebarPanel } from "./BrowserSidebarPanel";
 import type { BrowserPageComment } from "./browserSidebarComments";
 import { FilesSidebarPanel, type FileBrowserSource } from "./FilesSidebarPanel";
+import { TerminalSidebarPanel } from "./TerminalSidebarPanel";
 import { registerBrowserSidebarOpener } from "./browserSidebarRuntime";
 import {
   clampRightSidebarWidth,
@@ -99,7 +100,7 @@ const RIGHT_SIDEBAR_TOOLS = [
     label: "终端",
     description: "运行命令并查看输出",
     icon: SquareTerminal,
-    available: false,
+    available: true,
   },
   {
     id: "browser",
@@ -1874,7 +1875,9 @@ export function StatusBarSidebar({
         aria-hidden={collapsed ? "true" : undefined}
         aria-label="右侧工具栏"
         className={`status-bar-sidebar right-tools-sidebar ${
-          activeToolId === "status" ? "is-status-view" : "is-light-view"
+          activeToolId === "status" || activeToolId === "terminal"
+            ? "is-status-view"
+            : "is-light-view"
         } ${collapsed ? "is-collapsed" : ""}`}
         inert={collapsed ? true : undefined}
         style={sidebarStyle}
@@ -1949,7 +1952,12 @@ export function StatusBarSidebar({
               </nav>
             </div>
           </section>
-        ) : activeToolId === "browser" ? null : activeToolId === "files" ? (
+        ) : activeToolId === "browser" ? null : activeToolId === "terminal" ? (
+          <TerminalSidebarPanel
+            onBack={() => setActiveToolId("menu")}
+            onClose={() => onCollapsedChange(true)}
+          />
+        ) : activeToolId === "files" ? (
           <FilesSidebarPanel
             onBack={() => setActiveToolId("menu")}
             onChooseWorkspace={onChooseWorkspace}

@@ -912,6 +912,17 @@ type SidebarBrowserContextMenuRequest = {
   isEditable: boolean;
 };
 
+type SidebarTerminalSession = {
+  id: string;
+  title: string;
+  shell: string;
+  cwd: string;
+  createdAt: number;
+  exited: boolean;
+  exitCode: number | null;
+  buffer: string;
+};
+
 type RengeDesktopApi = {
   isElectron: boolean;
   clearAppStorage?(): Promise<{ ok: boolean }>;
@@ -961,6 +972,15 @@ type RengeDesktopApi = {
   findSymbols(options: { query?: string; path?: string; maxMatches?: number }): Promise<unknown>;
   readPackageJson(): Promise<unknown>;
   scanTodos(options: { path?: string; maxMatches?: number }): Promise<unknown>;
+  listSidebarTerminals?(): Promise<SidebarTerminalSession[]>;
+  createSidebarTerminal?(options?: { cols?: number; rows?: number; title?: string }): Promise<SidebarTerminalSession>;
+  writeSidebarTerminal?(options: { id: string; data: string }): Promise<{ ok: boolean }>;
+  resizeSidebarTerminal?(options: { id: string; cols: number; rows: number }): Promise<{ ok: boolean }>;
+  restartSidebarTerminal?(options: { id: string; cols?: number; rows?: number }): Promise<SidebarTerminalSession>;
+  closeSidebarTerminal?(options: { id: string }): Promise<{ ok: boolean; id: string }>;
+  onSidebarTerminalData?(listener: (payload: { id: string; data: string }) => void): () => void;
+  onSidebarTerminalExit?(listener: (payload: { id: string; exitCode: number; signal: number }) => void): () => void;
+  onSidebarTerminalRestarted?(listener: (payload: SidebarTerminalSession) => void): () => void;
   listSidebarBrowserDownloads?(): Promise<SidebarBrowserDownload[]>;
   runSidebarBrowserDownloadAction?(options: {
     action: "open-folder" | "clear-completed" | "open" | "reveal" | "pause" | "resume" | "cancel" | "remove";
