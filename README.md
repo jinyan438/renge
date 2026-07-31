@@ -149,13 +149,17 @@ npm run android:apk
 2. 把 `dist` 同步到 Android Web Assets；
 3. 运行 Gradle `clean assembleDebug`；
 4. 检查 APK 的 Manifest、资源、DEX、Web Assets 和签名；
-5. 把可安装文件复制到项目根目录。
+5. 验证成功后把 Gradle 临时产物移动到项目根目录，避免留下两个易混淆的 APK。
 
 成功后的 APK 路径：
 
 ```text
 Renge-Agent-Lab-debug.apk
 ```
+
+这是唯一应安装和分发的 APK。`renge_android/app/build/outputs/apk/debug/app-debug.apk`
+只在 Gradle 构建期间临时生成，脚本完成后会被移动走。请统一使用
+`npm run android:apk` 或根目录的 `build_android_apk.bat`，不要直接分发 Gradle 临时产物。
 
 APK、Android 构建目录、`local.properties` 和生成的 Web Assets 已加入 `.gitignore`，不会被提交到仓库。
 
