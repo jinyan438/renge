@@ -14,6 +14,7 @@ readonly NODE_SHA256="d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b
 
 export PORT="${PORT:-5190}"
 export npm_config_cache="${npm_config_cache:-$RUNTIME_DIR/npm-cache}"
+export electron_config_cache="${electron_config_cache:-$RUNTIME_DIR/electron-cache}"
 
 log() {
   printf '\n[%s] %s\n' "$APP_NAME" "$*"
@@ -26,7 +27,21 @@ fail() {
   exit 1
 }
 
+case "${1:-}" in
+  "") readonly LAUNCH_MODE="web" ;;
+  --desktop) readonly LAUNCH_MODE="desktop" ;;
+  *) fail "不支持的启动参数：$1" ;;
+esac
+
 node_is_supported() {
+  if [[ "$LAUNCH_MODE" == "desktop" ]]; then
+    "$1" -e '
+      const [major, minor] = process.versions.node.split(".").map(Number);
+      process.exit(major > 22 || (major === 22 && minor >= 12) ? 0 : 1);
+    ' >/dev/null 2>&1
+    return
+  fi
+
   "$1" -e '
     const [major, minor] = process.versions.node.split(".").map(Number);
     process.exit((major === 20 && minor >= 19) || major >= 22 ? 0 : 1);
@@ -36,9 +51,12 @@ node_is_supported() {
 install_portable_node() {
   local archive_path="$RUNTIME_DIR/$NODE_ARCHIVE"
   local extracted_dir="$RUNTIME_DIR/node-v${NODE_VERSION}-linux-x64"
+  local required_node="Node.js 20.19+ 或 22.12+"
+
+  [[ "$LAUNCH_MODE" == "desktop" ]] && required_node="Node.js 22.12+"
 
   [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]] ||
-    fail "未找到 Node.js 20.19+ 或 22.12+；当前平台无法自动安装，请先手动安装 Node.js 22。"
+    fail "未找到 ${required_node}；当前平台无法自动安装，请先手动安装 Node.js 22。"
   command -v curl >/dev/null 2>&1 || fail "自动安装 Node.js 需要 curl。"
   command -v sha256sum >/dev/null 2>&1 || fail "自动安装 Node.js 需要 sha256sum。"
   command -v tar >/dev/null 2>&1 || fail "自动安装 Node.js 需要 tar。"
@@ -84,12 +102,19 @@ url_is_ready() {
   curl -fsS --max-time 1 "$APP_URL" >/dev/null 2>&1
 }
 
+electron_is_ready() {
+  node -e '
+    const { existsSync } = require("node:fs");
+    process.exit(existsSync(require("electron")) ? 0 : 1);
+  ' >/dev/null 2>&1
+}
+
 select_node
 mkdir -p "$RUNTIME_DIR"
 
 log "使用 $(node --version) / npm $(npm --version)"
 
-if command -v curl >/dev/null 2>&1 && url_is_ready; then
+if [[ "$LAUNCH_MODE" == "web" ]] && command -v curl >/dev/null 2>&1 && url_is_ready; then
   log "服务已在运行，正在打开 $APP_URL"
   open_browser
   exit 0
@@ -107,8 +132,20 @@ else
   log "项目依赖已就绪。"
 fi
 
+if [[ "$LAUNCH_MODE" == "desktop" ]] && ! electron_is_ready; then
+  log "正在安装 Electron 客户端运行时（仅首次需要）..."
+  node node_modules/electron/install.js || fail "Electron 客户端运行时安装失败，请检查网络后重试。"
+  electron_is_ready || fail "Electron 客户端运行时安装不完整，请重试。"
+fi
+
 log "正在构建项目..."
 npm run build || fail "项目构建失败，请查看上方错误信息。"
+
+if [[ "$LAUNCH_MODE" == "desktop" ]]; then
+  log "正在启动桌面客户端..."
+  printf '关闭客户端窗口即可退出。\n\n'
+  exec node_modules/.bin/electron electron/main.mjs
+fi
 
 if command -v curl >/dev/null 2>&1 && [[ "${RENGE_NO_BROWSER:-0}" != "1" ]]; then
   (

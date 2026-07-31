@@ -40,7 +40,8 @@ Renge Agent Lab 是一个本地优先、跨端运行的 AI Agent 工作台。它
 
 ### Web 与桌面端
 
-- Node.js `20.19+` 或 `22.12+`
+- Web：Node.js `20.19+` 或 `22.12+`
+- Electron 桌面端：Node.js `22.12+`
 - npm 10 或兼容版本
 - Git（开发和版本恢复时使用）
 
@@ -56,15 +57,21 @@ Renge Agent Lab 是一个本地优先、跨端运行的 AI Agent 工作台。它
 
 ### Linux 一键启动
 
-在文件管理器中双击仓库根目录的 `Renge Agent Lab.desktop`，即可自动完成环境检查、依赖安装、构建、启动，并在浏览器中打开应用。首次启动需要联网；后续启动仅在依赖锁文件变化时重新安装依赖。
+在文件管理器中双击仓库根目录的 `Renge Agent Lab.desktop`，即可自动完成环境检查、依赖安装和构建，并打开 Electron 桌面客户端，不会再跳转到浏览器。首次启动需要联网下载 Node.js、项目依赖和 Electron Runtime；后续启动仅在依赖变化时重新安装。
 
 如果桌面环境首次提示启动器不受信任，请右键该文件并选择“允许运行”或“允许启动”。也可以在终端运行：
 
 ```bash
-./start-renge.sh
+./start-client.sh
 ```
 
 启动器要求 Linux x86_64；未安装合格 Node.js 时，它会把经过校验的便携 Node.js 22 安装到仓库内被 Git 忽略的 `.runtime` 目录，不会修改系统 Node.js。
+
+如果仍需启动原来的 Web 服务并在浏览器中使用，可运行：
+
+```bash
+./start-renge.sh
+```
 
 ### 手动启动
 
@@ -257,6 +264,8 @@ renge/
 ├─ server.mjs                   Web 服务、模型代理、MCP、Skill 和文件 API
 ├─ build_android_apk.bat        Android APK 一键构建脚本
 ├─ run.bat                      Windows 快速启动脚本
+├─ start-client.sh              Linux Electron 客户端一键启动脚本
+├─ start-renge.sh               Linux Web 服务一键启动脚本
 ├─ package.json                 Node.js 依赖与 npm scripts
 ├─ AGENTS.md                    AI 修改代码时的版本控制与安全规则
 └─ README.md                    项目说明
