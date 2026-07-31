@@ -1020,13 +1020,16 @@ async function runPackageScript({ script, args = [] }) {
 }
 
 function registerIpcHandlers() {
-  ipcMain.handle("sidebar-terminal:list", (event) => sidebarTerminalManager.list(event));
+  ipcMain.handle("sidebar-terminal:list", (event, options = {}) =>
+    sidebarTerminalManager.list(event, options));
   ipcMain.handle("sidebar-terminal:create", (event, options = {}) =>
     sidebarTerminalManager.create(event, options));
   ipcMain.handle("sidebar-terminal:write", (event, options = {}) =>
     sidebarTerminalManager.write(event, options));
   ipcMain.handle("sidebar-terminal:resize", (event, options = {}) =>
     sidebarTerminalManager.resize(event, options));
+  ipcMain.handle("sidebar-terminal:read", (event, options = {}) =>
+    sidebarTerminalManager.read(event, options));
   ipcMain.handle("sidebar-terminal:restart", (event, options = {}) =>
     sidebarTerminalManager.restart(event, options));
   ipcMain.handle("sidebar-terminal:close", (event, options = {}) =>

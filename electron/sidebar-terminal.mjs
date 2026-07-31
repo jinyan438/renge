@@ -4,6 +4,7 @@ import * as pty from "node-pty";
 
 const MAX_TERMINAL_BUFFER = 2 * 1024 * 1024;
 const MAX_TERMINAL_SESSIONS = 12;
+const MAX_TERMINAL_READ = 100_000;
 
 function clampDimension(value, fallback, maximum) {
   const parsed = Math.floor(Number(value));
@@ -61,6 +62,7 @@ export function createSidebarTerminalManager({
       createdAt: session.createdAt,
       exited: session.exited,
       exitCode: session.exitCode,
+      outputOffset: session.outputOffset,
       ...(includeBuffer ? { buffer: session.buffer } : {}),
     };
   }
@@ -82,6 +84,7 @@ export function createSidebarTerminalManager({
     session.exited = false;
     session.exitCode = null;
     session.buffer = "";
+    session.outputOffset = 0;
     session.process = ptyModule.spawn(shell.command, shell.args, {
       name: "xterm-256color",
       cols,
@@ -98,6 +101,7 @@ export function createSidebarTerminalManager({
     session.process.onData((data) => {
       if (session.generation !== generation) return;
       session.buffer = appendToBuffer(session.buffer, data);
+      session.outputOffset += data.length;
       send("sidebar-terminal:data", { id: session.id, data });
     });
     session.process.onExit(({ exitCode, signal }) => {
@@ -124,6 +128,7 @@ export function createSidebarTerminalManager({
       exited: false,
       exitCode: null,
       buffer: "",
+      outputOffset: 0,
       process: null,
       generation: 0,
     };
@@ -134,7 +139,9 @@ export function createSidebarTerminalManager({
       sessions.delete(id);
       throw error;
     }
-    return serialize(session, true);
+    const serialized = serialize(session, true);
+    send("sidebar-terminal:created", serialized);
+    return serialized;
   }
 
   function disposeSession(session) {
@@ -151,9 +158,10 @@ export function createSidebarTerminalManager({
   }
 
   return {
-    list(event) {
+    list(event, options = {}) {
       assertSender(event);
-      return [...sessions.values()].map((session) => serialize(session, true));
+      return [...sessions.values()].map((session) =>
+        serialize(session, options.includeBuffer !== false));
     },
     create(event, options) {
       assertSender(event);
@@ -179,6 +187,27 @@ export function createSidebarTerminalManager({
       }
       return { ok: true };
     },
+    read(event, options = {}) {
+      assertSender(event);
+      const session = getSession(options.id);
+      const maxChars = clampDimension(options.maxChars, 20_000, MAX_TERMINAL_READ);
+      const bufferStart = Math.max(0, session.outputOffset - session.buffer.length);
+      const requestedFrom = Number(options.from);
+      const hasRequestedFrom = Number.isFinite(requestedFrom) && requestedFrom >= 0;
+      const start = hasRequestedFrom
+        ? Math.min(session.outputOffset, Math.max(bufferStart, Math.floor(requestedFrom)))
+        : Math.max(bufferStart, session.outputOffset - maxChars);
+      const bufferIndex = Math.max(0, start - bufferStart);
+      const output = session.buffer.slice(bufferIndex, bufferIndex + maxChars);
+      return {
+        ...serialize(session),
+        output,
+        cursor: start,
+        nextCursor: start + output.length,
+        truncated: hasRequestedFrom && requestedFrom < bufferStart,
+        hasMore: start + output.length < session.outputOffset,
+      };
+    },
     restart(event, options = {}) {
       assertSender(event);
       const session = getSession(options.id);
@@ -192,6 +221,7 @@ export function createSidebarTerminalManager({
       const session = getSession(options.id);
       sessions.delete(session.id);
       disposeSession(session);
+      send("sidebar-terminal:closed", { id: session.id });
       return { ok: true, id: session.id };
     },
     disposeAll() {

@@ -61,6 +61,7 @@ test("creates, lists, resizes, writes to, restarts, and closes a PTY session", (
     assert.equal(created.title, "测试终端");
     assert.equal(created.cwd, process.cwd());
     assert.equal(manager.list(event).length, 1);
+    assert.equal(messages.some((message) => message.channel === "sidebar-terminal:created"), true);
     assert.deepEqual(manager.resize(event, { id: created.id, cols: 100, rows: 32 }), { ok: true });
 
     const command = process.platform === "win32"
@@ -70,12 +71,20 @@ test("creates, lists, resizes, writes to, restarts, and closes a PTY session", (
     assert.equal(messages.some((message) =>
       message.channel === "sidebar-terminal:data"
       && message.payload.data.includes("__RENGE_PTY_OK__")), true);
+    const readResult = manager.read(event, { id: created.id, from: 0, maxChars: 1000 });
+    assert.equal(readResult.output, command);
+    assert.equal(readResult.nextCursor, command.length);
+    assert.equal(readResult.hasMore, false);
+    const futureRead = manager.read(event, { id: created.id, from: 999, maxChars: 1000 });
+    assert.equal(futureRead.output, "");
+    assert.equal(futureRead.nextCursor, command.length);
     const restarted = manager.restart(event, { id: created.id, cols: 80, rows: 24 });
     assert.equal(restarted.exited, false);
     assert.equal(processes[0].killed, true);
     assert.equal(messages.some((message) => message.channel === "sidebar-terminal:restarted"), true);
     assert.deepEqual(manager.close(event, { id: created.id }), { ok: true, id: created.id });
     assert.equal(processes[1].killed, true);
+    assert.equal(messages.some((message) => message.channel === "sidebar-terminal:closed"), true);
     assert.equal(manager.list(event).length, 0);
   } finally {
     manager.disposeAll();

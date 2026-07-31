@@ -238,6 +238,12 @@ import {
   isBrowserToolName,
 } from "./browserSidebarRuntime";
 import {
+  buildTerminalToolsSystemPrompt,
+  executeTerminalTool,
+  isTerminalToolName,
+  terminalToolDefinitions,
+} from "./terminalSidebarRuntime";
+import {
   BROWSER_COMMENT_MIME_TYPE,
   parseBrowserPageComment,
   serializeBrowserPageComment,
@@ -921,6 +927,15 @@ type SidebarTerminalSession = {
   exited: boolean;
   exitCode: number | null;
   buffer: string;
+  outputOffset: number;
+};
+
+type SidebarTerminalReadResult = Omit<SidebarTerminalSession, "buffer"> & {
+  output: string;
+  cursor: number;
+  nextCursor: number;
+  truncated: boolean;
+  hasMore: boolean;
 };
 
 type RengeDesktopApi = {
@@ -972,15 +987,18 @@ type RengeDesktopApi = {
   findSymbols(options: { query?: string; path?: string; maxMatches?: number }): Promise<unknown>;
   readPackageJson(): Promise<unknown>;
   scanTodos(options: { path?: string; maxMatches?: number }): Promise<unknown>;
-  listSidebarTerminals?(): Promise<SidebarTerminalSession[]>;
+  listSidebarTerminals?(options?: { includeBuffer?: boolean }): Promise<SidebarTerminalSession[]>;
   createSidebarTerminal?(options?: { cols?: number; rows?: number; title?: string }): Promise<SidebarTerminalSession>;
   writeSidebarTerminal?(options: { id: string; data: string }): Promise<{ ok: boolean }>;
   resizeSidebarTerminal?(options: { id: string; cols: number; rows: number }): Promise<{ ok: boolean }>;
+  readSidebarTerminal?(options: { id: string; from?: number; maxChars?: number }): Promise<SidebarTerminalReadResult>;
   restartSidebarTerminal?(options: { id: string; cols?: number; rows?: number }): Promise<SidebarTerminalSession>;
   closeSidebarTerminal?(options: { id: string }): Promise<{ ok: boolean; id: string }>;
   onSidebarTerminalData?(listener: (payload: { id: string; data: string }) => void): () => void;
   onSidebarTerminalExit?(listener: (payload: { id: string; exitCode: number; signal: number }) => void): () => void;
   onSidebarTerminalRestarted?(listener: (payload: SidebarTerminalSession) => void): () => void;
+  onSidebarTerminalCreated?(listener: (payload: SidebarTerminalSession) => void): () => void;
+  onSidebarTerminalClosed?(listener: (payload: { id: string }) => void): () => void;
   listSidebarBrowserDownloads?(): Promise<SidebarBrowserDownload[]>;
   runSidebarBrowserDownloadAction?(options: {
     action: "open-folder" | "clear-completed" | "open" | "reveal" | "pause" | "resume" | "cancel" | "remove";
@@ -8687,6 +8705,22 @@ function formatToolActionMessage(
       return `编辑网页：${stringArg(args, "operation")} ${stringArg(args, "ref") || stringArg(args, "selector")}`;
     case "browser_execute_script":
       return `执行页面脚本：${stringArg(args, "script").length} 个字符`;
+    case "terminal_list":
+      return "列出右侧栏终端。";
+    case "terminal_create":
+      return `新建终端：${stringArg(args, "title", "自动命名")}`;
+    case "terminal_read":
+      return `读取终端：${stringArg(args, "id")}`;
+    case "terminal_write":
+      return `输入终端：${stringArg(args, "id")}\n${stringArg(args, "data").length} 个字符`;
+    case "terminal_run":
+      return `在终端运行：${stringArg(args, "id")}\n${stringArg(args, "command")}`;
+    case "terminal_resize":
+      return `调整终端：${stringArg(args, "id")}（${Number(args.cols ?? 80)}x${Number(args.rows ?? 24)}）`;
+    case "terminal_restart":
+      return `重启终端：${stringArg(args, "id")}`;
+    case "terminal_close":
+      return `关闭终端：${stringArg(args, "id")}`;
     case "local_list_files":
       return `列出文件：\n${formatWorkspacePathReference(handle, path)}${args.recursive === false ? "\n仅当前目录" : "\n递归扫描"}`;
     case "local_read_file":
@@ -9000,6 +9034,33 @@ function formatToolResultMessage(toolCall: ChatToolCall, result: unknown) {
     case "browser_edit_page":
     case "browser_execute_script":
       return `网页操作完成：${toolCall.function.name.replace(/^browser_/, "")}\n${String(result.url ?? "")}`.trim();
+    case "terminal_list":
+      return `已列出 ${Array.isArray(result) ? result.length : 0} 个终端。`;
+    case "terminal_create":
+      return `已新建终端：${String(result.title ?? result.id ?? "")}\nID：${String(result.id ?? "")}`;
+    case "terminal_read":
+      return [
+        `已读取终端：${String(result.title ?? result.id ?? "")}`,
+        typeof result.output === "string" && result.output
+          ? `输出：\n${trimBlock(result.output, 700)}`
+          : "没有新的输出。",
+      ].join("\n");
+    case "terminal_write":
+      return `已向终端 ${String(args.id ?? "")} 发送输入。`;
+    case "terminal_run":
+      return [
+        `终端命令已发送：${String(args.command ?? "")}`,
+        result.timedOut ? "等待结束，进程可能仍在后台运行。" : "",
+        typeof result.output === "string" && result.output
+          ? `输出：\n${trimBlock(result.output, 700)}`
+          : "本次暂未产生输出。",
+      ].filter(Boolean).join("\n");
+    case "terminal_resize":
+      return `已调整终端 ${String(args.id ?? "")} 的尺寸。`;
+    case "terminal_restart":
+      return `已重启终端：${String(result.title ?? result.id ?? args.id ?? "")}`;
+    case "terminal_close":
+      return `已关闭终端：${String(result.id ?? args.id ?? "")}`;
     case "local_read_file": {
       const content = typeof result.content === "string" ? result.content : "";
       return `已读取文件：${String(result.path ?? path)}${content ? `（${content.length} 字符）` : ""}`;
@@ -19532,6 +19593,8 @@ export function App() {
       result = await executeMcpTool(toolName, rawArguments, signal);
     } else if (isBrowserToolName(toolName)) {
       result = await executeBrowserTool(toolName, rawArguments, signal);
+    } else if (isTerminalToolName(toolName)) {
+      result = await executeTerminalTool(toolName, rawArguments, signal);
     } else if (toolName === "chat_update_heartbeat") {
       result = await executeHeartbeatTool(rawArguments);
     } else if (toolName === "multi_agent_end_rounds") {
@@ -19743,10 +19806,12 @@ export function App() {
         || isAndroidAppShell(window.location.search, window.navigator.userAgent),
       ),
     ) ? browserToolDefinitions : [];
+    const terminalTools = window.rengeDesktop?.isElectron ? terminalToolDefinitions : [];
     return [
       ...(chatChoiceToolsEnabled ? chatChoiceToolDefinitions : []),
       ...localTools,
       ...browserTools,
+      ...terminalTools,
       ...externalTools,
       ...(includeHeartbeatTools ? heartbeatToolDefinitions : []),
       ...(includeMultiAgentControlTools ? multiAgentControlToolDefinitions : []),
@@ -19938,6 +20003,7 @@ export function App() {
         ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
         : "",
       window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
+      window.rengeDesktop?.isElectron ? buildTerminalToolsSystemPrompt() : "",
       buildMcpToolsSystemPrompt(meterMcpTools),
       availableTools.some((tool) => isChatChoiceToolName(tool.function.name))
         ? buildChatChoiceSystemPrompt()
@@ -21476,6 +21542,7 @@ export function App() {
           ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
           : "",
         window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
+        window.rengeDesktop?.isElectron ? buildTerminalToolsSystemPrompt() : "",
       ].filter(Boolean).join("\n\n");
       const mcpToolsSystemPrompt = buildMcpToolsSystemPrompt(requestMcpTools);
       const chatChoiceSystemPrompt = availableChatTools.some((tool) =>
@@ -24070,6 +24137,7 @@ export function App() {
           ? buildLocalToolsSystemPrompt(localWorkspaceHandle, llmFullAccessEnabled)
           : "",
         window.rengeDesktop?.isElectron ? buildBrowserToolsSystemPrompt() : "",
+        window.rengeDesktop?.isElectron ? buildTerminalToolsSystemPrompt() : "",
       ].filter(Boolean).join("\n\n");
       const mcpToolsSystemPrompt = buildMcpToolsSystemPrompt(requestMcpTools);
       const chatChoiceSystemPrompt = availableChatTools.some((tool) =>

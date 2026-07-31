@@ -23,6 +23,7 @@ export type SidebarTerminalSession = {
   exited: boolean;
   exitCode: number | null;
   buffer: string;
+  outputOffset: number;
 };
 
 type TerminalPaneProps = {
@@ -155,9 +156,11 @@ function TerminalPane({ active, session, onReady, onDispose }: TerminalPaneProps
 export function TerminalSidebarPanel({
   onBack,
   onClose,
+  requestedSessionId = "",
 }: {
   onBack: () => void;
   onClose: () => void;
+  requestedSessionId?: string;
 }) {
   const [sessions, setSessions] = useState<SidebarTerminalSession[]>([]);
   const [activeId, setActiveId] = useState("");
@@ -186,7 +189,9 @@ export function TerminalSidebarPanel({
     setError("");
     try {
       const session = await desktopApi.createSidebarTerminal({ cols: 80, rows: 24 });
-      setSessions((current) => [...current, session]);
+      setSessions((current) => current.some((item) => item.id === session.id)
+        ? current.map((item) => item.id === session.id ? session : item)
+        : [...current, session]);
       setActiveId(session.id);
     } catch (createError) {
       setError(getErrorMessage(createError));
@@ -248,10 +253,26 @@ export function TerminalSidebarPanel({
           ? { ...session, exited: true, exitCode: payload.exitCode }
           : session));
     });
+    const stopCreated = desktopApi?.onSidebarTerminalCreated?.((payload) => {
+      setSessions((current) => current.some((session) => session.id === payload.id)
+        ? current.map((session) => session.id === payload.id ? payload : session)
+        : [...current, payload]);
+      setActiveId(payload.id);
+    });
+    const stopClosed = desktopApi?.onSidebarTerminalClosed?.((payload) => {
+      pendingDataRef.current.delete(payload.id);
+      setSessions((current) => {
+        const next = current.filter((session) => session.id !== payload.id);
+        setActiveId((currentId) => currentId === payload.id ? next[0]?.id ?? "" : currentId);
+        return next;
+      });
+    });
     return () => {
       stopData?.();
       stopRestart?.();
       stopExit?.();
+      stopCreated?.();
+      stopClosed?.();
     };
   }, []);
 
@@ -278,6 +299,15 @@ export function TerminalSidebarPanel({
     });
     return () => window.cancelAnimationFrame(frame);
   }, [activeId, sessions.length]);
+
+  useEffect(() => {
+    if (
+      requestedSessionId
+      && sessions.some((session) => session.id === requestedSessionId)
+    ) {
+      setActiveId(requestedSessionId);
+    }
+  }, [requestedSessionId, sessions]);
 
   const closeTerminal = async (id: string) => {
     const sessionIndex = sessions.findIndex((session) => session.id === id);

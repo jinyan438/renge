@@ -35,10 +35,11 @@ contextBridge.exposeInMainWorld("rengeDesktop", {
   findSymbols: (options) => ipcRenderer.invoke("workspace:find-symbols", options),
   readPackageJson: () => ipcRenderer.invoke("workspace:package-json"),
   scanTodos: (options) => ipcRenderer.invoke("workspace:todos", options),
-  listSidebarTerminals: () => ipcRenderer.invoke("sidebar-terminal:list"),
+  listSidebarTerminals: (options) => ipcRenderer.invoke("sidebar-terminal:list", options),
   createSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:create", options),
   writeSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:write", options),
   resizeSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:resize", options),
+  readSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:read", options),
   restartSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:restart", options),
   closeSidebarTerminal: (options) => ipcRenderer.invoke("sidebar-terminal:close", options),
   onSidebarTerminalData: (listener) => {
@@ -58,6 +59,18 @@ contextBridge.exposeInMainWorld("rengeDesktop", {
     const wrappedListener = (_event, payload) => listener(payload);
     ipcRenderer.on("sidebar-terminal:restarted", wrappedListener);
     return () => ipcRenderer.removeListener("sidebar-terminal:restarted", wrappedListener);
+  },
+  onSidebarTerminalCreated: (listener) => {
+    if (typeof listener !== "function") return () => undefined;
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on("sidebar-terminal:created", wrappedListener);
+    return () => ipcRenderer.removeListener("sidebar-terminal:created", wrappedListener);
+  },
+  onSidebarTerminalClosed: (listener) => {
+    if (typeof listener !== "function") return () => undefined;
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on("sidebar-terminal:closed", wrappedListener);
+    return () => ipcRenderer.removeListener("sidebar-terminal:closed", wrappedListener);
   },
   listSidebarBrowserDownloads: () => ipcRenderer.invoke("sidebar-browser:downloads-list"),
   runSidebarBrowserDownloadAction: (options) =>

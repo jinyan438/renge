@@ -33,6 +33,7 @@ import { BrowserSidebarPanel } from "./BrowserSidebarPanel";
 import type { BrowserPageComment } from "./browserSidebarComments";
 import { FilesSidebarPanel, type FileBrowserSource } from "./FilesSidebarPanel";
 import { TerminalSidebarPanel } from "./TerminalSidebarPanel";
+import { registerTerminalSidebarOpener } from "./terminalSidebarRuntime";
 import { registerBrowserSidebarOpener } from "./browserSidebarRuntime";
 import {
   clampRightSidebarWidth,
@@ -796,6 +797,7 @@ export function StatusBarSidebar({
   onBrowserComment,
 }: StatusBarSidebarProps) {
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
+  const [requestedTerminalId, setRequestedTerminalId] = useState("");
   const [sidebarWidth, setSidebarWidth] = useState(loadRightSidebarWidth);
   const [sidebarMaxWidth, setSidebarMaxWidth] = useState(() =>
     typeof window === "undefined"
@@ -941,6 +943,16 @@ export function StatusBarSidebar({
       document.body.classList.remove("right-sidebar-resizing");
     },
     [],
+  );
+
+  useEffect(
+    () =>
+      registerTerminalSidebarOpener((terminalId) => {
+        setRequestedTerminalId(terminalId ?? "");
+        setActiveToolId("terminal");
+        onCollapsedChange(false);
+      }),
+    [onCollapsedChange],
   );
 
   useEffect(() => {
@@ -1956,6 +1968,7 @@ export function StatusBarSidebar({
           <TerminalSidebarPanel
             onBack={() => setActiveToolId("menu")}
             onClose={() => onCollapsedChange(true)}
+            requestedSessionId={requestedTerminalId}
           />
         ) : activeToolId === "files" ? (
           <FilesSidebarPanel
