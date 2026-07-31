@@ -49,6 +49,7 @@ import {
   buildBrowserPageReadScript,
   buildBrowserScriptExecutionWrapper,
   calculateBrowserFitZoomFactor,
+  isAndroidAppShell,
   isBrowserAddressInputAvailable,
   normalizeBrowserAddress,
   openAndroidBrowserAddress,
@@ -319,7 +320,10 @@ export function BrowserSidebarPanel({
   onBrowserComment,
 }: BrowserSidebarPanelProps) {
   const electronAvailable = Boolean(window.rengeDesktop?.isElectron);
-  const androidAvailable = Boolean(window.rengeAndroid?.isAndroid || window.RengeAndroidNative);
+  const androidAppShell = isAndroidAppShell(window.location.search, window.navigator.userAgent);
+  const androidAvailable = Boolean(
+    androidAppShell || window.rengeAndroid?.isAndroid || window.RengeAndroidNative,
+  );
   const addressInputAvailable = isBrowserAddressInputAvailable(
     electronAvailable,
     androidAvailable,
@@ -1468,6 +1472,9 @@ export function BrowserSidebarPanel({
       url,
       window.rengeAndroid,
       window.RengeAndroidNative,
+      androidAppShell
+        ? (intentUrl) => window.location.assign(intentUrl)
+        : undefined,
     ).catch(reportFeatureError);
   };
 
@@ -1606,7 +1613,13 @@ export function BrowserSidebarPanel({
               spellCheck={false}
               value={address}
             />
-            <button aria-label="打开" disabled={!addressInputAvailable || !address.trim()} title="打开" type="submit">
+            <button
+              aria-label="打开"
+              disabled={!addressInputAvailable || !address.trim()}
+              onClick={openSubmittedAddress}
+              title="打开"
+              type="button"
+            >
               <Search size={14} />
             </button>
           </form>

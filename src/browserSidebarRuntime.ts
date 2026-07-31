@@ -23,11 +23,29 @@ export type AndroidBrowserNativeBridge = {
   openBrowser?(optionsJson: string): string;
 };
 
+const ANDROID_APP_USER_AGENT_TOKEN = "RengeAgentLabAndroid";
+const ANDROID_PLATFORM_QUERY_VALUE = "android";
+
+export function isAndroidAppShell(locationSearch: string, userAgent: string) {
+  const markedByQuery = new URLSearchParams(locationSearch).get("rengePlatform")
+    === ANDROID_PLATFORM_QUERY_VALUE;
+  return markedByQuery || userAgent.includes(ANDROID_APP_USER_AGENT_TOKEN);
+}
+
+export function buildAndroidBrowserIntentUrl(url: string) {
+  return `renge-browser://open?url=${encodeURIComponent(url)}`;
+}
+
 export async function openAndroidBrowserAddress(
   url: string,
   api?: AndroidBrowserApi,
   nativeBridge?: AndroidBrowserNativeBridge,
+  openAppIntent?: (intentUrl: string) => void,
 ) {
+  if (openAppIntent) {
+    openAppIntent(buildAndroidBrowserIntentUrl(url));
+    return { ok: true, url };
+  }
   if (api?.openBrowser) {
     return api.openBrowser({ url });
   }

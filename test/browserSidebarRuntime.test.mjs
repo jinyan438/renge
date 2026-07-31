@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   browserToolDefinitions,
+  buildAndroidBrowserIntentUrl,
   buildBrowserDocumentContentProbeScript,
   buildBrowserPageReadScript,
   buildBrowserScriptExecutionWrapper,
   buildBrowserToolsSystemPrompt,
   calculateBrowserFitZoomFactor,
+  isAndroidAppShell,
   isBrowserAddressInputAvailable,
   isBrowserToolName,
   normalizeBrowserAddress,
@@ -17,6 +19,35 @@ test("keeps the browser address input editable in Android and Electron shells", 
   assert.equal(isBrowserAddressInputAvailable(true, false), true);
   assert.equal(isBrowserAddressInputAvailable(false, true), true);
   assert.equal(isBrowserAddressInputAvailable(false, false), false);
+});
+
+test("detects the Android app shell before the JavaScript bridge is injected", () => {
+  assert.equal(isAndroidAppShell("?rengePlatform=android", "Mozilla/5.0"), true);
+  assert.equal(isAndroidAppShell("", "Mozilla/5.0 RengeAgentLabAndroid"), true);
+  assert.equal(isAndroidAppShell("", "Mozilla/5.0 Chrome/138"), false);
+});
+
+test("routes Android app navigation through the native intent scheme", async () => {
+  const intentUrls = [];
+  const result = await openAndroidBrowserAddress(
+    "https://www.bilibili.com",
+    {
+      async openBrowser() {
+        throw new Error("wrapper bridge should not be used");
+      },
+    },
+    undefined,
+    (intentUrl) => intentUrls.push(intentUrl),
+  );
+
+  assert.equal(
+    buildAndroidBrowserIntentUrl("https://www.bilibili.com"),
+    "renge-browser://open?url=https%3A%2F%2Fwww.bilibili.com",
+  );
+  assert.deepEqual(intentUrls, [
+    "renge-browser://open?url=https%3A%2F%2Fwww.bilibili.com",
+  ]);
+  assert.deepEqual(result, { ok: true, url: "https://www.bilibili.com" });
 });
 
 test("opens Android browser addresses through the injected wrapper when available", async () => {

@@ -34,6 +34,8 @@ public class MainActivity extends Activity {
     private static final int FILE_CHOOSER_REQUEST = 1201;
     private static final int DIRECTORY_PICKER_REQUEST = 1202;
     private static final String HTML_PREVIEW_HOST = "html-preview.renge.invalid";
+    private static final String BROWSER_INTENT_SCHEME = "renge-browser";
+    private static final String ANDROID_USER_AGENT_TOKEN = "RengeAgentLabAndroid";
 
     private WebView webView;
     private LocalWebServer localWebServer;
@@ -71,6 +73,11 @@ public class MainActivity extends Activity {
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+        String defaultUserAgent = settings.getUserAgentString();
+        if (defaultUserAgent == null || !defaultUserAgent.contains(ANDROID_USER_AGENT_TOKEN)) {
+            settings.setUserAgentString((defaultUserAgent == null ? "" : defaultUserAgent + " ")
+                    + ANDROID_USER_AGENT_TOKEN);
+        }
 
         webView.setHorizontalScrollBarEnabled(false);
         webView.setOverScrollMode(WebView.OVER_SCROLL_NEVER);
@@ -105,6 +112,10 @@ public class MainActivity extends Activity {
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
                 String scheme = uri.getScheme();
+                if (BROWSER_INTENT_SCHEME.equalsIgnoreCase(scheme)) {
+                    openBrowserIntent(uri);
+                    return true;
+                }
                 return !("http".equals(scheme) || "https".equals(scheme));
             }
 
@@ -204,7 +215,7 @@ public class MainActivity extends Activity {
         try {
             localWebServer = new LocalWebServer(this);
             String appUrl = localWebServer.start();
-            webView.loadUrl(appUrl);
+            webView.loadUrl(appUrl + "?rengePlatform=android");
         } catch (Exception error) {
             webView.loadData(
                     "<html><body><h1>Renge Android 启动失败</h1><pre>"
@@ -214,6 +225,18 @@ public class MainActivity extends Activity {
                     "UTF-8"
             );
         }
+    }
+
+    private void openBrowserIntent(Uri uri) {
+        if (!"open".equalsIgnoreCase(uri.getHost())) return;
+        String url = uri.getQueryParameter("url");
+        if (url == null || url.trim().isEmpty()) {
+            Toast.makeText(this, "请输入网址或搜索内容", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Intent intent = new Intent(this, BrowserActivity.class);
+        intent.putExtra(BrowserActivity.EXTRA_URL, url);
+        startActivity(intent);
     }
 
     @Override
