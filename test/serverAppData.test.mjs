@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { request } from "node:http";
+import { createServer, request } from "node:http";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -156,4 +156,103 @@ test("Tavern module proxy rejects non-jsDelivr module origins", async (t) => {
 
   assert.equal(response.status, 502);
   assert.match((await response.json()).error, /jsDelivr/);
+});
+
+test("routes Responses providers to /responses with a converted request", async (t) => {
+  const capturedRequests = [];
+  const upstreamServer = createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      const capturedRequest = {
+        path: request.url,
+        body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+      };
+      capturedRequests.push(capturedRequest);
+      if (capturedRequest.body.stream === true) {
+        response.writeHead(200, { "Content-Type": "text/event-stream" });
+        response.end([
+          "event: response.output_text.delta",
+          "data: {\"type\":\"response.output_text.delta\",\"delta\":\"streamed\"}",
+          "",
+          "event: response.completed",
+          "data: {\"type\":\"response.completed\",\"response\":{\"object\":\"response\",\"status\":\"completed\",\"output\":[]}}",
+          "",
+        ].join("\n"));
+        return;
+      }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        id: "resp_test",
+        object: "response",
+        status: "completed",
+        output: [{
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "ok" }],
+        }],
+      }));
+    });
+  });
+  await new Promise((resolve, reject) => {
+    upstreamServer.listen(0, "127.0.0.1", (error) => error ? reject(error) : resolve());
+  });
+
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-responses-proxy-test-"));
+  const controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  t.after(async () => {
+    await Promise.all([
+      new Promise((resolve, reject) => {
+        controller.server.close((error) => (error ? reject(error) : resolve()));
+      }),
+      new Promise((resolve, reject) => {
+        upstreamServer.close((error) => (error ? reject(error) : resolve()));
+      }),
+    ]);
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const upstreamAddress = upstreamServer.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
+  const response = await fetch(`${controller.url}/api/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      apiBaseUrl: `http://127.0.0.1:${upstreamAddress.port}/v1`,
+      apiType: "responses",
+      request: {
+        model: "gpt-test",
+        messages: [{ role: "user", content: "hello" }],
+        max_tokens: 300,
+        stream: false,
+      },
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).object, "response");
+  assert.equal(capturedRequests[0].path, "/v1/responses");
+  assert.deepEqual(capturedRequests[0].body.input, [{ role: "user", content: "hello" }]);
+  assert.equal(capturedRequests[0].body.max_output_tokens, 300);
+  assert.equal(capturedRequests[0].body.messages, undefined);
+  assert.equal(capturedRequests[0].body.max_tokens, undefined);
+
+  const streamResponse = await fetch(`${controller.url}/api/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      apiBaseUrl: `http://127.0.0.1:${upstreamAddress.port}/v1`,
+      apiType: "responses",
+      request: {
+        model: "gpt-test",
+        messages: [{ role: "user", content: "stream" }],
+        stream: true,
+      },
+    }),
+  });
+  assert.equal(streamResponse.status, 200);
+  assert.match(streamResponse.headers.get("content-type"), /text\/event-stream/);
+  assert.match(await streamResponse.text(), /response\.output_text\.delta/);
+  assert.equal(capturedRequests[1].path, "/v1/responses");
+  assert.equal(capturedRequests[1].body.stream, true);
 });

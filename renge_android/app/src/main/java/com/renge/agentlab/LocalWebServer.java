@@ -8,6 +8,7 @@ import android.util.JsonToken;
 import android.util.JsonWriter;
 import android.webkit.WebStorage;
 
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -830,10 +831,17 @@ public class LocalWebServer {
                 return;
             }
 
-            if (upstreamRequest.optBoolean("stream", false)) {
-                proxyStream(output, target.apiBaseUrl + "/chat/completions", target.apiKey, upstreamRequest);
+            JSONObject providerRequest = "responses".equals(target.apiType)
+                    ? buildResponsesApiRequest(upstreamRequest)
+                    : upstreamRequest;
+            String endpoint = "responses".equals(target.apiType)
+                    ? "/responses"
+                    : "/chat/completions";
+
+            if (providerRequest.optBoolean("stream", false)) {
+                proxyStream(output, target.apiBaseUrl + endpoint, target.apiKey, providerRequest);
             } else {
-                proxyJson(output, target.apiBaseUrl + "/chat/completions", target.apiKey, "POST", upstreamRequest);
+                proxyJson(output, target.apiBaseUrl + endpoint, target.apiKey, "POST", providerRequest);
             }
             return;
         }
@@ -1026,10 +1034,280 @@ public class LocalWebServer {
     private ProviderTarget getProviderTarget(JSONObject body) throws JSONException {
         String apiBaseUrl = body.optString("apiBaseUrl", "").trim().replaceAll("/+$", "");
         String apiKey = body.optString("apiKey", "");
+        String apiType = normalizeProviderApiType(body.optString("apiType", ""));
         if (apiBaseUrl.isEmpty()) {
             throw new JSONException("缺少 apiBaseUrl");
         }
-        return new ProviderTarget(apiBaseUrl, apiKey);
+        return new ProviderTarget(apiBaseUrl, apiKey, apiType);
+    }
+
+    private String normalizeProviderApiType(String value) {
+        String normalized = value == null
+                ? ""
+                : value.trim().toLowerCase(Locale.US).replaceAll("[_\\s]+", "-");
+        return "responses".equals(normalized) || "responses-api".equals(normalized)
+                ? "responses"
+                : "chat-completions";
+    }
+
+    private void copyJsonFields(JSONObject source, JSONObject target, String[] keys) throws JSONException {
+        for (String key : keys) {
+            if (source.has(key)) target.put(key, source.get(key));
+        }
+    }
+
+    private Object convertResponsesInputContent(Object rawContent) throws JSONException {
+        if (!(rawContent instanceof JSONArray)) return rawContent;
+        JSONArray source = (JSONArray) rawContent;
+        JSONArray content = new JSONArray();
+        for (int index = 0; index < source.length(); index += 1) {
+            JSONObject part = source.optJSONObject(index);
+            if (part == null) continue;
+            String type = part.optString("type", "");
+            if ("text".equals(type) || "output_text".equals(type)) {
+                if (part.has("text")) {
+                    JSONObject inputText = new JSONObject();
+                    inputText.put("type", "input_text");
+                    inputText.put("text", part.optString("text", ""));
+                    content.put(inputText);
+                }
+            } else if ("image_url".equals(type)) {
+                Object rawImageUrl = part.opt("image_url");
+                String imageUrl = rawImageUrl instanceof JSONObject
+                        ? ((JSONObject) rawImageUrl).optString("url", "")
+                        : String.valueOf(rawImageUrl == null ? "" : rawImageUrl);
+                if (!imageUrl.isEmpty()) {
+                    JSONObject inputImage = new JSONObject();
+                    inputImage.put("type", "input_image");
+                    inputImage.put("image_url", imageUrl);
+                    if (rawImageUrl instanceof JSONObject) {
+                        String detail = ((JSONObject) rawImageUrl).optString("detail", "");
+                        if (!detail.isEmpty()) inputImage.put("detail", detail);
+                    }
+                    content.put(inputImage);
+                }
+            } else if (
+                    "input_text".equals(type)
+                            || "input_image".equals(type)
+                            || "input_file".equals(type)
+            ) {
+                content.put(new JSONObject(part.toString()));
+            }
+        }
+        return content;
+    }
+
+    private boolean hasResponsesMessageContent(Object content) {
+        if (content instanceof String) return !((String) content).isEmpty();
+        return content instanceof JSONArray && ((JSONArray) content).length() > 0;
+    }
+
+    private String jsonValueAsText(Object value) {
+        if (value == null || value == JSONObject.NULL) return "";
+        return value instanceof String ? (String) value : String.valueOf(value);
+    }
+
+    private JSONArray convertResponsesInput(JSONArray messages) throws JSONException {
+        JSONArray input = new JSONArray();
+        if (messages == null) return input;
+
+        for (int index = 0; index < messages.length(); index += 1) {
+            JSONObject source = messages.optJSONObject(index);
+            if (source == null) continue;
+            String role = source.optString("role", "user");
+            Object rawContent = source.has("content") ? source.get("content") : JSONObject.NULL;
+            Object content = convertResponsesInputContent(rawContent);
+
+            if ("tool".equals(role)) {
+                String callId = source.optString("tool_call_id", "").trim();
+                if (!callId.isEmpty()) {
+                    JSONObject outputItem = new JSONObject();
+                    outputItem.put("type", "function_call_output");
+                    outputItem.put("call_id", callId);
+                    outputItem.put("output", jsonValueAsText(rawContent));
+                    input.put(outputItem);
+                }
+                continue;
+            }
+
+            if ("assistant".equals(role)) {
+                JSONArray reasoningItems = source.optJSONArray("responses_reasoning_items");
+                if (reasoningItems != null) {
+                    for (int reasoningIndex = 0; reasoningIndex < reasoningItems.length(); reasoningIndex += 1) {
+                        JSONObject reasoningItem = reasoningItems.optJSONObject(reasoningIndex);
+                        if (reasoningItem != null && "reasoning".equals(reasoningItem.optString("type", ""))) {
+                            input.put(new JSONObject(reasoningItem.toString()));
+                        }
+                    }
+                }
+                if (hasResponsesMessageContent(content)) {
+                    JSONObject assistantMessage = new JSONObject();
+                    assistantMessage.put("role", "assistant");
+                    assistantMessage.put("content", content);
+                    input.put(assistantMessage);
+                }
+                JSONArray toolCalls = source.optJSONArray("tool_calls");
+                if (toolCalls != null) {
+                    for (int toolIndex = 0; toolIndex < toolCalls.length(); toolIndex += 1) {
+                        JSONObject toolCall = toolCalls.optJSONObject(toolIndex);
+                        JSONObject function = toolCall == null ? null : toolCall.optJSONObject("function");
+                        if (function == null) continue;
+                        String callId = toolCall.optString("id", "").trim();
+                        String name = function.optString("name", "").trim();
+                        if (callId.isEmpty() || name.isEmpty()) continue;
+                        JSONObject callItem = new JSONObject();
+                        callItem.put("type", "function_call");
+                        callItem.put("call_id", callId);
+                        callItem.put("name", name);
+                        callItem.put("arguments", jsonValueAsText(function.opt("arguments")));
+                        input.put(callItem);
+                    }
+                }
+                continue;
+            }
+
+            if (hasResponsesMessageContent(content)) {
+                JSONObject inputMessage = new JSONObject();
+                inputMessage.put(
+                        "role",
+                        "system".equals(role) || "developer".equals(role) ? role : "user"
+                );
+                inputMessage.put("content", content);
+                input.put(inputMessage);
+            }
+        }
+        return input;
+    }
+
+    private JSONArray convertResponsesTools(JSONArray sourceTools) throws JSONException {
+        if (sourceTools == null) return null;
+        JSONArray tools = new JSONArray();
+        for (int index = 0; index < sourceTools.length(); index += 1) {
+            JSONObject source = sourceTools.optJSONObject(index);
+            if (source == null) continue;
+            JSONObject function = "function".equals(source.optString("type", ""))
+                    ? source.optJSONObject("function")
+                    : null;
+            if (function == null) {
+                tools.put(new JSONObject(source.toString()));
+                continue;
+            }
+            String name = function.optString("name", "").trim();
+            if (name.isEmpty()) continue;
+            JSONObject tool = new JSONObject();
+            tool.put("type", "function");
+            tool.put("name", name);
+            if (function.has("description")) tool.put("description", function.get("description"));
+            if (function.has("parameters")) tool.put("parameters", function.get("parameters"));
+            tool.put("strict", function.optBoolean("strict", false));
+            tools.put(tool);
+        }
+        return tools;
+    }
+
+    private Object convertResponsesToolChoice(Object rawToolChoice) throws JSONException {
+        if (!(rawToolChoice instanceof JSONObject)) return rawToolChoice;
+        JSONObject source = (JSONObject) rawToolChoice;
+        if (!"function".equals(source.optString("type", ""))) return rawToolChoice;
+        JSONObject function = source.optJSONObject("function");
+        String name = function == null
+                ? source.optString("name", "")
+                : function.optString("name", "");
+        if (name.isEmpty()) return rawToolChoice;
+        JSONObject toolChoice = new JSONObject();
+        toolChoice.put("type", "function");
+        toolChoice.put("name", name);
+        return toolChoice;
+    }
+
+    private JSONObject buildResponsesApiRequest(JSONObject chatRequest) throws JSONException {
+        JSONObject request = new JSONObject();
+        copyJsonFields(chatRequest, request, new String[]{
+                "background", "context_management", "conversation", "include", "instructions",
+                "max_tool_calls", "metadata", "model", "moderation", "parallel_tool_calls",
+                "previous_response_id", "prompt", "prompt_cache_key", "prompt_cache_options",
+                "prompt_cache_retention", "safety_identifier", "service_tier", "store", "stream",
+                "temperature", "top_logprobs", "top_p", "truncation", "user"
+        });
+
+        request.put(
+                "input",
+                chatRequest.has("input")
+                        ? chatRequest.get("input")
+                        : convertResponsesInput(chatRequest.optJSONArray("messages"))
+        );
+
+        for (String maxTokensKey : new String[]{
+                "max_output_tokens", "max_completion_tokens", "max_tokens"
+        }) {
+            if (chatRequest.has(maxTokensKey)) {
+                request.put("max_output_tokens", chatRequest.get(maxTokensKey));
+                break;
+            }
+        }
+
+        JSONArray tools = convertResponsesTools(
+                chatRequest.optJSONArray("tools") != null
+                        ? chatRequest.optJSONArray("tools")
+                        : chatRequest.optJSONArray("functions")
+        );
+        if (tools != null) request.put("tools", tools);
+
+        Object rawToolChoice = chatRequest.has("tool_choice")
+                ? chatRequest.get("tool_choice")
+                : chatRequest.opt("function_call");
+        if (rawToolChoice != null) {
+            request.put("tool_choice", convertResponsesToolChoice(rawToolChoice));
+        }
+
+        JSONObject text = chatRequest.optJSONObject("text") == null
+                ? new JSONObject()
+                : new JSONObject(chatRequest.optJSONObject("text").toString());
+        JSONObject responseFormat = chatRequest.optJSONObject("response_format");
+        if (responseFormat != null) {
+            String type = responseFormat.optString("type", "");
+            JSONObject format = null;
+            if ("json_schema".equals(type) && responseFormat.optJSONObject("json_schema") != null) {
+                format = new JSONObject(responseFormat.optJSONObject("json_schema").toString());
+                format.put("type", "json_schema");
+            } else if ("json_object".equals(type) || "text".equals(type)) {
+                format = new JSONObject();
+                format.put("type", type);
+            }
+            if (format != null) text.put("format", format);
+        }
+        if (chatRequest.has("verbosity")) text.put("verbosity", chatRequest.get("verbosity"));
+        if (text.length() > 0) request.put("text", text);
+
+        JSONObject reasoning = chatRequest.optJSONObject("reasoning") == null
+                ? new JSONObject()
+                : new JSONObject(chatRequest.optJSONObject("reasoning").toString());
+        if (reasoning.optBoolean("enabled", true) == false && !reasoning.has("effort")) {
+            reasoning.put("effort", "none");
+        }
+        reasoning.remove("enabled");
+        if (chatRequest.has("reasoning_effort")) {
+            reasoning.put("effort", chatRequest.get("reasoning_effort"));
+        }
+        if (
+                reasoning.has("effort")
+                        && !"none".equals(reasoning.optString("effort", ""))
+                        && !reasoning.has("summary")
+        ) {
+            reasoning.put("summary", "auto");
+        }
+        if (reasoning.length() > 0) request.put("reasoning", reasoning);
+
+        JSONObject streamOptions = chatRequest.optJSONObject("stream_options");
+        if (streamOptions != null && streamOptions.has("include_obfuscation")) {
+            JSONObject responsesStreamOptions = new JSONObject();
+            responsesStreamOptions.put(
+                    "include_obfuscation",
+                    streamOptions.get("include_obfuscation")
+            );
+            request.put("stream_options", responsesStreamOptions);
+        }
+        return request;
     }
 
     private void proxyJson(
@@ -1275,10 +1553,12 @@ public class LocalWebServer {
     private static final class ProviderTarget {
         final String apiBaseUrl;
         final String apiKey;
+        final String apiType;
 
-        ProviderTarget(String apiBaseUrl, String apiKey) {
+        ProviderTarget(String apiBaseUrl, String apiKey, String apiType) {
             this.apiBaseUrl = apiBaseUrl;
             this.apiKey = apiKey;
+            this.apiType = apiType;
         }
     }
 }

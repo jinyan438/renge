@@ -8,6 +8,10 @@ import { basename, dirname, extname, isAbsolute, join, normalize, relative, reso
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import {
+  buildResponsesApiRequest,
+  normalizeProviderApiType,
+} from "./src/responsesApiUtils.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const distDir = resolve(__dirname, "dist");
@@ -1931,12 +1935,13 @@ async function handlePcFiles(request, response, pathname) {
 function getProviderTarget(body) {
   const apiBaseUrl = String(body.apiBaseUrl ?? "").trim().replace(/\/+$/, "");
   const apiKey = String(body.apiKey ?? "");
+  const apiType = normalizeProviderApiType(body.apiType);
 
   if (!apiBaseUrl) {
     throw new Error("缺少 apiBaseUrl");
   }
 
-  return { apiBaseUrl, apiKey };
+  return { apiBaseUrl, apiKey, apiType };
 }
 
 const unsafeObjectKeys = new Set(["__proto__", "constructor", "prototype"]);
@@ -2844,7 +2849,7 @@ async function handleApi(request, response, pathname, dataFilePath) {
       return;
     }
 
-    const { apiBaseUrl, apiKey } = getProviderTarget(body);
+    const { apiBaseUrl, apiKey, apiType } = getProviderTarget(body);
 
     if (pathname === "/api/providers/models") {
       const upstream = await listProviderModels({
@@ -3179,20 +3184,32 @@ async function handleApi(request, response, pathname, dataFilePath) {
         return;
       }
       if (requestBody.stream === true) {
+        const upstreamRequest = apiType === "responses"
+          ? buildResponsesApiRequest(requestBody)
+          : requestBody;
         await proxyStream({
-          url: `${apiBaseUrl}/chat/completions`,
+          url: getCompatibleApiEndpoint(
+            apiBaseUrl,
+            apiType === "responses" ? "responses" : "chat/completions",
+          ),
           apiKey,
-          body: requestBody,
+          body: upstreamRequest,
           response,
         });
         return;
       }
 
+      const upstreamRequest = apiType === "responses"
+        ? buildResponsesApiRequest(requestBody)
+        : requestBody;
       const upstream = await proxyJson({
-        url: `${apiBaseUrl}/chat/completions`,
+        url: getCompatibleApiEndpoint(
+          apiBaseUrl,
+          apiType === "responses" ? "responses" : "chat/completions",
+        ),
         apiKey,
         method: "POST",
-        body: requestBody,
+        body: upstreamRequest,
       });
       sendJson(response, upstream.ok ? 200 : upstream.status, upstream.payload);
       return;

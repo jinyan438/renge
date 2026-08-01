@@ -1932,6 +1932,40 @@ summary:focus-visible {
   gap: 14px;
 }
 
+.provider-api-type-field {
+  gap: 7px;
+}
+
+.provider-api-type-segmented {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: min(100%, 420px);
+  min-height: 38px;
+  padding: 3px;
+  border: 1px solid #dfe4ec;
+  border-radius: 8px;
+  background: #f5f7fa;
+}
+
+.provider-api-type-segmented button {
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 6px;
+  color: #667085;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.provider-api-type-segmented button.active {
+  color: #087c42;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(23, 32, 51, 0.12);
+}
+
 .mcp-settings-grid {
   grid-template-columns: 280px minmax(0, 1fr);
 }

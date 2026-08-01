@@ -515,6 +515,16 @@ button.settings-window-light.close:hover {
   color: #005abf;
 }
 
+.settings-desktop .provider-api-type-segmented {
+  border-color: #d4d4da;
+  background: #f2f2f5;
+}
+
+.settings-desktop .provider-api-type-segmented button.active {
+  color: #005abf;
+  background: #ffffff;
+}
+
 .settings-desktop .secret-input:focus-within,
 .settings-desktop .mcp-export-textarea:focus {
   border-color: rgba(0, 102, 221, 0.72);

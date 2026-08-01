@@ -218,6 +218,13 @@ import {
   type ReasoningMessageStreamMode,
 } from "./reasoningUtils";
 import {
+  extractResponsesApiStreamEvent,
+  getResponsesApiErrorMessage,
+  normalizeProviderApiType,
+  normalizeResponsesApiPayload,
+  type ProviderApiType,
+} from "./responsesApiUtils.mjs";
+import {
   applyContextCompressionSummary,
   buildFallbackContextSummary,
   compactPriorityContextMessages,
@@ -466,6 +473,7 @@ type ChatSenderIdentity = {
 type ModelProviderChannel = {
   id: string;
   name: string;
+  apiType: ProviderApiType;
   apiBaseUrl: string;
   apiKey: string;
   modelId: string;
@@ -1238,6 +1246,7 @@ type ChatApiMessage = {
   thinking_content?: unknown;
   tool_call_id?: string;
   tool_calls?: ChatToolCall[];
+  responses_reasoning_items?: unknown[];
 };
 
 const PROVIDER_STORAGE_KEY = "renge_provider_channels";
@@ -1432,6 +1441,7 @@ function createProviderChannel(name = "OpenAI Compatible"): ModelProviderChannel
   return {
     id: crypto.randomUUID(),
     name,
+    apiType: "chat-completions",
     apiBaseUrl: "https://api.openai.com/v1",
     apiKey: "",
     modelId: "",
@@ -1447,6 +1457,7 @@ function createVolcengineCodingPlanProviderChannel(): ModelProviderChannel {
   return {
     id: crypto.randomUUID(),
     name: VOLCENGINE_CODING_PLAN_NAME,
+    apiType: "chat-completions",
     apiBaseUrl: VOLCENGINE_CODING_PLAN_API_BASE_URL,
     apiKey: "",
     modelId: VOLCENGINE_CODING_PLAN_MODEL_ID,
@@ -1465,6 +1476,7 @@ function normalizeProviderChannel(rawProvider: Partial<ModelProviderChannel>): M
   return {
     id: rawProvider.id ?? crypto.randomUUID(),
     name: rawProvider.name ?? "OpenAI Compatible",
+    apiType: normalizeProviderApiType(rawProvider.apiType),
     apiBaseUrl: rawProvider.apiBaseUrl ?? "",
     apiKey: rawProvider.apiKey ?? "",
     modelId: rawProvider.modelId ?? "",
@@ -9175,6 +9187,14 @@ function trimTrailingSlash(value: string) {
   return value.trim().replace(/\/+$/, "");
 }
 
+function buildProviderApiTarget(provider: ModelProviderChannel) {
+  return {
+    apiBaseUrl: trimTrailingSlash(provider.apiBaseUrl),
+    apiKey: provider.apiKey,
+    apiType: provider.apiType,
+  };
+}
+
 function parseToolArguments(rawArguments: string) {
   if (!rawArguments) return {};
 
@@ -9201,8 +9221,15 @@ function getChatApiErrorMessage(payload: unknown) {
   if (!isObjectRecord(payload)) return "";
   const error = payload.error;
   if (typeof error === "string") return error.trim();
-  if (!isObjectRecord(error)) return "";
-  return typeof error.message === "string" ? error.message.trim() : "";
+  if (isObjectRecord(error) && typeof error.message === "string") {
+    return error.message.trim();
+  }
+  return getResponsesApiErrorMessage(payload);
+}
+
+async function readChatCompletionPayload(response: Response) {
+  const payload = await response.json().catch(() => ({}));
+  return normalizeResponsesApiPayload(payload);
 }
 
 function extractStreamContent(payload: unknown): {
@@ -9212,7 +9239,11 @@ function extractStreamContent(payload: unknown): {
   finishReason?: string;
   toolCallDeltas?: ChatToolCallDelta[];
   toolCalls?: ChatToolCall[];
+  responsesReasoningItems?: unknown[];
 } {
+  const responsesStreamContent = extractResponsesApiStreamEvent(payload);
+  if (responsesStreamContent) return responsesStreamContent;
+
   const streamPayload = payload as {
     choices?: Array<{
       delta?: {
@@ -10099,6 +10130,7 @@ async function readChatStream(
       reasoning: streamContent.reasoning,
       toolCalls: streamContent.toolCalls ?? [],
       finishReason: streamContent.finishReason ?? "",
+      responsesReasoningItems: streamContent.responsesReasoningItems ?? [],
     };
   }
 
@@ -10112,6 +10144,7 @@ async function readChatStream(
   let reasoningMessageMode: ReasoningMessageStreamMode = "unknown";
   let finishReason = "";
   const toolCallsByIndex = new Map<number, ChatToolCall>();
+  const responsesReasoningItemsById = new Map<string, unknown>();
 
   const applyToolCallDeltas = (deltas: ChatToolCallDelta[]) => {
     deltas.forEach((delta, fallbackIndex) => {
@@ -10136,7 +10169,21 @@ async function readChatStream(
   };
 
   const applyCompleteToolCalls = (toolCalls: ChatToolCall[]) => {
-    toolCalls.forEach((toolCall, index) => toolCallsByIndex.set(index, toolCall));
+    toolCalls.forEach((toolCall, fallbackIndex) => {
+      const existingEntry = Array.from(toolCallsByIndex.entries()).find(
+        ([, current]) => current.id === toolCall.id,
+      );
+      toolCallsByIndex.set(existingEntry?.[0] ?? fallbackIndex, toolCall);
+    });
+  };
+
+  const applyResponsesReasoningItems = (items: unknown[]) => {
+    items.forEach((item) => {
+      const key = isObjectRecord(item) && typeof item.id === "string"
+        ? item.id
+        : `reasoning-${responsesReasoningItemsById.size}`;
+      responsesReasoningItemsById.set(key, item);
+    });
   };
 
   const applyStreamPayload = (data: string) => {
@@ -10159,6 +10206,9 @@ async function readChatStream(
       }
       if (streamContent.toolCalls) {
         applyCompleteToolCalls(streamContent.toolCalls);
+      }
+      if (streamContent.responsesReasoningItems) {
+        applyResponsesReasoningItems(streamContent.responsesReasoningItems);
       }
       if (streamContent.reasoning) {
         const mergedReasoning = mergeReasoningStreamChunk(
@@ -10223,6 +10273,7 @@ async function readChatStream(
     content: fullContent,
     reasoning: fullReasoning,
     finishReason,
+    responsesReasoningItems: Array.from(responsesReasoningItemsById.values()),
     toolCalls: Array.from(toolCallsByIndex.entries())
       .sort(([left], [right]) => left - right)
       .map(([, toolCall]) => toolCall)
@@ -14561,8 +14612,7 @@ export function App() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            apiBaseUrl: trimTrailingSlash(chatProvider.apiBaseUrl),
-            apiKey: chatProvider.apiKey,
+            ...buildProviderApiTarget(chatProvider),
             request: {
               model: modelId,
               messages: [
@@ -14581,7 +14631,7 @@ export function App() {
             },
           }),
         });
-        const payload = (await response.json()) as {
+        const payload = (await readChatCompletionPayload(response)) as {
           error?: string | { message?: string };
           choices?: Array<{ message?: ChatApiMessage }>;
           output_text?: string;
@@ -14913,8 +14963,7 @@ export function App() {
         headers: { "Content-Type": "application/json" },
         signal,
         body: JSON.stringify({
-          apiBaseUrl: trimTrailingSlash(provider.apiBaseUrl),
-          apiKey: provider.apiKey,
+          ...buildProviderApiTarget(provider),
           sessionId,
           request: {
             model: modelId,
@@ -14939,7 +14988,7 @@ export function App() {
           },
         }),
       });
-      const payload = (await response.json()) as {
+      const payload = (await readChatCompletionPayload(response)) as {
         error?: string | { message?: string };
         choices?: Array<{ message?: ChatApiMessage }>;
         output_text?: string;
@@ -20985,8 +21034,7 @@ export function App() {
       includeReasoningControl = true,
       focusedItemIds: string[] = [],
     ) => ({
-      apiBaseUrl: trimTrailingSlash(statusRequestProvider.apiBaseUrl),
-      apiKey: statusRequestProvider.apiKey,
+      ...buildProviderApiTarget(statusRequestProvider),
       request: {
         model: statusRequestModelId,
         messages: [
@@ -21086,7 +21134,7 @@ export function App() {
           requestBody(responseFormatMode, includeReasoningControl, focusedItemIds),
         ),
       });
-      const payload = (await response.json().catch(() => ({}))) as {
+      const payload = (await readChatCompletionPayload(response)) as {
         error?: string | { message?: string };
         choices?: Array<{ message?: ChatApiMessage; text?: string }>;
         output_text?: string;
@@ -21927,8 +21975,7 @@ export function App() {
           },
           signal: abortSignal,
           body: JSON.stringify({
-            apiBaseUrl: trimTrailingSlash(requestProvider.apiBaseUrl),
-            apiKey: requestProvider.apiKey,
+            ...buildProviderApiTarget(requestProvider),
             sessionId: activeChatSessionId,
             request: {
               model: requestModelId,
@@ -21962,13 +22009,14 @@ export function App() {
             content: streamResult.content,
             reasoning: streamResult.reasoning,
             toolCalls: streamResult.toolCalls,
+            responsesReasoningItems: streamResult.responsesReasoningItems,
             finishReason: streamResult.finishReason,
             includedToolCount: chatToolsForRequest.length,
           };
         }
 
         throwIfChatAborted(abortSignal);
-        const payload = (await response.json()) as {
+        const payload = (await readChatCompletionPayload(response)) as {
           error?: string | { message?: string };
           choices?: Array<{ message?: ChatApiMessage; finish_reason?: string }>;
           output_text?: string;
@@ -21985,6 +22033,8 @@ export function App() {
           content: "",
           reasoning: getChatCompletionPayloadReasoning(payload),
           toolCalls: [] as ChatToolCall[],
+          responsesReasoningItems:
+            payload.choices?.[0]?.message?.responses_reasoning_items ?? [],
           finishReason: payload.choices?.[0]?.finish_reason ?? "",
           includedToolCount: chatToolsForRequest.length,
         };
@@ -22194,8 +22244,7 @@ export function App() {
             headers: { "Content-Type": "application/json" },
             signal: abortSignal,
             body: JSON.stringify({
-              apiBaseUrl: trimTrailingSlash(subAgentProvider.apiBaseUrl),
-              apiKey: subAgentProvider.apiKey,
+              ...buildProviderApiTarget(subAgentProvider),
               sessionId: activeChatSessionId,
               request: {
                 model: subAgentModelId,
@@ -22224,7 +22273,7 @@ export function App() {
             : null;
           const payload = subAgentShouldStream
             ? null
-            : ((await response.json()) as {
+            : ((await readChatCompletionPayload(response)) as {
                 error?: string | { message?: string };
                 choices?: Array<{ message?: ChatApiMessage }>;
                 output_text?: string;
@@ -22295,6 +22344,10 @@ export function App() {
                   subAgentProvider,
                   subAgentReasoning,
                 )
+              : {}),
+            ...(!subAgentMessage?.responses_reasoning_items?.length &&
+            streamResult?.responsesReasoningItems.length
+              ? { responses_reasoning_items: streamResult.responsesReasoningItems }
               : {}),
             tool_calls: subAgentToolCalls,
           });
@@ -22931,6 +22984,10 @@ export function App() {
                   requestProvider,
                   assistantMessageReasoning,
                 )
+              : {}),
+            ...(!assistantMessage?.responses_reasoning_items?.length &&
+            completionResult.responsesReasoningItems.length
+              ? { responses_reasoning_items: completionResult.responsesReasoningItems }
               : {}),
             tool_calls: toolCalls,
           });
@@ -24087,11 +24144,15 @@ export function App() {
       const requestedOutputTokens = Number(
         normalizedConfig.max_tokens ?? normalizedConfig.length ?? customApi.max_tokens,
       );
+      const requestApiType: ProviderApiType = hasCustomApi
+        ? "chat-completions"
+        : chatProvider?.apiType ?? "chat-completions";
       const requestMessages = await prepareContextCompressedMessages({
         messages: substituteUserNicknameInApiMessages(apiMessages, userProfile.nickname),
         provider: {
           id: chatProvider?.id ?? "custom-api",
           name: chatProvider?.name ?? "Custom API",
+          apiType: requestApiType,
           apiBaseUrl: requestApiBaseUrl,
           apiKey: requestApiKey,
           modelId: requestModelId,
@@ -24114,6 +24175,7 @@ export function App() {
         body: JSON.stringify({
           apiBaseUrl: trimTrailingSlash(requestApiBaseUrl),
           apiKey: requestApiKey,
+          apiType: requestApiType,
           sessionId: activeChatSessionId,
           customIncludeBody:
             customApi.custom_include_body ?? normalizedConfig.custom_include_body,
@@ -24219,7 +24281,7 @@ export function App() {
         );
         generatedText = streamResult.content || generatedText;
       } else {
-        const payload = (await response.json()) as {
+        const payload = (await readChatCompletionPayload(response)) as {
           error?: string | { message?: string };
           choices?: Array<{ message?: ChatApiMessage }>;
           output_text?: string;
@@ -24581,8 +24643,7 @@ export function App() {
           },
           signal: abortSignal,
           body: JSON.stringify({
-            apiBaseUrl: trimTrailingSlash(chatProvider.apiBaseUrl),
-            apiKey: chatProvider.apiKey,
+            ...buildProviderApiTarget(chatProvider),
             sessionId: activeChatSessionId,
             request: {
               model: requestModelId,
@@ -24616,11 +24677,12 @@ export function App() {
             content: streamResult.content,
             reasoning: streamResult.reasoning,
             toolCalls: streamResult.toolCalls,
+            responsesReasoningItems: streamResult.responsesReasoningItems,
           };
         }
 
         throwIfChatAborted(abortSignal);
-        const payload = (await response.json()) as {
+        const payload = (await readChatCompletionPayload(response)) as {
           error?: string | { message?: string };
           choices?: Array<{ message?: ChatApiMessage }>;
           output_text?: string;
@@ -24637,6 +24699,8 @@ export function App() {
           content: "",
           reasoning: getChatCompletionPayloadReasoning(payload),
           toolCalls: [] as ChatToolCall[],
+          responsesReasoningItems:
+            payload.choices?.[0]?.message?.responses_reasoning_items ?? [],
         };
       };
       const appendStreamingAssistant = (delta: string) => {
@@ -24878,6 +24942,10 @@ export function App() {
                   chatProvider,
                   assistantMessageReasoning,
                 )
+              : {}),
+            ...(!assistantMessage?.responses_reasoning_items?.length &&
+            completionResult.responsesReasoningItems.length
+              ? { responses_reasoning_items: completionResult.responsesReasoningItems }
               : {}),
             tool_calls: toolCalls,
           });
@@ -28620,6 +28688,7 @@ export function App() {
                     <span>
                       {[
                         getEffectiveProviderModelId(provider) || "未设置模型",
+                        provider.apiType === "responses" ? "Responses" : "Chat Completions",
                         provider.reasoningEnabled
                           ? `思考${getProviderReasoningEffortLabel(provider.reasoningEffort)}`
                           : "",
@@ -28659,6 +28728,36 @@ export function App() {
                       }
                     />
                   </label>
+
+                  <div className="field provider-api-type-field">
+                    <span>API 类型</span>
+                    <div
+                      className="provider-api-type-segmented"
+                      role="group"
+                      aria-label="API 类型"
+                    >
+                      <button
+                        type="button"
+                        className={activeProvider.apiType === "chat-completions" ? "active" : ""}
+                        aria-pressed={activeProvider.apiType === "chat-completions"}
+                        onClick={() =>
+                          updateProvider(activeProvider.id, { apiType: "chat-completions" })
+                        }
+                      >
+                        Chat Completions
+                      </button>
+                      <button
+                        type="button"
+                        className={activeProvider.apiType === "responses" ? "active" : ""}
+                        aria-pressed={activeProvider.apiType === "responses"}
+                        onClick={() =>
+                          updateProvider(activeProvider.id, { apiType: "responses" })
+                        }
+                      >
+                        Responses
+                      </button>
+                    </div>
+                  </div>
 
                   <label className="field">
                     <span>API 地址</span>
