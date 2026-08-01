@@ -1,4 +1,10 @@
 import type { TavernScript, TavernScriptButton } from "./tavernScriptUtils";
+import {
+  attachTavernSubscriptionControls,
+  createTavernMacroRegistry,
+  createTavernErrorCatched,
+  proxyTavernModuleUrls,
+} from "./tavernCompatibilityUtils";
 import fontAwesomeCss from "@fortawesome/fontawesome-free/css/all.min.css?raw";
 import fontAwesomeBrandsUrl from "@fortawesome/fontawesome-free/webfonts/fa-brands-400.woff2?url";
 import fontAwesomeRegularUrl from "@fortawesome/fontawesome-free/webfonts/fa-regular-400.woff2?url";
@@ -175,6 +181,9 @@ const TAVERN_EVENTS = Object.freeze({
   CHARACTER_RENAMED: "character_renamed",
   CHARACTER_DELETED: "character_deleted",
   SETTINGS_UPDATED: "settings_updated",
+  SETTINGS_LOADED_AFTER: "settings_loaded_after",
+  WORLDINFO_ENTRIES_LOADED: "worldinfo_entries_loaded",
+  WORLDINFO_UPDATED: "worldinfo_updated",
   OAI_PRESET_CHANGED_AFTER: "oai_preset_changed_after",
   PRESET_RENAMED_BEFORE: "preset_renamed_before",
   GENERATION_STARTED: "generation_started",
@@ -1545,6 +1554,7 @@ export class TavernScriptRuntime {
     if (this.destroyed) throw new Error("脚本运行时已销毁。");
     this.reportStatus("loading", "正在初始化酒馆脚本运行环境...");
     await this.createIframe();
+    if (this.destroyed) return;
     this.parentSideEffectCleanup = installParentSideEffectTracker(
       window,
       () => this.currentScriptId || this.lastScriptId,
@@ -1575,13 +1585,26 @@ export class TavernScriptRuntime {
       )
       .sort((left, right) => Number(isFrameworkScript(right)) - Number(isFrameworkScript(left)));
     for (const script of startupScripts) {
-      await this.executeScript(script.id);
-      if (isFrameworkScript(script)) {
-        await this.waitForGlobal("Mvu", 15000);
+      try {
+        await this.executeScript(script.id);
+        if (isFrameworkScript(script)) {
+          await this.waitForGlobal("Mvu", 15000);
+        }
+      } catch (error) {
+        // Cards frequently bundle several independent startup modules. A
+        // broken optional status/data module must not prevent a later visual
+        // renderer from mounting the message UI.
+        this.writeLog(
+          "error",
+          script,
+          `启动脚本执行失败，已继续运行其余脚本：${toErrorMessage(error)}`,
+        );
       }
     }
     if (this.destroyed) return;
     this.ready = true;
+    await this.emit(TAVERN_EVENTS.SETTINGS_LOADED_AFTER);
+    await this.emit(TAVERN_EVENTS.WORLDINFO_ENTRIES_LOADED);
     await this.emit(TAVERN_EVENTS.APP_READY);
     await this.emit(TAVERN_EVENTS.CHAT_CHANGED, this.adapter.getChatId());
     const character = this.localizePlaceholderImages(this.adapter.getCharacter());
@@ -1737,30 +1760,39 @@ export class TavernScriptRuntime {
       '<body><div id="chat"></div><div id="extensions_settings2"></div>',
       '<div id="tavern_helper"></div></body></html>',
     ].join("");
-    document.body.appendChild(iframe);
-    await new Promise<void>((resolve, reject) => {
-      const timeout = window.setTimeout(
-        () => reject(new Error("酒馆脚本 iframe 初始化超时。")),
-        10000,
-      );
-      iframe.addEventListener(
-        "load",
-        () => {
-          window.clearTimeout(timeout);
-          resolve();
-        },
-        { once: true },
-      );
-      iframe.addEventListener(
-        "error",
-        () => {
-          window.clearTimeout(timeout);
-          reject(new Error("酒馆脚本 iframe 无法加载。"));
-        },
-        { once: true },
-      );
-    });
-    if (this.destroyed) return;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = window.setTimeout(() => {
+          reject(new Error("酒馆脚本 iframe 初始化超时。"));
+        }, 10000);
+        iframe.addEventListener(
+          "load",
+          () => {
+            window.clearTimeout(timeout);
+            resolve();
+          },
+          { once: true },
+        );
+        iframe.addEventListener(
+          "error",
+          () => {
+            window.clearTimeout(timeout);
+            reject(new Error("酒馆脚本 iframe 无法加载。"));
+          },
+          { once: true },
+        );
+        // Bind both terminal listeners before insertion. An about:srcdoc frame
+        // can finish loading synchronously when a runtime is recreated.
+        document.body.appendChild(iframe);
+      });
+    } catch (error) {
+      iframe.remove();
+      throw error;
+    }
+    if (this.destroyed) {
+      iframe.remove();
+      return;
+    }
     this.iframe = iframe;
     this.runtimeWindow = iframe.contentWindow as RuntimeWindow | null;
     if (!this.runtimeWindow) throw new Error("无法访问酒馆脚本 iframe。 ");
@@ -1909,7 +1941,17 @@ export class TavernScriptRuntime {
         });
       }
       this.eventHandlers.set(key, callbacks);
-      return callback;
+      return attachTavernSubscriptionControls(typedCallback, () => {
+        const registeredCallbacks = this.eventHandlers.get(key);
+        if (!registeredCallbacks) return false;
+        const index = registeredCallbacks.findIndex(
+          (handler) => handler.callback === typedCallback,
+        );
+        if (index < 0) return false;
+        registeredCallbacks.splice(index, 1);
+        if (registeredCallbacks.length === 0) this.eventHandlers.delete(key);
+        return true;
+      });
     };
     const eventOn = (eventName: unknown, callback: unknown) =>
       registerEventHandler(eventName, callback, 0);
@@ -2300,6 +2342,27 @@ export class TavernScriptRuntime {
       this.variableSchemas.set(String(name || getScriptId()), schema);
       return () => this.variableSchemas.delete(String(name || getScriptId()));
     };
+    const mvu = isRecord(win.Mvu) ? win.Mvu : {};
+    const mvuEvents = isRecord(mvu.events) ? mvu.events : {};
+    Object.assign(mvuEvents, {
+      VARIABLE_INITIALIZED:
+        mvuEvents.VARIABLE_INITIALIZED ?? "mag_variable_initialized",
+      VARIABLE_UPDATE_ENDED:
+        mvuEvents.VARIABLE_UPDATE_ENDED ?? "mag_variable_update_ended",
+    });
+    Object.assign(mvu, {
+      events: mvuEvents,
+      getMvuData: getVariables,
+      getData: getVariables,
+      setMvuData: replaceVariables,
+      replaceMvuData: replaceVariables,
+      setData: replaceVariables,
+      updateMvuData: updateVariablesWith,
+      updateData: updateVariablesWith,
+      isDuringExtraAnalysis: () => false,
+      registerMvuSchema: registerVariableSchema,
+    });
+    win.Mvu = mvu;
 
     const getCharacter = () => this.localizePlaceholderImages(this.adapter.getCharacter());
     const getGlobalWorldBooks = () =>
@@ -2583,12 +2646,20 @@ export class TavernScriptRuntime {
       getWorldbookEntryByKey,
     };
 
+    const macroRegistry = createTavernMacroRegistry(() => ({
+      message_id: this.adapter.getMessages().length - 1,
+      chat_id: this.adapter.getChatId(),
+      script_id: getScriptId(),
+    }));
+    const registerMacroLike = macroRegistry.registerMacroLike;
     const substitudeMacros = (value: unknown) =>
-      String(value ?? "")
+      macroRegistry.substitute(
+        String(value ?? "")
         .replace(/{{\s*user\s*}}/gi, this.adapter.getUserName() || "用户")
         .replace(/{{\s*char\s*}}/gi, getCharacter()?.name || "角色")
         .replace(/<USER>/gi, this.adapter.getUserName() || "用户")
-        .replace(/<BOT>/gi, getCharacter()?.name || "角色");
+        .replace(/<BOT>/gi, getCharacter()?.name || "角色"),
+      );
     const getTavernRegexes = (options: unknown = {}) => {
       const normalizedOptions = isRecord(options) ? options : {};
       const scope = String(normalizedOptions.scope ?? "all");
@@ -2810,6 +2881,9 @@ export class TavernScriptRuntime {
         this.adapter.onNotice?.("error", String(message), String(title ?? "")),
       clear: () => undefined,
     };
+    const errorCatched = createTavernErrorCatched((error) => {
+      win.console.error("[TavernHelper] 角色卡回调执行失败", error);
+    });
 
     const storedExtensionSettings = this.adapter.getExtensionSettings?.() ?? getPath(
       this.adapter.getGlobalVariables(),
@@ -2871,8 +2945,11 @@ export class TavernScriptRuntime {
       getCurrentCharPrimaryLorebook,
       worldbookManager,
       lorebookManager: worldbookManager,
-      registerMacro: () => true,
-      unregisterMacro: () => true,
+      registerMacro: registerMacroLike,
+      unregisterMacro: (registration: unknown) =>
+        isRecord(registration) && typeof registration.unregister === "function"
+          ? registration.unregister()
+          : false,
       unregisterFunctionTool: () => true,
       callGenericPopup: async (
         _content: unknown,
@@ -3091,6 +3168,8 @@ export class TavernScriptRuntime {
       getCurrentMessageId: () => this.adapter.getMessages().length - 1,
       getVariables,
       getAllVariables,
+      Mvu: mvu,
+      errorCatched,
       setVariables: replaceVariables,
       replaceVariables,
       updateVariablesWith,
@@ -3098,6 +3177,7 @@ export class TavernScriptRuntime {
       insertVariables,
       deleteVariable,
       registerVariableSchema,
+      registerMvuSchema: registerVariableSchema,
       eventOn,
       eventOnce,
       eventEmit: emitFromScript,
@@ -3148,6 +3228,7 @@ export class TavernScriptRuntime {
       updateTavernRegexesWith,
       deleteTavernRegex,
       substitudeMacros,
+      registerMacroLike,
       injectPrompts,
       getScriptId,
       getScriptButtons,
@@ -3571,14 +3652,17 @@ export class TavernScriptRuntime {
       if (usesModuleSyntax) element.type = "module";
       element.dataset.rengeTavernScriptId = script.id;
       const completionEventName = `renge-tavern-script-loaded:${script.id}:${crypto.randomUUID()}`;
+      const executableContent = usesModuleSyntax
+        ? proxyTavernModuleUrls(script.content, window.location.origin)
+        : script.content;
       element.textContent = usesModuleSyntax
-        ? `${script.content}\n;window.dispatchEvent(new Event(${JSON.stringify(completionEventName)}));\n//# sourceURL=renge-tavern-script-${encodeURIComponent(script.name)}.js`
-        : `${script.content}\n//# sourceURL=renge-tavern-script-${encodeURIComponent(script.name)}.js`;
+        ? `${executableContent}\n;window.dispatchEvent(new Event(${JSON.stringify(completionEventName)}));\n//# sourceURL=renge-tavern-script-${encodeURIComponent(script.name)}.js`
+        : `${executableContent}\n//# sourceURL=renge-tavern-script-${encodeURIComponent(script.name)}.js`;
       let settled = false;
       const timeoutId = usesModuleSyntax
         ? window.setTimeout(
             () => finish(new Error(`脚本「${script.name}」的模块加载超时。`)),
-            120000,
+            10000,
           )
         : undefined;
       const finish = (error?: unknown) => {

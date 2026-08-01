@@ -18086,7 +18086,7 @@ export function App() {
 
     const bubble = event.currentTarget.closest<HTMLElement>(".chat-bubble");
     const messageText = bubble?.querySelector<HTMLElement>(".mes_text") ?? null;
-    const chatThread = document.getElementById("chat-messages");
+    const chatThread = document.getElementById("chat");
     renderedEditingFocusRef.current = {
       messageId,
       textOffset: messageText
@@ -31874,7 +31874,7 @@ export function App() {
             </div>
           </header>
 
-          <div id="chat-messages" className="chat-thread" onScroll={() => setChatMessageMenu(null)}>
+          <div id="chat" className="chat-thread" onScroll={() => setChatMessageMenu(null)}>
             {visibleChatMessages.length === 0 ? (
               <div
                 className={`chat-empty ${
@@ -32021,7 +32021,7 @@ export function App() {
                       <article
                         className="chat-message assistant mes"
                         key={item.id}
-                        {...{ mesid: messageIndex }}
+                        {...{ mesid: messageIndex, is_user: "false", is_system: "false" }}
                       >
                         {item.showTime && (
                           <time className="chat-message-time">
@@ -32112,7 +32112,11 @@ export function App() {
                   <article
                     className={`chat-message mes ${message.role}`}
                     key={id}
-                    {...{ mesid: messageIndex }}
+                    {...{
+                      mesid: messageIndex,
+                      is_user: message.role === "user" ? "true" : "false",
+                      is_system: "false",
+                    }}
                   >
                     {showTime && (
                       <time className="chat-message-time">
@@ -32209,7 +32213,7 @@ export function App() {
                                       editor.focus({ preventScroll: true });
                                       placeCaretAtTextOffset(editor, focusState?.textOffset ?? null);
                                       if (focusState) {
-                                        const chatThread = document.getElementById("chat-messages");
+                                        const chatThread = document.getElementById("chat");
                                         if (chatThread) {
                                           chatThread.scrollLeft = focusState.threadScrollLeft;
                                           chatThread.scrollTop = focusState.threadScrollTop;
@@ -32452,7 +32456,7 @@ export function App() {
             </div>
           )}
 
-          <section className="chat-composer">
+          <section id="form_sheld" className="chat-composer">
             {chatStatus.message && (
               <p className={`chat-status ${chatStatus.status}`}>{chatStatus.message}</p>
             )}

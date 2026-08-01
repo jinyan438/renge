@@ -135,3 +135,25 @@ test("serves temporary files on the isolated preview origin", async (t) => {
   const apiResponse = await requestLocalServer(controller, "/api/app-data");
   assert.equal(apiResponse.status, 404);
 });
+
+test("Tavern module proxy rejects non-jsDelivr module origins", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-tavern-proxy-test-"));
+  const controller = await startRengeServer({
+    host: "127.0.0.1",
+    port: 0,
+    dataDir,
+  });
+  t.after(async () => {
+    await new Promise((resolve, reject) => {
+      controller.server.close((error) => (error ? reject(error) : resolve()));
+    });
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const response = await fetch(
+    `${controller.url}/api/tavern-module-proxy?url=${encodeURIComponent("https://example.test/card.js")}`,
+  );
+
+  assert.equal(response.status, 502);
+  assert.match((await response.json()).error, /jsDelivr/);
+});

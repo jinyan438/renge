@@ -16,6 +16,7 @@ const appDataFileName = "app-data.json";
 const appDataBackupCount = 3;
 const appDataWriteQueues = new Map();
 const mcpClientCache = new Map();
+const tavernModuleProxyCache = new Map();
 
 const mimeTypes = {
   ".html": "text/html;charset=utf-8",
@@ -174,6 +175,88 @@ function sendTavernCompatModule(response) {
     "Access-Control-Allow-Origin": "*",
   });
   response.end(tavernCompatModuleSource);
+}
+
+function getTavernModuleProxyUrl(origin, remoteUrl) {
+  return `${origin}/api/tavern-module-proxy?url=${encodeURIComponent(remoteUrl)}`;
+}
+
+function rewriteTavernModuleImports(source, origin) {
+  return source.replace(
+    /https:\/\/(?:testingcf|cdn|fastly)\.jsdelivr\.net\/[^'"`\s)]+/g,
+    (remoteUrl) => getTavernModuleProxyUrl(origin, remoteUrl),
+  );
+}
+
+function getTavernModuleCandidates(remoteUrl) {
+  const parsed = new URL(remoteUrl);
+  if (parsed.protocol !== "https:" || ![
+    "testingcf.jsdelivr.net",
+    "cdn.jsdelivr.net",
+    "fastly.jsdelivr.net",
+  ].includes(parsed.hostname.toLowerCase())) {
+    throw new Error("仅支持 jsDelivr 角色卡模块。");
+  }
+  const candidates = [parsed.href];
+  if (parsed.hostname.toLowerCase() !== "cdn.jsdelivr.net") {
+    const fallback = new URL(parsed.href);
+    fallback.hostname = "cdn.jsdelivr.net";
+    candidates.push(fallback.href);
+  }
+  return candidates;
+}
+
+async function loadTavernModule(remoteUrl, origin) {
+  const cacheKey = `${origin}\n${remoteUrl}`;
+  if (!tavernModuleProxyCache.has(cacheKey)) {
+    tavernModuleProxyCache.set(cacheKey, (async () => {
+      let lastError;
+      for (const candidate of getTavernModuleCandidates(remoteUrl)) {
+        try {
+          const remoteResponse = await fetch(candidate, {
+            signal: AbortSignal.timeout(30_000),
+            headers: { Accept: "text/javascript, application/javascript, */*;q=0.8" },
+          });
+          if (!remoteResponse.ok) {
+            throw new Error(`远程模块返回 ${remoteResponse.status}`);
+          }
+          const source = await remoteResponse.text();
+          return rewriteTavernModuleImports(source, origin);
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      throw lastError ?? new Error("角色卡模块加载失败。");
+    })());
+  }
+  try {
+    return await tavernModuleProxyCache.get(cacheKey);
+  } catch (error) {
+    tavernModuleProxyCache.delete(cacheKey);
+    throw error;
+  }
+}
+
+async function serveTavernModuleProxy(request, response, url) {
+  if (request.method !== "GET") {
+    sendJson(response, 405, { error: "Method not allowed" });
+    return;
+  }
+  const remoteUrl = String(url.searchParams.get("url") ?? "").trim();
+  try {
+    getTavernModuleCandidates(remoteUrl);
+    const origin = `${url.protocol}//${url.host}`;
+    const source = await loadTavernModule(remoteUrl, origin);
+    response.writeHead(200, {
+      "Content-Type": "text/javascript;charset=utf-8",
+      "Cache-Control": "public, max-age=3600",
+      "Access-Control-Allow-Origin": "*",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.end(source);
+  } catch (error) {
+    sendJson(response, 502, { error: compactError(error) });
+  }
 }
 
 function sendJson(response, statusCode, payload) {
@@ -3266,6 +3349,11 @@ export function startRengeServer(options = {}) {
         return;
       }
       sendJson(response, 200, { token: "renge-local-extension" });
+      return;
+    }
+
+    if (url.pathname === "/api/tavern-module-proxy") {
+      await serveTavernModuleProxy(request, response, url);
       return;
     }
 
