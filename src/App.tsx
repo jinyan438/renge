@@ -11657,7 +11657,9 @@ export function App() {
   >(() => {
     throw new Error("酒馆斜杠命令接口尚未初始化。");
   });
-  const selectRoleplayGreetingRef = useRef<(requestedIndex: number) => void>(() => {});
+  const selectRoleplayGreetingRef = useRef<
+    (requestedIndex: number) => boolean | Promise<boolean>
+  >(() => false);
   const chatAttachmentInputRef = useRef<HTMLInputElement>(null);
   const chatAttachmentFilesRef = useRef<Map<string, File>>(new Map());
   const chatAttachmentMetadataRef = useRef<Map<string, ChatAttachment>>(new Map());
@@ -16551,6 +16553,19 @@ export function App() {
         chatMessagesRef.current = normalized;
         setChatMessages(normalized);
       },
+      getGreetingState: () => {
+        const session = chatSessionsRef.current.find(
+          (candidate) => candidate.id === activeChatSessionIdRef.current,
+        );
+        const card = characterCardsRef.current.find(
+          (candidate) => candidate.id === session?.roleplayCharacterCardId,
+        );
+        return {
+          index: session?.roleplayGreetingIndex ?? 0,
+          greetings: card ? getCharacterCardGreetings(card, "{{user}}") : [],
+        };
+      },
+      selectGreeting: (index) => selectRoleplayGreetingRef.current(index),
       getChatVariables: () => {
         const session = chatSessionsRef.current.find(
           (candidate) => candidate.id === activeChatSessionIdRef.current,
@@ -17422,20 +17437,23 @@ export function App() {
     setChatSessions((current) => [...current, session]);
     activateRoleplaySession(session);
   };
-  const selectRoleplayGreeting = (requestedIndex: number) => {
-    if (!activeChatSession || !activeSessionRoleplayCard) return;
-    if (activeRoleplayGreetings.length < 2) return;
-    if (!Number.isFinite(requestedIndex)) return;
+  const selectRoleplayGreeting = async (requestedIndex: number) => {
+    if (!activeChatSession || !activeSessionRoleplayCard) return false;
+    if (activeRoleplayGreetings.length < 2) return false;
+    if (!Number.isFinite(requestedIndex)) return false;
     const nextIndex = Math.max(
       0,
       Math.min(Math.floor(requestedIndex), activeRoleplayGreetings.length - 1),
     );
-    if (nextIndex === activeRoleplayGreetingIndex) return;
+    if (nextIndex === activeRoleplayGreetingIndex) {
+      await tavernScriptRuntimeRef.current?.initializeGreeting(nextIndex);
+      return true;
+    }
     const greeting = createRoleplayGreetingMessage(
       activeSessionRoleplayCard,
       nextIndex,
     );
-    if (!greeting) return;
+    if (!greeting) return false;
     const nextMessages = chatMessages.some((message) => message.source === "roleplay-greeting")
       ? chatMessages.map((message) =>
           message.source === "roleplay-greeting" ? { ...greeting, id: message.id } : message,
@@ -17449,10 +17467,14 @@ export function App() {
       messages: nextMessages,
       updatedAt: new Date().toISOString(),
     };
-    setChatSessions((current) =>
-      current.map((session) => (session.id === activeChatSession.id ? nextSession : session)),
+    const nextSessions = chatSessionsRef.current.map((session) =>
+      session.id === activeChatSession.id ? nextSession : session,
     );
+    chatSessionsRef.current = nextSessions;
+    setChatSessions(nextSessions);
     processRoleplayGreeting(nextSession, activeSessionRoleplayCard, true);
+    await tavernScriptRuntimeRef.current?.initializeGreeting(nextIndex);
+    return true;
   };
   selectRoleplayGreetingRef.current = selectRoleplayGreeting;
   const cycleRoleplayGreeting = () => {

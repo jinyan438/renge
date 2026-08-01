@@ -15,6 +15,11 @@ import {
   usesTavernModuleSyntax,
 } from "./tavernScriptModuleUtils";
 import { initializeTavernMvuMessages } from "./tavernMvuInitUtils";
+import {
+  getTavernGreetingSwipeIndex,
+  getTavernMessageSwipeState,
+  type TavernGreetingState,
+} from "./tavernGreetingUtils";
 
 export type TavernRuntimeMessage = {
   id: string;
@@ -23,6 +28,7 @@ export type TavernRuntimeMessage = {
   createdAt: string;
   variables?: Record<string, unknown>;
   extra?: Record<string, unknown>;
+  source?: string;
 };
 
 export type TavernRuntimeWorldBookEntry = {
@@ -95,6 +101,8 @@ export type TavernRuntimeStatus = {
 export type TavernScriptRuntimeAdapter = {
   getMessages(): TavernRuntimeMessage[];
   setMessages(messages: TavernRuntimeMessage[]): void;
+  getGreetingState?(): TavernGreetingState;
+  selectGreeting?(index: number): boolean | Promise<boolean>;
   getChatVariables(): Record<string, unknown>;
   setChatVariables(variables: Record<string, unknown>): void;
   getCharacterVariables(): Record<string, unknown>;
@@ -1554,6 +1562,11 @@ export class TavernScriptRuntime {
     this.syncChatMetadata?.();
   }
 
+  async initializeGreeting(swipeIndex: number) {
+    if (this.destroyed) return;
+    await this.initializeMvuMessageVariables(swipeIndex);
+  }
+
   async initialize() {
     if (this.destroyed) throw new Error("脚本运行时已销毁。");
     this.reportStatus("loading", "正在初始化酒馆脚本运行环境...");
@@ -2197,17 +2210,31 @@ export class TavernScriptRuntime {
 
     const setChatMessages = async (updates: unknown) => {
       if (!Array.isArray(updates)) return false;
-      const messages = this.adapter.getMessages().map((message) => cloneValue(message));
+      let messages = this.adapter.getMessages().map((message) => cloneValue(message));
+      let messagesChanged = false;
+      let succeeded = true;
       const reservedUpdateKeys = new Set([
         "message_id", "mesid", "id", "name", "role", "is_user", "is_system",
         "is_hidden", "message", "mes", "content", "data", "variables", "extra",
         "swipe_id", "swipes", "swipes_data", "swipes_info",
       ]);
-      updates.forEach((update) => {
-        if (!isRecord(update)) return;
+      for (const update of updates) {
+        if (!isRecord(update)) continue;
         const index = normalizeMessageId(update.message_id, messages);
         const message = messages[index];
-        if (!message) return;
+        if (!message) continue;
+        const greetingSwipeIndex = getTavernGreetingSwipeIndex(message, update);
+        if (greetingSwipeIndex !== null && this.adapter.selectGreeting) {
+          if (messagesChanged) {
+            this.adapter.setMessages(messages);
+            messagesChanged = false;
+          }
+          const selected = await this.adapter.selectGreeting(greetingSwipeIndex);
+          succeeded = selected && succeeded;
+          if (selected) await this.initializeMvuMessageVariables(greetingSwipeIndex);
+          messages = this.adapter.getMessages().map((item) => cloneValue(item));
+          continue;
+        }
         if (typeof update.mes === "string") message.content = update.mes;
         else if (typeof update.message === "string") message.content = update.message;
         else if (typeof update.content === "string") message.content = update.content;
@@ -2241,10 +2268,11 @@ export class TavernScriptRuntime {
           if (!reservedUpdateKeys.has(key)) nextExtra[key] = cloneValue(value);
         });
         if (Object.keys(nextExtra).length > 0) message.extra = nextExtra;
-      });
-      this.adapter.setMessages(messages);
+        messagesChanged = true;
+      }
+      if (messagesChanged) this.adapter.setMessages(messages);
       this.refreshSillyTavernChatCache();
-      return true;
+      return succeeded;
     };
 
     const createChatMessages = async (values: unknown, position = -1) => {
@@ -3367,7 +3395,7 @@ export class TavernScriptRuntime {
     return messages[index]?.variables ?? {};
   }
 
-  private async initializeMvuMessageVariables() {
+  private async initializeMvuMessageVariables(swipeIndex = 0) {
     const win = this.runtimeWindow;
     if (!win) return;
     const yaml = isRecord(win.YAML) ? win.YAML : {};
@@ -3401,7 +3429,7 @@ export class TavernScriptRuntime {
     );
     for (const initialization of result.initializations) {
       const eventVariables = cloneValue(initialization.variables);
-      await this.emit(initializedEvent, eventVariables, 0);
+      await this.emit(initializedEvent, eventVariables, swipeIndex);
       const messages = this.adapter.getMessages().map((message) => cloneValue(message));
       if (messages[initialization.messageIndex]) {
         messages[initialization.messageIndex].variables = eventVariables;
@@ -3480,6 +3508,10 @@ export class TavernScriptRuntime {
   private formatHelperMessage(message: TavernRuntimeMessage, index: number) {
     const character = this.adapter.getCharacter();
     const extra = cloneValue(message.extra ?? {});
+    const swipeState = getTavernMessageSwipeState(
+      message,
+      this.adapter.getGreetingState?.(),
+    );
     return {
       ...extra,
       message_id: index,
@@ -3498,10 +3530,10 @@ export class TavernScriptRuntime {
       data: this.localizePlaceholderImages(cloneValue(message.variables ?? {})),
       variables: this.localizePlaceholderImages(cloneValue(message.variables ?? {})),
       extra,
-      swipe_id: 0,
-      swipes: [message.content],
-      swipes_data: [cloneValue(message.variables ?? {})],
-      swipes_info: [cloneValue(message.extra ?? {})],
+      swipe_id: swipeState.swipeId,
+      swipes: swipeState.swipes,
+      swipes_data: swipeState.swipesData,
+      swipes_info: swipeState.swipesInfo,
     };
   }
 
