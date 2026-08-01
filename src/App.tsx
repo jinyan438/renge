@@ -32491,7 +32491,7 @@ export function App() {
                 onChange={(event) => void handleChatAttachmentChange(event.target.files)}
               />
               <textarea
-                id="send_textarea"
+                id="renge_chat_input"
                 ref={chatInputRef}
                 value={chatInput}
                 placeholder="输入消息"
@@ -33164,7 +33164,7 @@ export function App() {
                   </details>
                 </div>
                 <button
-                  id="send_but"
+                  id="renge_chat_send_button"
                   ref={chatSendButtonRef}
                   type="button"
                   className={`send-button ${chatGenerationState !== "idle" ? "stop" : ""}`}

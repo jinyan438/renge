@@ -1,5 +1,54 @@
 export type TavernCompatibilityErrorReporter = (error: unknown) => void;
 
+/**
+ * Installs the legacy SillyTavern composer elements used by character-card
+ * scripts that submit through window.parent.document.
+ */
+export function installLegacyTavernSendControls(
+  document: Document,
+  sendMessage: (value: string) => unknown,
+  reportError: TavernCompatibilityErrorReporter = () => undefined,
+) {
+  const root = document.body ?? document.documentElement;
+  if (
+    !root ||
+    document.getElementById("send_textarea") ||
+    document.getElementById("send_but")
+  ) {
+    return () => undefined;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.id = "send_textarea";
+  textarea.hidden = true;
+  textarea.setAttribute("aria-hidden", "true");
+
+  const sendButton = document.createElement("button");
+  sendButton.id = "send_but";
+  sendButton.type = "button";
+  sendButton.hidden = true;
+  sendButton.setAttribute("aria-hidden", "true");
+
+  const submit = () => {
+    const value = textarea.value;
+    if (!value.trim()) return;
+    try {
+      void Promise.resolve(sendMessage(value)).catch(reportError);
+    } catch (error) {
+      reportError(error);
+    }
+  };
+
+  sendButton.addEventListener("click", submit);
+  root.append(textarea, sendButton);
+
+  return () => {
+    sendButton.removeEventListener("click", submit);
+    textarea.remove();
+    sendButton.remove();
+  };
+}
+
 export type TavernMacroContext = Record<string, unknown>;
 
 export function createTavernMacroRegistry(

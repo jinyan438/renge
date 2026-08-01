@@ -3,7 +3,9 @@ import {
   attachTavernSubscriptionControls,
   createTavernMacroRegistry,
   createTavernErrorCatched,
+  installLegacyTavernSendControls,
   proxyTavernModuleUrls,
+  type TavernCompatibilityErrorReporter,
 } from "./tavernCompatibilityUtils";
 import fontAwesomeCss from "@fortawesome/fontawesome-free/css/all.min.css?raw";
 import fontAwesomeBrandsUrl from "@fortawesome/fontawesome-free/webfonts/fa-brands-400.woff2?url";
@@ -963,6 +965,7 @@ function installParentTavernApiBridge(
   sillyTavern: Record<string, unknown>,
   eventSource: Record<string, unknown>,
   toastr: Record<string, unknown>,
+  reportError: TavernCompatibilityErrorReporter,
 ) {
   const host = hostWindow as unknown as Record<string, unknown>;
   const values: Record<string, unknown> = {
@@ -995,7 +998,19 @@ function installParentTavernApiBridge(
       } catch {}
     }
   });
+  const legacySendControlsCleanup = installLegacyTavernSendControls(
+    hostWindow.document,
+    (value) => {
+      const sendMessage = api.sendMessage;
+      if (typeof sendMessage !== "function") {
+        throw new Error("Renge 会话发送接口尚未初始化。");
+      }
+      return Reflect.apply(sendMessage, api, [value]);
+    },
+    reportError,
+  );
   return () => {
+    legacySendControlsCleanup();
     Array.from(previousDescriptors.entries()).reverse().forEach(([name, descriptor]) => {
       try {
         if (descriptor) Object.defineProperty(hostWindow, name, descriptor);
@@ -3362,6 +3377,10 @@ export class TavernScriptRuntime {
       sillyTavern,
       eventSource as unknown as Record<string, unknown>,
       toastr,
+      (error) => this.writeRuntimeLog(
+        "error",
+        `兼容发送控件提交失败：${toErrorMessage(error)}`,
+      ),
     );
   }
 

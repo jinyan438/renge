@@ -5,8 +5,75 @@ import {
   attachTavernSubscriptionControls,
   createTavernMacroRegistry,
   createTavernErrorCatched,
+  installLegacyTavernSendControls,
   proxyTavernModuleUrls,
 } from "../src/tavernCompatibilityUtils.ts";
+
+class FakeElement extends EventTarget {
+  constructor(owner) {
+    super();
+    this.owner = owner;
+    this.id = "";
+    this.hidden = false;
+    this.type = "";
+    this.value = "";
+    this.attributes = new Map();
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, value);
+  }
+
+  remove() {
+    this.owner.elements.delete(this.id);
+  }
+}
+
+function createFakeDocument() {
+  const document = {
+    elements: new Map(),
+    getElementById(id) {
+      return this.elements.get(id) ?? null;
+    },
+    createElement() {
+      return new FakeElement(this);
+    },
+  };
+  document.body = {
+    append(...elements) {
+      elements.forEach((element) => document.elements.set(element.id, element));
+    },
+  };
+  document.documentElement = document.body;
+  return document;
+}
+
+test("legacy parent composer sends card choices directly and cleans up", async () => {
+  const document = createFakeDocument();
+  const sent = [];
+  const cleanup = installLegacyTavernSendControls(
+    document,
+    async (value) => sent.push(value),
+  );
+  const textarea = document.getElementById("send_textarea");
+  const sendButton = document.getElementById("send_but");
+
+  assert.equal(textarea.hidden, true);
+  assert.equal(sendButton.hidden, true);
+  textarea.value = "继续调查走廊";
+  sendButton.dispatchEvent(new Event("click"));
+  await Promise.resolve();
+  assert.deepEqual(sent, ["继续调查走廊"]);
+
+  textarea.value = "   ";
+  sendButton.dispatchEvent(new Event("click"));
+  await Promise.resolve();
+  assert.deepEqual(sent, ["继续调查走廊"]);
+
+  cleanup();
+  assert.equal(document.getElementById("send_textarea"), null);
+  assert.equal(document.getElementById("send_but"), null);
+});
 
 test("macro-like registrations substitute regex values and unregister cleanly", () => {
   const registry = createTavernMacroRegistry(() => ({ message_id: 7 }));
