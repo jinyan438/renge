@@ -1,3 +1,44 @@
+type HtmlPreviewContentSegment = {
+  type: "text" | "html";
+  content: string;
+};
+
+function isHtmlPreviewSegmentGlue(content: string) {
+  return content.replace(/<!--[\s\S]*?-->/g, "").trim().length === 0;
+}
+
+export function mergeWhitespaceSeparatedHtmlPreviewSegments(
+  segments: HtmlPreviewContentSegment[],
+) {
+  const merged: HtmlPreviewContentSegment[] = [];
+
+  segments.forEach((segment) => {
+    const nextSegment = { ...segment };
+    const previousSegment = merged[merged.length - 1];
+
+    if (previousSegment?.type === nextSegment.type) {
+      previousSegment.content += nextSegment.content;
+      return;
+    }
+
+    const precedingHtmlSegment = merged[merged.length - 2];
+    if (
+      nextSegment.type === "html" &&
+      previousSegment?.type === "text" &&
+      precedingHtmlSegment?.type === "html" &&
+      isHtmlPreviewSegmentGlue(previousSegment.content)
+    ) {
+      merged.pop();
+      precedingHtmlSegment.content += previousSegment.content + nextSegment.content;
+      return;
+    }
+
+    merged.push(nextSegment);
+  });
+
+  return merged;
+}
+
 export function stabilizeHtmlPreviewRuntimeCompatibility(content: string) {
   let stabilized = content.replace(
     /(\b(?:document\.getElementById|(?:document|[A-Za-z_$][\w$]*)\.querySelector)\([^;\r\n]*?\))\.addEventListener\s*\(/g,

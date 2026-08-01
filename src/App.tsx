@@ -69,6 +69,7 @@ import { strFromU8, strToU8, unzip, zip } from "fflate";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
 import {
+  mergeWhitespaceSeparatedHtmlPreviewSegments,
   stabilizeHtmlPreviewMapViewport,
   stabilizeHtmlPreviewRuntimeCompatibility,
 } from "./htmlPreviewUtils";
@@ -5382,7 +5383,9 @@ function splitEmbeddedHtmlBlocks(content: string): PlainChatHtmlSegment[] {
     searchCursor = resumeEnd;
   }
 
-  return segments.length > 0 ? segments : [{ type: "text", content }];
+  return segments.length > 0
+    ? mergeWhitespaceSeparatedHtmlPreviewSegments(segments)
+    : [{ type: "text", content }];
 }
 
 function parsePlainChatContent(

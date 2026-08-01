@@ -2,9 +2,43 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  mergeWhitespaceSeparatedHtmlPreviewSegments,
   stabilizeHtmlPreviewMapViewport,
   stabilizeHtmlPreviewRuntimeCompatibility,
 } from "../src/htmlPreviewUtils.ts";
+
+test("keeps a style block and adjacent HTML roots in one preview document", () => {
+  const result = mergeWhitespaceSeparatedHtmlPreviewSegments([
+    { type: "text", content: "角色开场\n\n" },
+    { type: "html", content: "<style>.card{color:#fff}</style>" },
+    { type: "text", content: "\n<!-- status layout -->\n" },
+    { type: "html", content: '<div class="card">状态</div>' },
+    { type: "text", content: "\n" },
+    { type: "html", content: '<div class="card">背包</div>' },
+    { type: "text", content: "\n后续叙事" },
+  ]);
+
+  assert.deepEqual(result, [
+    { type: "text", content: "角色开场\n\n" },
+    {
+      type: "html",
+      content:
+        '<style>.card{color:#fff}</style>\n<!-- status layout -->\n<div class="card">状态</div>\n<div class="card">背包</div>',
+    },
+    { type: "text", content: "\n后续叙事" },
+  ]);
+});
+
+test("does not merge HTML roots separated by visible prose", () => {
+  const result = mergeWhitespaceSeparatedHtmlPreviewSegments([
+    { type: "html", content: "<div>第一块</div>" },
+    { type: "text", content: "\n解释文字\n" },
+    { type: "html", content: "<div>第二块</div>" },
+  ]);
+
+  assert.equal(result.length, 3);
+  assert.equal(result[1].content, "\n解释文字\n");
+});
 
 test("guards optional preview event targets and missing card helpers", () => {
   const source = `
