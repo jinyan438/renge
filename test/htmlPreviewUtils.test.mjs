@@ -2,10 +2,51 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  collectInheritedHtmlPreviewStyleResources,
   mergeWhitespaceSeparatedHtmlPreviewSegments,
   stabilizeHtmlPreviewMapViewport,
   stabilizeHtmlPreviewRuntimeCompatibility,
 } from "../src/htmlPreviewUtils.ts";
+
+test("inherits assistant style resources from earlier chat messages", () => {
+  const result = collectInheritedHtmlPreviewStyleResources(
+    [
+      {
+        role: "assistant",
+        content:
+          '<style>.st-ui{color:white}</style><link href="card.css" rel="stylesheet">',
+      },
+      { role: "user", content: "<style>.st-ui{color:red}</style>" },
+      { role: "assistant", content: "<div class='st-ui'>当前卡片</div>" },
+    ],
+    2,
+  );
+
+  assert.equal(
+    result,
+    '<style>.st-ui{color:white}</style>\n<link href="card.css" rel="stylesheet">',
+  );
+});
+
+test("keeps the last cascade position for repeated inherited styles", () => {
+  const repeatedStyle = "<style>.card{padding:8px}</style>";
+  const overridingStyle = "<style>.card{padding:12px}</style>";
+  const result = collectInheritedHtmlPreviewStyleResources(
+    [
+      { role: "assistant", content: repeatedStyle },
+      {
+        role: "assistant",
+        content: `<script>const example = ${JSON.stringify("<style>.card{display:none}</style>")};</script>${overridingStyle}`,
+      },
+      { role: "assistant", content: repeatedStyle },
+      { role: "assistant", content: "<div class='card'>当前卡片</div>" },
+    ],
+    3,
+  );
+
+  assert.equal(result, `${overridingStyle}\n${repeatedStyle}`);
+  assert.doesNotMatch(result, /display:none/);
+});
 
 test("keeps a style block and adjacent HTML roots in one preview document", () => {
   const result = mergeWhitespaceSeparatedHtmlPreviewSegments([

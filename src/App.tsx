@@ -69,6 +69,7 @@ import { strFromU8, strToU8, unzip, zip } from "fflate";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
 import {
+  collectInheritedHtmlPreviewStyleResources,
   mergeWhitespaceSeparatedHtmlPreviewSegments,
   stabilizeHtmlPreviewMapViewport,
   stabilizeHtmlPreviewRuntimeCompatibility,
@@ -6248,7 +6249,14 @@ function buildHtmlPreviewDocument(
   )
     ? buildHtmlPreviewEmbeddedFramesScript(previewId)
     : "";
-  const headInjection = `${htmlPreviewViewportMeta}${htmlPreviewStyle}${buildHtmlPreviewFullscreenScript(previewId)}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
+  const inheritedStyleResources = collectInheritedHtmlPreviewStyleResources(
+    context.messages,
+    context.currentMessageIndex,
+  );
+  const inheritedStyleInjection = inheritedStyleResources
+    ? `<!-- renge-inherited-html-styles -->${inheritedStyleResources}`
+    : "";
+  const headInjection = `${htmlPreviewViewportMeta}${inheritedStyleInjection}${htmlPreviewStyle}${buildHtmlPreviewFullscreenScript(previewId)}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
     return injectHtmlPreviewHead(trimmedContent, headInjection);
   }

@@ -3,6 +3,49 @@ type HtmlPreviewContentSegment = {
   content: string;
 };
 
+type HtmlPreviewStyleMessage = {
+  role?: string;
+  content?: string;
+};
+
+function isHtmlStylesheetLink(resource: string) {
+  return /\brel\s*=\s*(?:"[^"]*\bstylesheet\b[^"]*"|'[^']*\bstylesheet\b[^']*'|stylesheet\b)/i.test(
+    resource,
+  );
+}
+
+export function collectInheritedHtmlPreviewStyleResources(
+  messages: HtmlPreviewStyleMessage[],
+  currentMessageIndex: number,
+) {
+  const inheritedResources = new Map<string, string>();
+  const endIndex = Number.isFinite(currentMessageIndex)
+    ? Math.max(0, Math.min(messages.length, Math.trunc(currentMessageIndex)))
+    : 0;
+
+  messages.slice(0, endIndex).forEach((message) => {
+    if (message.role !== "assistant" || typeof message.content !== "string") return;
+
+    const contentWithoutScripts = message.content.replace(
+      /<script\b[^>]*>[\s\S]*?<\/script\s*>/gi,
+      "",
+    );
+    const resourcePattern = /<style\b[^>]*>[\s\S]*?<\/style\s*>|<link\b[^>]*>/gi;
+    let match: RegExpExecArray | null;
+    while ((match = resourcePattern.exec(contentWithoutScripts))) {
+      const resource = match[0].trim();
+      if (/^<link\b/i.test(resource) && !isHtmlStylesheetLink(resource)) continue;
+
+      // An identical later resource supersedes its earlier occurrence. Moving
+      // it to the end keeps CSS cascade order without cloning it per turn.
+      inheritedResources.delete(resource);
+      inheritedResources.set(resource, resource);
+    }
+  });
+
+  return Array.from(inheritedResources.values()).join("\n");
+}
+
 function isHtmlPreviewSegmentGlue(content: string) {
   return content.replace(/<!--[\s\S]*?-->/g, "").trim().length === 0;
 }
