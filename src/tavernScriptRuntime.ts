@@ -10,7 +10,11 @@ import fontAwesomeBrandsUrl from "@fortawesome/fontawesome-free/webfonts/fa-bran
 import fontAwesomeRegularUrl from "@fortawesome/fontawesome-free/webfonts/fa-regular-400.woff2?url";
 import fontAwesomeSolidUrl from "@fortawesome/fontawesome-free/webfonts/fa-solid-900.woff2?url";
 import fontAwesomeV4CompatibilityUrl from "@fortawesome/fontawesome-free/webfonts/fa-v4compatibility.woff2?url";
-import { usesTavernModuleSyntax } from "./tavernScriptModuleUtils";
+import {
+  scopeTavernClassicScript,
+  usesTavernModuleSyntax,
+} from "./tavernScriptModuleUtils";
+import { initializeTavernMvuMessages } from "./tavernMvuInitUtils";
 
 export type TavernRuntimeMessage = {
   id: string;
@@ -1607,6 +1611,7 @@ export class TavernScriptRuntime {
     await this.emit(TAVERN_EVENTS.WORLDINFO_ENTRIES_LOADED);
     await this.emit(TAVERN_EVENTS.APP_READY);
     await this.emit(TAVERN_EVENTS.CHAT_CHANGED, this.adapter.getChatId());
+    await this.initializeMvuMessageVariables();
     const character = this.localizePlaceholderImages(this.adapter.getCharacter());
     if (character) {
       await this.emit(TAVERN_EVENTS.CHARACTER_SELECTED, {
@@ -2292,18 +2297,28 @@ export class TavernScriptRuntime {
           cloneValue(this.adapter.getChatVariables()),
         ),
       );
-    const publishVariableChange = async (variables: Record<string, unknown>, option?: unknown) => {
+    const publishVariableChange = async (
+      variables: Record<string, unknown>,
+      previousVariables: Record<string, unknown>,
+      option?: unknown,
+    ) => {
       await this.emit(TAVERN_EVENTS.VARIABLE_CHANGED, cloneValue(variables), cloneValue(option));
-      await this.emit("mag_variable_update_ended", cloneValue(variables), cloneValue(option));
+      await this.emit(
+        "mag_variable_update_ended",
+        cloneValue(variables),
+        cloneValue(previousVariables),
+      );
       return variables;
     };
     const replaceVariables = async (variables: unknown, option?: unknown) => {
+      const previous = getVariables(option);
       const next = isRecord(variables) ? cloneValue(variables) : {};
       this.saveVariables(option, resolveVariableScriptId(option), next);
-      return await publishVariableChange(next, option);
+      return await publishVariableChange(next, previous, option);
     };
     const updateVariablesWith = async (updater: unknown, option?: unknown) => {
       const current = getVariables(option);
+      const previous = cloneValue(current);
       let next = current;
       if (typeof updater === "function") {
         const result = await (updater as (value: Record<string, unknown>) => unknown)(current);
@@ -2313,7 +2328,7 @@ export class TavernScriptRuntime {
       }
       this.saveVariables(option, resolveVariableScriptId(option), next);
       await this.emit("variables_updated", cloneValue(next), cloneValue(option));
-      return await publishVariableChange(next, option);
+      return await publishVariableChange(next, previous, option);
     };
     const insertOrAssignVariables = async (variables: unknown, option?: unknown) => {
       const current = getVariables(option);
@@ -2321,7 +2336,7 @@ export class TavernScriptRuntime {
         ? mergeVariableRecords(current, cloneValue(variables))
         : current;
       this.saveVariables(option, resolveVariableScriptId(option), next);
-      return await publishVariableChange(next, option);
+      return await publishVariableChange(next, current, option);
     };
     const insertVariables = async (variables: unknown, option?: unknown) => {
       const current = getVariables(option);
@@ -2329,13 +2344,14 @@ export class TavernScriptRuntime {
         ? mergeVariableRecords(cloneValue(variables), current)
         : current;
       this.saveVariables(option, resolveVariableScriptId(option), next);
-      return await publishVariableChange(next, option);
+      return await publishVariableChange(next, current, option);
     };
     const deleteVariable = async (path: unknown, option?: unknown) => {
       const current = getVariables(option);
+      const previous = cloneValue(current);
       const deleted = deletePath(current, String(path));
       this.saveVariables(option, resolveVariableScriptId(option), current);
-      await publishVariableChange(current, option);
+      await publishVariableChange(current, previous, option);
       return { variables: current, delete_occurred: deleted };
     };
     const registerVariableSchema = (schema: unknown, name = getScriptId()) => {
@@ -3351,6 +3367,54 @@ export class TavernScriptRuntime {
     return messages[index]?.variables ?? {};
   }
 
+  private async initializeMvuMessageVariables() {
+    const win = this.runtimeWindow;
+    if (!win) return;
+    const yaml = isRecord(win.YAML) ? win.YAML : {};
+    const yamlDefault = isRecord(yaml.default) ? yaml.default : {};
+    const parseYaml = yaml.parse ?? yamlDefault.parse;
+    if (typeof parseYaml !== "function") return;
+    const substituteMacros =
+      typeof win.substitudeMacros === "function"
+        ? (source: string) =>
+            String((win.substitudeMacros as (value: unknown) => unknown)(source))
+        : undefined;
+    const result = initializeTavernMvuMessages(
+      this.adapter.getMessages(),
+      (source) => (parseYaml as (value: string) => unknown)(source),
+      substituteMacros,
+    );
+    result.errors.forEach((error) => {
+      this.writeRuntimeLog(
+        "warn",
+        `消息 ${error.messageIndex} 的第 ${error.blockIndex} 个 initvar 块解析失败：${error.message}`,
+      );
+    });
+    if (result.initializations.length === 0) return;
+
+    this.adapter.setMessages(result.messages);
+    this.refreshSillyTavernChatCache();
+    const mvu = isRecord(win.Mvu) ? win.Mvu : {};
+    const events = isRecord(mvu.events) ? mvu.events : {};
+    const initializedEvent = String(
+      events.VARIABLE_INITIALIZED ?? "mag_variable_initialized",
+    );
+    for (const initialization of result.initializations) {
+      const eventVariables = cloneValue(initialization.variables);
+      await this.emit(initializedEvent, eventVariables, 0);
+      const messages = this.adapter.getMessages().map((message) => cloneValue(message));
+      if (messages[initialization.messageIndex]) {
+        messages[initialization.messageIndex].variables = eventVariables;
+        this.adapter.setMessages(messages);
+      }
+    }
+    this.refreshSillyTavernChatCache();
+    this.writeRuntimeLog(
+      "info",
+      `已从 initvar 补齐 ${result.initializations.length} 条消息的 MVU 初始变量。`,
+    );
+  }
+
   private saveVariables(
     option: unknown,
     scriptId: string,
@@ -3657,7 +3721,7 @@ export class TavernScriptRuntime {
         : script.content;
       element.textContent = usesModuleSyntax
         ? `${executableContent}\n;window.dispatchEvent(new Event(${JSON.stringify(completionEventName)}));\n//# sourceURL=renge-tavern-script-${encodeURIComponent(script.name)}.js`
-        : `${executableContent}\n//# sourceURL=renge-tavern-script-${encodeURIComponent(script.name)}.js`;
+        : `${scopeTavernClassicScript(executableContent)}\n//# sourceURL=renge-tavern-script-${encodeURIComponent(script.name)}.js`;
       let settled = false;
       const timeoutId = usesModuleSyntax
         ? window.setTimeout(

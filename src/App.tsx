@@ -6386,7 +6386,7 @@ function ChatHtmlPreview({
       observer = new IntersectionObserver(
         (entries) => {
           const steadilyVisible = entries.some(
-            (entry) => entry.isIntersecting && entry.intersectionRatio >= 0.6,
+            (entry) => entry.isIntersecting && entry.intersectionRatio > 0,
           );
           if (!steadilyVisible) {
             if (visibilityTimer) window.clearTimeout(visibilityTimer);
@@ -6400,7 +6400,7 @@ function ChatHtmlPreview({
             queueMount();
           }, 300);
         },
-        { threshold: [0.6] },
+        { threshold: [0] },
       );
       observer.observe(container);
     }, HTML_PREVIEW_HEAVY_AUTO_LOAD_DELAY);
