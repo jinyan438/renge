@@ -911,12 +911,18 @@ type TemporaryWorkspaceHandle = {
   name: string;
 };
 
+type SystemWorkspaceHandle = {
+  kind: "system";
+  name: string;
+};
+
 type LocalToolsWorkspaceHandle =
   | LocalDirectoryHandle
   | ElectronWorkspaceHandle
   | AndroidWorkspaceHandle
   | PcWorkspaceHandle
-  | TemporaryWorkspaceHandle;
+  | TemporaryWorkspaceHandle
+  | SystemWorkspaceHandle;
 
 type PcFileEntry = {
   name: string;
@@ -1303,6 +1309,10 @@ const DEFAULT_WORKSPACE_NAME = "默认工作区";
 const TEMPORARY_WORKSPACE_HANDLE: TemporaryWorkspaceHandle = {
   kind: "temporary",
   name: "临时文件",
+};
+const SYSTEM_WORKSPACE_HANDLE: SystemWorkspaceHandle = {
+  kind: "system",
+  name: "本机系统",
 };
 const CHAT_TIME_GROUP_MS = 5 * 60 * 1000;
 const DEFAULT_HEARTBEAT_INTERVAL_MINUTES = 5;
@@ -7907,8 +7917,30 @@ function buildPersonaMemoryPrompt(
 
 function getAvailableLocalToolDefinitions(
   handle: LocalToolsWorkspaceHandle | null,
+  desktopSystemAccess = false,
 ) {
   if (!handle) return [];
+  const desktopSystemToolNames = new Set([
+    "local_list_files",
+    "local_read_file",
+    "local_read_binary_file",
+    "local_read_file_range",
+    "local_file_info",
+    "local_search_files",
+    "local_create_directory",
+    "local_rename_path",
+    "local_write_file",
+    "local_write_binary_file",
+    "local_edit_file",
+    "local_delete_path",
+    "project_find_symbols",
+    "project_search_regex",
+    "project_todo_scan",
+  ]);
+  if (handle.kind === "system") {
+    return localFileToolDefinitions.filter((tool) =>
+      desktopSystemToolNames.has(tool.function.name));
+  }
   if (handle.kind === "temporary") {
     const temporaryToolNames = new Set([
       "local_list_files",
@@ -7921,7 +7953,8 @@ function getAvailableLocalToolDefinitions(
       "local_delete_path",
     ]);
     return localFileToolDefinitions.filter((tool) =>
-      temporaryToolNames.has(tool.function.name));
+      temporaryToolNames.has(tool.function.name)
+      || (desktopSystemAccess && desktopSystemToolNames.has(tool.function.name)));
   }
   if (handle.kind === "electron") {
     return localFileToolDefinitions.filter(
@@ -8182,9 +8215,22 @@ function buildHeartbeatSystemPrompt(heartbeat: ChatHeartbeatConfig | undefined) 
 function buildLocalToolsSystemPrompt(
   handle: LocalToolsWorkspaceHandle | null,
   fullAccessEnabled = false,
+  desktopSystemAccess = false,
 ) {
   if (!handle) return "";
   if (handle.kind === "temporary") {
+    if (desktopSystemAccess) {
+      return [
+        "当前会话使用「临时文件」区域保存相对路径文件，同时拥有本机系统文件工具。",
+        "读取、列出、搜索或查看文件信息时，可以使用绝对路径访问当前系统账户有权读取的任意目录；系统读取始终允许，不需要用户审批。相对路径仍指向与其他工作区隔离的临时文件区。",
+        fullAccessEnabled
+          ? "运行完全访问已开启：对绝对路径执行创建、写入、编辑、移动或删除时会直接执行。"
+          : "运行完全访问已关闭：对绝对路径执行创建、写入、编辑、移动或删除时，应用会先弹窗请求用户批准本次操作。",
+        "local_read_file_range、local_file_info、local_search_files、project_find_symbols、project_search_regex 和 project_todo_scan 用于本机系统时必须传绝对路径。",
+        "相对路径支持临时文件区的列出、读取、创建、写入、编辑和删除；本机系统路径还支持移动或重命名。",
+        "未收到工具成功结果前不得声称已读取、保存或修改文件。",
+      ].join("\n");
+    }
     return [
       "当前会话属于默认工作区，没有项目目录权限；你只能操作与其他工作区完全隔离的「临时文件」区域。",
       "所有 path 必须是临时文件区内的相对路径，禁止使用绝对路径或 ..。不得读取、写入或声称访问任何已连接项目工作区。",
@@ -8202,6 +8248,17 @@ function buildLocalToolsSystemPrompt(
       "- local_write_binary_file：把完整 Base64 写入临时二进制文件。",
       "- local_edit_file：查找替换临时文本文件。",
       "- local_delete_path：删除临时文件或目录。",
+    ].join("\n");
+  }
+  if (handle.kind === "system") {
+    return [
+      "当前聊天工作区未恢复，但你仍拥有本机系统文件工具。所有 path/from/to 必须使用绝对路径。",
+      "你可以直接读取、列出、搜索或查看当前系统账户有权读取的任意目录；系统读取始终允许，不需要用户审批。",
+      fullAccessEnabled
+        ? "运行完全访问已开启：创建、写入、编辑、移动或删除任意系统路径会直接执行。"
+        : "运行完全访问已关闭：创建、写入、编辑、移动或删除系统路径前，应用会弹窗请求用户批准本次操作。",
+      "当前没有可作为工作目录的项目，因此命令、npm script、Git 状态、Git diff、技术栈检测和 package.json 快捷读取不可用。",
+      "未收到工具成功结果前不得声称已读取或修改文件。",
     ].join("\n");
   }
   const hasDesktopFullAccess = handle.kind === "electron" && fullAccessEnabled;
@@ -8252,10 +8309,14 @@ function buildLocalToolsSystemPrompt(
   return [
     hasDesktopFullAccess
       ? `你已获得桌面系统完全访问权限；工作区「${handle.name}」仅作为默认工作目录。你可以读取、创建、编辑、移动或删除当前系统账户有权访问的任意文件。`
-      : `你可以使用本地文件工具操作用户授权的工作区「${handle.name}」。`,
+      : handle.kind === "electron"
+        ? `你可以读取当前系统账户有权读取的任意文件，并可直接修改用户授权的工作区「${handle.name}」。修改工作区外路径时，应用会先弹窗请求用户批准本次操作。`
+        : `你可以使用本地文件工具操作用户授权的工作区「${handle.name}」。`,
     hasDesktopFullAccess
       ? "path/from/to 可以使用绝对路径；相对路径仍以当前工作区为根目录。"
-      : "所有 path/from/to 必须是相对工作区根目录的路径；不要使用绝对路径或 ..。",
+      : handle.kind === "electron"
+        ? "读取工具的 path 可以使用绝对路径或越出工作区的相对路径；变更工具也可以使用这些路径，但工作区外变更需要用户弹窗授权。"
+        : "所有 path/from/to 必须是相对工作区根目录的路径；不要使用绝对路径或 ..。",
     "当用户已经明确要求执行文件操作时，不要二次确认，必须直接调用对应工具；不要只描述将要操作。",
     "当用户提出安装、部署、创建启动脚本、构建验证等多步骤任务时，必须连续调用工具推进，直到任务完成、遇到真实阻塞或用户中断；不要在中途只汇报计划并要求用户继续。",
     "如果用户要求重命名或移动文件/目录，并且 local_rename_path 可用，必须调用 local_rename_path。",
@@ -8598,14 +8659,18 @@ function normalizeWorkspaceRelativePath(path: string) {
   return path.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/g, "");
 }
 
+function isAbsoluteSystemPath(path: string) {
+  const rawPath = path.trim();
+  return /^[A-Za-z]:[\\/]/.test(rawPath) || /^\\\\/.test(rawPath) || rawPath.startsWith("/");
+}
+
 function formatWorkspacePathReference(
   handle: LocalDirectoryHandle | ElectronWorkspaceHandle | AndroidWorkspaceHandle | PcWorkspaceHandle | null,
   path: string,
 ) {
   const rawPath = path.trim();
   if (
-    handle?.kind === "electron" &&
-    (/^[A-Za-z]:[\\/]/.test(rawPath) || /^\\\\/.test(rawPath) || rawPath.startsWith("/"))
+    isAbsoluteSystemPath(rawPath)
   ) {
     return rawPath.replace(/\\/g, "/");
   }
@@ -10670,11 +10735,11 @@ const localFileToolDefinitions = [
     type: "function",
     function: {
       name: "local_list_files",
-      description: "列出用户授权工作区内的文件和目录。",
+      description: "列出文件和目录。Electron 桌面版可用绝对路径读取系统任意可访问目录；相对路径以当前工作区或默认临时文件区为根。",
       parameters: {
         type: "object",
         properties: {
-          path: { type: "string", description: "相对工作区根目录的路径，默认根目录。" },
+          path: { type: "string", description: "相对当前根目录的路径；Electron 桌面版也可传系统绝对路径。" },
           recursive: { type: "boolean", description: "是否递归列出，默认 true。" },
         },
       },
@@ -10684,11 +10749,11 @@ const localFileToolDefinitions = [
     type: "function",
     function: {
       name: "local_read_file",
-      description: "读取用户授权工作区内的文本文件。",
+      description: "读取文本文件。Electron 桌面版可始终读取系统任意可访问绝对路径，无需额外审批。",
       parameters: {
         type: "object",
         properties: {
-          path: { type: "string", description: "相对工作区根目录的文件路径。" },
+          path: { type: "string", description: "相对当前根目录的文件路径，或 Electron 桌面版系统绝对路径。" },
         },
         required: ["path"],
       },
@@ -10698,11 +10763,11 @@ const localFileToolDefinitions = [
     type: "function",
     function: {
       name: "local_read_binary_file",
-      description: "读取用户授权工作区内的任意文件，返回 Base64 内容。用于传输 ZIP、APK、图片、音频、视频等二进制文件。",
+      description: "读取任意文件并返回 Base64。Electron 桌面版可始终读取系统任意可访问绝对路径，无需额外审批。",
       parameters: {
         type: "object",
         properties: {
-          path: { type: "string", description: "相对工作区根目录的文件路径。" },
+          path: { type: "string", description: "相对当前根目录的文件路径，或 Electron 桌面版系统绝对路径。" },
         },
         required: ["path"],
       },
@@ -10726,11 +10791,11 @@ const localFileToolDefinitions = [
     type: "function",
     function: {
       name: "local_read_file_range",
-      description: "按行号读取用户授权工作区内文本文件的一部分，适合查看大文件片段。",
+      description: "按行号读取文本文件的一部分。Electron 桌面版可始终读取系统任意可访问绝对路径。",
       parameters: {
         type: "object",
         properties: {
-          path: { type: "string", description: "相对工作区根目录的文件路径。" },
+          path: { type: "string", description: "相对当前根目录的文件路径，或 Electron 桌面版系统绝对路径。" },
           startLine: { type: "number", description: "起始行号，从 1 开始，默认 1。" },
           endLine: { type: "number", description: "结束行号，包含该行。" },
         },
@@ -10742,11 +10807,11 @@ const localFileToolDefinitions = [
     type: "function",
     function: {
       name: "local_file_info",
-      description: "查看用户授权工作区内文件或目录的元信息，例如类型、大小、修改时间。",
+      description: "查看文件或目录元信息。Electron 桌面版可始终查看系统任意可访问绝对路径。",
       parameters: {
         type: "object",
         properties: {
-          path: { type: "string", description: "相对工作区根目录的文件或目录路径，根目录可传空字符串。" },
+          path: { type: "string", description: "相对当前根目录的路径，或 Electron 桌面版系统绝对路径。" },
         },
         required: ["path"],
       },
@@ -10756,12 +10821,12 @@ const localFileToolDefinitions = [
     type: "function",
     function: {
       name: "local_search_files",
-      description: "按文件名或文本内容搜索用户授权工作区。",
+      description: "按文件名或文本内容搜索目录。Electron 桌面版可用绝对路径搜索系统任意可访问目录。",
       parameters: {
         type: "object",
         properties: {
           query: { type: "string", description: "搜索关键词。" },
-          path: { type: "string", description: "可选，相对工作区根目录的搜索起点。" },
+          path: { type: "string", description: "相对当前根目录的搜索起点，或 Electron 桌面版系统绝对路径。" },
           includeContent: { type: "boolean", description: "是否搜索文本内容，默认 true。" },
         },
         required: ["query"],
@@ -15142,14 +15207,32 @@ export function App() {
     && typeof window.rengeDesktop.editTemporaryTextFile === "function"
     && typeof window.rengeDesktop.deleteTemporaryPath === "function",
   );
+  const desktopSystemFileToolsAvailable = Boolean(
+    window.rengeDesktop?.isElectron
+    && typeof window.rengeDesktop.listFiles === "function"
+    && typeof window.rengeDesktop.readFile === "function"
+    && typeof window.rengeDesktop.readBinaryFile === "function"
+    && typeof window.rengeDesktop.readFileRange === "function"
+    && typeof window.rengeDesktop.fileInfo === "function"
+    && typeof window.rengeDesktop.searchFiles === "function",
+  );
   const activeFileToolsWorkspaceHandle: LocalToolsWorkspaceHandle | null =
     activeWorkspaceKey === DEFAULT_WORKSPACE_KEY && temporaryFileToolsAvailable
       ? TEMPORARY_WORKSPACE_HANDLE
-      : activeLocalWorkspaceHandle;
+      : activeLocalWorkspaceHandle && (localToolsEnabled || activeLocalWorkspaceHandle.kind !== "electron")
+        ? activeLocalWorkspaceHandle
+        : desktopSystemFileToolsAvailable
+          ? SYSTEM_WORKSPACE_HANDLE
+          : activeLocalWorkspaceHandle;
   const activeLocalToolsEnabled = activeFileToolsWorkspaceHandle?.kind === "temporary"
+    || activeFileToolsWorkspaceHandle?.kind === "system"
     || (localToolsEnabled && Boolean(activeLocalWorkspaceHandle));
   const activeLocalToolsSystemPrompt = activeFileToolsWorkspaceHandle && activeLocalToolsEnabled
-    ? buildLocalToolsSystemPrompt(activeFileToolsWorkspaceHandle, llmFullAccessEnabled)
+    ? buildLocalToolsSystemPrompt(
+        activeFileToolsWorkspaceHandle,
+        llmFullAccessEnabled,
+        desktopSystemFileToolsAvailable,
+      )
     : buildUnavailableLocalToolsSystemPrompt(activeWorkspaceKey);
   const activeLlmContextSettings = llmContextSettings[chatMode];
   const workspaceInfo = getWorkspaceInfo(localWorkspaceHandle);
@@ -18984,11 +19067,107 @@ export function App() {
 
   const executeLocalFileTool = async (toolName: string, rawArguments: string) => {
     const args = parseToolArguments(rawArguments);
+    const executeDesktopSystemFileTool = async () => {
+      const desktopApi = window.rengeDesktop;
+      if (!desktopApi?.isElectron) throw new Error("本机系统文件工具仅支持 Electron 桌面版");
+
+      const requireAbsolutePath = (key: "path" | "from" | "to") => {
+        const value = String(args[key] ?? "");
+        if (!isAbsoluteSystemPath(value)) {
+          throw new Error(`本机系统文件工具的 ${key} 必须使用绝对路径`);
+        }
+        return value;
+      };
+
+      switch (toolName) {
+        case "local_list_files":
+          return desktopApi.listFiles({
+            path: requireAbsolutePath("path"),
+            recursive: args.recursive === undefined ? true : Boolean(args.recursive),
+          });
+        case "local_read_file":
+          return desktopApi.readFile({ path: requireAbsolutePath("path") });
+        case "local_read_binary_file":
+          return desktopApi.readBinaryFile({ path: requireAbsolutePath("path") });
+        case "local_read_file_range":
+          return desktopApi.readFileRange({
+            path: requireAbsolutePath("path"),
+            startLine: Number(args.startLine ?? 1),
+            endLine: Number(args.endLine ?? Number(args.startLine ?? 1) + 120),
+          });
+        case "local_file_info":
+          return desktopApi.fileInfo({ path: requireAbsolutePath("path") });
+        case "local_search_files":
+          return desktopApi.searchFiles({
+            query: String(args.query ?? ""),
+            path: requireAbsolutePath("path"),
+            includeContent: args.includeContent === undefined ? true : Boolean(args.includeContent),
+          });
+        case "local_create_directory":
+          return desktopApi.createDirectory({ path: requireAbsolutePath("path") });
+        case "local_rename_path":
+          return desktopApi.renamePath({
+            from: requireAbsolutePath("from"),
+            to: requireAbsolutePath("to"),
+          });
+        case "local_write_file":
+          return desktopApi.writeFile({
+            path: requireAbsolutePath("path"),
+            content: String(args.content ?? ""),
+          });
+        case "local_write_binary_file":
+          return desktopApi.writeBinaryFile({
+            path: requireAbsolutePath("path"),
+            base64: String(args.base64 ?? ""),
+            mimeType: String(args.mimeType ?? ""),
+          });
+        case "local_edit_file":
+          return desktopApi.editFile({
+            path: requireAbsolutePath("path"),
+            find: String(args.find ?? ""),
+            replace: String(args.replace ?? ""),
+          });
+        case "local_delete_path":
+          return desktopApi.deletePath({
+            path: requireAbsolutePath("path"),
+            recursive: Boolean(args.recursive),
+          });
+        case "project_find_symbols":
+          return desktopApi.findSymbols({
+            query: String(args.query ?? ""),
+            path: requireAbsolutePath("path"),
+            maxMatches: Number(args.maxMatches ?? 120),
+          });
+        case "project_search_regex":
+          return desktopApi.searchRegex({
+            pattern: String(args.pattern ?? ""),
+            path: requireAbsolutePath("path"),
+            flags: String(args.flags ?? ""),
+            maxMatches: Number(args.maxMatches ?? 80),
+          });
+        case "project_todo_scan":
+          return desktopApi.scanTodos({
+            path: requireAbsolutePath("path"),
+            maxMatches: Number(args.maxMatches ?? 120),
+          });
+        default:
+          throw new Error(`${toolName} 不属于本机系统文件工具`);
+      }
+    };
+    const usesAbsoluteSystemPath = (() => {
+      if (toolName === "local_rename_path") {
+        return isAbsoluteSystemPath(String(args.from ?? ""))
+          || isAbsoluteSystemPath(String(args.to ?? ""));
+      }
+      return isAbsoluteSystemPath(String(args.path ?? ""));
+    })();
+
     if (activeWorkspaceKey === DEFAULT_WORKSPACE_KEY) {
       const desktopApi = window.rengeDesktop;
       if (!temporaryFileToolsAvailable || !desktopApi?.isElectron) {
         throw new Error("当前平台没有提供默认工作区临时文件工具；请直接在消息中展示代码");
       }
+      if (usesAbsoluteSystemPath) return executeDesktopSystemFileTool();
       const commitTemporaryFileMutation = async (operation: Promise<unknown>) => {
         const result = await operation;
         setTemporaryFilesRevision((current) => current + 1);
@@ -19040,6 +19219,9 @@ export function App() {
         default:
           throw new Error(`${toolName} 不支持默认工作区的临时文件区`);
       }
+    }
+    if (activeFileToolsWorkspaceHandle?.kind === "system") {
+      return executeDesktopSystemFileTool();
     }
     if (!localWorkspaceHandle || !activeLocalWorkspaceHandle || !activeLocalToolsEnabled) {
       throw new Error("当前聊天工作区尚未恢复或与已授权目录不匹配，拒绝使用其他工作区的文件工具");
@@ -20022,7 +20204,10 @@ export function App() {
     const localToolsBase =
       contextSettings.workspaceTools &&
       activeLocalToolsEnabled && activeFileToolsWorkspaceHandle
-        ? getAvailableLocalToolDefinitions(activeFileToolsWorkspaceHandle)
+        ? getAvailableLocalToolDefinitions(
+            activeFileToolsWorkspaceHandle,
+            desktopSystemFileToolsAvailable,
+          )
         : [];
     const localTools = suppressAttachmentTransferTool
       ? localToolsBase.filter((tool) => tool.function.name !== "local_transfer_attachment_file")
@@ -28620,9 +28805,9 @@ export function App() {
                 <div className="llm-setting-copy">
                   <h3>运行完全访问</h3>
                   <p>
-                    开启后，Electron 桌面版中的 AI 可以使用绝对路径访问、创建、编辑、移动或删除
-                    当前系统账户有权操作的任意文件；所有命令（包括非白名单命令和高风险 Git
-                    命令）都会直接运行，不再弹出审批提示。
+                    Electron 桌面版中的 AI 始终可以读取当前系统账户有权读取的任意目录，包括
+                    非工作区目录。开启后，非工作区目录的创建、编辑、移动和删除也会直接执行；
+                    所有命令（包括非白名单命令和高风险 Git 命令）不再弹出审批提示。
                   </p>
                 </div>
                 <label className="tool-toggle llm-feature-toggle">
@@ -28635,7 +28820,7 @@ export function App() {
                       if (
                         enabled &&
                         !window.confirm(
-                          "开启运行完全访问后，AI 可操作当前系统账户有权访问的所有文件，并可无审批运行任意命令。\n\n该设置会持久保存。仅在你信任当前模型、提示词和任务内容时开启。是否继续？",
+                          "系统文件读取权限始终开放。开启运行完全访问后，AI 还可无审批修改非工作区文件，并可无审批运行任意命令。\n\n该设置会持久保存。仅在你信任当前模型、提示词和任务内容时开启。是否继续？",
                         )
                       ) {
                         return;
@@ -28661,8 +28846,8 @@ export function App() {
                     {!window.rengeDesktop?.isElectron
                       ? "浏览器和 Android 环境仍受各自的目录授权或系统权限限制。"
                       : llmFullAccessEnabled
-                        ? "文件操作不再限制在工作区内，命令不会触发白名单审批。"
-                        : "文件操作限制在授权工作区内；每个聊天会话首次运行白名单外命令时会请求你的批准。"}
+                        ? "系统读取和变更均已开放，命令不会触发白名单审批。"
+                        : "系统读取始终开放；变更非工作区文件时逐次弹窗确认，白名单外命令也会请求批准。"}
                   </span>
                 </div>
               </article>

@@ -12,10 +12,10 @@ import {
   shell,
   webContents,
 } from "electron";
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { execFile } from "node:child_process";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { startRengeServer } from "../server.mjs";
@@ -36,6 +36,11 @@ import {
   parseSidebarBrowserImport,
   selectCredentialForUrl,
 } from "./sidebar-browser-profile.mjs";
+import {
+  formatSystemPathResult,
+  isPathInsideWorkspace,
+  resolveSystemPath,
+} from "./workspace-access.mjs";
 import {
   createSidebarDirectory,
   deleteSidebarPath,
@@ -466,23 +471,8 @@ function assertWorkspace() {
   }
 }
 
-function resolveWorkspacePath(inputPath = "") {
-  assertWorkspace();
-  const rawInput = String(inputPath ?? "").trim();
-  if (workspaceFullAccessEnabled) {
-    return rawInput ? resolve(workspaceRoot, rawInput) : workspaceRoot;
-  }
-
-  const normalizedInput = rawInput.replace(/\\/g, "/").replace(/^\/+/, "");
-  const targetPath = resolve(workspaceRoot, normalizedInput);
-  const relativePath = relative(workspaceRoot, targetPath);
-
-  if (relativePath.startsWith("..") || relativePath === ".." || targetPath === workspaceRoot) {
-    if (targetPath === workspaceRoot) return targetPath;
-    throw new Error("路径超出授权工作区");
-  }
-
-  return targetPath;
+function resolveReadablePath(inputPath = "") {
+  return resolveSystemPath(workspaceRoot, inputPath);
 }
 
 function normalizeScriptArgs(args = []) {
@@ -499,7 +489,7 @@ function getGitExecutable() {
 }
 
 async function setWorkspaceRoot(nextWorkspaceRoot) {
-  const resolvedWorkspaceRoot = resolve(String(nextWorkspaceRoot ?? ""));
+  const resolvedWorkspaceRoot = await realpath(resolve(String(nextWorkspaceRoot ?? "")));
   const workspaceStat = await stat(resolvedWorkspaceRoot);
   if (!workspaceStat.isDirectory()) {
     throw new Error("保存的工作区路径不是文件夹");
@@ -593,7 +583,7 @@ async function execWorkspaceShell(commandLine, options = {}) {
 }
 
 async function listFiles(inputPath = "", recursive = true, limit = 500) {
-  const startPath = resolveWorkspacePath(inputPath);
+  const startPath = resolveReadablePath(inputPath);
   const results = [];
 
   async function visit(currentPath) {
@@ -603,7 +593,7 @@ async function listFiles(inputPath = "", recursive = true, limit = 500) {
       if (results.length >= limit) return;
 
       const absolutePath = join(currentPath, entry.name);
-      const path = relative(workspaceRoot, absolutePath).replace(/\\/g, "/");
+      const path = formatSystemPathResult(workspaceRoot, absolutePath);
       const kind = entry.isDirectory() ? "directory" : "file";
       results.push({ path, kind });
 
@@ -618,7 +608,7 @@ async function listFiles(inputPath = "", recursive = true, limit = 500) {
 }
 
 async function fileInfo(inputPath = "") {
-  const targetPath = resolveWorkspacePath(inputPath);
+  const targetPath = resolveReadablePath(inputPath);
   const targetStat = await stat(targetPath);
 
   return {
@@ -631,7 +621,7 @@ async function fileInfo(inputPath = "") {
 }
 
 async function readFileRange({ path, startLine = 1, endLine }) {
-  const content = await readFile(resolveWorkspacePath(path), "utf8");
+  const content = await readFile(resolveReadablePath(path), "utf8");
   const lines = content.replace(/\r\n/g, "\n").split("\n");
   const safeStartLine = Math.max(1, Math.floor(Number(startLine) || 1));
   const safeEndLine = Math.min(
@@ -666,7 +656,7 @@ async function searchFiles({ query, path = "", includeContent = true }) {
     if (!includeContent) continue;
 
     try {
-      const content = await readFile(resolveWorkspacePath(entry.path), "utf8");
+      const content = await readFile(resolveReadablePath(entry.path), "utf8");
       const index = content.toLowerCase().indexOf(normalizedQuery);
       if (index >= 0) {
         matches.push({
@@ -686,7 +676,7 @@ async function searchFiles({ query, path = "", includeContent = true }) {
 }
 
 async function readPackageJson() {
-  const content = await readFile(resolveWorkspacePath("package.json"), "utf8");
+  const content = await readFile(resolveReadablePath("package.json"), "utf8");
   const packageJson = JSON.parse(content);
   return {
     name: packageJson.name,
@@ -752,7 +742,7 @@ async function searchRegex({ pattern, path = "", flags = "", maxMatches = 80 }) 
     if (entry.kind !== "file" || !isLikelyTextPath(entry.path)) continue;
 
     try {
-      const content = await readFile(resolveWorkspacePath(entry.path), "utf8");
+      const content = await readFile(resolveReadablePath(entry.path), "utf8");
       const lines = content.replace(/\r\n/g, "\n").split("\n");
       for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
         regex.lastIndex = 0;
@@ -796,7 +786,7 @@ async function gitDiff({ path = "", staged = false } = {}) {
   const args = ["diff", ...(staged ? ["--cached"] : [])];
   const normalizedPath = String(path ?? "").trim();
   if (normalizedPath) {
-    resolveWorkspacePath(normalizedPath);
+    resolveReadablePath(normalizedPath);
     args.push("--", normalizedPath.replace(/\\/g, "/").replace(/^\/+/, ""));
   }
 
@@ -825,6 +815,65 @@ async function confirmHighRiskGitCommand(command, args) {
   });
 
   return result.response === 0;
+}
+
+async function confirmExternalWorkspaceMutation(operation, targetPaths) {
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: "warning",
+    buttons: ["授权本次操作", "取消"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+    title: "授权非工作区文件操作",
+    message: `AI 请求在工作区外${operation}`,
+    detail: [
+      `当前工作区：${workspaceRoot || "未选择"}`,
+      "",
+      "目标路径：",
+      ...targetPaths.map((targetPath) => `- ${targetPath}`),
+      "",
+      "读取系统文件始终允许。本次授权只允许上面列出的变更操作，不会开启运行完全访问。",
+    ].join("\n"),
+  });
+
+  return result.response === 0;
+}
+
+async function authorizeWorkspaceMutation(operation, inputPaths) {
+  const targetPaths = inputPaths.map((inputPath) => resolveReadablePath(inputPath));
+  const canonicalWorkspaceRoot = workspaceRoot
+    ? await realpath(workspaceRoot).catch(() => workspaceRoot)
+    : null;
+  const canonicalTargetPaths = await Promise.all(
+    targetPaths.map(async (targetPath) => {
+      const missingSegments = [];
+      let existingAncestor = targetPath;
+
+      while (true) {
+        try {
+          const canonicalAncestor = await realpath(existingAncestor);
+          return resolve(canonicalAncestor, ...missingSegments);
+        } catch (error) {
+          if (error?.code !== "ENOENT") return targetPath;
+          const parentPath = dirname(existingAncestor);
+          if (parentPath === existingAncestor) return targetPath;
+          missingSegments.unshift(basename(existingAncestor));
+          existingAncestor = parentPath;
+        }
+      }
+    }),
+  );
+  const externalPaths = targetPaths.filter(
+    (_targetPath, index) =>
+      !isPathInsideWorkspace(canonicalWorkspaceRoot, canonicalTargetPaths[index]),
+  );
+
+  if (!workspaceFullAccessEnabled && externalPaths.length > 0) {
+    const authorized = await confirmExternalWorkspaceMutation(operation, externalPaths);
+    if (!authorized) throw new Error(`用户取消授权在工作区外${operation}`);
+  }
+
+  return targetPaths;
 }
 
 async function confirmUnlistedWorkspaceCommand(commandLine, sessionId) {
@@ -870,7 +919,21 @@ async function validateWorkspaceCommand(command, args, alreadyAuthorized = false
   }
 
   if (normalizedCommand === "node" && args[0] && !String(args[0]).startsWith("-")) {
-    resolveWorkspacePath(String(args[0]));
+    const scriptPath = resolveReadablePath(String(args[0]));
+    if (
+      !workspaceFullAccessEnabled
+      && !alreadyAuthorized
+      && !isPathInsideWorkspace(workspaceRoot, scriptPath)
+    ) {
+      const authorized = await confirmExternalWorkspaceMutation("运行 Node 脚本", [scriptPath]);
+      if (!authorized) {
+        return {
+          ok: false,
+          canceled: true,
+          stderr: `用户取消授权运行工作区外 Node 脚本：${scriptPath}`,
+        };
+      }
+    }
   }
 
   return { ok: true };
@@ -959,7 +1022,7 @@ async function findSymbols({ query = "", path = "", maxMatches = 120 }) {
     if (entry.kind !== "file" || !isLikelyTextPath(entry.path)) continue;
 
     try {
-      const content = await readFile(resolveWorkspacePath(entry.path), "utf8");
+      const content = await readFile(resolveReadablePath(entry.path), "utf8");
       const lines = content.replace(/\r\n/g, "\n").split("\n");
 
       for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
@@ -1001,7 +1064,7 @@ async function runPackageScript({ script, args = [] }) {
   const scriptName = String(script ?? "").trim();
   if (!scriptName) throw new Error("script 不能为空");
 
-  const packageJsonPath = resolveWorkspacePath("package.json");
+  const packageJsonPath = resolveReadablePath("package.json");
   const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8"));
   const scripts = packageJson?.scripts ?? {};
   if (!Object.prototype.hasOwnProperty.call(scripts, scriptName)) {
@@ -1447,11 +1510,11 @@ function registerIpcHandlers() {
 
   ipcMain.handle("workspace:read", async (_event, options = {}) => ({
     path: options.path,
-    content: await readFile(resolveWorkspacePath(options.path), "utf8"),
+    content: await readFile(resolveReadablePath(options.path), "utf8"),
   }));
 
   ipcMain.handle("workspace:read-binary", async (_event, options = {}) => {
-    const targetPath = resolveWorkspacePath(options.path);
+    const targetPath = resolveReadablePath(options.path);
     const content = await readFile(targetPath);
     const info = await stat(targetPath);
     return {
@@ -1480,28 +1543,30 @@ function registerIpcHandlers() {
   ipcMain.handle("workspace:todos", async (_event, options = {}) => scanTodos(options));
 
   ipcMain.handle("workspace:mkdir", async (_event, options = {}) => {
-    const targetPath = resolveWorkspacePath(options.path);
+    const [targetPath] = await authorizeWorkspaceMutation("创建目录", [options.path]);
     await mkdir(targetPath, { recursive: true });
     return { ok: true, path: options.path, operation: "mkdir" };
   });
 
   ipcMain.handle("workspace:rename", async (_event, options = {}) => {
-    const fromPath = resolveWorkspacePath(options.from);
-    const toPath = resolveWorkspacePath(options.to);
+    const [fromPath, toPath] = await authorizeWorkspaceMutation("移动或重命名文件", [
+      options.from,
+      options.to,
+    ]);
     await mkdir(dirname(toPath), { recursive: true });
     await rename(fromPath, toPath);
     return { ok: true, from: options.from, to: options.to, operation: "rename" };
   });
 
   ipcMain.handle("workspace:write", async (_event, options = {}) => {
-    const targetPath = resolveWorkspacePath(options.path);
+    const [targetPath] = await authorizeWorkspaceMutation("写入文件", [options.path]);
     await mkdir(dirname(targetPath), { recursive: true });
     await writeFile(targetPath, String(options.content ?? ""), "utf8");
     return { ok: true, path: options.path, operation: "write" };
   });
 
   ipcMain.handle("workspace:write-binary", async (_event, options = {}) => {
-    const targetPath = resolveWorkspacePath(options.path);
+    const [targetPath] = await authorizeWorkspaceMutation("写入二进制文件", [options.path]);
     const base64 = String(options.base64 ?? "").replace(/^data:[^,]*,/, "").replace(/\s+/g, "");
     const content = Buffer.from(base64, "base64");
     await mkdir(dirname(targetPath), { recursive: true });
@@ -1510,7 +1575,7 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("workspace:edit", async (_event, options = {}) => {
-    const targetPath = resolveWorkspacePath(options.path);
+    const [targetPath] = await authorizeWorkspaceMutation("编辑文件", [options.path]);
     const find = String(options.find ?? "");
     if (!find) throw new Error("find 不能为空");
 
@@ -1531,7 +1596,7 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("workspace:delete", async (_event, options = {}) => {
-    const targetPath = resolveWorkspacePath(options.path);
+    const [targetPath] = await authorizeWorkspaceMutation("删除文件或目录", [options.path]);
     const targetStat = await stat(targetPath);
     await rm(targetPath, {
       recursive: Boolean(options.recursive) && targetStat.isDirectory(),
