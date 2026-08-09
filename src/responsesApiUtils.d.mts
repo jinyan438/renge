@@ -24,6 +24,10 @@ export type ResponsesStreamContent = {
 };
 
 export function normalizeProviderApiType(value: unknown): ProviderApiType;
+export function resolveStatusBarProviderApiType(
+  providerApiType: unknown,
+  modelId: unknown,
+): ProviderApiType;
 export function buildResponsesApiRequest(chatRequest: unknown): Record<string, unknown>;
 export function extractResponsesApiOutput(payload: unknown): {
   content: string;

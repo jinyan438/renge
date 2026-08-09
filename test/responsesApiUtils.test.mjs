@@ -7,11 +7,31 @@ import {
   getResponsesApiErrorMessage,
   normalizeProviderApiType,
   normalizeResponsesApiPayload,
+  resolveStatusBarProviderApiType,
 } from "../src/responsesApiUtils.mjs";
 
 test("normalizes provider API types without changing legacy providers", () => {
   assert.equal(normalizeProviderApiType(undefined), "chat-completions");
   assert.equal(normalizeProviderApiType("responses_api"), "responses");
+});
+
+test("routes DeepSeek V4 Pro status updates away from the unsupported Codex integration", () => {
+  assert.equal(
+    resolveStatusBarProviderApiType("responses", "deepseek-v4-pro"),
+    "chat-completions",
+  );
+  assert.equal(
+    resolveStatusBarProviderApiType("responses", "deepseek/deepseek-v4-pro"),
+    "chat-completions",
+  );
+  assert.equal(
+    resolveStatusBarProviderApiType("responses", "deepseek-v4-flash"),
+    "responses",
+  );
+  assert.equal(
+    resolveStatusBarProviderApiType("chat-completions", "deepseek-v4-pro"),
+    "chat-completions",
+  );
 });
 
 test("maps chat messages, tools, reasoning, and structured output to Responses", () => {

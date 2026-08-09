@@ -22,6 +22,14 @@ export function normalizeProviderApiType(value) {
     : CHAT_COMPLETIONS_API_TYPE;
 }
 
+export function resolveStatusBarProviderApiType(providerApiType, modelId) {
+  const normalizedApiType = normalizeProviderApiType(providerApiType);
+  const modelSlug = String(modelId ?? "").trim().toLowerCase().split("/").pop();
+  return normalizedApiType === RESPONSES_API_TYPE && modelSlug === "deepseek-v4-pro"
+    ? CHAT_COMPLETIONS_API_TYPE
+    : normalizedApiType;
+}
+
 function convertInputContent(content) {
   if (!Array.isArray(content)) return content;
 

@@ -86,8 +86,8 @@ test("creates the default status bar and progress item defaults", () => {
   const progress = createStatusBarItem("progress", { id: "custom-progress" });
 
   assert.equal(state.enabled, false);
-  assert.equal("providerId" in state, false);
-  assert.equal("modelId" in state, false);
+  assert.equal(state.providerId, "");
+  assert.equal(state.modelId, "");
   assert.equal(state.title, "状态栏");
   assert.equal(state.accentColor, "#ff758c");
   assert.equal(state.items.length, 17);
@@ -175,8 +175,8 @@ test("normalizes duplicate variable names, progress entries, and stored values",
     },
   });
 
-  assert.equal("providerId" in state, false);
-  assert.equal("modelId" in state, false);
+  assert.equal(state.providerId, "provider-1");
+  assert.equal(state.modelId, "text-model-1");
   assert.equal(state.title, "测试状态");
   assert.equal(state.accentColor, "#ff758c");
   assert.equal(state.items[0].variableName, "进度");
@@ -191,16 +191,14 @@ test("normalizes duplicate variable names, progress entries, and stored values",
   assert.equal(getStatusBarItemValue(state, state.items[1]), 75);
 });
 
-test("discards legacy provider and model bindings from status bars", () => {
+test("keeps legacy status bars compatible when model settings are absent", () => {
   const state = normalizeStatusBarState({
     enabled: true,
-    providerId: "legacy-provider",
-    modelId: "deepseek-v4-pro",
     items: [],
   });
 
-  assert.equal("providerId" in state, false);
-  assert.equal("modelId" in state, false);
+  assert.equal(state.providerId, "");
+  assert.equal(state.modelId, "");
 });
 
 test("builds reducer payload and response schema", () => {
