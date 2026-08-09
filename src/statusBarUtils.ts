@@ -24,8 +24,6 @@ export type StatusBarItem = {
 
 export type StatusBarState = {
   enabled: boolean;
-  providerId: string;
-  modelId: string;
   title: string;
   accentColor: string;
   items: StatusBarItem[];
@@ -355,8 +353,6 @@ export function createDefaultStatusBarState(): StatusBarState {
 
   return {
     enabled: false,
-    providerId: "",
-    modelId: "",
     title: "状态栏",
     accentColor: DEFAULT_ACCENT_COLOR,
     items: defaults.map(({ type, ...item }) => createStatusBarItem(type, item)),
@@ -525,9 +521,6 @@ export function normalizeStatusBarState(rawValue: unknown): StatusBarState {
 
   return {
     enabled: rawValue.enabled === true,
-    providerId:
-      typeof rawValue.providerId === "string" ? rawValue.providerId.trim() : "",
-    modelId: typeof rawValue.modelId === "string" ? rawValue.modelId.trim() : "",
     title:
       typeof rawValue.title === "string" && rawValue.title.trim()
         ? rawValue.title.trim()

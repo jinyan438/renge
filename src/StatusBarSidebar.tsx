@@ -54,12 +54,6 @@ type StatusBarItem = StatusBarState["items"][number];
 type StatusBarItemType = StatusBarItem["type"];
 type StatusBarItemWidth = StatusBarItem["width"];
 type StatusBarItemSize = StatusBarItem["size"];
-export type StatusBarProviderOption = {
-  id: string;
-  name: string;
-  models: string[];
-};
-
 export type StatusBarSidebarProps = {
   state: StatusBarState;
   collapsed: boolean;
@@ -67,7 +61,6 @@ export type StatusBarSidebarProps = {
   onStateChange: (next: StatusBarState) => void;
   onClearValues: () => void;
   onManualUpdate: () => void | Promise<void>;
-  providerOptions: StatusBarProviderOption[];
   presets: StatusBarPreset[];
   onPresetsChange: (next: StatusBarPreset[]) => void;
   manualUpdateDisabled?: boolean;
@@ -789,7 +782,6 @@ export function StatusBarSidebar({
   onStateChange,
   onClearValues,
   onManualUpdate,
-  providerOptions,
   presets,
   onPresetsChange,
   manualUpdateDisabled = false,
@@ -836,21 +828,6 @@ export function StatusBarSidebar({
   latestStateRef.current = state;
 
   const validationErrors = useMemo(() => validateStatusItems(draft.items), [draft.items]);
-  const selectedStatusProvider = useMemo(
-    () => providerOptions.find((provider) => provider.id === draft.providerId),
-    [draft.providerId, providerOptions],
-  );
-  const statusModelOptions = useMemo(() => {
-    const models = selectedStatusProvider?.models ?? [];
-    return draft.modelId && !models.includes(draft.modelId)
-      ? [draft.modelId, ...models]
-      : models;
-  }, [draft.modelId, selectedStatusProvider]);
-  const modelConfigurationError = !selectedStatusProvider
-    ? "请选择状态栏供应商"
-    : !draft.modelId.trim()
-      ? "请选择状态栏模型"
-      : "";
   const selectedPreset = useMemo(
     () => presets.find((preset) => preset.id === selectedPresetId) ?? null,
     [presets, selectedPresetId],
@@ -1341,7 +1318,7 @@ export function StatusBarSidebar({
 
   const saveDraft = () => {
     const nextErrors = validateStatusItems(draft.items);
-    if (nextErrors.size > 0 || modelConfigurationError) {
+    if (nextErrors.size > 0) {
       setShowValidation(true);
       return;
     }
@@ -1497,47 +1474,6 @@ export function StatusBarSidebar({
                   </div>
 
                   <div className="status-bar-general-fields">
-                    <label>
-                      <span>状态栏供应商</span>
-                      <select
-                        onChange={(event) => {
-                          const providerId = event.target.value;
-                          const provider = providerOptions.find(
-                            (candidate) => candidate.id === providerId,
-                          );
-                          updateDraft({
-                            providerId,
-                            modelId:
-                              provider?.models.includes(draft.modelId)
-                                ? draft.modelId
-                                : provider?.models[0] ?? "",
-                          });
-                        }}
-                        value={draft.providerId}
-                      >
-                        <option value="">选择供应商</option>
-                        {providerOptions.map((provider) => (
-                          <option key={provider.id} value={provider.id}>
-                            {provider.name || "未命名供应商"}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      <span>状态栏模型</span>
-                      <select
-                        disabled={!selectedStatusProvider}
-                        onChange={(event) => updateDraft({ modelId: event.target.value })}
-                        value={draft.modelId}
-                      >
-                        <option value="">选择模型</option>
-                        {statusModelOptions.map((modelId) => (
-                          <option key={modelId} value={modelId}>
-                            {modelId}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
                     <label>
                       <span>面板标题</span>
                       <input
@@ -1845,11 +1781,6 @@ export function StatusBarSidebar({
                   {showValidation && validationErrors.size > 0 ? (
                     <span className="status-editor-validation-summary">
                       请修正 {validationErrors.size} 个变量名问题
-                    </span>
-                  ) : null}
-                  {showValidation && modelConfigurationError ? (
-                    <span className="status-editor-validation-summary">
-                      {modelConfigurationError}
                     </span>
                   ) : null}
                   <button onClick={closeEditor} type="button">

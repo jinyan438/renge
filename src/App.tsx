@@ -2365,8 +2365,6 @@ function createChatSession(
   const initialStatusBar = savedDefaultStatusBarPreset
     ? normalizeStatusBarState({
         enabled: false,
-        providerId: "",
-        modelId: "",
         title: savedDefaultStatusBarPreset.title,
         accentColor: savedDefaultStatusBarPreset.accentColor,
         items: savedDefaultStatusBarPreset.items.map((item) => ({
@@ -21075,14 +21073,14 @@ export function App() {
     if (!statusBar.enabled || trackedItemCount === 0) {
       return { attempted: false, updated: 0 };
     }
-    const statusRequestProvider =
-      requestProvider ?? providers.find((provider) => provider.id === statusBar.providerId);
-    const statusRequestModelId = requestModelId?.trim() || statusBar.modelId.trim();
+    const statusRequestProvider = requestProvider ?? chatProvider;
+    const statusRequestModelId =
+      requestModelId?.trim() || getEffectiveProviderModelId(statusRequestProvider);
     if (!statusRequestProvider?.apiBaseUrl || !statusRequestModelId) {
       return {
         attempted: true,
         updated: 0,
-        error: "请在状态栏编辑器中选择状态栏供应商和模型。",
+        error: "请先配置当前聊天使用的供应商和文本模型。",
       };
     }
     if (isImageGenerationModelId(statusRequestModelId)) {
@@ -23548,6 +23546,8 @@ export function App() {
             sourceMessageIds: latestUserMessage ? [latestUserMessage.id] : [],
             latestUser: latestUserMessage?.content ?? "",
             finalAssistant: currentAssistantMessage.content,
+            requestProvider,
+            requestModelId,
             signal: abortSignal,
           });
           if (
@@ -25307,6 +25307,8 @@ export function App() {
         sourceMessageIds: [userMessage.id],
         latestUser: effectiveContent,
         finalAssistant: finalAssistantForStatus,
+        requestProvider: chatProvider,
+        requestModelId,
         signal: abortSignal,
       });
       if (activeChatSessionIdRef.current === requestSessionId) {
@@ -33483,11 +33485,6 @@ export function App() {
           onStateChange={updateActiveStatusBarState}
           onClearValues={clearActiveStatusBarValues}
           onManualUpdate={manuallyUpdateActiveStatusBar}
-          providerOptions={providers.map((provider) => ({
-            id: provider.id,
-            name: provider.name,
-            models: getProviderModelIds(provider),
-          }))}
           presets={statusBarPresets}
           onPresetsChange={setStatusBarPresets}
           manualUpdateDisabled={chatGenerationState !== "idle"}
