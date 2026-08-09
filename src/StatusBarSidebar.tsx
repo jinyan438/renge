@@ -1242,8 +1242,6 @@ export function StatusBarSidebar({
     return {
       id,
       name,
-      providerId: normalizedDraft.providerId,
-      modelId: normalizedDraft.modelId,
       title: normalizedDraft.title,
       accentColor: normalizedDraft.accentColor,
       items: normalizedDraft.items.map(({ id: _id, ...item }) => item),
@@ -1254,9 +1252,9 @@ export function StatusBarSidebar({
 
   const validateDraftBeforePresetSave = () => {
     const nextErrors = validateStatusItems(draft.items);
-    if (nextErrors.size === 0 && !modelConfigurationError) return true;
+    if (nextErrors.size === 0) return true;
     setShowValidation(true);
-    setPresetFeedback(modelConfigurationError || "请先修正变量名，再保存预设。");
+    setPresetFeedback("请先修正变量名，再保存预设。");
     return false;
   };
 
@@ -1306,8 +1304,6 @@ export function StatusBarSidebar({
     setDeleteConfirmationPresetId("");
     setDraft((current) => ({
       ...current,
-      providerId: selectedPreset.providerId,
-      modelId: selectedPreset.modelId,
       title: selectedPreset.title,
       accentColor: selectedPreset.accentColor,
       items: clonePresetItems(selectedPreset.items).map((item) => ({

@@ -36,8 +36,6 @@ export type StatusBarState = {
 export type StatusBarPreset = {
   id: string;
   name: string;
-  providerId: string;
-  modelId: string;
   title: string;
   accentColor: string;
   items: Array<Omit<StatusBarItem, "id">>;
@@ -367,15 +365,11 @@ export function createDefaultStatusBarState(): StatusBarState {
   };
 }
 
-export function createDefaultStatusBarPreset(
-  modelBinding: Partial<Pick<StatusBarPreset, "providerId" | "modelId">> = {},
-): StatusBarPreset {
+export function createDefaultStatusBarPreset(): StatusBarPreset {
   const state = createDefaultStatusBarState();
   return {
     id: DEFAULT_STATUS_BAR_PRESET_ID,
     name: DEFAULT_STATUS_BAR_PRESET_NAME,
-    providerId: modelBinding.providerId?.trim() ?? "",
-    modelId: modelBinding.modelId?.trim() ?? "",
     title: state.title,
     accentColor: state.accentColor,
     items: state.items.map(({ id: _id, ...item }) => item),
@@ -397,8 +391,6 @@ function normalizeStatusBarPreset(rawValue: unknown, index: number): StatusBarPr
 
   const normalizedState = normalizeStatusBarState({
     enabled: false,
-    providerId: rawPreset.providerId,
-    modelId: rawPreset.modelId,
     title: rawPreset.title,
     accentColor: rawPreset.accentColor,
     items: rawPreset.items,
@@ -417,8 +409,6 @@ function normalizeStatusBarPreset(rawValue: unknown, index: number): StatusBarPr
         ? rawPreset.id.trim()
         : createStableId(),
     name,
-    providerId: normalizedState.providerId,
-    modelId: normalizedState.modelId,
     title: normalizedState.title,
     accentColor: normalizedState.accentColor,
     items: normalizedState.items.map(({ id: _id, ...item }) => item),
@@ -437,16 +427,7 @@ export function normalizeStatusBarPresets(rawValue: unknown): StatusBarPreset[] 
       const normalized = normalizeStatusBarPreset(preset, index);
       return normalized ? [normalized] : [];
     });
-  const legacyDefault = normalizedPresets.find(
-    (preset) =>
-      preset.id === DEFAULT_STATUS_BAR_PRESET_ID ||
-      preset.name.toLocaleLowerCase() === DEFAULT_STATUS_BAR_PRESET_NAME.toLocaleLowerCase(),
-  );
-  const defaultPreset = createDefaultStatusBarPreset(
-    legacyDefault
-      ? { providerId: legacyDefault.providerId, modelId: legacyDefault.modelId }
-      : undefined,
-  );
+  const defaultPreset = createDefaultStatusBarPreset();
   const seenIds = new Set([DEFAULT_STATUS_BAR_PRESET_ID]);
   const userPresets = normalizedPresets
     .filter(

@@ -2365,8 +2365,8 @@ function createChatSession(
   const initialStatusBar = savedDefaultStatusBarPreset
     ? normalizeStatusBarState({
         enabled: false,
-        providerId: savedDefaultStatusBarPreset.providerId,
-        modelId: savedDefaultStatusBarPreset.modelId,
+        providerId: "",
+        modelId: "",
         title: savedDefaultStatusBarPreset.title,
         accentColor: savedDefaultStatusBarPreset.accentColor,
         items: savedDefaultStatusBarPreset.items.map((item) => ({

@@ -19,7 +19,7 @@ test("always provides the immutable built-in status bar preset", () => {
   assert.equal(isDefaultStatusBarPreset(presets[0]), true);
 });
 
-test("migrates a legacy named default while restoring factory content", () => {
+test("migrates legacy presets without retaining provider or model bindings", () => {
   const presets = normalizeStatusBarPresets([
     {
       id: "legacy-default",
@@ -56,10 +56,12 @@ test("migrates a legacy named default while restoring factory content", () => {
   assert.equal(presets[0].id, DEFAULT_STATUS_BAR_PRESET_ID);
   assert.equal(presets[0].title, "状态栏");
   assert.equal(presets[0].items.length, 17);
-  assert.equal(presets[0].providerId, "deepseek-provider");
-  assert.equal(presets[0].modelId, "deepseek-v4-flash");
+  assert.equal("providerId" in presets[0], false);
+  assert.equal("modelId" in presets[0], false);
   assert.equal(presets[1].id, "user-preset");
   assert.equal(presets[1].name, "用户副本");
+  assert.equal("providerId" in presets[1], false);
+  assert.equal("modelId" in presets[1], false);
 });
 
 test("does not count the built-in preset against the user preset limit", () => {
