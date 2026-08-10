@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildWechatRequestMessages,
+  createEmptyWechatStore,
+  getWechatSessionStore,
+  normalizeWechatStore,
   splitWechatReply,
+  updateWechatSessionStore,
 } from "../src/wechatSidebarUtils.ts";
 
 const contact = {
@@ -102,3 +106,86 @@ test("wechat replies render as at most three clean bubbles", () => {
   ]);
 });
 
+test("legacy wechat data migrates into host chat session partitions", () => {
+  const secondContact = {
+    ...contact,
+    id: "friend-2",
+    name: "林夏",
+    nickname: "夏夏",
+  };
+  const migrated = normalizeWechatStore(
+    {
+      contacts: [contact, secondContact],
+      activeContactId: "friend-1",
+      messages: [
+        {
+          id: "message-a",
+          contactId: "friend-1",
+          sessionId: "session-a",
+          role: "user",
+          content: "A 会话消息",
+          createdAt: "2026-08-10T08:02:00.000Z",
+        },
+        {
+          id: "message-b",
+          contactId: "friend-2",
+          sessionId: "session-b",
+          role: "assistant",
+          content: "B 会话消息",
+          createdAt: "2026-08-10T08:03:00.000Z",
+        },
+        {
+          id: "message-unscoped",
+          contactId: "friend-1",
+          role: "assistant",
+          content: "旧版未分区消息",
+          createdAt: "2026-08-10T08:04:00.000Z",
+        },
+      ],
+    },
+    "session-a",
+  );
+
+  assert.deepEqual(
+    migrated.sessions["session-a"].messages.map((message) => message.id),
+    ["message-a", "message-unscoped"],
+  );
+  assert.equal(migrated.sessions["session-a"].contacts.length, 2);
+  assert.deepEqual(
+    migrated.sessions["session-b"].contacts.map((item) => item.id),
+    ["friend-2"],
+  );
+  assert.equal(migrated.sessions["session-b"].messages[0].sessionId, undefined);
+});
+
+test("wechat contacts, messages and active contact stay isolated per host chat session", () => {
+  const sessionAContact = { ...contact, id: "friend-a", name: "会话 A 朋友" };
+  const sessionBContact = { ...contact, id: "friend-b", name: "会话 B 朋友" };
+  let store = createEmptyWechatStore();
+
+  store = updateWechatSessionStore(store, "session-a", (current) => ({
+    ...current,
+    contacts: [sessionAContact],
+    activeContactId: sessionAContact.id,
+    messages: [
+      {
+        id: "message-a",
+        contactId: sessionAContact.id,
+        role: "user",
+        content: "只属于 A",
+        createdAt: "2026-08-10T08:05:00.000Z",
+      },
+    ],
+  }));
+  store = updateWechatSessionStore(store, "session-b", (current) => ({
+    ...current,
+    contacts: [sessionBContact],
+    activeContactId: sessionBContact.id,
+  }));
+
+  assert.deepEqual(getWechatSessionStore(store, "session-a").contacts, [sessionAContact]);
+  assert.equal(getWechatSessionStore(store, "session-a").messages[0].content, "只属于 A");
+  assert.deepEqual(getWechatSessionStore(store, "session-b").contacts, [sessionBContact]);
+  assert.deepEqual(getWechatSessionStore(store, "session-b").messages, []);
+  assert.deepEqual(getWechatSessionStore(store, "missing-session").contacts, []);
+});

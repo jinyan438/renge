@@ -34,6 +34,174 @@ export type WechatStoredMessage = {
   failed?: boolean;
 };
 
+export type WechatSessionStore = {
+  contacts: WechatContact[];
+  messages: WechatStoredMessage[];
+  activeContactId: string;
+};
+
+export type WechatStore = {
+  version: 2;
+  sessions: Record<string, WechatSessionStore>;
+};
+
+type LegacyWechatStore = Partial<WechatSessionStore>;
+
+export function createEmptyWechatSessionStore(): WechatSessionStore {
+  return { contacts: [], messages: [], activeContactId: "" };
+}
+
+export function createEmptyWechatStore(): WechatStore {
+  return { version: 2, sessions: {} };
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeContact(value: unknown): WechatContact | null {
+  if (!isObjectRecord(value) || typeof value.id !== "string" || typeof value.name !== "string") {
+    return null;
+  }
+  return {
+    id: value.id,
+    name: value.name,
+    nickname: typeof value.nickname === "string" ? value.nickname : "",
+    avatarImage: typeof value.avatarImage === "string" ? value.avatarImage : "",
+    profile: typeof value.profile === "string" ? value.profile : "",
+    ...(typeof value.personaId === "string" && value.personaId
+      ? { personaId: value.personaId }
+      : {}),
+    createdAt: typeof value.createdAt === "string" ? value.createdAt : "",
+    updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
+  };
+}
+
+function normalizeMessage(
+  value: unknown,
+  contactIds: Set<string>,
+): WechatStoredMessage | null {
+  if (
+    !isObjectRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.contactId !== "string" ||
+    !contactIds.has(value.contactId) ||
+    (value.role !== "user" && value.role !== "assistant") ||
+    typeof value.content !== "string"
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    contactId: value.contactId,
+    ...(typeof value.sessionId === "string" && value.sessionId
+      ? { sessionId: value.sessionId }
+      : {}),
+    role: value.role,
+    content: value.content,
+    createdAt: typeof value.createdAt === "string" ? value.createdAt : "",
+    ...(value.failed === true ? { failed: true } : {}),
+  };
+}
+
+function normalizeWechatSessionStore(value: unknown): WechatSessionStore {
+  if (!isObjectRecord(value)) return createEmptyWechatSessionStore();
+  const contacts = Array.isArray(value.contacts)
+    ? value.contacts
+        .map(normalizeContact)
+        .filter((contact): contact is WechatContact => contact !== null)
+    : [];
+  const contactIds = new Set(contacts.map((contact) => contact.id));
+  const messages = Array.isArray(value.messages)
+    ? value.messages
+        .map((message) => normalizeMessage(message, contactIds))
+        .filter((message): message is WechatStoredMessage => message !== null)
+        .map(({ sessionId: _legacySessionId, ...message }) => message)
+    : [];
+  const activeContactId =
+    typeof value.activeContactId === "string" && contactIds.has(value.activeContactId)
+      ? value.activeContactId
+      : contacts[0]?.id ?? "";
+  return { contacts, messages, activeContactId };
+}
+
+function migrateLegacyWechatStore(
+  legacy: LegacyWechatStore,
+  currentSessionId: string,
+): WechatStore {
+  if (!currentSessionId) return createEmptyWechatStore();
+  const normalizedLegacy = normalizeWechatSessionStore(legacy);
+  const rawMessages = Array.isArray(legacy.messages) ? legacy.messages : [];
+  const contactIds = new Set(normalizedLegacy.contacts.map((contact) => contact.id));
+  const legacyMessages = rawMessages
+    .map((message) => normalizeMessage(message, contactIds))
+    .filter((message): message is WechatStoredMessage => message !== null);
+  const sessions: Record<string, WechatSessionStore> = {};
+  const buildSession = (sessionId: string, includeUnscopedMessages = false) => {
+    const scopedMessages = legacyMessages
+      .filter(
+        (message) =>
+          message.sessionId === sessionId || (includeUnscopedMessages && !message.sessionId),
+      )
+      .map(({ sessionId: _legacySessionId, ...message }) => message);
+    const scopedContactIds = new Set(scopedMessages.map((message) => message.contactId));
+    const contacts =
+      sessionId === currentSessionId
+        ? normalizedLegacy.contacts
+        : normalizedLegacy.contacts.filter((contact) => scopedContactIds.has(contact.id));
+    const validContactIds = new Set(contacts.map((contact) => contact.id));
+    const activeContactId = validContactIds.has(normalizedLegacy.activeContactId)
+      ? normalizedLegacy.activeContactId
+      : contacts[0]?.id ?? "";
+    sessions[sessionId] = { contacts, messages: scopedMessages, activeContactId };
+  };
+
+  buildSession(currentSessionId, true);
+  for (const message of legacyMessages) {
+    if (message.sessionId && message.sessionId !== currentSessionId && !sessions[message.sessionId]) {
+      buildSession(message.sessionId);
+    }
+  }
+  return { version: 2, sessions };
+}
+
+export function normalizeWechatStore(value: unknown, currentSessionId = ""): WechatStore {
+  if (!isObjectRecord(value)) return createEmptyWechatStore();
+  if (isObjectRecord(value.sessions)) {
+    return {
+      version: 2,
+      sessions: Object.fromEntries(
+        Object.entries(value.sessions)
+          .filter(([sessionId]) => Boolean(sessionId))
+          .map(([sessionId, sessionStore]) => [
+            sessionId,
+            normalizeWechatSessionStore(sessionStore),
+          ]),
+      ),
+    };
+  }
+  return migrateLegacyWechatStore(value as LegacyWechatStore, currentSessionId);
+}
+
+export function getWechatSessionStore(store: WechatStore, sessionId: string) {
+  return store.sessions[sessionId] ?? createEmptyWechatSessionStore();
+}
+
+export function updateWechatSessionStore(
+  store: WechatStore,
+  sessionId: string,
+  updater: (current: WechatSessionStore) => WechatSessionStore,
+): WechatStore {
+  if (!sessionId) return store;
+  return {
+    ...store,
+    sessions: {
+      ...store.sessions,
+      [sessionId]: updater(getWechatSessionStore(store, sessionId)),
+    },
+  };
+}
+
 export type WechatSharedContextMessage = {
   role: "user" | "assistant";
   content: string;

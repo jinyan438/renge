@@ -34,20 +34,20 @@ import {
 } from "react";
 import type { AgentPersona } from "./types";
 import {
+  getWechatSessionStore,
+  normalizeWechatStore,
   splitWechatReply,
   type WechatContact,
+  type WechatSessionStore,
+  type WechatStore,
   type WechatStoredMessage,
+  updateWechatSessionStore,
 } from "./wechatSidebarUtils";
 import "./wechat-sidebar.css";
 
-const WECHAT_STORAGE_KEY = "renge.wechat.sidebar.v1";
+const WECHAT_STORAGE_KEY = "renge.wechat.sidebar.v2";
+const LEGACY_WECHAT_STORAGE_KEY = "renge.wechat.sidebar.v1";
 const MAX_AVATAR_BYTES = 3 * 1024 * 1024;
-
-type WechatStore = {
-  contacts: WechatContact[];
-  messages: WechatStoredMessage[];
-  activeContactId: string;
-};
 
 type ContactDraft = {
   id: string;
@@ -72,45 +72,19 @@ type WechatSidebarProps = {
   onSendMessage: (contact: WechatContact, content: string) => Promise<string>;
 };
 
-function createEmptyStore(): WechatStore {
-  return { contacts: [], messages: [], activeContactId: "" };
-}
-
-function loadWechatStore(): WechatStore {
+function loadWechatStore(sessionId: string): WechatStore {
   try {
     const raw = localStorage.getItem(WECHAT_STORAGE_KEY);
-    if (!raw) return createEmptyStore();
-    const parsed = JSON.parse(raw) as Partial<WechatStore>;
-    const contacts = Array.isArray(parsed.contacts)
-      ? parsed.contacts.filter(
-          (contact): contact is WechatContact =>
-            Boolean(contact) &&
-            typeof contact.id === "string" &&
-            typeof contact.name === "string",
-        )
-      : [];
-    const contactIds = new Set(contacts.map((contact) => contact.id));
-    const messages = Array.isArray(parsed.messages)
-      ? parsed.messages.filter(
-          (message): message is WechatStoredMessage =>
-            Boolean(message) &&
-            typeof message.id === "string" &&
-            typeof message.contactId === "string" &&
-            contactIds.has(message.contactId) &&
-            (message.role === "user" || message.role === "assistant") &&
-            typeof message.content === "string",
-        )
-      : [];
-    return {
-      contacts,
-      messages,
-      activeContactId:
-        typeof parsed.activeContactId === "string" && contactIds.has(parsed.activeContactId)
-          ? parsed.activeContactId
-          : contacts[0]?.id ?? "",
-    };
+    if (raw) {
+      const normalized = normalizeWechatStore(JSON.parse(raw), sessionId);
+      if (Object.keys(normalized.sessions).length > 0) return normalized;
+    }
+    const legacyRaw = localStorage.getItem(LEGACY_WECHAT_STORAGE_KEY);
+    return legacyRaw
+      ? normalizeWechatStore(JSON.parse(legacyRaw), sessionId)
+      : normalizeWechatStore(null);
   } catch {
-    return createEmptyStore();
+    return normalizeWechatStore(null);
   }
 }
 
@@ -200,7 +174,7 @@ export function WechatSidebar({
   onClose,
   onSendMessage,
 }: WechatSidebarProps) {
-  const [store, setStore] = useState(loadWechatStore);
+  const [store, setStore] = useState(() => loadWechatStore(sessionId));
   const [view, setView] = useState<"list" | "chat" | "contact">("list");
   const [activeTab, setActiveTab] = useState<"wechat" | "contacts" | "discover" | "me">("wechat");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -220,28 +194,65 @@ export function WechatSidebar({
   useEffect(() => {
     try {
       localStorage.setItem(WECHAT_STORAGE_KEY, JSON.stringify(store));
+      if (Object.keys(store.sessions).length > 0) {
+        localStorage.removeItem(LEGACY_WECHAT_STORAGE_KEY);
+      }
     } catch (error) {
       console.warn("微信联系人数据保存失败", error);
     }
   }, [store]);
 
   useEffect(() => {
+    if (sessionId) {
+      setStore((current) => {
+        if (current.sessions[sessionId]) return current;
+        const restored = loadWechatStore(sessionId);
+        return restored.sessions[sessionId] ? restored : current;
+      });
+    }
+    setView("list");
+    setActiveTab("wechat");
+    setMenuOpen(false);
+    setSearchOpen(false);
+    setSearchQuery("");
+    setDraft(createContactDraft());
+    setDraftError("");
+    setChatInput("");
+    setSendingContactId("");
+    setChatError("");
+    setEmojiOpen(false);
+    setMoreOpen(false);
+  }, [sessionId]);
+
+  useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
 
+  const sessionStore = useMemo(
+    () => getWechatSessionStore(store, sessionId),
+    [sessionId, store],
+  );
   const activeContact = useMemo(
-    () => store.contacts.find((contact) => contact.id === store.activeContactId) ?? null,
-    [store.activeContactId, store.contacts],
+    () =>
+      sessionStore.contacts.find((contact) => contact.id === sessionStore.activeContactId) ??
+      null,
+    [sessionStore.activeContactId, sessionStore.contacts],
   );
   const activeMessages = useMemo(
-    () =>
-      store.messages.filter(
-        (message) =>
-          message.contactId === activeContact?.id && message.sessionId === sessionId,
-      ),
-    [activeContact?.id, sessionId, store.messages],
+    () => sessionStore.messages.filter((message) => message.contactId === activeContact?.id),
+    [activeContact?.id, sessionStore.messages],
   );
+
+  useEffect(() => {
+    if (view === "chat" && !activeContact) setView("list");
+  }, [activeContact, view]);
+
+  const updateCurrentSession = (
+    updater: (current: WechatSessionStore) => WechatSessionStore,
+  ) => {
+    setStore((current) => updateWechatSessionStore(current, sessionId, updater));
+  };
 
   useEffect(() => {
     if (view !== "chat") return;
@@ -254,15 +265,12 @@ export function WechatSidebar({
 
   const contactsWithLastMessage = useMemo(
     () =>
-      store.contacts
+      sessionStore.contacts
         .map((contact) => ({
           contact,
-          lastMessage: [...store.messages]
+          lastMessage: [...sessionStore.messages]
             .reverse()
-            .find(
-              (message) =>
-                message.contactId === contact.id && message.sessionId === sessionId,
-            ),
+            .find((message) => message.contactId === contact.id),
         }))
         .filter(({ contact }) => {
           const query = searchQuery.trim().toLocaleLowerCase();
@@ -277,11 +285,11 @@ export function WechatSidebar({
           const rightTime = Date.parse(right.lastMessage?.createdAt ?? right.contact.updatedAt);
           return rightTime - leftTime;
         }),
-    [searchQuery, sessionId, store.contacts, store.messages],
+    [searchQuery, sessionStore.contacts, sessionStore.messages],
   );
 
   const openContact = (contact: WechatContact) => {
-    setStore((current) => ({ ...current, activeContactId: contact.id }));
+    updateCurrentSession((current) => ({ ...current, activeContactId: contact.id }));
     setChatError("");
     setChatInput("");
     setView("chat");
@@ -291,6 +299,11 @@ export function WechatSidebar({
     setDraft(createContactDraft());
     setDraftError("");
     setMenuOpen(false);
+    setChatInput("");
+    setChatError("");
+    setSendingContactId("");
+    setEmojiOpen(false);
+    setMoreOpen(false);
     setView("contact");
   };
 
@@ -346,7 +359,7 @@ export function WechatSidebar({
       return;
     }
     const timestamp = new Date().toISOString();
-    const existing = store.contacts.find((contact) => contact.id === draft.id);
+    const existing = sessionStore.contacts.find((contact) => contact.id === draft.id);
     const nextContact: WechatContact = {
       id: existing?.id ?? crypto.randomUUID(),
       name,
@@ -357,7 +370,7 @@ export function WechatSidebar({
       createdAt: existing?.createdAt ?? timestamp,
       updatedAt: timestamp,
     };
-    setStore((current) => ({
+    updateCurrentSession((current) => ({
       ...current,
       activeContactId: nextContact.id,
       contacts: existing
@@ -373,7 +386,7 @@ export function WechatSidebar({
   const deleteActiveContact = () => {
     if (!activeContact) return;
     if (!window.confirm(`删除朋友“${activeContact.name}”及其本地聊天记录？`)) return;
-    setStore((current) => {
+    updateCurrentSession((current) => {
       const contacts = current.contacts.filter((contact) => contact.id !== activeContact.id);
       return {
         contacts,
@@ -381,6 +394,13 @@ export function WechatSidebar({
         activeContactId: contacts[0]?.id ?? "",
       };
     });
+    setDraft(createContactDraft());
+    setDraftError("");
+    setChatInput("");
+    setChatError("");
+    setSendingContactId("");
+    setEmojiOpen(false);
+    setMoreOpen(false);
     setMenuOpen(false);
     setView("list");
   };
@@ -391,12 +411,14 @@ export function WechatSidebar({
     const userMessage: WechatStoredMessage = {
       id: crypto.randomUUID(),
       contactId: activeContact.id,
-      sessionId,
       role: "user",
       content,
       createdAt: new Date().toISOString(),
     };
-    setStore((current) => ({ ...current, messages: [...current.messages, userMessage] }));
+    updateCurrentSession((current) => ({
+      ...current,
+      messages: [...current.messages, userMessage],
+    }));
     setChatInput("");
     setChatError("");
     setEmojiOpen(false);
@@ -407,14 +429,17 @@ export function WechatSidebar({
       const assistantMessage: WechatStoredMessage = {
         id: crypto.randomUUID(),
         contactId: activeContact.id,
-        sessionId,
         role: "assistant",
         content: reply,
         createdAt: new Date().toISOString(),
       };
-      setStore((current) => ({ ...current, messages: [...current.messages, assistantMessage] }));
+      updateCurrentSession((current) =>
+        current.contacts.some((contact) => contact.id === activeContact.id)
+          ? { ...current, messages: [...current.messages, assistantMessage] }
+          : current,
+      );
     } catch (error) {
-      setStore((current) => ({
+      updateCurrentSession((current) => ({
         ...current,
         messages: current.messages.map((message) =>
           message.id === userMessage.id ? { ...message, failed: true } : message,
@@ -524,7 +549,7 @@ export function WechatSidebar({
 
   const listTitle =
     activeTab === "wechat"
-      ? `微信${store.contacts.length ? ` (${store.contacts.length})` : ""}`
+      ? `微信${sessionStore.contacts.length ? ` (${sessionStore.contacts.length})` : ""}`
       : activeTab === "contacts"
         ? "通讯录"
         : activeTab === "discover"
@@ -664,7 +689,7 @@ export function WechatSidebar({
             ) : null}
           </footer>
         </>
-      ) : (
+      ) : view === "contact" ? (
         <>
           <header className="wechat-contact-header">
             <button onClick={() => setView(draft.id ? "chat" : "list")} type="button">取消</button>
@@ -678,14 +703,14 @@ export function WechatSidebar({
               </button>
               <input accept="image/*" hidden onChange={handleAvatarUpload} ref={avatarInputRef} type="file" />
             </div>
-            <label><span>姓名</span><input maxLength={40} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} placeholder="朋友姓名" value={draft.name} /></label>
+            <label><span>姓名</span><input autoFocus maxLength={40} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} placeholder="朋友姓名" value={draft.name} /></label>
             <label><span>网名</span><input maxLength={40} onChange={(event) => setDraft((current) => ({ ...current, nickname: event.target.value }))} placeholder="微信昵称" value={draft.nickname} /></label>
             <label><span>人格 Agent</span><select onChange={(event) => selectPersona(event.target.value)} value={draft.personaId}><option value="">自定义人设</option>{personas.map((persona) => <option key={persona.id} value={persona.id}>{persona.name}</option>)}</select></label>
             <label className="wechat-profile-field"><span>人设</span><textarea onChange={(event) => setDraft((current) => ({ ...current, profile: event.target.value }))} placeholder="朋友的身份、性格、说话方式与关系设定" rows={7} value={draft.profile} /></label>
             {draftError ? <p className="wechat-form-error">{draftError}</p> : null}
           </main>
         </>
-      )}
+      ) : null}
     </section>
   );
 }
