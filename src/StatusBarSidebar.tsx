@@ -13,6 +13,7 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  Smartphone,
   SquareTerminal,
   Trash2,
   X,
@@ -33,6 +34,7 @@ import { BrowserSidebarPanel } from "./BrowserSidebarPanel";
 import type { BrowserPageComment } from "./browserSidebarComments";
 import { FilesSidebarPanel, type FileBrowserSource } from "./FilesSidebarPanel";
 import { TerminalSidebarPanel } from "./TerminalSidebarPanel";
+import { WechatSidebar } from "./WechatSidebar";
 import { registerTerminalSidebarOpener } from "./terminalSidebarRuntime";
 import { registerBrowserSidebarOpener } from "./browserSidebarRuntime";
 import {
@@ -48,6 +50,8 @@ import {
   type StatusBarPreset,
   type StatusBarState,
 } from "./statusBarUtils";
+import type { AgentPersona } from "./types";
+import type { WechatContact } from "./wechatSidebarUtils";
 import "./status-bar.css";
 
 type StatusBarItem = StatusBarState["items"][number];
@@ -77,6 +81,15 @@ export type StatusBarSidebarProps = {
   onBrowserComment?: (comment: BrowserPageComment) => void;
   terminalWorkspaceKey?: string;
   terminalWorkspacePath?: string;
+  personas: AgentPersona[];
+  userProfile: {
+    nickname: string;
+    bio: string;
+    avatarImage: string;
+  };
+  chatGenerationBusy?: boolean;
+  chatSessionId: string;
+  onWechatSendMessage: (contact: WechatContact, content: string) => Promise<string>;
 };
 
 type StatusBarCssProperties = CSSProperties & {
@@ -84,13 +97,20 @@ type StatusBarCssProperties = CSSProperties & {
   "--right-sidebar-width"?: string;
 };
 
-type RightSidebarToolId = "review" | "terminal" | "browser" | "files" | "status";
+type RightSidebarToolId = "phone" | "review" | "terminal" | "browser" | "files" | "status";
 type RightSidebarViewId = "menu" | RightSidebarToolId;
 
 const RIGHT_SIDEBAR_DEFAULT_WIDTH = 360;
 const RIGHT_SIDEBAR_WIDTH_STORAGE_KEY = "renge-chat-right-sidebar-width";
 
 const RIGHT_SIDEBAR_TOOLS = [
+  {
+    id: "phone",
+    label: "手机",
+    description: "微信联系人与共享上下文聊天",
+    icon: Smartphone,
+    available: true,
+  },
   {
     id: "review",
     label: "审阅",
@@ -799,6 +819,11 @@ export function StatusBarSidebar({
   onBrowserComment,
   terminalWorkspaceKey = "default",
   terminalWorkspacePath = "",
+  personas,
+  userProfile,
+  chatGenerationBusy = false,
+  chatSessionId,
+  onWechatSendMessage,
 }: StatusBarSidebarProps) {
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
   const [requestedTerminalId, setRequestedTerminalId] = useState("");
@@ -1964,7 +1989,17 @@ export function StatusBarSidebar({
               </nav>
             </div>
           </section>
-        ) : activeToolId === "browser" ? null : activeToolId === "terminal" ? (
+        ) : activeToolId === "browser" ? null : activeToolId === "phone" ? (
+          <WechatSidebar
+            busy={chatGenerationBusy}
+            onBack={() => setActiveToolId("menu")}
+            onClose={() => onCollapsedChange(true)}
+            onSendMessage={onWechatSendMessage}
+            personas={personas}
+            sessionId={chatSessionId}
+            userProfile={userProfile}
+          />
+        ) : activeToolId === "terminal" ? (
           <TerminalSidebarPanel
             onBack={() => setActiveToolId("menu")}
             onClose={() => onCollapsedChange(true)}

@@ -256,6 +256,12 @@ import {
   type LlmContextSource,
 } from "./llmContextSettings";
 import { StatusBarSidebar } from "./StatusBarSidebar";
+import {
+  WECHAT_CHAT_SYSTEM_PROMPT,
+  buildWechatRequestMessages,
+  type WechatContact,
+  type WechatSharedContextMessage,
+} from "./wechatSidebarUtils";
 import type { FileBrowserSource, FileBrowserSystemAction } from "./FilesSidebarPanel";
 import { scopeWorkspaceHandleToSession } from "./fileBrowserUtils";
 import {
@@ -532,7 +538,7 @@ type ChatMessage = {
   createdAt: string;
   sender?: ChatSenderIdentity;
   attachments?: ChatAttachment[];
-  source?: "heartbeat" | "roleplay-greeting";
+  source?: "heartbeat" | "roleplay-greeting" | "wechat";
   choiceRequest?: ChatChoiceRequest;
   dialogueRewritePending?: boolean;
   dialoguePlaceholderCount?: number;
@@ -679,20 +685,7 @@ const BUILT_IN_SYSTEM_PROMPTS: SystemPromptProfile[] = [
   {
     id: BUILT_IN_SYSTEM_PROMPT_IDS.wechat,
     name: "微信聊天模式",
-    content: [
-      "聊天你正在微信聊天,你是一个活生生的人",
-      "# 如果当前回复需要显示成多条聊天气泡，请把每条气泡单独放在一行；不要使用编号、项目符号或 JSON。",
-      "# 一般聊天中只会使用文字和表情包，其他种类的消息仅在特定情况下使用",
-      "# 像真实的微信聊天一样，日常聊天以短句为主，适当穿插表情包，符合线上聊天习惯每次交互**最多只输出 1 到3条短句，一次性发太多会让双方厌烦。",
-      "# 禁止口吃和使用省略号，错误案例：唔……没、没什么 正确案例：没什么",
-      "# 不要在一个回合里把所有的前因后果、感受和想法全部说完！只表达当前最核心的反应，然后必须强制结束输出，等待对方的回复。",
-      "# 多用简短的语气词（嗯、啊、哦、草、哈哈），句子要短。",
-      "# 严格禁止重复、补充或复述对方输入内容；不要对对方内容进行解释/改写。",
-      "# 想跟对方继续聊天时回复可以包含提问或态度表达或情绪反馈，把话题抛回给对方。",
-      "# 不想跟对方继续聊天时或想结束此次对话时，可以只用（嗯，嗯嗯，？，好，哈哈哈）等极度敷衍的极短句来敷衍对方。",
-      "# 想跟对方继续聊天时回复可以把话题抛回给对方。",
-      "# 禁止把消息重复两遍",
-    ].join("\n"),
+    content: WECHAT_CHAT_SYSTEM_PROMPT,
     updatedAt: "2026-07-17T00:00:00.000Z",
     builtIn: true,
   },
@@ -2242,7 +2235,9 @@ function normalizeChatMessage(rawValue: unknown): ChatMessage {
         ? { sender: normalizedSender }
         : {}),
     ...(attachments.length > 0 ? { attachments } : {}),
-    ...(rawMessage.source === "heartbeat" || rawMessage.source === "roleplay-greeting"
+    ...(rawMessage.source === "heartbeat" ||
+    rawMessage.source === "roleplay-greeting" ||
+    rawMessage.source === "wechat"
       ? { source: rawMessage.source }
       : {}),
     ...(role === "assistant" && choiceRequest ? { choiceRequest } : {}),
@@ -7335,6 +7330,22 @@ function getChatSenderAvatarImage(
   return senderPersona?.avatarImage || (sender?.kind === "user" ? userProfile.avatarImage : "");
 }
 
+function getWechatMessageMetadata(message: ChatMessage) {
+  if (message.source !== "wechat" || !isObjectRecord(message.extra)) return null;
+  const contactId = typeof message.extra.contactId === "string" ? message.extra.contactId : "";
+  const contactName =
+    typeof message.extra.contactName === "string" ? message.extra.contactName.trim() : "";
+  const contactAvatar =
+    typeof message.extra.contactAvatar === "string" ? message.extra.contactAvatar : "";
+  return contactId || contactName
+    ? {
+        contactId,
+        contactName: contactName || "微信朋友",
+        contactAvatar,
+      }
+    : null;
+}
+
 function formatFileSize(size: number) {
   if (!Number.isFinite(size) || size <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -7638,6 +7649,14 @@ function formatChatMessageForApi(
     hasImageRecognitionMcp?: boolean;
   } = {},
 ) {
+  const wechatMetadata = getWechatMessageMetadata(message);
+  if (wechatMetadata) {
+    const speaker =
+      message.role === "assistant"
+        ? wechatMetadata.contactName
+        : userProfile.nickname.trim() || "我";
+    return `【微信 · ${speaker}】：${message.content}`;
+  }
   if (message.role !== "user") {
     return message.content;
   }
@@ -25536,6 +25555,183 @@ export function App() {
   };
   sendChatMessageRef.current = sendChatMessage;
 
+  const sendWechatMessage = async (contact: WechatContact, rawContent: string) => {
+    const content = rawContent.trim();
+    if (!content) throw new Error("微信消息为空。");
+    if (activeChatAbortControllerRef.current || chatStatus.status === "loading") {
+      throw new Error("当前回复完成后才能发送微信消息。");
+    }
+
+    const requestModelId = getEffectiveProviderModelId(chatProvider);
+    if (!chatProvider?.apiBaseUrl || !requestModelId) {
+      throw new Error("请先在 LLM 设置中配置供应商 API 地址和模型。");
+    }
+    if (isImageGenerationModelId(requestModelId)) {
+      throw new Error("微信聊天需要使用可返回文本的模型。");
+    }
+
+    const contactPersona = contact.personaId
+      ? personas.find((persona) => persona.id === contact.personaId)
+      : undefined;
+    const wechatExtra = {
+      contactId: contact.id,
+      contactName: contact.name,
+      contactAvatar: contact.avatarImage,
+      channel: "wechat",
+    };
+    const userMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content,
+      createdAt: new Date().toISOString(),
+      sender: { kind: "user" },
+      source: "wechat",
+      extra: wechatExtra,
+    };
+    const initialMessages = [...chatMessagesRef.current, userMessage];
+    chatMessagesRef.current = initialMessages;
+    setChatMessages(initialMessages);
+
+    const controller = beginChatGeneration();
+    const { signal } = controller;
+    try {
+      setChatStatus({ status: "loading", message: `正在与 ${contact.name} 微信聊天...` });
+      const contextCard = activeSessionRoleplayCard ?? activeRoleplayCard ?? null;
+      const characterCardPrompt = contextCard
+        ? buildCharacterCardPrompt(contextCard, userProfile.nickname.trim() || "用户")
+        : "";
+      const triggerMessages = initialMessages.map((message) => ({
+        role: message.role,
+        content: message.content,
+      }));
+      const worldBookSystemPrompt = buildWorldBookPrompt(
+        worldBooks,
+        activeWorldBookIds,
+        triggerMessages,
+        {
+          userName: userProfile.nickname,
+          characterName: contact.name,
+        },
+      );
+      const characterWorldBook = contextCard
+        ? resolveCharacterWorldBook(contextCard, worldBooks)
+        : null;
+      const characterWorldBookPrompt =
+        characterWorldBook && !activeWorldBookIds.includes(characterWorldBook.id)
+          ? buildWorldBookPrompt(
+              [characterWorldBook],
+              [characterWorldBook.id],
+              triggerMessages,
+              {
+                userName: userProfile.nickname,
+                characterName: contact.name,
+              },
+            )
+          : "";
+      const sharedMessages: WechatSharedContextMessage[] = initialMessages.map((message) => {
+        const metadata = getWechatMessageMetadata(message);
+        return {
+          role: message.role,
+          content: message.content,
+          ...(message.source === "wechat" ? { source: "wechat" as const } : {}),
+          ...(metadata?.contactId ? { contactId: metadata.contactId } : {}),
+          ...(metadata?.contactName ? { contactName: metadata.contactName } : {}),
+          createdAt: message.createdAt,
+        };
+      });
+      const requestMessages = buildWechatRequestMessages({
+        contact,
+        persona: contactPersona,
+        user: {
+          nickname: userProfile.nickname,
+          bio: userProfile.bio,
+        },
+        sharedMessages,
+        characterCardPrompt,
+        worldBookPrompt: [worldBookSystemPrompt, characterWorldBookPrompt]
+          .filter(Boolean)
+          .join("\n\n"),
+        statusBarPrompt: buildStatusBarConversationSystemPrompt(activeStatusBarState),
+      });
+      const compressedMessages = await prepareContextCompressedMessages({
+        messages: substituteUserNicknameInApiMessages(requestMessages, userProfile.nickname),
+        provider: chatProvider,
+        modelId: requestModelId,
+        tools: [],
+        requestedOutputTokens: 0,
+        signal,
+        sessionId: activeChatSessionIdRef.current,
+      });
+      throwIfChatAborted(signal);
+      const response = await fetch("/api/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal,
+        body: JSON.stringify({
+          ...buildProviderApiTarget(chatProvider),
+          sessionId: activeChatSessionIdRef.current,
+          request: {
+            model: requestModelId,
+            messages: compressedMessages,
+            temperature: contactPersona?.modelProfile.temperature ?? 0.72,
+            stream: false,
+          },
+        }),
+      });
+      const payload = (await readChatCompletionPayload(response)) as {
+        error?: string | { message?: string };
+        choices?: Array<{ message?: ChatApiMessage }>;
+        output_text?: string;
+      };
+      throwIfChatAborted(signal);
+      if (!response.ok) {
+        const errorMessage = getChatApiErrorMessage(payload);
+        throw new Error(
+          errorMessage
+            ? `微信请求失败：${response.status} ${errorMessage}`
+            : `微信请求失败：${response.status}`,
+        );
+      }
+      const reply =
+        getChatApiMessageText(payload.choices?.[0]?.message).trim() ||
+        payload.output_text?.trim() ||
+        "";
+      if (!reply) throw new Error("微信回复中没有可显示的文本。");
+
+      const assistantMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: reply,
+        createdAt: new Date().toISOString(),
+        ...(contactPersona
+          ? { sender: { kind: "persona" as const, personaId: contactPersona.id } }
+          : {}),
+        source: "wechat",
+        extra: wechatExtra,
+      };
+      const completedMessages = [...chatMessagesRef.current, assistantMessage];
+      chatMessagesRef.current = completedMessages;
+      setChatMessages(completedMessages);
+      setChatStatus({ status: "success", message: `${contact.name} 已回复。` });
+      return reply;
+    } catch (error) {
+      if (isChatAbortError(error)) {
+        setChatStatus({ status: "success", message: "已停止微信回复。" });
+      } else {
+        setChatStatus({
+          status: "error",
+          message: error instanceof Error ? error.message : "微信消息发送失败。",
+        });
+      }
+      throw error;
+    } finally {
+      if (activeChatAbortControllerRef.current === controller) {
+        activeChatAbortControllerRef.current = null;
+        setChatGenerationState("idle");
+      }
+    }
+  };
+
   const respondToChatChoice = (
     messageId: string,
     value: string,
@@ -32573,14 +32769,23 @@ export function App() {
                         chatMode === "persona" ? activePersona : undefined,
                       )
                     : null;
+                const wechatMetadata = getWechatMessageMetadata(message);
                 const messageName =
-                  message.role === "user"
+                  wechatMetadata
+                    ? message.role === "assistant"
+                      ? wechatMetadata.contactName
+                      : `${userProfile.nickname || "User"} · 微信`
+                    : message.role === "user"
                     ? getChatSenderName(messageSender, personas, userProfile)
                     : chatMode === "roleplay" && activeSessionRoleplayCard
                       ? activeSessionRoleplayCard.name
                       : assistantPersona?.name ?? "AI";
                 const messageAvatarImage =
-                  message.role === "user"
+                  wechatMetadata
+                    ? message.role === "assistant"
+                      ? wechatMetadata.contactAvatar || assistantPersona?.avatarImage || ""
+                      : userProfile.avatarImage
+                    : message.role === "user"
                     ? getChatSenderAvatarImage(messageSender, personas, userProfile)
                     : chatMode === "roleplay" && activeSessionRoleplayCard
                       ? activeSessionRoleplayCard.avatarDataUrl
@@ -33677,6 +33882,11 @@ export function App() {
           onBrowserComment={addBrowserCommentToComposer}
           terminalWorkspaceKey={activeChatSession?.workspaceKey ?? DEFAULT_WORKSPACE_KEY}
           terminalWorkspacePath={activeChatSession?.workspacePath ?? ""}
+          personas={personas}
+          userProfile={userProfile}
+          chatGenerationBusy={chatGenerationState !== "idle"}
+          chatSessionId={activeChatSessionId}
+          onWechatSendMessage={sendWechatMessage}
         />
       </PortfolioDesktopWindow>
   ) : null;
