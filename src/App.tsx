@@ -261,7 +261,10 @@ import {
   buildWechatRequestMessages,
   splitWechatReply,
   type WechatContact,
+  type WechatSendMessageInput,
+  type WechatSendMessageResult,
   type WechatSharedContextMessage,
+  type WechatStoredMessage,
 } from "./wechatSidebarUtils";
 import type { FileBrowserSource, FileBrowserSystemAction } from "./FilesSidebarPanel";
 import { scopeWorkspaceHandleToSession } from "./fileBrowserUtils";
@@ -17886,6 +17889,25 @@ export function App() {
     () => chatMessages.find((message) => message.id === chatMessageMenu?.messageId),
     [chatMessageMenu?.messageId, chatMessages],
   );
+  const syncedWechatMessages = useMemo<WechatStoredMessage[]>(
+    () =>
+      chatMessages.flatMap((message) => {
+        const metadata = getWechatMessageMetadata(message);
+        if (!metadata?.contactId || (message.role !== "user" && message.role !== "assistant")) {
+          return [];
+        }
+        return [
+          {
+            id: message.id,
+            contactId: metadata.contactId,
+            role: message.role,
+            content: message.content,
+            createdAt: message.createdAt,
+          },
+        ];
+      }),
+    [chatMessages],
+  );
   const activeSessionMemoryEnabled = Boolean(
     activePersona && activeChatSession?.memoryPersonaIds.includes(activePersona.id),
   );
@@ -25556,8 +25578,11 @@ export function App() {
   };
   sendChatMessageRef.current = sendChatMessage;
 
-  const sendWechatMessage = async (contact: WechatContact, rawContent: string) => {
-    const content = rawContent.trim();
+  const sendWechatMessage = async (
+    contact: WechatContact,
+    outgoingMessage: WechatSendMessageInput,
+  ): Promise<WechatSendMessageResult> => {
+    const content = outgoingMessage.content.trim();
     if (!content) throw new Error("微信消息为空。");
     if (activeChatAbortControllerRef.current || chatStatus.status === "loading") {
       throw new Error("当前回复完成后才能发送微信消息。");
@@ -25581,10 +25606,10 @@ export function App() {
       channel: "wechat",
     };
     const userMessage: ChatMessage = {
-      id: crypto.randomUUID(),
+      id: outgoingMessage.id,
       role: "user",
       content,
-      createdAt: new Date().toISOString(),
+      createdAt: outgoingMessage.createdAt,
       sender: { kind: "user" },
       source: "wechat",
       extra: wechatExtra,
@@ -25715,7 +25740,11 @@ export function App() {
       chatMessagesRef.current = completedMessages;
       setChatMessages(completedMessages);
       setChatStatus({ status: "success", message: `${contact.name} 已回复。` });
-      return reply;
+      return {
+        id: assistantMessage.id,
+        content: reply,
+        createdAt: assistantMessage.createdAt,
+      };
     } catch (error) {
       if (isChatAbortError(error)) {
         setChatStatus({ status: "success", message: "已停止微信回复。" });
@@ -33888,6 +33917,7 @@ export function App() {
           userProfile={userProfile}
           chatGenerationBusy={chatGenerationState !== "idle"}
           chatSessionId={activeChatSessionId}
+          syncedWechatMessages={syncedWechatMessages}
           onWechatSendMessage={sendWechatMessage}
         />
       </PortfolioDesktopWindow>

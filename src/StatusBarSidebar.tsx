@@ -51,7 +51,12 @@ import {
   type StatusBarState,
 } from "./statusBarUtils";
 import type { AgentPersona } from "./types";
-import type { WechatContact } from "./wechatSidebarUtils";
+import type {
+  WechatContact,
+  WechatSendMessageInput,
+  WechatSendMessageResult,
+  WechatStoredMessage,
+} from "./wechatSidebarUtils";
 import "./status-bar.css";
 
 type StatusBarItem = StatusBarState["items"][number];
@@ -89,7 +94,11 @@ export type StatusBarSidebarProps = {
   };
   chatGenerationBusy?: boolean;
   chatSessionId: string;
-  onWechatSendMessage: (contact: WechatContact, content: string) => Promise<string>;
+  syncedWechatMessages: WechatStoredMessage[];
+  onWechatSendMessage: (
+    contact: WechatContact,
+    message: WechatSendMessageInput,
+  ) => Promise<WechatSendMessageResult>;
 };
 
 type StatusBarCssProperties = CSSProperties & {
@@ -823,6 +832,7 @@ export function StatusBarSidebar({
   userProfile,
   chatGenerationBusy = false,
   chatSessionId,
+  syncedWechatMessages,
   onWechatSendMessage,
 }: StatusBarSidebarProps) {
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
@@ -1997,6 +2007,7 @@ export function StatusBarSidebar({
             onSendMessage={onWechatSendMessage}
             personas={personas}
             sessionId={chatSessionId}
+            syncedMessages={syncedWechatMessages}
             userProfile={userProfile}
           />
         ) : activeToolId === "terminal" ? (

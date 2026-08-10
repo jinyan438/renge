@@ -37,7 +37,10 @@ import {
   getWechatSessionStore,
   normalizeWechatStore,
   splitWechatReply,
+  syncWechatSessionMessages,
   type WechatContact,
+  type WechatSendMessageInput,
+  type WechatSendMessageResult,
   type WechatSessionStore,
   type WechatStore,
   type WechatStoredMessage,
@@ -67,9 +70,13 @@ type WechatSidebarProps = {
   };
   sessionId: string;
   busy?: boolean;
+  syncedMessages: WechatStoredMessage[];
   onBack: () => void;
   onClose: () => void;
-  onSendMessage: (contact: WechatContact, content: string) => Promise<string>;
+  onSendMessage: (
+    contact: WechatContact,
+    message: WechatSendMessageInput,
+  ) => Promise<WechatSendMessageResult>;
 };
 
 function loadWechatStore(sessionId: string): WechatStore {
@@ -170,6 +177,7 @@ export function WechatSidebar({
   userProfile,
   sessionId,
   busy = false,
+  syncedMessages,
   onBack,
   onClose,
   onSendMessage,
@@ -253,6 +261,14 @@ export function WechatSidebar({
   ) => {
     setStore((current) => updateWechatSessionStore(current, sessionId, updater));
   };
+
+  useEffect(() => {
+    setStore((current) =>
+      updateWechatSessionStore(current, sessionId, (currentSession) =>
+        syncWechatSessionMessages(currentSession, syncedMessages),
+      ),
+    );
+  }, [sessionId, syncedMessages]);
 
   useEffect(() => {
     if (view !== "chat") return;
@@ -425,17 +441,28 @@ export function WechatSidebar({
     setMoreOpen(false);
     setSendingContactId(activeContact.id);
     try {
-      const reply = await onSendMessage(activeContact, content);
+      const reply = await onSendMessage(activeContact, {
+        id: userMessage.id,
+        content: userMessage.content,
+        createdAt: userMessage.createdAt,
+      });
       const assistantMessage: WechatStoredMessage = {
-        id: crypto.randomUUID(),
+        id: reply.id,
         contactId: activeContact.id,
         role: "assistant",
-        content: reply,
-        createdAt: new Date().toISOString(),
+        content: reply.content,
+        createdAt: reply.createdAt,
       };
       updateCurrentSession((current) =>
         current.contacts.some((contact) => contact.id === activeContact.id)
-          ? { ...current, messages: [...current.messages, assistantMessage] }
+          ? {
+              ...current,
+              messages: current.messages.some((message) => message.id === assistantMessage.id)
+                ? current.messages.map((message) =>
+                    message.id === assistantMessage.id ? assistantMessage : message,
+                  )
+                : [...current.messages, assistantMessage],
+            }
           : current,
       );
     } catch (error) {

@@ -37,6 +37,18 @@ export type WechatStoredMessage = {
   failed?: boolean;
 };
 
+export type WechatSendMessageInput = {
+  id: string;
+  content: string;
+  createdAt: string;
+};
+
+export type WechatSendMessageResult = {
+  id: string;
+  content: string;
+  createdAt: string;
+};
+
 export type WechatSessionStore = {
   contacts: WechatContact[];
   messages: WechatStoredMessage[];
@@ -196,11 +208,16 @@ export function updateWechatSessionStore(
   updater: (current: WechatSessionStore) => WechatSessionStore,
 ): WechatStore {
   if (!sessionId) return store;
+  const currentSession = getWechatSessionStore(store, sessionId);
+  const nextSession = updater(currentSession);
+  if (store.sessions[sessionId] === currentSession && nextSession === currentSession) {
+    return store;
+  }
   return {
     ...store,
     sessions: {
       ...store.sessions,
-      [sessionId]: updater(getWechatSessionStore(store, sessionId)),
+      [sessionId]: nextSession,
     },
   };
 }
@@ -397,4 +414,49 @@ export function splitWechatReply(content: string) {
     .flatMap(cleanWechatReplyLine)
     .filter(Boolean);
   return (lines.length > 0 ? lines : ["嗯。"]).slice(0, 3);
+}
+
+export function syncWechatSessionMessages(
+  sessionStore: WechatSessionStore,
+  syncedMessages: WechatStoredMessage[],
+): WechatSessionStore {
+  const contactIds = new Set(sessionStore.contacts.map((contact) => contact.id));
+  const existingById = new Map(
+    sessionStore.messages.map((message) => [message.id, message]),
+  );
+  const messages = syncedMessages
+    .filter(
+      (message) =>
+        contactIds.has(message.contactId) &&
+        (message.role === "user" || message.role === "assistant") &&
+        Boolean(message.content.trim()),
+    )
+    .map((message) => {
+      const existing = existingById.get(message.id);
+      return {
+        id: message.id,
+        contactId: message.contactId,
+        role: message.role,
+        content:
+          message.role === "assistant"
+            ? splitWechatReply(message.content).join("\n")
+            : message.content.trim(),
+        createdAt: message.createdAt,
+        ...(message.failed || existing?.failed ? { failed: true } : {}),
+      } satisfies WechatStoredMessage;
+    });
+  const unchanged =
+    messages.length === sessionStore.messages.length &&
+    messages.every((message, index) => {
+      const current = sessionStore.messages[index];
+      return (
+        current?.id === message.id &&
+        current.contactId === message.contactId &&
+        current.role === message.role &&
+        current.content === message.content &&
+        current.createdAt === message.createdAt &&
+        Boolean(current.failed) === Boolean(message.failed)
+      );
+    });
+  return unchanged ? sessionStore : { ...sessionStore, messages };
 }

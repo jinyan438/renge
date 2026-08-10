@@ -6,6 +6,7 @@ import {
   getWechatSessionStore,
   normalizeWechatStore,
   splitWechatReply,
+  syncWechatSessionMessages,
   updateWechatSessionStore,
 } from "../src/wechatSidebarUtils.ts";
 
@@ -251,4 +252,70 @@ test("wechat contacts, messages and active contact stay isolated per host chat s
   assert.deepEqual(getWechatSessionStore(store, "session-b").contacts, [sessionBContact]);
   assert.deepEqual(getWechatSessionStore(store, "session-b").messages, []);
   assert.deepEqual(getWechatSessionStore(store, "missing-session").contacts, []);
+});
+
+test("main chat edits and deletions synchronize into phone messages", () => {
+  const sessionStore = {
+    contacts: [contact],
+    activeContactId: contact.id,
+    messages: [
+      {
+        id: "legacy-phone-user-id",
+        contactId: contact.id,
+        role: "user",
+        content: "修改前",
+        createdAt: "2026-08-10T08:06:00.000Z",
+      },
+      {
+        id: "legacy-phone-assistant-id",
+        contactId: contact.id,
+        role: "assistant",
+        content: "旧回复",
+        createdAt: "2026-08-10T08:07:00.000Z",
+      },
+    ],
+  };
+  const edited = syncWechatSessionMessages(sessionStore, [
+    {
+      id: "main-user-id",
+      contactId: contact.id,
+      role: "user",
+      content: "左侧修改后的消息",
+      createdAt: "2026-08-10T08:06:00.000Z",
+    },
+    {
+      id: "main-assistant-id",
+      contactId: contact.id,
+      role: "assistant",
+      content: "她笑着回他：“同步后的回复。”",
+      createdAt: "2026-08-10T08:07:00.000Z",
+    },
+    {
+      id: "deleted-contact-message",
+      contactId: "missing-contact",
+      role: "assistant",
+      content: "不应恢复已删除联系人的消息",
+      createdAt: "2026-08-10T08:08:00.000Z",
+    },
+  ]);
+
+  assert.deepEqual(
+    edited.messages.map((message) => ({ id: message.id, content: message.content })),
+    [
+      { id: "main-user-id", content: "左侧修改后的消息" },
+      { id: "main-assistant-id", content: "同步后的回复。" },
+    ],
+  );
+
+  const afterDelete = syncWechatSessionMessages(edited, [
+    {
+      id: "main-assistant-id",
+      contactId: contact.id,
+      role: "assistant",
+      content: "同步后的回复。",
+      createdAt: "2026-08-10T08:07:00.000Z",
+    },
+  ]);
+  assert.deepEqual(afterDelete.messages.map((message) => message.id), ["main-assistant-id"]);
+  assert.deepEqual(syncWechatSessionMessages(afterDelete, []).messages, []);
 });
