@@ -16,6 +16,7 @@ import {
   Send,
   Signal,
   Smile,
+  Sparkles,
   Trash2,
   UserPlus,
   UserRound,
@@ -36,6 +37,7 @@ import type { AgentPersona } from "./types";
 import {
   getWechatSessionStore,
   normalizeWechatStore,
+  shouldGenerateWechatProactively,
   splitWechatReply,
   syncWechatSessionMessages,
   type WechatContact,
@@ -73,9 +75,13 @@ type WechatSidebarProps = {
   syncedMessages: WechatStoredMessage[];
   onBack: () => void;
   onClose: () => void;
-  onSendMessage: (
+  onQueueMessage: (
     contact: WechatContact,
     message: WechatSendMessageInput,
+  ) => void;
+  onGenerateReply: (
+    contact: WechatContact,
+    proactive: boolean,
   ) => Promise<WechatSendMessageResult>;
 };
 
@@ -180,7 +186,8 @@ export function WechatSidebar({
   syncedMessages,
   onBack,
   onClose,
-  onSendMessage,
+  onQueueMessage,
+  onGenerateReply,
 }: WechatSidebarProps) {
   const [store, setStore] = useState(() => loadWechatStore(sessionId));
   const [view, setView] = useState<"list" | "chat" | "contact">("list");
@@ -191,7 +198,7 @@ export function WechatSidebar({
   const [draft, setDraft] = useState<ContactDraft>(createContactDraft);
   const [draftError, setDraftError] = useState("");
   const [chatInput, setChatInput] = useState("");
-  const [sendingContactId, setSendingContactId] = useState("");
+  const [generatingContactId, setGeneratingContactId] = useState("");
   const [chatError, setChatError] = useState("");
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -226,7 +233,7 @@ export function WechatSidebar({
     setDraft(createContactDraft());
     setDraftError("");
     setChatInput("");
-    setSendingContactId("");
+    setGeneratingContactId("");
     setChatError("");
     setEmojiOpen(false);
     setMoreOpen(false);
@@ -277,7 +284,7 @@ export function WechatSidebar({
       if (body) body.scrollTop = body.scrollHeight;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeMessages.length, sendingContactId, view]);
+  }, [activeMessages.length, generatingContactId, view]);
 
   const contactsWithLastMessage = useMemo(
     () =>
@@ -317,7 +324,7 @@ export function WechatSidebar({
     setMenuOpen(false);
     setChatInput("");
     setChatError("");
-    setSendingContactId("");
+    setGeneratingContactId("");
     setEmojiOpen(false);
     setMoreOpen(false);
     setView("contact");
@@ -414,16 +421,16 @@ export function WechatSidebar({
     setDraftError("");
     setChatInput("");
     setChatError("");
-    setSendingContactId("");
+    setGeneratingContactId("");
     setEmojiOpen(false);
     setMoreOpen(false);
     setMenuOpen(false);
     setView("list");
   };
 
-  const sendMessage = async () => {
+  const sendMessage = () => {
     const content = chatInput.trim();
-    if (!activeContact || !content || sendingContactId || busy) return;
+    if (!activeContact || !content || generatingContactId) return;
     const userMessage: WechatStoredMessage = {
       id: crypto.randomUUID(),
       contactId: activeContact.id,
@@ -439,13 +446,32 @@ export function WechatSidebar({
     setChatError("");
     setEmojiOpen(false);
     setMoreOpen(false);
-    setSendingContactId(activeContact.id);
     try {
-      const reply = await onSendMessage(activeContact, {
+      onQueueMessage(activeContact, {
         id: userMessage.id,
         content: userMessage.content,
         createdAt: userMessage.createdAt,
       });
+    } catch (error) {
+      updateCurrentSession((current) => ({
+        ...current,
+        messages: current.messages.map((message) =>
+          message.id === userMessage.id ? { ...message, failed: true } : message,
+        ),
+      }));
+      setChatError(error instanceof Error ? error.message : "消息发送失败。 ");
+    }
+  };
+
+  const generateReply = async () => {
+    if (!activeContact || generatingContactId || busy) return;
+    const proactive = shouldGenerateWechatProactively(activeMessages);
+    setChatError("");
+    setEmojiOpen(false);
+    setMoreOpen(false);
+    setGeneratingContactId(activeContact.id);
+    try {
+      const reply = await onGenerateReply(activeContact, proactive);
       const assistantMessage: WechatStoredMessage = {
         id: reply.id,
         contactId: activeContact.id,
@@ -466,22 +492,16 @@ export function WechatSidebar({
           : current,
       );
     } catch (error) {
-      updateCurrentSession((current) => ({
-        ...current,
-        messages: current.messages.map((message) =>
-          message.id === userMessage.id ? { ...message, failed: true } : message,
-        ),
-      }));
-      setChatError(error instanceof Error ? error.message : "消息发送失败。 ");
+      setChatError(error instanceof Error ? error.message : "微信回复生成失败。 ");
     } finally {
-      setSendingContactId("");
+      setGeneratingContactId("");
     }
   };
 
   const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
-    void sendMessage();
+    sendMessage();
   };
 
   const renderContactRows = (contactsOnly = false) => (
@@ -675,7 +695,7 @@ export function WechatSidebar({
                 </div>
               ));
             })}
-            {sendingContactId === activeContact.id ? (
+            {generatingContactId === activeContact.id ? (
               <div className="wechat-message-row incoming">
                 <ContactAvatar contact={activeContact} />
                 <div className="wechat-message-bubble wechat-typing"><i /><i /><i /></div>
@@ -685,18 +705,21 @@ export function WechatSidebar({
           {chatError ? <div className="wechat-chat-error">{chatError}</div> : null}
           <footer className="wechat-composer">
             <div className="wechat-composer-row">
-              <button aria-label="语音" title="语音" type="button"><Mic size={22} /></button>
-              <textarea
-                aria-label="微信消息"
-                disabled={busy || Boolean(sendingContactId)}
-                onChange={(event) => setChatInput(event.target.value)}
-                onKeyDown={handleComposerKeyDown}
-                rows={1}
-                value={chatInput}
-              />
+              <button aria-label="生成回复" disabled={busy || Boolean(generatingContactId)} onClick={() => void generateReply()} title="生成回复" type="button"><Sparkles size={21} /></button>
+              <div className="wechat-input-shell">
+                <textarea
+                  aria-label="微信消息"
+                  disabled={Boolean(generatingContactId)}
+                  onChange={(event) => setChatInput(event.target.value)}
+                  onKeyDown={handleComposerKeyDown}
+                  rows={1}
+                  value={chatInput}
+                />
+                <button aria-label="语音" title="语音" type="button"><Mic size={21} /></button>
+              </div>
               <button aria-expanded={emojiOpen} aria-label="表情" onClick={() => { setEmojiOpen((current) => !current); setMoreOpen(false); }} title="表情" type="button"><Smile size={23} /></button>
               {chatInput.trim() ? (
-                <button className="wechat-send-button" disabled={busy || Boolean(sendingContactId)} aria-label="发送" onClick={() => void sendMessage()} title="发送" type="button"><Send size={17} /></button>
+                <button className="wechat-send-button" disabled={Boolean(generatingContactId)} aria-label="发送" onClick={sendMessage} title="发送" type="button"><Send size={17} /></button>
               ) : (
                 <button aria-expanded={moreOpen} aria-label="更多" onClick={() => { setMoreOpen((current) => !current); setEmojiOpen(false); }} title="更多" type="button"><Plus size={24} /></button>
               )}

@@ -5,6 +5,7 @@ import {
   createEmptyWechatStore,
   getWechatSessionStore,
   normalizeWechatStore,
+  shouldGenerateWechatProactively,
   splitWechatReply,
   syncWechatSessionMessages,
   updateWechatSessionStore,
@@ -99,6 +100,33 @@ test("wechat prompt builder has no slots for tavern presets or tool capability p
 
   assert.doesNotMatch(prompt, /MCP|终端工具|浏览器工具|workspace tool/i);
   assert.doesNotMatch(prompt, /酒馆预设|tool_choice|chat_present_options/i);
+});
+
+test("wechat proactive generation asks the contact to initiate a message", () => {
+  const messages = buildWechatRequestMessages({
+    contact,
+    user: { nickname: "用户", bio: "" },
+    sharedMessages: [],
+    proactive: true,
+  });
+
+  assert.match(messages[0].content, /没有新的用户微信消息/);
+  assert.match(messages[0].content, /主动发起一条自然/);
+  assert.equal(messages.length, 1);
+});
+
+test("wechat generation is proactive only when no user message is queued", () => {
+  assert.equal(shouldGenerateWechatProactively([]), true);
+  assert.equal(shouldGenerateWechatProactively([{ role: "assistant" }]), true);
+  assert.equal(shouldGenerateWechatProactively([{ role: "user" }]), false);
+  assert.equal(
+    shouldGenerateWechatProactively([{ role: "user" }, { role: "assistant" }]),
+    true,
+  );
+  assert.equal(
+    shouldGenerateWechatProactively([{ role: "assistant" }, { role: "user" }]),
+    false,
+  );
 });
 
 test("wechat prompt treats roleplay prose as background instead of assistant style", () => {

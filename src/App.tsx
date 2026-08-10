@@ -25578,14 +25578,36 @@ export function App() {
   };
   sendChatMessageRef.current = sendChatMessage;
 
-  const sendWechatMessage = async (
+  const queueWechatMessage = (
     contact: WechatContact,
     outgoingMessage: WechatSendMessageInput,
-  ): Promise<WechatSendMessageResult> => {
+  ) => {
     const content = outgoingMessage.content.trim();
     if (!content) throw new Error("微信消息为空。");
+    const wechatExtra = {
+      contactId: contact.id,
+      contactName: contact.name,
+      contactAvatar: contact.avatarImage,
+      channel: "wechat",
+    };
+    const userMessage: ChatMessage = {
+      id: outgoingMessage.id,
+      role: "user",
+      content,
+      createdAt: outgoingMessage.createdAt,
+      sender: { kind: "user" },
+      source: "wechat",
+      extra: wechatExtra,
+    };
+    commitChatMessages((current) => [...current, userMessage]);
+  };
+
+  const generateWechatReply = async (
+    contact: WechatContact,
+    proactive: boolean,
+  ): Promise<WechatSendMessageResult> => {
     if (activeChatAbortControllerRef.current || chatStatus.status === "loading") {
-      throw new Error("当前回复完成后才能发送微信消息。");
+      throw new Error("当前回复完成后才能生成微信回复。");
     }
 
     const requestModelId = getEffectiveProviderModelId(chatProvider);
@@ -25605,18 +25627,7 @@ export function App() {
       contactAvatar: contact.avatarImage,
       channel: "wechat",
     };
-    const userMessage: ChatMessage = {
-      id: outgoingMessage.id,
-      role: "user",
-      content,
-      createdAt: outgoingMessage.createdAt,
-      sender: { kind: "user" },
-      source: "wechat",
-      extra: wechatExtra,
-    };
-    const initialMessages = [...chatMessagesRef.current, userMessage];
-    chatMessagesRef.current = initialMessages;
-    setChatMessages(initialMessages);
+    const initialMessages = [...chatMessagesRef.current];
 
     const controller = beginChatGeneration();
     const { signal } = controller;
@@ -25678,6 +25689,7 @@ export function App() {
           .filter(Boolean)
           .join("\n\n"),
         statusBarPrompt: buildStatusBarConversationSystemPrompt(activeStatusBarState),
+        proactive,
       });
       const compressedMessages = await prepareContextCompressedMessages({
         messages: substituteUserNicknameInApiMessages(requestMessages, userProfile.nickname),
@@ -33918,7 +33930,8 @@ export function App() {
           chatGenerationBusy={chatGenerationState !== "idle"}
           chatSessionId={activeChatSessionId}
           syncedWechatMessages={syncedWechatMessages}
-          onWechatSendMessage={sendWechatMessage}
+          onWechatQueueMessage={queueWechatMessage}
+          onWechatGenerateReply={generateWechatReply}
         />
       </PortfolioDesktopWindow>
   ) : null;

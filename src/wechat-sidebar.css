@@ -605,12 +605,17 @@
   background: rgba(0, 0, 0, 0.06);
 }
 
+.wechat-input-shell {
+  position: relative;
+  min-width: 0;
+}
+
 .wechat-composer-row textarea {
   width: 100%;
   min-height: 36px;
   max-height: 80px;
   resize: none;
-  padding: 8px 9px;
+  padding: 8px 42px 8px 9px;
   border: 0;
   border-radius: 4px;
   outline: 0;
@@ -618,6 +623,27 @@
   background: #ffffff;
   font-size: 14px;
   line-height: 20px;
+}
+
+.wechat-input-shell > button {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  color: #656565;
+  background: transparent;
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
+.wechat-input-shell > button:hover {
+  background: rgba(0, 0, 0, 0.06);
 }
 
 .wechat-composer-row button.wechat-send-button {
@@ -782,4 +808,3 @@
     animation: none;
   }
 }
-

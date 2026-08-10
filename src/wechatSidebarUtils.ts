@@ -60,6 +60,13 @@ export type WechatStore = {
   sessions: Record<string, WechatSessionStore>;
 };
 
+export function shouldGenerateWechatProactively(
+  messages: Array<Pick<WechatStoredMessage, "role">>,
+) {
+  const lastMessage = messages[messages.length - 1];
+  return !lastMessage || lastMessage.role !== "user";
+}
+
 type LegacyWechatStore = Partial<WechatSessionStore>;
 
 export function createEmptyWechatSessionStore(): WechatSessionStore {
@@ -249,6 +256,7 @@ export type BuildWechatRequestOptions = {
   characterCardPrompt?: string;
   worldBookPrompt?: string;
   statusBarPrompt?: string;
+  proactive?: boolean;
 };
 
 function formatContactIdentity(contact: WechatContact, persona?: AgentPersona) {
@@ -327,6 +335,7 @@ export function buildWechatRequestMessages({
   characterCardPrompt = "",
   worldBookPrompt = "",
   statusBarPrompt = "",
+  proactive = false,
 }: BuildWechatRequestOptions): WechatRequestMessage[] {
   const currentWechatMessages = sharedMessages.filter(
     (message) => message.content.trim() && isCurrentContactWechatMessage(message, contact),
@@ -354,6 +363,9 @@ export function buildWechatRequestMessages({
       : "",
     statusBarPrompt.trim(),
     "你能读取主会话与微信会话的共享上下文。带有其他联系人姓名的微信消息只作为背景，不要冒充其他联系人。当前联系人的微信消息才是对话记录。",
+    proactive
+      ? "当前没有新的用户微信消息，请由联系人主动发起一条自然、符合关系和上下文的微信消息。仍然只输出微信气泡正文，不要输出旁白。"
+      : "",
   ]
     .filter(Boolean)
     .join("\n\n");

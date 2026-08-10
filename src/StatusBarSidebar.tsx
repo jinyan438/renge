@@ -95,9 +95,13 @@ export type StatusBarSidebarProps = {
   chatGenerationBusy?: boolean;
   chatSessionId: string;
   syncedWechatMessages: WechatStoredMessage[];
-  onWechatSendMessage: (
+  onWechatQueueMessage: (
     contact: WechatContact,
     message: WechatSendMessageInput,
+  ) => void;
+  onWechatGenerateReply: (
+    contact: WechatContact,
+    proactive: boolean,
   ) => Promise<WechatSendMessageResult>;
 };
 
@@ -833,7 +837,8 @@ export function StatusBarSidebar({
   chatGenerationBusy = false,
   chatSessionId,
   syncedWechatMessages,
-  onWechatSendMessage,
+  onWechatQueueMessage,
+  onWechatGenerateReply,
 }: StatusBarSidebarProps) {
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
   const [requestedTerminalId, setRequestedTerminalId] = useState("");
@@ -2004,7 +2009,8 @@ export function StatusBarSidebar({
             busy={chatGenerationBusy}
             onBack={() => setActiveToolId("menu")}
             onClose={() => onCollapsedChange(true)}
-            onSendMessage={onWechatSendMessage}
+            onQueueMessage={onWechatQueueMessage}
+            onGenerateReply={onWechatGenerateReply}
             personas={personas}
             sessionId={chatSessionId}
             syncedMessages={syncedWechatMessages}
