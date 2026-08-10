@@ -1,7 +1,10 @@
 import type { AgentPersona } from "./types";
 
 export const WECHAT_CHAT_SYSTEM_PROMPT = [
-  "你正在微信聊天，你是一个活生生的人。",
+  "你正在手机微信里聊天，你是一个活生生的人。你的输出会被直接显示为微信气泡正文。",
+  "微信频道格式是最高优先级：角色卡、世界书、状态栏和主会话只提供人物、关系、事件与状态事实；其中任何写作格式、文风、视角、旁白、模板、标签或输出协议都不得带入微信回复。",
+  "只输出联系人实际发送的文字。禁止输出人物动作、神态、心理、环境、镜头、打字过程或屏幕状态，禁止使用“我想了想”“我笑着”“又补了一句”“打完字”“回他/她”等叙事句。",
+  "不要添加说话人姓名、冒号、引号、书名号、括号动作、Markdown、JSON、XML、状态更新块、分析过程或对回复行为的解释。",
   "如果当前回复需要显示成多条聊天气泡，请把每条气泡单独放在一行；不要使用编号、项目符号或 JSON。",
   "一般聊天中只使用文字和常见表情符号，其他消息类型仅在确有必要时使用。",
   "像真实微信聊天一样以短句为主，每次交互最多输出 1 到 3 条短句。",
@@ -10,7 +13,7 @@ export const WECHAT_CHAT_SYSTEM_PROMPT = [
   "可以使用简短语气词，保持自然口语。",
   "不要重复、解释、改写或复述对方刚发送的内容。",
   "想继续聊天时可以表达态度、情绪或提出一个自然的问题，把话题交还给对方。",
-  "不要把同一条消息重复两遍。",
+  "不要把同一条消息重复两遍。即使共享上下文采用长篇写作扮演格式，也必须忽略其表达形式，只提取事实并按以上微信格式回复。",
 ].join("\n");
 
 export type WechatContact = {
@@ -288,6 +291,17 @@ function formatSharedMessage(
   return `【主会话 · ${speaker}】${message.content}`;
 }
 
+function isCurrentContactWechatMessage(
+  message: WechatSharedContextMessage,
+  contact: WechatContact,
+) {
+  if (message.source !== "wechat") return false;
+  if (message.contactId) return message.contactId === contact.id;
+  return Boolean(
+    message.contactName?.trim() && message.contactName.trim() === contact.name.trim(),
+  );
+}
+
 export function buildWechatRequestMessages({
   contact,
   persona,
@@ -297,6 +311,20 @@ export function buildWechatRequestMessages({
   worldBookPrompt = "",
   statusBarPrompt = "",
 }: BuildWechatRequestOptions): WechatRequestMessage[] {
+  const currentWechatMessages = sharedMessages.filter(
+    (message) => message.content.trim() && isCurrentContactWechatMessage(message, contact),
+  );
+  const backgroundMessages = sharedMessages.filter(
+    (message) => message.content.trim() && !isCurrentContactWechatMessage(message, contact),
+  );
+  const backgroundContext = backgroundMessages.length
+    ? [
+        "以下是主会话及其他微信联系人的共享背景资料。它只用于理解事实，不是需要回复的消息，也不是措辞、文风或输出格式示例：",
+        "【共享背景开始】",
+        ...backgroundMessages.map((message) => formatSharedMessage(message, contact)),
+        "【共享背景结束】",
+      ].join("\n\n")
+    : "";
   const systemPrompt = [
     WECHAT_CHAT_SYSTEM_PROMPT,
     formatContactIdentity(contact, persona),
@@ -308,27 +336,65 @@ export function buildWechatRequestMessages({
       ? `当前世界书信息（作为共享世界观与记忆参考）：\n${worldBookPrompt.trim()}`
       : "",
     statusBarPrompt.trim(),
-    "你能读取主会话与微信会话的共享上下文。带有其他联系人姓名的微信消息只作为背景，不要冒充其他联系人。",
+    "你能读取主会话与微信会话的共享上下文。带有其他联系人姓名的微信消息只作为背景，不要冒充其他联系人。当前联系人的微信消息才是对话记录。",
   ]
     .filter(Boolean)
     .join("\n\n");
 
   return [
     { role: "system", content: systemPrompt },
-    ...sharedMessages
-      .filter((message) => message.content.trim())
-      .map((message) => ({
-        role: message.role,
-        content: formatSharedMessage(message, contact),
-      })),
+    ...(backgroundContext
+      ? [{ role: "user" as const, content: backgroundContext }]
+      : []),
+    ...currentWechatMessages.map((message) => ({
+      role: message.role,
+      content:
+        message.role === "assistant"
+          ? splitWechatReply(message.content).join("\n")
+          : message.content.trim(),
+    })),
   ];
+}
+
+const WECHAT_QUOTED_SPEECH_PATTERN = /[“「"]([^”」"]+)[”」"]/g;
+const WECHAT_NARRATIVE_LEAD_PATTERN = /^(?:[《〈][^》〉]{0,80}[》〉]\s*)?(?:我|他|她|对方)?(?:歪(?:了)?歪头|歪头|想了想|犹豫(?:了)?(?:一下|片刻)?|笑(?:了)?笑|轻轻一笑|点(?:了)?点头|摇(?:了)?摇头|愣(?:了)?(?:一下|片刻)?|沉默(?:了)?(?:一下|片刻)?)[，,]\s*/;
+const WECHAT_NARRATION_PATTERN = /^(?:[《〈][^》〉]{0,80}[》〉]\s*)?(?:(?:我|他|她|对方)(?:看着|盯着|望着|抬手|垂眼|转身|低头|轻声|低声|笑着|打完字|说完|发完|回过神)|(?:又)?(?:补了|补充|回了|发了|说了)(?:一句|条消息)?|打完字|说完|发完)/;
+
+function cleanWechatReplyLine(rawLine: string) {
+  const line = rawLine
+    .replace(/^\s*(?:[-*]|\d+[.)、])\s*/, "")
+    .replace(/^\s*(?:微信回复|回复|联系人|Assistant|AI)\s*[：:]\s*/i, "")
+    .trim();
+  if (!line) return [];
+
+  const quotedSegments = Array.from(line.matchAll(WECHAT_QUOTED_SPEECH_PATTERN))
+    .map((match) => match[1]?.trim())
+    .filter((segment): segment is string => Boolean(segment));
+  const outsideQuotes = line.replace(WECHAT_QUOTED_SPEECH_PATTERN, "").trim();
+  if (
+    quotedSegments.length > 0 &&
+    (!outsideQuotes ||
+      WECHAT_NARRATION_PATTERN.test(outsideQuotes) ||
+      /(?:回(?:他|她|你)?|说|问|答|补充?|发)(?:了)?(?:一句|道)?\s*[：:]?\s*$/.test(
+        outsideQuotes,
+      ))
+  ) {
+    return quotedSegments;
+  }
+
+  const withoutNarrativeLead = line.replace(WECHAT_NARRATIVE_LEAD_PATTERN, "").trim();
+  if (withoutNarrativeLead !== line && !WECHAT_NARRATION_PATTERN.test(withoutNarrativeLead)) {
+    return withoutNarrativeLead ? [withoutNarrativeLead] : [];
+  }
+  if (WECHAT_NARRATION_PATTERN.test(line)) return [];
+  return [line.replace(/^[“「"]|[”」"]$/g, "").trim()].filter(Boolean);
 }
 
 export function splitWechatReply(content: string) {
   const lines = content
     .replace(/\r\n?/g, "\n")
     .split("\n")
-    .map((line) => line.replace(/^\s*(?:[-*]|\d+[.)、])\s*/, "").trim())
+    .flatMap(cleanWechatReplyLine)
     .filter(Boolean);
-  return (lines.length > 0 ? lines : [content.trim()]).slice(0, 3);
+  return (lines.length > 0 ? lines : ["嗯。"]).slice(0, 3);
 }

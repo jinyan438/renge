@@ -259,6 +259,7 @@ import { StatusBarSidebar } from "./StatusBarSidebar";
 import {
   WECHAT_CHAT_SYSTEM_PROMPT,
   buildWechatRequestMessages,
+  splitWechatReply,
   type WechatContact,
   type WechatSharedContextMessage,
 } from "./wechatSidebarUtils";
@@ -25692,11 +25693,12 @@ export function App() {
             : `微信请求失败：${response.status}`,
         );
       }
-      const reply =
+      const rawReply =
         getChatApiMessageText(payload.choices?.[0]?.message).trim() ||
         payload.output_text?.trim() ||
         "";
-      if (!reply) throw new Error("微信回复中没有可显示的文本。");
+      if (!rawReply) throw new Error("微信回复中没有可显示的文本。");
+      const reply = splitWechatReply(rawReply).join("\n");
 
       const assistantMessage: ChatMessage = {
         id: crypto.randomUUID(),
