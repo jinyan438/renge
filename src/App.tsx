@@ -58,6 +58,7 @@ import {
   type ReactNode,
   type SetStateAction,
   type SyntheticEvent,
+  memo,
   useCallback,
   useEffect,
   useMemo,
@@ -3372,33 +3373,55 @@ function splitAssistantToolProgressSegments(content: string) {
   return segments;
 }
 
+const chatMessageSegmentsCache = new WeakMap<
+  ChatMessage,
+  Map<boolean, string[]>
+>();
+
 function getChatMessageSegments(message: ChatMessage, splitShortChatLines = true) {
+  const messageCache = chatMessageSegmentsCache.get(message);
+  const cached = messageCache?.get(splitShortChatLines);
+  if (cached) return cached;
+
   const content = message.content.trim();
-  if (!content) return [""];
-  if (message.role !== "assistant") return [content];
-  if (parseToolProgressContent(content)) return [content];
-  if (content.includes("```")) return [content];
-  if (containsChatAudioMarkup(content)) return [content];
+  let segments: string[];
+  if (!content || message.role !== "assistant") {
+    segments = [content];
+  } else if (
+    parseToolProgressContent(content) ||
+    content.includes("```") ||
+    containsChatAudioMarkup(content)
+  ) {
+    segments = [content];
+  } else {
+    const toolProgressSegments = splitAssistantToolProgressSegments(content);
+    if (toolProgressSegments.length > 1) {
+      segments = toolProgressSegments;
+    } else if (!splitShortChatLines) {
+      segments = [content];
+    } else {
+      const lines = content
+        .replace(/\r\n/g, "\n")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const hasMarkdownStructure = lines.some((line) =>
+        /^(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|\|)/.test(line),
+      );
+      segments =
+        lines.length > 1 &&
+        lines.length <= 4 &&
+        !hasMarkdownStructure &&
+        lines.every((line) => line.length <= 80)
+          ? lines
+          : [content];
+    }
+  }
 
-  const toolProgressSegments = splitAssistantToolProgressSegments(content);
-  if (toolProgressSegments.length > 1) return toolProgressSegments;
-  if (!splitShortChatLines) return [content];
-
-  const lines = content
-    .replace(/\r\n/g, "\n")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  if (lines.length <= 1 || lines.length > 4) return [content];
-
-  const hasMarkdownStructure = lines.some((line) =>
-    /^(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|\|)/.test(line),
-  );
-  if (hasMarkdownStructure) return [content];
-
-  const allShortChatLines = lines.every((line) => line.length <= 80);
-  return allShortChatLines ? lines : [content];
+  const nextCache = messageCache ?? new Map<boolean, string[]>();
+  nextCache.set(splitShortChatLines, segments);
+  if (!messageCache) chatMessageSegmentsCache.set(message, nextCache);
+  return segments;
 }
 
 function getRenderedChatSegments(messages: ChatMessage[], multiBubbleEnabled: boolean) {
@@ -3497,7 +3520,8 @@ const HTML_PREVIEW_MAX_HEIGHT = 12000;
 const HTML_PREVIEW_EXPANDED_MIN_HEIGHT = 1200;
 const HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD = 512 * 1024;
 const HTML_PREVIEW_HEAVY_MOUNT_GAP = 900;
-const HTML_PREVIEW_HEAVY_AUTO_LOAD_DELAY = 5000;
+const HTML_PREVIEW_FALLBACK_LOAD_DELAY = 600;
+const HTML_PREVIEW_LAZY_ROOT_MARGIN = "900px 0px";
 
 type HeavyHtmlPreviewMountTask = {
   cancelled: boolean;
@@ -4619,7 +4643,9 @@ function getRenderedChatItems(
 
   for (const segment of segments) {
     const toolBlock =
-      segment.message.role === "assistant" ? parseToolProgressContent(segment.segment) : null;
+      segment.message.role === "assistant" && segment.message.renderAsPlainText !== true
+        ? parseToolProgressContent(segment.segment)
+        : null;
 
     if (!toolBlock) {
       flushToolGroup();
@@ -5675,6 +5701,35 @@ function parseChatContentParts(
   );
 }
 
+const CHAT_CONTENT_PARTS_CACHE_LIMIT = 240;
+const chatContentPartsCache = new Map<
+  string,
+  { content: string; parts: ChatContentPart[] }
+>();
+
+function getCachedChatContentParts(
+  content: string,
+  audioRenderingEnabled: boolean,
+  cacheKey = content,
+) {
+  const key = `${audioRenderingEnabled ? "1" : "0"}:${cacheKey}`;
+  const cached = chatContentPartsCache.get(key);
+  if (cached && cached.content === content) {
+    chatContentPartsCache.delete(key);
+    chatContentPartsCache.set(key, cached);
+    return cached.parts;
+  }
+
+  const parsed = parseChatContentParts(content, audioRenderingEnabled);
+  chatContentPartsCache.set(key, { content, parts: parsed });
+  while (chatContentPartsCache.size > CHAT_CONTENT_PARTS_CACHE_LIMIT) {
+    const oldestKey = chatContentPartsCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    chatContentPartsCache.delete(oldestKey);
+  }
+  return parsed;
+}
+
 function looksLikeRenderableHtml(content: string) {
   const trimmedContent = content.trim();
   if (!trimmedContent) return false;
@@ -6359,79 +6414,62 @@ function ChatHtmlPreview({
       return;
     }
 
-    if (!heavyContent) {
-      let firstFrame = 0;
-      let secondFrame = 0;
-      firstFrame = window.requestAnimationFrame(() => {
-        secondFrame = window.requestAnimationFrame(() => setRenderReady(true));
-      });
-      return () => {
-        window.cancelAnimationFrame(firstFrame);
-        window.cancelAnimationFrame(secondFrame);
-      };
-    }
-
     const container = containerRef.current;
     if (!container) return;
-    const unsubscribeHeavyPreview = subscribeHeavyHtmlPreview(
-      previewId,
-      setRenderReady,
-    );
+    const unsubscribeHeavyPreview = heavyContent
+      ? subscribeHeavyHtmlPreview(previewId, setRenderReady)
+      : () => undefined;
     let cancelQueuedMount: (() => void) | null = null;
-    let visibilityTimer = 0;
+    let firstFrame = 0;
+    let secondFrame = 0;
     let queued = false;
     const queueMount = () => {
       if (queued) return;
       queued = true;
-      cancelQueuedMount = enqueueHeavyHtmlPreviewMount(() => {
-        queued = false;
-        cancelQueuedMount = null;
-        activateHeavyHtmlPreview(previewId);
+      observer?.disconnect();
+      if (heavyContent) {
+        cancelQueuedMount = enqueueHeavyHtmlPreviewMount(() => {
+          queued = false;
+          cancelQueuedMount = null;
+          activateHeavyHtmlPreview(previewId);
+        });
+        return;
+      }
+      firstFrame = window.requestAnimationFrame(() => {
+        secondFrame = window.requestAnimationFrame(() => {
+          queued = false;
+          setRenderReady(true);
+        });
       });
     };
     requestHeavyMountRef.current = queueMount;
 
-    if (typeof IntersectionObserver !== "function") {
-      const fallbackTimer = window.setTimeout(
-        queueMount,
-        HTML_PREVIEW_HEAVY_AUTO_LOAD_DELAY,
-      );
-      return () => {
-        window.clearTimeout(fallbackTimer);
-        requestHeavyMountRef.current = () => {};
-        cancelQueuedMount?.();
-        unsubscribeHeavyPreview();
-      };
-    }
-
     let observer: IntersectionObserver | null = null;
-    const observerStartTimer = window.setTimeout(() => {
+    let fallbackTimer = 0;
+    if (typeof IntersectionObserver !== "function") {
+      fallbackTimer = window.setTimeout(
+        queueMount,
+        heavyContent ? HTML_PREVIEW_FALLBACK_LOAD_DELAY : 0,
+      );
+    } else {
       observer = new IntersectionObserver(
         (entries) => {
-          const steadilyVisible = entries.some(
-            (entry) => entry.isIntersecting && entry.intersectionRatio > 0,
-          );
-          if (!steadilyVisible) {
-            if (visibilityTimer) window.clearTimeout(visibilityTimer);
-            visibilityTimer = 0;
-            return;
-          }
-          if (visibilityTimer) return;
-          visibilityTimer = window.setTimeout(() => {
-            visibilityTimer = 0;
-            observer?.disconnect();
-            queueMount();
-          }, 300);
+          if (entries.some((entry) => entry.isIntersecting)) queueMount();
         },
-        { threshold: [0] },
+        {
+          root: container.closest(".chat-thread"),
+          rootMargin: HTML_PREVIEW_LAZY_ROOT_MARGIN,
+          threshold: 0,
+        },
       );
       observer.observe(container);
-    }, HTML_PREVIEW_HEAVY_AUTO_LOAD_DELAY);
+    }
 
     return () => {
-      window.clearTimeout(observerStartTimer);
+      window.clearTimeout(fallbackTimer);
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
       observer?.disconnect();
-      if (visibilityTimer) window.clearTimeout(visibilityTimer);
       requestHeavyMountRef.current = () => {};
       cancelQueuedMount?.();
       unsubscribeHeavyPreview();
@@ -6616,7 +6654,7 @@ function ChatHtmlPreview({
                 ? "大型 HTML 已排队加载；最多同时保留 3 个运行实例。"
                 : "正在安全挂载角色卡 HTML…"}
           </span>
-          {mountReady && heavyContent && (
+          {mountReady && (
             <button type="button" onClick={() => requestHeavyMountRef.current()}>
               立即加载
             </button>
@@ -6986,6 +7024,20 @@ function renderMarkdownBlocks(content: string, keyPrefix: string) {
 
   return nodes;
 }
+
+const ChatMarkdown = memo(function ChatMarkdown({
+  content,
+  keyPrefix,
+}: {
+  content: string;
+  keyPrefix: string;
+}) {
+  return (
+    <div className="chat-markdown">
+      {renderMarkdownBlocks(content, keyPrefix)}
+    </div>
+  );
+});
 
 function canEditChatMessageAsRendered(content: string, htmlRenderEnabled: boolean) {
   const parts = parseChatContentParts(content, htmlRenderEnabled);
@@ -9908,7 +9960,7 @@ function createStreamingWordWriter(
       : null;
   let pendingText = "";
   let queuedWords: string[] = [];
-  let timerId: number | undefined;
+  let frameId: number | undefined;
   let finished = false;
   let cancelled = false;
   let finishPromise: Promise<void> | null = null;
@@ -9932,7 +9984,7 @@ function createStreamingWordWriter(
   };
 
   const resolveWhenIdle = () => {
-    if (!finished || timerId !== undefined || queuedWords.length > 0 || pendingText) return;
+    if (!finished || frameId !== undefined || queuedWords.length > 0 || pendingText) return;
     removeActivityListeners();
     signal?.removeEventListener("abort", cancel);
     resolveFinish?.();
@@ -9944,8 +9996,8 @@ function createStreamingWordWriter(
     (document.visibilityState === "visible" && document.hasFocus());
 
   const flushImmediately = () => {
-    if (timerId !== undefined) window.clearTimeout(timerId);
-    timerId = undefined;
+    if (frameId !== undefined) window.cancelAnimationFrame(frameId);
+    frameId = undefined;
     const content = `${queuedWords.join("")}${pendingText}`;
     queuedWords = [];
     pendingText = "";
@@ -9954,7 +10006,7 @@ function createStreamingWordWriter(
   };
 
   const scheduleNextWord = () => {
-    if (cancelled || timerId !== undefined || queuedWords.length === 0) {
+    if (cancelled || frameId !== undefined || queuedWords.length === 0) {
       resolveWhenIdle();
       return;
     }
@@ -9963,13 +10015,17 @@ function createStreamingWordWriter(
       return;
     }
 
-    const delay = queuedWords.length > 120 ? 8 : queuedWords.length > 40 ? 16 : 32;
-    timerId = window.setTimeout(() => {
-      timerId = undefined;
-      const word = queuedWords.shift();
-      if (word) onWord(word);
+    frameId = window.requestAnimationFrame(() => {
+      frameId = undefined;
+      const batchSize = queuedWords.length > 120
+        ? 48
+        : queuedWords.length > 40
+          ? 20
+          : Math.min(8, queuedWords.length);
+      const words = queuedWords.splice(0, batchSize).join("");
+      if (words) onWord(words);
       scheduleNextWord();
-    }, delay);
+    });
   };
 
   const enqueueStableWords = (flushAll: boolean) => {
@@ -10024,8 +10080,8 @@ function createStreamingWordWriter(
   const cancel = () => {
     if (cancelled) return;
     cancelled = true;
-    if (timerId !== undefined) window.clearTimeout(timerId);
-    timerId = undefined;
+    if (frameId !== undefined) window.cancelAnimationFrame(frameId);
+    frameId = undefined;
     queuedWords = [];
     pendingText = "";
     removeActivityListeners();
@@ -10048,7 +10104,7 @@ function createStreamingWordWriter(
         finished = true;
         enqueueStableWords(true);
       }
-      if (timerId === undefined && queuedWords.length === 0 && !pendingText) {
+      if (frameId === undefined && queuedWords.length === 0 && !pendingText) {
         removeActivityListeners();
         signal?.removeEventListener("abort", cancel);
         return Promise.resolve();
@@ -11798,6 +11854,22 @@ export function App() {
   const activeChatSessionIdRef = useRef("");
   const tavernScriptRuntimeRef = useRef<TavernScriptRuntime | null>(null);
   const chatMessagesRef = useRef<ChatMessage[]>([]);
+  const htmlPreviewMessagesCacheRef = useRef<{
+    sources: ChatMessage[];
+    values: HtmlPreviewContext["messages"];
+  }>({ sources: [], values: [] });
+  const regexDisplayCacheRef = useRef<{
+    context: readonly unknown[] | null;
+    entries: Map<
+      string,
+      {
+        source: ChatMessage;
+        depth: number;
+        latestAssistant: boolean;
+        result: ChatMessage;
+      }
+    >;
+  }>({ context: null, entries: new Map() });
   const chatSessionsRef = useRef<ChatSession[]>([]);
   const characterCardsRef = useRef<CharacterCard[]>([]);
   const personasRef = useRef<AgentPersona[]>([]);
@@ -17633,19 +17705,45 @@ export function App() {
   );
   const regexProcessedChatMessages = useMemo(
     () => {
+      const cache = regexDisplayCacheRef.current;
+      const context = [
+        activePersona,
+        activeSessionRoleplayCard,
+        chatMode,
+        effectiveRegexScripts,
+        personas,
+        userProfile.nickname,
+      ] as const;
+      if (
+        !cache.context ||
+        cache.context.length !== context.length ||
+        cache.context.some((value, index) => !Object.is(value, context[index]))
+      ) {
+        cache.context = context;
+        cache.entries.clear();
+      }
       const latestAssistantMessageIndex = visibleChatMessages.reduce(
         (latestIndex, message, index) =>
           message.role === "assistant" ? index : latestIndex,
         -1,
       );
-      return visibleChatMessages.map((message, index) => {
+      const processed = visibleChatMessages.map((message, index) => {
         if (message.role !== "assistant" || !message.content) return message;
+        const depth = visibleChatMessages.length - index - 1;
+        const latestAssistant = index === latestAssistantMessageIndex;
+        const cached = cache.entries.get(message.id);
+        if (
+          cached?.source === message &&
+          cached.depth === depth &&
+          cached.latestAssistant === latestAssistant
+        ) {
+          return cached.result;
+        }
         const assistantPersona = getAssistantMessagePersona(
           message,
           personas,
           chatMode === "persona" ? activePersona : undefined,
         );
-        const depth = visibleChatMessages.length - index - 1;
         const regexOptions = {
           placement: 2,
           destination: "display" as const,
@@ -17662,15 +17760,107 @@ export function App() {
             ? placeSillyTavernStatusPlaceholderOnCurrentMessage(
                 message.content,
                 activeSessionRoleplayCard.regexScripts,
-                index === latestAssistantMessageIndex,
+                latestAssistant,
                 regexOptions,
               )
             : message.content;
         const content = applyRegexScripts(displaySource, effectiveRegexScripts, regexOptions);
-        return content === message.content ? message : { ...message, content };
+        const result = content === message.content ? message : { ...message, content };
+        cache.entries.set(message.id, {
+          source: message,
+          depth,
+          latestAssistant,
+          result,
+        });
+        return result;
       });
+      while (cache.entries.size > Math.max(96, visibleChatMessages.length + 32)) {
+        const oldestMessageId = cache.entries.keys().next().value;
+        if (oldestMessageId === undefined) break;
+        cache.entries.delete(oldestMessageId);
+      }
+      return processed;
     },
     [activePersona, activeSessionRoleplayCard, chatMode, effectiveRegexScripts, personas, userProfile.nickname, visibleChatMessages],
+  );
+  const htmlPreviewMessages = useMemo(() => {
+    const previous = htmlPreviewMessagesCacheRef.current;
+    const previousById = new Map(
+      previous.sources.map((source, index) => [
+        source.id,
+        { source, value: previous.values[index] },
+      ]),
+    );
+    const values = chatMessages.map((message) => {
+      const cached = previousById.get(message.id);
+      if (
+        cached &&
+        (cached.source === message ||
+          (cached.source.renderAsPlainText === true && message.renderAsPlainText === true))
+      ) {
+        return cached.value;
+      }
+      return {
+        role: message.role,
+        content: message.content,
+        variables: message.variables ?? {},
+        extra: message.extra ?? {},
+      };
+    });
+    const stableValues =
+      values.length === previous.values.length &&
+      values.every((value, index) => value === previous.values[index])
+        ? previous.values
+        : values;
+    htmlPreviewMessagesCacheRef.current = {
+      sources: chatMessages,
+      values: stableValues,
+    };
+    return stableValues;
+  }, [chatMessages]);
+  const htmlPreviewContextBase = useMemo<Omit<HtmlPreviewContext, "currentMessageIndex">>(
+    () => ({
+      messages: htmlPreviewMessages,
+      chatVariables: activeChatSession?.scriptVariables ?? {},
+      characterVariables: activeSessionRoleplayCard?.tavernVariables ?? {},
+      globalVariables: tavernGlobalVariables,
+      presetVariables: activeChatPreset?.tavernVariables ?? {},
+      extensionVariables: Object.fromEntries(
+        Object.entries(
+          (window as Window & { extension_settings?: Record<string, unknown> })
+            .extension_settings ?? {},
+        ).filter((entry): entry is [string, Record<string, unknown>] =>
+          isObjectRecord(entry[1]),
+        ),
+      ),
+      userName: userProfile.nickname.trim() || "用户",
+      characterName: activeSessionRoleplayCard?.name || "Assistant",
+      chatId: activeChatSession?.id ?? activeChatSessionId,
+      chatInput,
+      personalization: {
+        quoteStyleEnabled: chatPersonalization.quoteStyleEnabled,
+        quoteStyleColor: chatPersonalization.quoteStyleColor,
+      },
+    }),
+    [
+      activeChatPreset?.tavernVariables,
+      activeChatSession?.id,
+      activeChatSession?.scriptVariables,
+      activeChatSessionId,
+      activeSessionRoleplayCard?.name,
+      activeSessionRoleplayCard?.tavernVariables,
+      chatInput,
+      chatPersonalization.quoteStyleColor,
+      chatPersonalization.quoteStyleEnabled,
+      extensions,
+      htmlPreviewMessages,
+      tavernGlobalVariables,
+      userProfile.nickname,
+    ],
+  );
+  const htmlPreviewContexts = useMemo(
+    () => new Map<string, HtmlPreviewContext>(),
+    [htmlPreviewContextBase],
   );
   const chatMessageMenuMessage = useMemo(
     () => chatMessages.find((message) => message.id === chatMessageMenu?.messageId),
@@ -20774,7 +20964,10 @@ export function App() {
           <strong>思维链</strong>
         </summary>
         <div className="chat-reasoning-body">
-          {renderMarkdownBlocks(displayReasoning, `${keyPrefix}-reasoning`)}
+          <ChatMarkdown
+            content={displayReasoning}
+            keyPrefix={`${keyPrefix}-reasoning`}
+          />
         </div>
       </details>
     );
@@ -20804,46 +20997,26 @@ export function App() {
       );
     }
 
-    const parts = parseChatContentParts(displayContent, chatHtmlRenderEnabled);
-    let htmlPreviewContext: HtmlPreviewContext | null = null;
+    const parts = getCachedChatContentParts(
+      displayContent,
+      chatHtmlRenderEnabled,
+      `${sourceMessageId}:${messageId}`,
+    );
     const htmlPreviewSessionId =
       (activeChatSession?.id ?? activeChatSessionId) || "no-session";
     const getHtmlPreviewContext = () => {
-      if (htmlPreviewContext) return htmlPreviewContext;
+      const cached = htmlPreviewContexts.get(sourceMessageId);
+      if (cached) return cached;
       const currentMessageIndex = chatMessages.findIndex(
         (message) => message.id === sourceMessageId,
       );
-      htmlPreviewContext = {
+      const context: HtmlPreviewContext = {
+        ...htmlPreviewContextBase,
         currentMessageIndex:
           currentMessageIndex >= 0 ? currentMessageIndex : Math.max(0, chatMessages.length - 1),
-        messages: chatMessages.map((message) => ({
-          role: message.role,
-          content: message.content,
-          variables: message.variables ?? {},
-          extra: message.extra ?? {},
-        })),
-        chatVariables: activeChatSession?.scriptVariables ?? {},
-        characterVariables: activeSessionRoleplayCard?.tavernVariables ?? {},
-        globalVariables: tavernGlobalVariables,
-        presetVariables: activeChatPreset?.tavernVariables ?? {},
-        extensionVariables: Object.fromEntries(
-          Object.entries(
-            (window as Window & { extension_settings?: Record<string, unknown> })
-              .extension_settings ?? {},
-          ).filter((entry): entry is [string, Record<string, unknown>] =>
-            isObjectRecord(entry[1]),
-          ),
-        ),
-        userName: userProfile.nickname.trim() || "用户",
-        characterName: activeSessionRoleplayCard?.name || "Assistant",
-        chatId: activeChatSession?.id ?? activeChatSessionId,
-        chatInput,
-        personalization: {
-          quoteStyleEnabled: chatPersonalization.quoteStyleEnabled,
-          quoteStyleColor: chatPersonalization.quoteStyleColor,
-        },
       };
-      return htmlPreviewContext;
+      htmlPreviewContexts.set(sourceMessageId, context);
+      return context;
     };
 
     return (
@@ -20866,9 +21039,11 @@ export function App() {
             }
 
             return (
-              <div className="chat-markdown" key={`${messageId}-text-${partIndex}`}>
-                {renderMarkdownBlocks(part.content, `${messageId}-text-${partIndex}`)}
-              </div>
+              <ChatMarkdown
+                content={part.content}
+                key={`${messageId}-text-${partIndex}`}
+                keyPrefix={`${messageId}-text-${partIndex}`}
+              />
             );
           }
 
