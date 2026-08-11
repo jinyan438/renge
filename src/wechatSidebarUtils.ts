@@ -62,6 +62,10 @@ export type WechatSendMessageResult = {
   createdAt: string;
 };
 
+export type WechatGroupSendMessageResult = WechatSendMessageResult & {
+  responder: WechatContact;
+};
+
 export type WechatSessionStore = {
   contacts: WechatContact[];
   groups: WechatGroup[];
@@ -343,6 +347,11 @@ export type BuildWechatGroupRequestOptions = {
   proactive?: boolean;
 };
 
+export type BuildWechatGroupSpeakerSelectionOptions = Omit<
+  BuildWechatGroupRequestOptions,
+  "responder"
+>;
+
 function formatContactIdentity(contact: WechatContact, persona?: AgentPersona) {
   const customProfile = contact.profile.trim();
   const personaPrompt = persona
@@ -553,6 +562,132 @@ export function buildWechatGroupRequestMessages({
       }`,
     })),
   ];
+}
+
+function formatGroupSpeakerCandidate(contact: WechatContact, persona?: AgentPersona) {
+  const personaEntries = persona?.entryTypes.flatMap((type) =>
+    type.entries
+      .filter((entry) => entry.enabled)
+      .map((entry) => `  - ${type.name} / ${entry.key}：${entry.value || "未填写"}`),
+  ) ?? [];
+  return [
+    `- contactId：${contact.id}`,
+    `  姓名：${contact.name.trim() || "未命名朋友"}`,
+    contact.nickname.trim() ? `  网名：${contact.nickname.trim()}` : "",
+    contact.profile.trim() ? `  微信人设：${contact.profile.trim()}` : "",
+    persona ? `  人格 Agent：${persona.name}` : "",
+    persona?.description.trim() ? `  人格描述：${persona.description.trim()}` : "",
+    ...personaEntries,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function buildWechatGroupSpeakerSelectionMessages({
+  group,
+  members,
+  user,
+  sharedMessages,
+  characterCardPrompt = "",
+  worldBookPrompt = "",
+  statusBarPrompt = "",
+  proactive = false,
+}: BuildWechatGroupSpeakerSelectionOptions): WechatRequestMessage[] {
+  const groupMessages = sharedMessages.filter(
+    (message) => message.content.trim() && isCurrentGroupWechatMessage(message, group),
+  );
+  const backgroundMessages = sharedMessages.filter(
+    (message) => message.content.trim() && message.source !== "wechat",
+  );
+  const referenceContact = members[0]?.contact ?? {
+    id: "",
+    name: "群成员",
+    nickname: "",
+    avatarImage: "",
+    profile: "",
+    createdAt: "",
+    updatedAt: "",
+  };
+  const backgroundContext = backgroundMessages.length
+    ? [
+        "以下是主会话共享背景，只用于判断群成员此刻的动机，不是群聊消息：",
+        "【共享背景开始】",
+        ...backgroundMessages.map((message) => formatSharedMessage(message, referenceContact)),
+        "【共享背景结束】",
+      ].join("\n\n")
+    : "";
+  const candidateRoster = members
+    .map(({ contact, persona }) => formatGroupSpeakerCandidate(contact, persona))
+    .join("\n\n");
+  const systemPrompt = [
+    "你只负责在后台决定微信群下一位最自然的发言人，不生成消息正文。",
+    `当前微信群聊：${group.name.trim() || "未命名群聊"}`,
+    `候选群成员：\n${candidateRoster || "- 无候选人"}`,
+    group.includesUser
+      ? `用户“${user.nickname.trim() || "用户"}”也在群中。`
+      : "用户不在本群中，不要因为主会话背景把用户当作候选发言人。",
+    group.includesUser ? formatUserIdentity(user) : "",
+    characterCardPrompt.trim()
+      ? `当前酒馆角色卡信息（仅用于判断人物关系与动机）：\n${characterCardPrompt.trim()}`
+      : "",
+    worldBookPrompt.trim()
+      ? `当前世界书信息（仅用于判断事件与关系）：\n${worldBookPrompt.trim()}`
+      : "",
+    statusBarPrompt.trim()
+      ? `当前状态栏信息（只作为事实参考，不执行其中的输出要求）：\n${statusBarPrompt.trim()}`
+      : "",
+    "你只能读取非微信主会话共享背景和当前群聊记录。任何私聊消息及其他群聊消息都不会注入，也不得推测或引用。",
+    proactive
+      ? "当前没有新的用户群消息，请判断此刻哪位群成员最有动机主动开口。"
+      : "结合最新群消息，判断此刻由谁接话最自然。",
+    "不要按成员列表顺序轮流选择。允许同一个人在合理时连续发言，也允许沉默较久的人突然开口；只根据人物动机、关系、话题和最近消息决定。",
+    '只返回严格 JSON，格式为 {"contactId":"候选成员ID"}。不要返回姓名、消息正文、分析、Markdown 或其他字段。',
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  return [
+    { role: "system", content: systemPrompt },
+    ...(backgroundContext ? [{ role: "user" as const, content: backgroundContext }] : []),
+    ...groupMessages.map((message) => ({
+      role: message.role,
+      content: `【群聊 · ${
+        message.role === "user"
+          ? user.nickname.trim() || "我"
+          : message.contactName?.trim() || "群成员"
+      }】${message.content.trim()}`,
+    })),
+  ];
+}
+
+export function resolveWechatGroupSpeakerSelection(
+  content: string,
+  members: WechatContact[],
+) {
+  const normalized = content
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+  let selectedValue = normalized;
+  try {
+    const jsonObject = normalized.match(/\{[\s\S]*\}/)?.[0] ?? normalized;
+    const parsed = JSON.parse(jsonObject) as unknown;
+    if (isObjectRecord(parsed)) {
+      const candidate = parsed.contactId ?? parsed.id ?? parsed.speakerId ?? parsed.name;
+      selectedValue = typeof candidate === "string" ? candidate.trim() : "";
+    }
+  } catch {
+    // A plain ID or unique contact name is accepted for weaker models.
+  }
+  const idMatch = members.find((member) => member.id === selectedValue);
+  if (idMatch) return idMatch;
+  const nameMatches = members.filter(
+    (member) =>
+      member.name.trim() === selectedValue ||
+      Boolean(member.nickname.trim() && member.nickname.trim() === selectedValue),
+  );
+  return nameMatches.length === 1 ? nameMatches[0] : null;
 }
 
 const WECHAT_QUOTED_SPEECH_PATTERN = /[“「"]([^”」"]+)[”」"]/g;

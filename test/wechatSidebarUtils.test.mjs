@@ -2,10 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildWechatGroupRequestMessages,
+  buildWechatGroupSpeakerSelectionMessages,
   buildWechatRequestMessages,
   createEmptyWechatStore,
   getWechatSessionStore,
   normalizeWechatStore,
+  resolveWechatGroupSpeakerSelection,
   shouldGenerateWechatProactively,
   splitWechatReply,
   syncWechatSessionMessages,
@@ -280,6 +282,103 @@ test("group chat keeps its own messages and excludes all private and other-group
   assert.doesNotMatch(promptText, /不应注入未入群用户资料/);
   assert.match(messages[0].content, /用户不在本群中/);
   assert.match(messages[0].content, /本轮只由群成员“林夏”/);
+});
+
+test("group speaker selection lets AI choose from isolated group context without turn order", () => {
+  const messages = buildWechatGroupSpeakerSelectionMessages({
+    group,
+    members: [
+      { contact, persona },
+      { contact: secondContact },
+    ],
+    user: { nickname: "用户", bio: "用户不在群时不应作为候选人" },
+    sharedMessages: [
+      {
+        role: "assistant",
+        content: "主会话共享事件",
+        createdAt: "2026-08-10T08:00:00.000Z",
+      },
+      {
+        role: "user",
+        content: "用户和 C 的私聊",
+        source: "wechat",
+        contactId: "friend-3",
+        contactName: "C",
+        createdAt: "2026-08-10T08:01:00.000Z",
+      },
+      {
+        role: "assistant",
+        content: "其他群里的消息",
+        source: "wechat",
+        groupId: "group-2",
+        groupName: "其他群",
+        contactId: "friend-3",
+        contactName: "C",
+        createdAt: "2026-08-10T08:02:00.000Z",
+      },
+      {
+        role: "assistant",
+        content: "A 刚刚在当前群说过话",
+        source: "wechat",
+        groupId: group.id,
+        groupName: group.name,
+        contactId: contact.id,
+        contactName: contact.name,
+        createdAt: "2026-08-10T08:03:00.000Z",
+      },
+    ],
+    characterCardPrompt: "角色卡事实",
+    worldBookPrompt: "世界书事实",
+    statusBarPrompt: "状态栏事实",
+    proactive: true,
+  });
+
+  const promptText = messages.map((message) => message.content).join("\n");
+  assert.match(promptText, /主会话共享事件/);
+  assert.match(promptText, /A 刚刚在当前群说过话/);
+  assert.match(promptText, new RegExp(contact.id));
+  assert.match(promptText, new RegExp(secondContact.id));
+  assert.match(promptText, /城市规划研究员/);
+  assert.match(promptText, /角色卡事实/);
+  assert.match(promptText, /世界书事实/);
+  assert.match(promptText, /状态栏事实/);
+  assert.match(promptText, /允许同一个人在合理时连续发言/);
+  assert.match(promptText, /只返回严格 JSON/);
+  assert.doesNotMatch(promptText, /用户和 C 的私聊/);
+  assert.doesNotMatch(promptText, /其他群里的消息/);
+  assert.doesNotMatch(promptText, /用户不在群时不应作为候选人/);
+});
+
+test("group speaker selection resolves only a real unambiguous member", () => {
+  assert.equal(
+    resolveWechatGroupSpeakerSelection(
+      `\`\`\`json\n{"contactId":"${secondContact.id}"}\n\`\`\``,
+      [contact, secondContact],
+    )?.id,
+    secondContact.id,
+  );
+  assert.equal(
+    resolveWechatGroupSpeakerSelection(contact.name, [contact, secondContact])?.id,
+    contact.id,
+  );
+  assert.equal(
+    resolveWechatGroupSpeakerSelection(
+      `我选择这一位：{"contactId":"${contact.id}"}`,
+      [contact, secondContact],
+    )?.id,
+    contact.id,
+  );
+  assert.equal(
+    resolveWechatGroupSpeakerSelection("unknown-contact", [contact, secondContact]),
+    null,
+  );
+  assert.equal(
+    resolveWechatGroupSpeakerSelection("同名", [
+      { ...contact, name: "同名" },
+      { ...secondContact, name: "同名" },
+    ]),
+    null,
+  );
 });
 
 test("wechat replies render as at most three clean bubbles", () => {

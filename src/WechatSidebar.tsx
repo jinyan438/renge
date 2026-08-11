@@ -42,6 +42,7 @@ import {
   syncWechatSessionMessages,
   type WechatContact,
   type WechatGroup,
+  type WechatGroupSendMessageResult,
   type WechatSendMessageInput,
   type WechatSendMessageResult,
   type WechatSessionStore,
@@ -99,9 +100,9 @@ type WechatSidebarProps = {
   onGenerateGroupReply: (
     group: WechatGroup,
     members: WechatContact[],
-    responder: WechatContact,
     proactive: boolean,
-  ) => Promise<WechatSendMessageResult>;
+    onResponderSelected: (responder: WechatContact) => void,
+  ) => Promise<WechatGroupSendMessageResult>;
 };
 
 function loadWechatStore(sessionId: string): WechatStore {
@@ -696,18 +697,7 @@ export function WechatSidebar({
           )
           .filter((contact): contact is WechatContact => Boolean(contact))
       : [];
-    const previousGroupResponderId = activeGroup
-      ? [...activeMessages]
-          .reverse()
-          .find((message) => message.role === "assistant" && message.contactId)?.contactId
-      : "";
-    const previousGroupResponderIndex = groupMembers.findIndex(
-      (contact) => contact.id === previousGroupResponderId,
-    );
-    const groupResponder = activeGroup
-      ? groupMembers[(previousGroupResponderIndex + 1) % groupMembers.length]
-      : undefined;
-    if (activeGroup && !groupResponder) {
+    if (activeGroup && groupMembers.length === 0) {
       setChatError("群聊中没有可生成回复的联系人。 ");
       return;
     }
@@ -715,19 +705,27 @@ export function WechatSidebar({
     setEmojiOpen(false);
     setMoreOpen(false);
     setGeneratingContactId(activeGroup?.id ?? activeContact?.id ?? "");
-    setGeneratingResponderId(groupResponder?.id ?? activeContact?.id ?? "");
+    setGeneratingResponderId(activeContact?.id ?? "");
     try {
-      const reply = activeGroup && groupResponder
-        ? await onGenerateGroupReply(activeGroup, groupMembers, groupResponder, proactive)
-        : await onGenerateReply(activeContact as WechatContact, proactive);
+      const groupReply = activeGroup
+        ? await onGenerateGroupReply(
+            activeGroup,
+            groupMembers,
+            proactive,
+            (responder) => setGeneratingResponderId(responder.id),
+          )
+        : null;
+      const reply =
+        groupReply ??
+        (await onGenerateReply(activeContact as WechatContact, proactive));
       const assistantMessage: WechatStoredMessage = {
         id: reply.id,
-        ...(activeGroup
+        ...(activeGroup && groupReply
           ? {
               groupId: activeGroup.id,
-              contactId: groupResponder?.id,
-              senderName: groupResponder?.name,
-              senderAvatar: groupResponder?.avatarImage,
+              contactId: groupReply.responder.id,
+              senderName: groupReply.responder.name,
+              senderAvatar: groupReply.responder.avatarImage,
             }
           : activeContact
             ? { contactId: activeContact.id }
@@ -1004,7 +1002,11 @@ export function WechatSidebar({
             })}
             {generatingContactId === (activeGroup?.id ?? activeContact?.id) ? (
               <div className="wechat-message-row incoming">
-                {generatingResponder ? <ContactAvatar contact={generatingResponder} /> : null}
+                {generatingResponder ? (
+                  <ContactAvatar contact={generatingResponder} />
+                ) : activeGroup ? (
+                  <GroupAvatar group={activeGroup} />
+                ) : null}
                 <div className="wechat-bubble-wrap">
                   {activeGroup && generatingResponder ? <small className="wechat-group-sender">{generatingResponder.name}</small> : null}
                   <div className="wechat-message-bubble wechat-typing"><i /><i /><i /></div>

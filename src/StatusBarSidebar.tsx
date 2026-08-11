@@ -54,6 +54,7 @@ import type { AgentPersona } from "./types";
 import type {
   WechatContact,
   WechatGroup,
+  WechatGroupSendMessageResult,
   WechatSendMessageInput,
   WechatSendMessageResult,
   WechatStoredMessage,
@@ -111,9 +112,9 @@ export type StatusBarSidebarProps = {
   onWechatGenerateGroupReply: (
     group: WechatGroup,
     members: WechatContact[],
-    responder: WechatContact,
     proactive: boolean,
-  ) => Promise<WechatSendMessageResult>;
+    onResponderSelected: (responder: WechatContact) => void,
+  ) => Promise<WechatGroupSendMessageResult>;
 };
 
 type StatusBarCssProperties = CSSProperties & {
