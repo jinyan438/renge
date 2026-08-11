@@ -32826,7 +32826,7 @@ export function App() {
                 const messageAvatarImage =
                   wechatMetadata
                     ? message.role === "assistant"
-                      ? wechatMetadata.contactAvatar || assistantPersona?.avatarImage || ""
+                      ? wechatMetadata.contactAvatar
                       : userProfile.avatarImage
                     : message.role === "user"
                     ? getChatSenderAvatarImage(messageSender, personas, userProfile)
@@ -32866,6 +32866,10 @@ export function App() {
                         <div className="chat-avatar">
                           {messageAvatarImage ? (
                             <img src={messageAvatarImage} alt={`${messageName} 头像`} />
+                          ) : wechatMetadata && message.role === "assistant" ? (
+                            <span className="chat-wechat-avatar-fallback" aria-hidden="true">
+                              {wechatMetadata.contactName.slice(0, 1).toUpperCase()}
+                            </span>
                           ) : messageSender?.kind === "system" ? (
                             <Settings2 size={16} />
                           ) : messageSender?.kind === "persona" ? (
