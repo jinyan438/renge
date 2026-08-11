@@ -258,9 +258,11 @@ import {
 import { StatusBarSidebar } from "./StatusBarSidebar";
 import {
   WECHAT_CHAT_SYSTEM_PROMPT,
+  buildWechatGroupRequestMessages,
   buildWechatRequestMessages,
   splitWechatReply,
   type WechatContact,
+  type WechatGroup,
   type WechatSendMessageInput,
   type WechatSendMessageResult,
   type WechatSharedContextMessage,
@@ -7341,11 +7343,19 @@ function getWechatMessageMetadata(message: ChatMessage) {
     typeof message.extra.contactName === "string" ? message.extra.contactName.trim() : "";
   const contactAvatar =
     typeof message.extra.contactAvatar === "string" ? message.extra.contactAvatar : "";
-  return contactId || contactName
+  const groupId = typeof message.extra.groupId === "string" ? message.extra.groupId : "";
+  const groupName =
+    typeof message.extra.groupName === "string" ? message.extra.groupName.trim() : "";
+  const groupAvatar =
+    typeof message.extra.groupAvatar === "string" ? message.extra.groupAvatar : "";
+  return contactId || contactName || groupId
     ? {
         contactId,
-        contactName: contactName || "微信朋友",
+        contactName: contactName || (groupId ? "" : "微信朋友"),
         contactAvatar,
+        groupId,
+        groupName: groupName || "微信群聊",
+        groupAvatar,
       }
     : null;
 }
@@ -7659,7 +7669,9 @@ function formatChatMessageForApi(
       message.role === "assistant"
         ? wechatMetadata.contactName
         : userProfile.nickname.trim() || "我";
-    return `【微信 · ${speaker}】：${message.content}`;
+    return wechatMetadata.groupId
+      ? `【微信群 · ${wechatMetadata.groupName} · ${speaker}】：${message.content}`
+      : `【微信 · ${speaker}】：${message.content}`;
   }
   if (message.role !== "user") {
     return message.content;
@@ -17893,13 +17905,19 @@ export function App() {
     () =>
       chatMessages.flatMap((message) => {
         const metadata = getWechatMessageMetadata(message);
-        if (!metadata?.contactId || (message.role !== "user" && message.role !== "assistant")) {
+        if (
+          (!metadata?.contactId && !metadata?.groupId) ||
+          (message.role !== "user" && message.role !== "assistant")
+        ) {
           return [];
         }
         return [
           {
             id: message.id,
-            contactId: metadata.contactId,
+            ...(metadata.contactId ? { contactId: metadata.contactId } : {}),
+            ...(metadata.groupId ? { groupId: metadata.groupId } : {}),
+            ...(metadata.contactName ? { senderName: metadata.contactName } : {}),
+            ...(metadata.contactAvatar ? { senderAvatar: metadata.contactAvatar } : {}),
             role: message.role,
             content: message.content,
             createdAt: message.createdAt,
@@ -25602,8 +25620,38 @@ export function App() {
     commitChatMessages((current) => [...current, userMessage]);
   };
 
-  const generateWechatReply = async (
-    contact: WechatContact,
+  const queueWechatGroupMessage = (
+    group: WechatGroup,
+    outgoingMessage: WechatSendMessageInput,
+  ) => {
+    const content = outgoingMessage.content.trim();
+    if (!content) throw new Error("微信群消息为空。");
+    const userMessage: ChatMessage = {
+      id: outgoingMessage.id,
+      role: "user",
+      content,
+      createdAt: outgoingMessage.createdAt,
+      sender: { kind: "user" },
+      source: "wechat",
+      extra: {
+        groupId: group.id,
+        groupName: group.name,
+        groupAvatar: group.avatarImage,
+        channel: "wechat-group",
+      },
+    };
+    commitChatMessages((current) => [...current, userMessage]);
+  };
+
+  const generateWechatTargetReply = async (
+    target:
+      | { kind: "contact"; contact: WechatContact }
+      | {
+          kind: "group";
+          group: WechatGroup;
+          members: WechatContact[];
+          responder: WechatContact;
+        },
     proactive: boolean,
   ): Promise<WechatSendMessageResult> => {
     if (activeChatAbortControllerRef.current || chatStatus.status === "loading") {
@@ -25618,26 +25666,50 @@ export function App() {
       throw new Error("微信聊天需要使用可返回文本的模型。");
     }
 
-    const contactPersona = contact.personaId
-      ? personas.find((persona) => persona.id === contact.personaId)
+    const responder = target.kind === "contact" ? target.contact : target.responder;
+    const contactPersona = responder.personaId
+      ? personas.find((persona) => persona.id === responder.personaId)
       : undefined;
-    const wechatExtra = {
-      contactId: contact.id,
-      contactName: contact.name,
-      contactAvatar: contact.avatarImage,
-      channel: "wechat",
-    };
+    const wechatExtra = target.kind === "contact"
+      ? {
+          contactId: responder.id,
+          contactName: responder.name,
+          contactAvatar: responder.avatarImage,
+          channel: "wechat",
+        }
+      : {
+          contactId: responder.id,
+          contactName: responder.name,
+          contactAvatar: responder.avatarImage,
+          groupId: target.group.id,
+          groupName: target.group.name,
+          groupAvatar: target.group.avatarImage,
+          channel: "wechat-group",
+        };
     const initialMessages = [...chatMessagesRef.current];
+    const contextMessages = initialMessages.filter((message) => {
+      if (message.source !== "wechat") return true;
+      const metadata = getWechatMessageMetadata(message);
+      return target.kind === "contact"
+        ? !metadata?.groupId && metadata?.contactId === target.contact.id
+        : metadata?.groupId === target.group.id;
+    });
 
     const controller = beginChatGeneration();
     const { signal } = controller;
     try {
-      setChatStatus({ status: "loading", message: `正在与 ${contact.name} 微信聊天...` });
+      setChatStatus({
+        status: "loading",
+        message:
+          target.kind === "contact"
+            ? `正在与 ${responder.name} 微信聊天...`
+            : `正在生成 ${target.group.name} 的群聊消息...`,
+      });
       const contextCard = activeSessionRoleplayCard ?? activeRoleplayCard ?? null;
       const characterCardPrompt = contextCard
         ? buildCharacterCardPrompt(contextCard, userProfile.nickname.trim() || "用户")
         : "";
-      const triggerMessages = initialMessages.map((message) => ({
+      const triggerMessages = contextMessages.map((message) => ({
         role: message.role,
         content: message.content,
       }));
@@ -25647,7 +25719,7 @@ export function App() {
         triggerMessages,
         {
           userName: userProfile.nickname,
-          characterName: contact.name,
+          characterName: responder.name,
         },
       );
       const characterWorldBook = contextCard
@@ -25661,11 +25733,11 @@ export function App() {
               triggerMessages,
               {
                 userName: userProfile.nickname,
-                characterName: contact.name,
+                characterName: responder.name,
               },
             )
           : "";
-      const sharedMessages: WechatSharedContextMessage[] = initialMessages.map((message) => {
+      const sharedMessages: WechatSharedContextMessage[] = contextMessages.map((message) => {
         const metadata = getWechatMessageMetadata(message);
         return {
           role: message.role,
@@ -25673,12 +25745,12 @@ export function App() {
           ...(message.source === "wechat" ? { source: "wechat" as const } : {}),
           ...(metadata?.contactId ? { contactId: metadata.contactId } : {}),
           ...(metadata?.contactName ? { contactName: metadata.contactName } : {}),
+          ...(metadata?.groupId ? { groupId: metadata.groupId } : {}),
+          ...(metadata?.groupName ? { groupName: metadata.groupName } : {}),
           createdAt: message.createdAt,
         };
       });
-      const requestMessages = buildWechatRequestMessages({
-        contact,
-        persona: contactPersona,
+      const commonRequestOptions = {
         user: {
           nickname: userProfile.nickname,
           bio: userProfile.bio,
@@ -25690,7 +25762,28 @@ export function App() {
           .join("\n\n"),
         statusBarPrompt: buildStatusBarConversationSystemPrompt(activeStatusBarState),
         proactive,
-      });
+      };
+      const requestMessages = target.kind === "contact"
+        ? buildWechatRequestMessages({
+            ...commonRequestOptions,
+            contact: target.contact,
+            persona: contactPersona,
+          })
+        : buildWechatGroupRequestMessages({
+            ...commonRequestOptions,
+            group: target.group,
+            responder,
+            members: target.members.map((contact) => ({
+              contact,
+              ...(contact.personaId
+                ? {
+                    persona: personas.find(
+                      (persona) => persona.id === contact.personaId,
+                    ),
+                  }
+                : {}),
+            })),
+          });
       const compressedMessages = await prepareContextCompressedMessages({
         messages: substituteUserNicknameInApiMessages(requestMessages, userProfile.nickname),
         provider: chatProvider,
@@ -25751,7 +25844,7 @@ export function App() {
       const completedMessages = [...chatMessagesRef.current, assistantMessage];
       chatMessagesRef.current = completedMessages;
       setChatMessages(completedMessages);
-      setChatStatus({ status: "success", message: `${contact.name} 已回复。` });
+      setChatStatus({ status: "success", message: `${responder.name} 已回复。` });
       return {
         id: assistantMessage.id,
         content: reply,
@@ -25774,6 +25867,18 @@ export function App() {
       }
     }
   };
+
+  const generateWechatReply = (
+    contact: WechatContact,
+    proactive: boolean,
+  ) => generateWechatTargetReply({ kind: "contact", contact }, proactive);
+
+  const generateWechatGroupReply = (
+    group: WechatGroup,
+    members: WechatContact[],
+    responder: WechatContact,
+    proactive: boolean,
+  ) => generateWechatTargetReply({ kind: "group", group, members, responder }, proactive);
 
   const respondToChatChoice = (
     messageId: string,
@@ -32816,8 +32921,12 @@ export function App() {
                 const messageName =
                   wechatMetadata
                     ? message.role === "assistant"
-                      ? wechatMetadata.contactName
-                      : `${userProfile.nickname || "User"} · 微信`
+                      ? wechatMetadata.groupId
+                        ? `${wechatMetadata.contactName || "群成员"} · ${wechatMetadata.groupName}`
+                        : wechatMetadata.contactName
+                      : wechatMetadata.groupId
+                        ? `${userProfile.nickname || "User"} · ${wechatMetadata.groupName}`
+                        : `${userProfile.nickname || "User"} · 微信`
                     : message.role === "user"
                     ? getChatSenderName(messageSender, personas, userProfile)
                     : chatMode === "roleplay" && activeSessionRoleplayCard
@@ -33936,6 +34045,8 @@ export function App() {
           syncedWechatMessages={syncedWechatMessages}
           onWechatQueueMessage={queueWechatMessage}
           onWechatGenerateReply={generateWechatReply}
+          onWechatQueueGroupMessage={queueWechatGroupMessage}
+          onWechatGenerateGroupReply={generateWechatGroupReply}
         />
       </PortfolioDesktopWindow>
   ) : null;

@@ -53,6 +53,7 @@ import {
 import type { AgentPersona } from "./types";
 import type {
   WechatContact,
+  WechatGroup,
   WechatSendMessageInput,
   WechatSendMessageResult,
   WechatStoredMessage,
@@ -101,6 +102,16 @@ export type StatusBarSidebarProps = {
   ) => void;
   onWechatGenerateReply: (
     contact: WechatContact,
+    proactive: boolean,
+  ) => Promise<WechatSendMessageResult>;
+  onWechatQueueGroupMessage: (
+    group: WechatGroup,
+    message: WechatSendMessageInput,
+  ) => void;
+  onWechatGenerateGroupReply: (
+    group: WechatGroup,
+    members: WechatContact[],
+    responder: WechatContact,
     proactive: boolean,
   ) => Promise<WechatSendMessageResult>;
 };
@@ -839,6 +850,8 @@ export function StatusBarSidebar({
   syncedWechatMessages,
   onWechatQueueMessage,
   onWechatGenerateReply,
+  onWechatQueueGroupMessage,
+  onWechatGenerateGroupReply,
 }: StatusBarSidebarProps) {
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
   const [requestedTerminalId, setRequestedTerminalId] = useState("");
@@ -2011,6 +2024,8 @@ export function StatusBarSidebar({
             onClose={() => onCollapsedChange(true)}
             onQueueMessage={onWechatQueueMessage}
             onGenerateReply={onWechatGenerateReply}
+            onQueueGroupMessage={onWechatQueueGroupMessage}
+            onGenerateGroupReply={onWechatGenerateGroupReply}
             personas={personas}
             sessionId={chatSessionId}
             syncedMessages={syncedWechatMessages}

@@ -27,9 +27,22 @@ export type WechatContact = {
   updatedAt: string;
 };
 
+export type WechatGroup = {
+  id: string;
+  name: string;
+  avatarImage: string;
+  memberContactIds: string[];
+  includesUser: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type WechatStoredMessage = {
   id: string;
-  contactId: string;
+  contactId?: string;
+  groupId?: string;
+  senderName?: string;
+  senderAvatar?: string;
   sessionId?: string;
   role: "user" | "assistant";
   content: string;
@@ -51,8 +64,10 @@ export type WechatSendMessageResult = {
 
 export type WechatSessionStore = {
   contacts: WechatContact[];
+  groups: WechatGroup[];
   messages: WechatStoredMessage[];
   activeContactId: string;
+  activeGroupId: string;
 };
 
 export type WechatStore = {
@@ -70,7 +85,7 @@ export function shouldGenerateWechatProactively(
 type LegacyWechatStore = Partial<WechatSessionStore>;
 
 export function createEmptyWechatSessionStore(): WechatSessionStore {
-  return { contacts: [], messages: [], activeContactId: "" };
+  return { contacts: [], groups: [], messages: [], activeContactId: "", activeGroupId: "" };
 }
 
 export function createEmptyWechatStore(): WechatStore {
@@ -99,23 +114,61 @@ function normalizeContact(value: unknown): WechatContact | null {
   };
 }
 
+function normalizeGroup(value: unknown, contactIds: Set<string>): WechatGroup | null {
+  if (!isObjectRecord(value) || typeof value.id !== "string" || typeof value.name !== "string") {
+    return null;
+  }
+  const memberContactIds = Array.isArray(value.memberContactIds)
+    ? Array.from(
+        new Set(
+          value.memberContactIds.filter(
+            (contactId): contactId is string =>
+              typeof contactId === "string" && contactIds.has(contactId),
+          ),
+        ),
+      )
+    : [];
+  return {
+    id: value.id,
+    name: value.name,
+    avatarImage: typeof value.avatarImage === "string" ? value.avatarImage : "",
+    memberContactIds,
+    includesUser: value.includesUser !== false,
+    createdAt: typeof value.createdAt === "string" ? value.createdAt : "",
+    updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
+  };
+}
+
 function normalizeMessage(
   value: unknown,
   contactIds: Set<string>,
+  groupIds: Set<string>,
 ): WechatStoredMessage | null {
   if (
     !isObjectRecord(value) ||
     typeof value.id !== "string" ||
-    typeof value.contactId !== "string" ||
-    !contactIds.has(value.contactId) ||
     (value.role !== "user" && value.role !== "assistant") ||
     typeof value.content !== "string"
   ) {
     return null;
   }
+  const contactId =
+    typeof value.contactId === "string" && contactIds.has(value.contactId)
+      ? value.contactId
+      : "";
+  const groupId =
+    typeof value.groupId === "string" && groupIds.has(value.groupId) ? value.groupId : "";
+  if (!groupId && !contactId) return null;
   return {
     id: value.id,
-    contactId: value.contactId,
+    ...(contactId ? { contactId } : {}),
+    ...(groupId ? { groupId } : {}),
+    ...(typeof value.senderName === "string" && value.senderName
+      ? { senderName: value.senderName }
+      : {}),
+    ...(typeof value.senderAvatar === "string" && value.senderAvatar
+      ? { senderAvatar: value.senderAvatar }
+      : {}),
     ...(typeof value.sessionId === "string" && value.sessionId
       ? { sessionId: value.sessionId }
       : {}),
@@ -134,9 +187,15 @@ function normalizeWechatSessionStore(value: unknown): WechatSessionStore {
         .filter((contact): contact is WechatContact => contact !== null)
     : [];
   const contactIds = new Set(contacts.map((contact) => contact.id));
+  const groups = Array.isArray(value.groups)
+    ? value.groups
+        .map((group) => normalizeGroup(group, contactIds))
+        .filter((group): group is WechatGroup => group !== null)
+    : [];
+  const groupIds = new Set(groups.map((group) => group.id));
   const messages = Array.isArray(value.messages)
     ? value.messages
-        .map((message) => normalizeMessage(message, contactIds))
+        .map((message) => normalizeMessage(message, contactIds, groupIds))
         .filter((message): message is WechatStoredMessage => message !== null)
         .map(({ sessionId: _legacySessionId, ...message }) => message)
     : [];
@@ -144,7 +203,11 @@ function normalizeWechatSessionStore(value: unknown): WechatSessionStore {
     typeof value.activeContactId === "string" && contactIds.has(value.activeContactId)
       ? value.activeContactId
       : contacts[0]?.id ?? "";
-  return { contacts, messages, activeContactId };
+  const activeGroupId =
+    typeof value.activeGroupId === "string" && groupIds.has(value.activeGroupId)
+      ? value.activeGroupId
+      : "";
+  return { contacts, groups, messages, activeContactId, activeGroupId };
 }
 
 function migrateLegacyWechatStore(
@@ -155,8 +218,9 @@ function migrateLegacyWechatStore(
   const normalizedLegacy = normalizeWechatSessionStore(legacy);
   const rawMessages = Array.isArray(legacy.messages) ? legacy.messages : [];
   const contactIds = new Set(normalizedLegacy.contacts.map((contact) => contact.id));
+  const groupIds = new Set<string>();
   const legacyMessages = rawMessages
-    .map((message) => normalizeMessage(message, contactIds))
+    .map((message) => normalizeMessage(message, contactIds, groupIds))
     .filter((message): message is WechatStoredMessage => message !== null);
   const sessions: Record<string, WechatSessionStore> = {};
   const buildSession = (sessionId: string, includeUnscopedMessages = false) => {
@@ -175,7 +239,13 @@ function migrateLegacyWechatStore(
     const activeContactId = validContactIds.has(normalizedLegacy.activeContactId)
       ? normalizedLegacy.activeContactId
       : contacts[0]?.id ?? "";
-    sessions[sessionId] = { contacts, messages: scopedMessages, activeContactId };
+    sessions[sessionId] = {
+      contacts,
+      groups: [],
+      messages: scopedMessages,
+      activeContactId,
+      activeGroupId: "",
+    };
   };
 
   buildSession(currentSessionId, true);
@@ -235,6 +305,8 @@ export type WechatSharedContextMessage = {
   source?: "wechat";
   contactId?: string;
   contactName?: string;
+  groupId?: string;
+  groupName?: string;
   createdAt: string;
 };
 
@@ -251,6 +323,18 @@ export type WechatUserIdentity = {
 export type BuildWechatRequestOptions = {
   contact: WechatContact;
   persona?: AgentPersona;
+  user: WechatUserIdentity;
+  sharedMessages: WechatSharedContextMessage[];
+  characterCardPrompt?: string;
+  worldBookPrompt?: string;
+  statusBarPrompt?: string;
+  proactive?: boolean;
+};
+
+export type BuildWechatGroupRequestOptions = {
+  group: WechatGroup;
+  members: Array<{ contact: WechatContact; persona?: AgentPersona }>;
+  responder: WechatContact;
   user: WechatUserIdentity;
   sharedMessages: WechatSharedContextMessage[];
   characterCardPrompt?: string;
@@ -320,11 +404,18 @@ function isCurrentContactWechatMessage(
   message: WechatSharedContextMessage,
   contact: WechatContact,
 ) {
-  if (message.source !== "wechat") return false;
+  if (message.source !== "wechat" || message.groupId) return false;
   if (message.contactId) return message.contactId === contact.id;
   return Boolean(
     message.contactName?.trim() && message.contactName.trim() === contact.name.trim(),
   );
+}
+
+function isCurrentGroupWechatMessage(
+  message: WechatSharedContextMessage,
+  group: WechatGroup,
+) {
+  return message.source === "wechat" && message.groupId === group.id;
 }
 
 export function buildWechatRequestMessages({
@@ -362,7 +453,7 @@ export function buildWechatRequestMessages({
       ? `当前世界书信息（作为共享世界观与记忆参考）：\n${worldBookPrompt.trim()}`
       : "",
     statusBarPrompt.trim(),
-    "你能读取主会话的共享背景和当前联系人的微信对话。其他联系人的微信消息不会注入；当前联系人的微信消息才是微信对话记录。",
+    "你能读取主会话的共享背景和当前联系人的微信对话。其他联系人的私聊及所有群聊消息都不会注入；当前联系人的微信私聊消息才是对话记录。",
     proactive
       ? "当前没有新的用户微信消息，请由联系人主动发起一条自然、符合关系和上下文的微信消息。仍然只输出微信气泡正文，不要输出旁白。"
       : "",
@@ -381,6 +472,85 @@ export function buildWechatRequestMessages({
         message.role === "assistant"
           ? splitWechatReply(message.content).join("\n")
           : message.content.trim(),
+    })),
+  ];
+}
+
+export function buildWechatGroupRequestMessages({
+  group,
+  members,
+  responder,
+  user,
+  sharedMessages,
+  characterCardPrompt = "",
+  worldBookPrompt = "",
+  statusBarPrompt = "",
+  proactive = false,
+}: BuildWechatGroupRequestOptions): WechatRequestMessage[] {
+  const responderPersona = members.find(
+    ({ contact }) => contact.id === responder.id,
+  )?.persona;
+  const groupMessages = sharedMessages.filter(
+    (message) => message.content.trim() && isCurrentGroupWechatMessage(message, group),
+  );
+  const backgroundMessages = sharedMessages.filter(
+    (message) => message.content.trim() && message.source !== "wechat",
+  );
+  const backgroundContext = backgroundMessages.length
+    ? [
+        "以下是主会话的共享背景资料。它只用于理解事实，不是群聊消息，也不是措辞、文风或输出格式示例：",
+        "【共享背景开始】",
+        ...backgroundMessages.map((message) => formatSharedMessage(message, responder)),
+        "【共享背景结束】",
+      ].join("\n\n")
+    : "";
+  const memberRoster = members
+    .map(({ contact }) => {
+      const details = [contact.nickname.trim(), contact.profile.trim()].filter(Boolean).join("；");
+      return `- ${contact.name}${details ? `：${details}` : ""}`;
+    })
+    .join("\n");
+  const systemPrompt = [
+    WECHAT_CHAT_SYSTEM_PROMPT,
+    `当前微信群聊：${group.name.trim() || "未命名群聊"}`,
+    `群成员：\n${memberRoster || "- 暂无联系人"}${
+      group.includesUser ? `\n- ${user.nickname.trim() || "用户"}（用户本人）` : ""
+    }`,
+    formatContactIdentity(responder, responderPersona),
+    group.includesUser ? formatUserIdentity(user) : "",
+    `本轮只由群成员“${responder.name}”发送消息。只输出“${responder.name}”实际发到群里的气泡正文，不要输出姓名或冒号，不要代替其他成员一次性发言。`,
+    group.includesUser
+      ? "用户是本群成员，可以自然回应用户或其他群成员。"
+      : "用户不在本群中。不要向用户说话或假装用户参与；请让群成员基于群内历史自然地彼此聊天。",
+    characterCardPrompt.trim()
+      ? `当前酒馆角色卡信息（作为人物与剧情背景参考，群成员身份仍以群资料为准）：\n${characterCardPrompt.trim()}`
+      : "",
+    worldBookPrompt.trim()
+      ? `当前世界书信息（作为共享世界观与记忆参考）：\n${worldBookPrompt.trim()}`
+      : "",
+    statusBarPrompt.trim(),
+    "你只能读取主会话共享背景和当前群聊记录。任何私聊消息及其他群聊消息都不会注入，也不得推测或引用。",
+    proactive
+      ? `当前没有新的用户群消息，请由“${responder.name}”主动发起一条符合群内关系与上下文的消息。`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  return [
+    { role: "system", content: systemPrompt },
+    ...(backgroundContext ? [{ role: "user" as const, content: backgroundContext }] : []),
+    ...groupMessages.map((message) => ({
+      role: message.role,
+      content: `【群聊 · ${
+        message.role === "user"
+          ? user.nickname.trim() || "我"
+          : message.contactName?.trim() || "群成员"
+      }】${
+        message.role === "assistant"
+          ? splitWechatReply(message.content).join("\n")
+          : message.content.trim()
+      }`,
     })),
   ];
 }
@@ -433,13 +603,17 @@ export function syncWechatSessionMessages(
   syncedMessages: WechatStoredMessage[],
 ): WechatSessionStore {
   const contactIds = new Set(sessionStore.contacts.map((contact) => contact.id));
+  const groupIds = new Set((sessionStore.groups ?? []).map((group) => group.id));
   const existingById = new Map(
     sessionStore.messages.map((message) => [message.id, message]),
   );
   const messages = syncedMessages
     .filter(
       (message) =>
-        contactIds.has(message.contactId) &&
+        (message.groupId
+          ? groupIds.has(message.groupId) &&
+            (!message.contactId || contactIds.has(message.contactId))
+          : Boolean(message.contactId && contactIds.has(message.contactId))) &&
         (message.role === "user" || message.role === "assistant") &&
         Boolean(message.content.trim()),
     )
@@ -447,7 +621,10 @@ export function syncWechatSessionMessages(
       const existing = existingById.get(message.id);
       return {
         id: message.id,
-        contactId: message.contactId,
+        ...(message.contactId ? { contactId: message.contactId } : {}),
+        ...(message.groupId ? { groupId: message.groupId } : {}),
+        ...(message.senderName ? { senderName: message.senderName } : {}),
+        ...(message.senderAvatar ? { senderAvatar: message.senderAvatar } : {}),
         role: message.role,
         content:
           message.role === "assistant"
@@ -464,6 +641,9 @@ export function syncWechatSessionMessages(
       return (
         current?.id === message.id &&
         current.contactId === message.contactId &&
+        current.groupId === message.groupId &&
+        current.senderName === message.senderName &&
+        current.senderAvatar === message.senderAvatar &&
         current.role === message.role &&
         current.content === message.content &&
         current.createdAt === message.createdAt &&

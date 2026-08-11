@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildWechatGroupRequestMessages,
   buildWechatRequestMessages,
   createEmptyWechatStore,
   getWechatSessionStore,
@@ -50,6 +51,24 @@ const persona = {
       updatedAt: "2026-08-10T08:00:00.000Z",
     },
   ],
+  createdAt: "2026-08-10T08:00:00.000Z",
+  updatedAt: "2026-08-10T08:00:00.000Z",
+};
+
+const secondContact = {
+  ...contact,
+  id: "friend-2",
+  name: "林夏",
+  nickname: "夏夏",
+  personaId: undefined,
+};
+
+const group = {
+  id: "group-1",
+  name: "周末出游",
+  avatarImage: "",
+  memberContactIds: [contact.id, secondContact.id],
+  includesUser: false,
   createdAt: "2026-08-10T08:00:00.000Z",
   updatedAt: "2026-08-10T08:00:00.000Z",
 };
@@ -175,6 +194,92 @@ test("wechat prompt keeps main chat as background and isolates other contacts", 
     ),
     false,
   );
+});
+
+test("private chat excludes group messages even when the same contact spoke in the group", () => {
+  const messages = buildWechatRequestMessages({
+    contact,
+    user: { nickname: "用户", bio: "" },
+    sharedMessages: [
+      {
+        role: "assistant",
+        content: "这是 A 在群里的发言",
+        source: "wechat",
+        groupId: group.id,
+        groupName: group.name,
+        contactId: contact.id,
+        contactName: contact.name,
+        createdAt: "2026-08-10T08:00:00.000Z",
+      },
+      {
+        role: "assistant",
+        content: "这是 A 的私聊",
+        source: "wechat",
+        contactId: contact.id,
+        contactName: contact.name,
+        createdAt: "2026-08-10T08:01:00.000Z",
+      },
+    ],
+  });
+
+  assert.equal(messages.some((message) => message.content.includes("A 在群里的发言")), false);
+  assert.equal(messages.at(-1).content, "这是 A 的私聊");
+});
+
+test("group chat keeps its own messages and excludes all private and other-group messages", () => {
+  const messages = buildWechatGroupRequestMessages({
+    group,
+    members: [
+      { contact, persona },
+      { contact: secondContact },
+    ],
+    responder: secondContact,
+    user: { nickname: "用户", bio: "不应注入未入群用户资料" },
+    sharedMessages: [
+      {
+        role: "assistant",
+        content: "主会话共享事件",
+        createdAt: "2026-08-10T08:00:00.000Z",
+      },
+      {
+        role: "user",
+        content: "用户和 C 的私聊",
+        source: "wechat",
+        contactId: "friend-3",
+        contactName: "C",
+        createdAt: "2026-08-10T08:01:00.000Z",
+      },
+      {
+        role: "assistant",
+        content: "其他群里的消息",
+        source: "wechat",
+        groupId: "group-2",
+        groupName: "其他群",
+        contactId: "friend-3",
+        contactName: "C",
+        createdAt: "2026-08-10T08:02:00.000Z",
+      },
+      {
+        role: "assistant",
+        content: "A 在当前群里的消息",
+        source: "wechat",
+        groupId: group.id,
+        groupName: group.name,
+        contactId: contact.id,
+        contactName: contact.name,
+        createdAt: "2026-08-10T08:03:00.000Z",
+      },
+    ],
+  });
+
+  const promptText = messages.map((message) => message.content).join("\n");
+  assert.match(promptText, /主会话共享事件/);
+  assert.match(promptText, /A 在当前群里的消息/);
+  assert.doesNotMatch(promptText, /用户和 C 的私聊/);
+  assert.doesNotMatch(promptText, /其他群里的消息/);
+  assert.doesNotMatch(promptText, /不应注入未入群用户资料/);
+  assert.match(messages[0].content, /用户不在本群中/);
+  assert.match(messages[0].content, /本轮只由群成员“林夏”/);
 });
 
 test("wechat replies render as at most three clean bubbles", () => {
