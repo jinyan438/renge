@@ -129,7 +129,7 @@ test("wechat generation is proactive only when no user message is queued", () =>
   );
 });
 
-test("wechat prompt treats roleplay prose as background instead of assistant style", () => {
+test("wechat prompt keeps main chat as background and isolates other contacts", () => {
   const messages = buildWechatRequestMessages({
     contact,
     user: { nickname: "用户", bio: "" },
@@ -163,7 +163,11 @@ test("wechat prompt treats roleplay prose as background instead of assistant sty
   assert.equal(messages[1].role, "user");
   assert.match(messages[1].content, /只用于理解事实/);
   assert.match(messages[1].content, /她看向窗外/);
-  assert.match(messages[1].content, /另一个联系人的消息/);
+  assert.doesNotMatch(messages[1].content, /另一个联系人的消息/);
+  assert.equal(
+    messages.some((message) => message.content.includes("另一个联系人的消息")),
+    false,
+  );
   assert.deepEqual(messages[2], { role: "user", content: "喜欢吃什么菜" });
   assert.equal(
     messages.some(

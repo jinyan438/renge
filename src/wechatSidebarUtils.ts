@@ -341,11 +341,11 @@ export function buildWechatRequestMessages({
     (message) => message.content.trim() && isCurrentContactWechatMessage(message, contact),
   );
   const backgroundMessages = sharedMessages.filter(
-    (message) => message.content.trim() && !isCurrentContactWechatMessage(message, contact),
+    (message) => message.content.trim() && message.source !== "wechat",
   );
   const backgroundContext = backgroundMessages.length
     ? [
-        "以下是主会话及其他微信联系人的共享背景资料。它只用于理解事实，不是需要回复的消息，也不是措辞、文风或输出格式示例：",
+        "以下是主会话的共享背景资料。它只用于理解事实，不是需要回复的消息，也不是措辞、文风或输出格式示例：",
         "【共享背景开始】",
         ...backgroundMessages.map((message) => formatSharedMessage(message, contact)),
         "【共享背景结束】",
@@ -362,7 +362,7 @@ export function buildWechatRequestMessages({
       ? `当前世界书信息（作为共享世界观与记忆参考）：\n${worldBookPrompt.trim()}`
       : "",
     statusBarPrompt.trim(),
-    "你能读取主会话与微信会话的共享上下文。带有其他联系人姓名的微信消息只作为背景，不要冒充其他联系人。当前联系人的微信消息才是对话记录。",
+    "你能读取主会话的共享背景和当前联系人的微信对话。其他联系人的微信消息不会注入；当前联系人的微信消息才是微信对话记录。",
     proactive
       ? "当前没有新的用户微信消息，请由联系人主动发起一条自然、符合关系和上下文的微信消息。仍然只输出微信气泡正文，不要输出旁白。"
       : "",
