@@ -66,6 +66,8 @@ test("creates contacts from an empty phone and blocks normalized duplicates", ()
   session = created.session;
 
   assert.equal(created.result.created, true);
+  assert.equal(created.result.message_sent, false);
+  assert.match(created.result.next_action, /必须立即调用 phone_send_private_messages/);
   assert.equal(session.contacts.length, 1);
   assert.equal(session.activeContactId, session.contacts[0].id);
   const state = run("phone_get_state", { include_messages: false }, session, runtime);
@@ -98,6 +100,47 @@ test("creates contacts from an empty phone and blocks normalized duplicates", ()
   assert.equal(samePersona.session.contacts.length, 1);
 });
 
+test("creates or reuses a contact and sends private messages atomically", () => {
+  const runtime = createRuntime();
+  const emptySession = createEmptyWechatSessionStore();
+  const createdAndSent = run(
+    "phone_create_contact",
+    {
+      name: "林小栀",
+      nickname: "小栀",
+      messages: ["到了没？", "我在门口等你"],
+    },
+    emptySession,
+    runtime,
+  );
+
+  assert.equal(createdAndSent.result.created, true);
+  assert.equal(createdAndSent.result.message_sent, true);
+  assert.equal(createdAndSent.result.sent_count, 2);
+  assert.equal(createdAndSent.session.contacts.length, 1);
+  assert.deepEqual(
+    createdAndSent.session.messages.map((message) => message.content),
+    ["到了没？", "我在门口等你"],
+  );
+
+  const reusedAndSent = run(
+    "phone_create_contact",
+    {
+      name: "另一个姓名",
+      nickname: "小栀",
+      messages: ["明天见"],
+    },
+    createdAndSent.session,
+    runtime,
+  );
+  assert.equal(reusedAndSent.result.created, false);
+  assert.equal(reusedAndSent.result.duplicate, true);
+  assert.equal(reusedAndSent.result.message_sent, true);
+  assert.equal(reusedAndSent.session.contacts.length, 1);
+  assert.equal(reusedAndSent.session.messages.at(-1).contactId, createdAndSent.session.contacts[0].id);
+  assert.equal(reusedAndSent.session.messages.at(-1).content, "明天见");
+});
+
 test("creates unique groups, validates members, and sends mixed-member messages", () => {
   const runtime = createRuntime();
   let session = createEmptyWechatSessionStore();
@@ -120,6 +163,10 @@ test("creates unique groups, validates members, and sends mixed-member messages"
       name: "周末群",
       member_contact_ids: [contactA.id, contactB.id],
       includes_user: false,
+      messages: [
+        { sender_contact_id: contactB.id, content: "群建好了" },
+        { sender_contact_id: contactA.id, content: "收到" },
+      ],
     },
     session,
     runtime,
@@ -127,6 +174,14 @@ test("creates unique groups, validates members, and sends mixed-member messages"
   session = created.session;
   const group = session.groups[0];
   assert.equal(created.result.created, true);
+  assert.equal(created.result.message_sent, true);
+  assert.deepEqual(
+    created.sentMessages.map((message) => [message.contactId, message.content]),
+    [
+      [contactB.id, "群建好了"],
+      [contactA.id, "收到"],
+    ],
+  );
 
   const duplicateMembers = run(
     "phone_create_group",

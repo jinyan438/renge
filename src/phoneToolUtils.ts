@@ -11,7 +11,8 @@ export const PHONE_TOOL_SYSTEM_PROMPT = [
   "手机工具在后台执行。成功后不要向用户解释工具、权限、参数或后台过程；正常继续主会话即可，也不要在主会话重复抄写刚发出的微信消息。",
   "手机微信消息的格式优先于主会话写作格式：每个 messages 数组元素只填写一个真实发送的气泡正文，禁止姓名前缀、冒号、旁白、动作、心理、环境、Markdown、状态栏或输出模板。",
   "发送私聊前先通过 phone_get_state 确认联系人；发送群聊前确认群聊和成员身份。群消息 sender_contact_id 必须是该群现有联系人成员，不能冒充用户。",
-  "如果没有联系人或群聊，或者缺少适合当前情境的对象，可以自行创建联系人或群聊后再发送。创建对象必须使用真实且彼此可区分的资料；运行时会按姓名、网名、人格 ID、群名和成员组合阻止重复创建。",
+  "如果没有联系人或群聊，或者缺少适合当前情境的对象，可以自行创建。创建对象必须使用真实且彼此可区分的资料；运行时会按姓名、网名、人格 ID、群名和成员组合阻止重复创建。",
+  "当当前目标包含发微信消息且联系人或群聊尚不存在时，必须把消息放进 phone_create_contact 或 phone_create_group 的 messages 参数，让创建或复用与发送在同一次调用中完成。禁止只创建对象后在主会话正文里模拟微信消息；只有目标明确只是管理通讯录时才省略 messages。",
   "一次可发送一条或多条消息，也可以让不同群成员连续发言；消息数量和发言人由当前情境决定。",
 ].join("\n");
 
@@ -66,6 +67,31 @@ const GROUP_PROPERTIES = {
   },
 } as const;
 
+const PRIVATE_MESSAGES_PROPERTY = {
+  type: "array",
+  minItems: 1,
+  items: { type: "string" },
+  description: "按发送顺序排列的微信气泡正文。创建联系人是为了发消息时必须填写。",
+} as const;
+
+const GROUP_MESSAGES_PROPERTY = {
+  type: "array",
+  minItems: 1,
+  items: {
+    type: "object",
+    properties: {
+      sender_contact_id: {
+        type: "string",
+        description: "发言联系人 ID，必须是该群成员。",
+      },
+      content: { type: "string", description: "一条微信气泡正文。" },
+    },
+    required: ["sender_contact_id", "content"],
+    additionalProperties: false,
+  },
+  description: "按发送顺序排列的群聊气泡。创建群聊是为了发消息时必须填写。",
+} as const;
+
 export const phoneToolDefinitions: PhoneToolDefinition[] = [
   {
     type: "function",
@@ -88,10 +114,13 @@ export const phoneToolDefinitions: PhoneToolDefinition[] = [
     type: "function",
     function: {
       name: "phone_create_contact",
-      description: "创建手机联系人。若姓名、网名或人格 ID 与现有联系人重复，不创建并返回已有联系人。",
+      description: "创建或复用手机联系人，并可在同一次调用中立即发送私聊。若目标包含发消息，必须填写 messages。重复联系人不会再次创建。",
       parameters: {
         type: "object",
-        properties: CONTACT_PROPERTIES,
+        properties: {
+          ...CONTACT_PROPERTIES,
+          messages: PRIVATE_MESSAGES_PROPERTY,
+        },
         required: ["name"],
         additionalProperties: false,
       },
@@ -132,10 +161,13 @@ export const phoneToolDefinitions: PhoneToolDefinition[] = [
     type: "function",
     function: {
       name: "phone_create_group",
-      description: "用现有联系人创建群聊。重复群名或相同成员及用户入群状态不会重复创建。",
+      description: "用现有联系人创建或复用群聊，并可在同一次调用中立即发送群消息。若目标包含发消息，必须填写 messages。重复群聊不会再次创建。",
       parameters: {
         type: "object",
-        properties: GROUP_PROPERTIES,
+        properties: {
+          ...GROUP_PROPERTIES,
+          messages: GROUP_MESSAGES_PROPERTY,
+        },
         required: ["name", "member_contact_ids", "includes_user"],
         additionalProperties: false,
       },
@@ -181,12 +213,7 @@ export const phoneToolDefinitions: PhoneToolDefinition[] = [
         type: "object",
         properties: {
           contact_id: { type: "string", description: "发消息的联系人 ID。" },
-          messages: {
-            type: "array",
-            minItems: 1,
-            items: { type: "string" },
-            description: "按发送顺序排列的微信气泡正文。",
-          },
+          messages: PRIVATE_MESSAGES_PROPERTY,
         },
         required: ["contact_id", "messages"],
         additionalProperties: false,
@@ -202,22 +229,7 @@ export const phoneToolDefinitions: PhoneToolDefinition[] = [
         type: "object",
         properties: {
           group_id: { type: "string", description: "群聊 ID。" },
-          messages: {
-            type: "array",
-            minItems: 1,
-            items: {
-              type: "object",
-              properties: {
-                sender_contact_id: {
-                  type: "string",
-                  description: "发言联系人 ID，必须是该群成员。",
-                },
-                content: { type: "string", description: "一条微信气泡正文。" },
-              },
-              required: ["sender_contact_id", "content"],
-              additionalProperties: false,
-            },
-          },
+          messages: GROUP_MESSAGES_PROPERTY,
         },
         required: ["group_id", "messages"],
         additionalProperties: false,
@@ -408,6 +420,75 @@ function requireGroup(session: WechatSessionStore, groupId: string) {
   return group;
 }
 
+function buildPrivateMessages(
+  contact: WechatContact,
+  value: unknown,
+  createId: () => string,
+  now: () => string,
+) {
+  return normalizeBubbleContents(value).map(
+    (content): WechatStoredMessage => ({
+      id: createId(),
+      contactId: contact.id,
+      role: "assistant",
+      content,
+      createdAt: now(),
+    }),
+  );
+}
+
+function buildGroupMessages(
+  group: WechatGroup,
+  session: WechatSessionStore,
+  value: unknown,
+  createId: () => string,
+  now: () => string,
+) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("至少需要一条群聊消息。");
+  }
+  const memberIds = new Set(group.memberContactIds);
+  return value.flatMap((rawItem): WechatStoredMessage[] => {
+    if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
+      throw new Error("每条群聊消息都必须包含 sender_contact_id 和 content。");
+    }
+    const item = rawItem as Record<string, unknown>;
+    const contactId = requireString(item, "sender_contact_id", "群聊发言人 ID");
+    if (!memberIds.has(contactId)) {
+      throw new Error(`联系人 ${contactId} 不是群聊“${group.name}”的成员。`);
+    }
+    const contact = requireContact(session, contactId);
+    return normalizeBubbleContents([item.content]).map((content) => ({
+      id: createId(),
+      groupId: group.id,
+      contactId: contact.id,
+      senderName: contact.name,
+      senderAvatar: contact.avatarImage,
+      role: "assistant" as const,
+      content,
+      createdAt: now(),
+    }));
+  });
+}
+
+function serializePrivateMessages(messages: WechatStoredMessage[]) {
+  return messages.map((message) => ({
+    id: message.id,
+    content: message.content,
+    created_at: message.createdAt,
+  }));
+}
+
+function serializeGroupMessages(messages: WechatStoredMessage[]) {
+  return messages.map((message) => ({
+    id: message.id,
+    sender_contact_id: message.contactId,
+    sender_name: message.senderName,
+    content: message.content,
+    created_at: message.createdAt,
+  }));
+}
+
 export function executePhoneToolOnSession(
   toolName: PhoneToolName,
   args: Record<string, unknown>,
@@ -462,25 +543,43 @@ export function executePhoneToolOnSession(
         updatedAt: timestamp,
       };
       const duplicate = findDuplicateContact(session.contacts, contact);
-      if (duplicate) {
-        return {
-          session,
-          result: {
-            ok: true,
-            created: false,
-            duplicate: true,
-            contact: serializeContact(duplicate),
-          },
-        };
-      }
+      const targetContact = duplicate ?? contact;
+      const sentMessages = Object.prototype.hasOwnProperty.call(args, "messages")
+        ? buildPrivateMessages(targetContact, args.messages, createId, now)
+        : [];
+      const nextSession = duplicate && sentMessages.length === 0
+        ? session
+        : {
+            ...session,
+            ...(duplicate
+              ? {}
+              : {
+                  contacts: [...session.contacts, contact],
+                  activeContactId: session.activeContactId || contact.id,
+                }),
+            ...(sentMessages.length > 0
+              ? { messages: [...session.messages, ...sentMessages] }
+              : {}),
+          };
       return {
-        session: {
-          ...session,
-          contacts: [...session.contacts, contact],
-          activeContactId: session.activeContactId || contact.id,
+        session: nextSession,
+        result: {
+          ok: true,
+          created: !duplicate,
+          duplicate: Boolean(duplicate),
+          contact: serializeContact(targetContact),
+          message_sent: sentMessages.length > 0,
+          sent_count: sentMessages.length,
+          messages: serializePrivateMessages(sentMessages),
+          ...(sentMessages.length === 0
+            ? {
+                next_action:
+                  "本次只创建或复用了联系人，没有发送微信消息。如果当前目标包含发消息，必须立即调用 phone_send_private_messages，不能在主会话正文中代替发送。",
+              }
+            : {}),
         },
-        result: { ok: true, created: true, duplicate: false, contact: serializeContact(contact) },
-        updatedContact: contact,
+        ...(duplicate ? {} : { updatedContact: contact }),
+        ...(sentMessages.length > 0 ? { sentMessages } : {}),
       };
     }
 
@@ -560,25 +659,43 @@ export function executePhoneToolOnSession(
         updatedAt: timestamp,
       };
       const duplicate = findDuplicateGroup(session.groups, group);
-      if (duplicate) {
-        return {
-          session,
-          result: {
-            ok: true,
-            created: false,
-            duplicate: true,
-            group: serializeGroup(duplicate),
-          },
-        };
-      }
+      const targetGroup = duplicate ?? group;
+      const sentMessages = Object.prototype.hasOwnProperty.call(args, "messages")
+        ? buildGroupMessages(targetGroup, session, args.messages, createId, now)
+        : [];
+      const nextSession = duplicate && sentMessages.length === 0
+        ? session
+        : {
+            ...session,
+            ...(duplicate
+              ? {}
+              : {
+                  groups: [...session.groups, group],
+                  activeGroupId: session.activeGroupId || group.id,
+                }),
+            ...(sentMessages.length > 0
+              ? { messages: [...session.messages, ...sentMessages] }
+              : {}),
+          };
       return {
-        session: {
-          ...session,
-          groups: [...session.groups, group],
-          activeGroupId: session.activeGroupId || group.id,
+        session: nextSession,
+        result: {
+          ok: true,
+          created: !duplicate,
+          duplicate: Boolean(duplicate),
+          group: serializeGroup(targetGroup),
+          message_sent: sentMessages.length > 0,
+          sent_count: sentMessages.length,
+          messages: serializeGroupMessages(sentMessages),
+          ...(sentMessages.length === 0
+            ? {
+                next_action:
+                  "本次只创建或复用了群聊，没有发送微信消息。如果当前目标包含发消息，必须立即调用 phone_send_group_messages，不能在主会话正文中代替发送。",
+              }
+            : {}),
         },
-        result: { ok: true, created: true, duplicate: false, group: serializeGroup(group) },
-        updatedGroup: group,
+        ...(duplicate ? {} : { updatedGroup: group }),
+        ...(sentMessages.length > 0 ? { sentMessages } : {}),
       };
     }
 
@@ -635,26 +752,14 @@ export function executePhoneToolOnSession(
     case "phone_send_private_messages": {
       const contactId = requireString(args, "contact_id", "联系人 ID");
       const contact = requireContact(session, contactId);
-      const sentMessages = normalizeBubbleContents(args.messages).map(
-        (content): WechatStoredMessage => ({
-          id: createId(),
-          contactId: contact.id,
-          role: "assistant",
-          content,
-          createdAt: now(),
-        }),
-      );
+      const sentMessages = buildPrivateMessages(contact, args.messages, createId, now);
       return {
         session: { ...session, messages: [...session.messages, ...sentMessages] },
         result: {
           ok: true,
           contact: serializeContact(contact),
           sent_count: sentMessages.length,
-          messages: sentMessages.map((message) => ({
-            id: message.id,
-            content: message.content,
-            created_at: message.createdAt,
-          })),
+          messages: serializePrivateMessages(sentMessages),
         },
         sentMessages,
       };
@@ -663,45 +768,14 @@ export function executePhoneToolOnSession(
     case "phone_send_group_messages": {
       const groupId = requireString(args, "group_id", "群聊 ID");
       const group = requireGroup(session, groupId);
-      if (!Array.isArray(args.messages) || args.messages.length === 0) {
-        throw new Error("至少需要一条群聊消息。");
-      }
-      const memberIds = new Set(group.memberContactIds);
-      const sentMessages = args.messages.flatMap((value): WechatStoredMessage[] => {
-        if (!value || typeof value !== "object" || Array.isArray(value)) {
-          throw new Error("每条群聊消息都必须包含 sender_contact_id 和 content。");
-        }
-        const item = value as Record<string, unknown>;
-        const contactId = requireString(item, "sender_contact_id", "群聊发言人 ID");
-        if (!memberIds.has(contactId)) {
-          throw new Error(`联系人 ${contactId} 不是群聊“${group.name}”的成员。`);
-        }
-        const contact = requireContact(session, contactId);
-        const contents = normalizeBubbleContents([item.content]);
-        return contents.map((content) => ({
-          id: createId(),
-          groupId: group.id,
-          contactId: contact.id,
-          senderName: contact.name,
-          senderAvatar: contact.avatarImage,
-          role: "assistant" as const,
-          content,
-          createdAt: now(),
-        }));
-      });
+      const sentMessages = buildGroupMessages(group, session, args.messages, createId, now);
       return {
         session: { ...session, messages: [...session.messages, ...sentMessages] },
         result: {
           ok: true,
           group: serializeGroup(group),
           sent_count: sentMessages.length,
-          messages: sentMessages.map((message) => ({
-            id: message.id,
-            sender_contact_id: message.contactId,
-            sender_name: message.senderName,
-            content: message.content,
-            created_at: message.createdAt,
-          })),
+          messages: serializeGroupMessages(sentMessages),
         },
         sentMessages,
       };

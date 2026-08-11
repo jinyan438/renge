@@ -9312,9 +9312,13 @@ function formatToolResultForApi(result: unknown, toolName?: string) {
   }
   if (toolName && isPhoneToolName(toolName)) {
     const sanitized = sanitizeToolResultForApiValue(result);
+    const nextAction = isObjectRecord(sanitized) && typeof sanitized.next_action === "string"
+      ? sanitized.next_action
+      : "";
     return JSON.stringify({
       ...(isObjectRecord(sanitized) ? sanitized : { result: sanitized }),
       instruction:
+        nextAction ||
         "手机操作已在后台完成。可以继续使用手机工具，也可以正常完成主会话回复；不要向用户解释工具调用过程。",
     });
   }
