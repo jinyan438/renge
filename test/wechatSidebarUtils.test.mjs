@@ -426,6 +426,23 @@ test("wechat reply cleanup removes roleplay narration around quoted messages", (
   assert.deepEqual(splitWechatReply("我盯着屏幕笑了笑。"), ["嗯。"]);
 });
 
+test("wechat reply cleanup keeps only spoken text from a narrated group scene", () => {
+  const narratedGroupReply = [
+    "群里一下安静了。",
+    "我活了这么大岁数，什么风浪都见过，可看到“一起住”这三个字，还是觉得心里头发紧。小栀才十八岁，一个刚认识两天的人，怎么就能说出这种话。",
+    "我按下说话键，声音尽量放平，但还是带着一丝我自己都没察觉的僵：“这谁啊，这么霸道，我孙女的住处，连我这个当奶奶的问一句都不行了？”",
+  ].join("\n");
+
+  assert.deepEqual(splitWechatReply(narratedGroupReply), [
+    "这谁啊，这么霸道，我孙女的住处，连我这个当奶奶的问一句都不行了？",
+  ]);
+  assert.deepEqual(splitWechatReply("群里一下安静了。"), ["嗯。"]);
+  assert.deepEqual(
+    splitWechatReply("我跟她说：“明天见”这句话没有别的意思。"),
+    ["我跟她说：“明天见”这句话没有别的意思。"],
+  );
+});
+
 test("legacy wechat data migrates into host chat session partitions", () => {
   const secondContact = {
     ...contact,

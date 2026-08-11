@@ -14,6 +14,7 @@ export const WECHAT_CHAT_SYSTEM_PROMPT = [
   "不要重复、解释、改写或复述对方刚发送的内容。",
   "想继续聊天时可以表达态度、情绪或提出一个自然的问题，把话题交还给对方。",
   "不要把同一条消息重复两遍。即使共享上下文采用长篇写作扮演格式，也必须忽略其表达形式，只提取事实并按以上微信格式回复。",
+  "如果脑中先形成了场景、心理、动作或说话过程，只保留角色最终真正发出的文字，绝不把“群里安静了”“心里想到”“按下说话键”等叙事内容输出为气泡。",
 ].join("\n");
 
 export type WechatContact = {
@@ -693,46 +694,77 @@ export function resolveWechatGroupSpeakerSelection(
 const WECHAT_QUOTED_SPEECH_PATTERN = /[“「"]([^”」"]+)[”」"]/g;
 const WECHAT_NARRATIVE_LEAD_PATTERN = /^(?:[《〈][^》〉]{0,80}[》〉]\s*)?(?:我|他|她|对方)?(?:歪(?:了)?歪头|歪头|想了想|犹豫(?:了)?(?:一下|片刻)?|笑(?:了)?笑|轻轻一笑|点(?:了)?点头|摇(?:了)?摇头|愣(?:了)?(?:一下|片刻)?|沉默(?:了)?(?:一下|片刻)?)[，,]\s*/;
 const WECHAT_NARRATION_PATTERN = /^(?:[《〈][^》〉]{0,80}[》〉]\s*)?(?:(?:我|他|她|对方)(?:看着|盯着|望着|抬手|垂眼|转身|低头|轻声|低声|笑着|打完字|说完|发完|回过神)|(?:又)?(?:补了|补充|回了|发了|说了)(?:一句|条消息)?|打完字|说完|发完)/;
+const WECHAT_SCENE_NARRATION_PATTERN = /^(?:(?:群里|群聊里|聊天框里|屏幕上|气氛).{0,80}(?:安静|沉默|寂静|凝固)|(?:我|他|她|对方)(?:按下说话键|拿起手机|放下手机|盯着屏幕|握着手机|攥紧手机))/;
+const WECHAT_NARRATED_DIRECT_SPEECH_PATTERN = /^(?:[《〈][^》〉]{0,80}[》〉]\s*)?(?:我|他|她|对方)[^“「"\n]{0,200}(?:歪头|想了想|按下说话键|拿起手机|放下手机|盯着屏幕|低声|轻声|笑着|开口|回(?:他|她|你)|问道|说道|答道|补(?:了|充了)(?:一句)?|声音|语气)[^“「"\n]{0,120}[：:]\s*[“「"]/;
+const WECHAT_QUOTED_NARRATION_END_PATTERN = /(?:回(?:他|她|你)?|说|问|答|补充?|发)(?:了)?(?:一句|道)?\s*[：:]?\s*$/;
 const WECHAT_GROUP_SPEAKER_LABEL_PATTERN = /^(?:(?:【|\[)\s*(?:微信)?群聊(?:(?:\s*[·•・|｜:：]\s*|\s+)[^】\]]+)?\s*(?:】|\])\s*[：:]?\s*)+/i;
 const WECHAT_PLAIN_GROUP_SPEAKER_LABEL_PATTERN = /^(?:微信)?群聊\s*[·•・|｜]\s*[^：:\n]{1,80}\s*[：:]\s*/i;
 
-function cleanWechatReplyLine(rawLine: string) {
-  const line = rawLine
+function stripWechatReplyPrefixes(rawLine: string) {
+  return rawLine
     .replace(/^\s*(?:[-*]|\d+[.)、])\s*/, "")
     .replace(/^\s*(?:微信回复|回复|联系人|Assistant|AI)\s*[：:]\s*/i, "")
     .replace(WECHAT_GROUP_SPEAKER_LABEL_PATTERN, "")
     .replace(WECHAT_PLAIN_GROUP_SPEAKER_LABEL_PATTERN, "")
     .replace(/^\s*(?:微信回复|回复|联系人|Assistant|AI)\s*[：:]\s*/i, "")
     .trim();
-  if (!line) return [];
+}
 
-  const quotedSegments = Array.from(line.matchAll(WECHAT_QUOTED_SPEECH_PATTERN))
+function extractWechatQuotedSegments(line: string) {
+  return Array.from(line.matchAll(WECHAT_QUOTED_SPEECH_PATTERN))
     .map((match) => match[1]?.trim())
     .filter((segment): segment is string => Boolean(segment));
+}
+
+function isWechatNarration(value: string) {
+  return WECHAT_NARRATION_PATTERN.test(value) || WECHAT_SCENE_NARRATION_PATTERN.test(value);
+}
+
+function cleanWechatReplyLine(rawLine: string) {
+  const line = stripWechatReplyPrefixes(rawLine);
+  if (!line) return [];
+
+  const quotedSegments = extractWechatQuotedSegments(line);
   const outsideQuotes = line.replace(WECHAT_QUOTED_SPEECH_PATTERN, "").trim();
   if (
     quotedSegments.length > 0 &&
     (!outsideQuotes ||
-      WECHAT_NARRATION_PATTERN.test(outsideQuotes) ||
-      /(?:回(?:他|她|你)?|说|问|答|补充?|发)(?:了)?(?:一句|道)?\s*[：:]?\s*$/.test(
-        outsideQuotes,
-      ))
+      WECHAT_NARRATED_DIRECT_SPEECH_PATTERN.test(line) ||
+      isWechatNarration(outsideQuotes) ||
+      WECHAT_QUOTED_NARRATION_END_PATTERN.test(outsideQuotes))
   ) {
     return quotedSegments;
   }
 
   const withoutNarrativeLead = line.replace(WECHAT_NARRATIVE_LEAD_PATTERN, "").trim();
-  if (withoutNarrativeLead !== line && !WECHAT_NARRATION_PATTERN.test(withoutNarrativeLead)) {
+  if (withoutNarrativeLead !== line && !isWechatNarration(withoutNarrativeLead)) {
     return withoutNarrativeLead ? [withoutNarrativeLead] : [];
   }
-  if (WECHAT_NARRATION_PATTERN.test(line)) return [];
+  if (isWechatNarration(line)) return [];
   return [line.replace(/^[“「"]|[”」"]$/g, "").trim()].filter(Boolean);
 }
 
 export function splitWechatReply(content: string) {
-  const lines = content
+  const sourceLines = content
     .replace(/\r\n?/g, "\n")
-    .split("\n")
+    .split("\n");
+  const normalizedLines = sourceLines.map(stripWechatReplyPrefixes);
+  if (normalizedLines.some((line) => WECHAT_NARRATED_DIRECT_SPEECH_PATTERN.test(line))) {
+    const spokenLines = normalizedLines
+      .flatMap((line) => {
+        const quotedSegments = extractWechatQuotedSegments(line);
+        if (quotedSegments.length === 0) return [];
+        const outsideQuotes = line.replace(WECHAT_QUOTED_SPEECH_PATTERN, "").trim();
+        return WECHAT_NARRATED_DIRECT_SPEECH_PATTERN.test(line) ||
+          isWechatNarration(outsideQuotes) ||
+          WECHAT_QUOTED_NARRATION_END_PATTERN.test(outsideQuotes)
+          ? quotedSegments
+          : [];
+      })
+      .filter(Boolean);
+    if (spokenLines.length > 0) return spokenLines.slice(0, 3);
+  }
+  const lines = sourceLines
     .flatMap(cleanWechatReplyLine)
     .filter(Boolean);
   return (lines.length > 0 ? lines : ["嗯。"]).slice(0, 3);
