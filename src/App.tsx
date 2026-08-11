@@ -8261,6 +8261,12 @@ function isSilentChatControlTool(toolName: string) {
   return toolName === "multi_agent_end_rounds" || isPhoneToolName(toolName);
 }
 
+// Phone action/result records stay hidden, while normal assistant text returned
+// alongside a phone call remains part of the conversation turn.
+function isHiddenAssistantContentTool(toolName: string) {
+  return toolName === "multi_agent_end_rounds";
+}
+
 function isChatChoiceToolName(toolName: string) {
   return toolName === "chat_present_options";
 }
@@ -23528,8 +23534,8 @@ export function App() {
               getChatApiMessageReasoning(assistantMessage) || completionResult.reasoning || "";
           }
 
-          const hasSilentControlTool = toolCalls.some((toolCall) =>
-            isSilentChatControlTool(toolCall.function.name),
+          const hasHiddenAssistantContentTool = toolCalls.some((toolCall) =>
+            isHiddenAssistantContentTool(toolCall.function.name),
           );
           const choiceToolCall = chatChoiceToolsEnabled
             ? toolCalls.find((toolCall) => isChatChoiceToolName(toolCall.function.name))
@@ -23544,7 +23550,7 @@ export function App() {
             toolLoopCompleted = true;
             break;
           }
-          if (hasSilentControlTool) {
+          if (hasHiddenAssistantContentTool) {
             assistantContent = "";
             assistantReasoning = "";
           } else {
@@ -23615,7 +23621,7 @@ export function App() {
             break;
           }
 
-          if (assistantMessageContent && !hasSilentControlTool) {
+          if (assistantMessageContent && !hasHiddenAssistantContentTool) {
             if (!streamingRound) {
               appendAssistantTimelineMessage(
                 commitChatMessages,
@@ -23634,7 +23640,7 @@ export function App() {
           apiMessages.push({
             ...(assistantMessage ?? {}),
             role: "assistant",
-            content: hasSilentControlTool ? null : assistantMessageContent || null,
+            content: hasHiddenAssistantContentTool ? null : assistantMessageContent || null,
             ...(assistantMessage?.reasoning_content === undefined
               ? buildProviderReasoningReplay(
                   requestProvider,
@@ -23649,7 +23655,7 @@ export function App() {
           });
           setChatStatus({
             status: "loading",
-            message: hasSilentControlTool
+            message: hasHiddenAssistantContentTool
               ? "正在继续当前回复..."
               : `正在执行 ${toolCalls.length} 个工具...`,
           });
@@ -25486,8 +25492,8 @@ export function App() {
             (toolCall) =>
               chatChoiceToolsEnabled || !isChatChoiceToolName(toolCall.function.name),
           );
-          const hasSilentControlTool = toolCalls.some((toolCall) =>
-            isSilentChatControlTool(toolCall.function.name),
+          const hasHiddenAssistantContentTool = toolCalls.some((toolCall) =>
+            isHiddenAssistantContentTool(toolCall.function.name),
           );
           const assistantMessageContent =
             getChatApiMessageText(assistantMessage).trim() ||
@@ -25507,7 +25513,7 @@ export function App() {
             streamingRound?.complete(assistantContent, assistantReasoning);
             break;
           }
-          if (hasSilentControlTool) {
+          if (hasHiddenAssistantContentTool) {
             assistantContent = "";
             assistantReasoning = "";
           } else {
@@ -25576,7 +25582,7 @@ export function App() {
             break;
           }
 
-          if (assistantMessageContent && !hasSilentControlTool) {
+          if (assistantMessageContent && !hasHiddenAssistantContentTool) {
             if (!streamingRound) {
               appendAssistantTimelineMessage(
                 commitChatMessages,
@@ -25594,7 +25600,7 @@ export function App() {
           apiMessages.push({
             ...(assistantMessage ?? {}),
             role: "assistant",
-            content: hasSilentControlTool ? null : assistantMessageContent || null,
+            content: hasHiddenAssistantContentTool ? null : assistantMessageContent || null,
             ...(assistantMessage?.reasoning_content === undefined
               ? buildProviderReasoningReplay(
                   chatProvider,
@@ -25609,7 +25615,7 @@ export function App() {
           });
           setChatStatus({
             status: "loading",
-            message: hasSilentControlTool
+            message: hasHiddenAssistantContentTool
               ? "正在继续当前回复..."
               : `正在执行 ${toolCalls.length} 个工具...`,
           });
