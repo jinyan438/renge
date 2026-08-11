@@ -282,6 +282,7 @@ test("group chat keeps its own messages and excludes all private and other-group
   assert.doesNotMatch(promptText, /不应注入未入群用户资料/);
   assert.match(messages[0].content, /用户不在本群中/);
   assert.match(messages[0].content, /本轮只由群成员“林夏”/);
+  assert.match(messages[0].content, /不要输出姓名、冒号、“【群聊 · 姓名】”/);
 });
 
 test("group speaker selection lets AI choose from isolated group context without turn order", () => {
@@ -387,6 +388,25 @@ test("wechat replies render as at most three clean bubbles", () => {
     "第二条",
     "第三条",
   ]);
+});
+
+test("wechat reply cleanup removes leaked group speaker labels", () => {
+  assert.deepEqual(
+    splitWechatReply([
+      "【群聊 · 王爱青】看就看，你把地址发我。",
+      "【微信群聊 · 临时群 · 林小栀】：我晚点也过去。",
+      "[群聊 | 王爱青]: 到了再说。",
+    ].join("\n")),
+    ["看就看，你把地址发我。", "我晚点也过去。", "到了再说。"],
+  );
+  assert.deepEqual(
+    splitWechatReply("群聊 · 王爱青：我这周就去北京。"),
+    ["我这周就去北京。"],
+  );
+  assert.deepEqual(
+    splitWechatReply("【群聊通知】今晚八点开会。"),
+    ["【群聊通知】今晚八点开会。"],
+  );
 });
 
 test("wechat reply cleanup removes roleplay narration around quoted messages", () => {

@@ -527,7 +527,7 @@ export function buildWechatGroupRequestMessages({
     }`,
     formatContactIdentity(responder, responderPersona),
     group.includesUser ? formatUserIdentity(user) : "",
-    `本轮只由群成员“${responder.name}”发送消息。只输出“${responder.name}”实际发到群里的气泡正文，不要输出姓名或冒号，不要代替其他成员一次性发言。`,
+    `本轮只由群成员“${responder.name}”发送消息。只输出“${responder.name}”实际发到群里的气泡正文，不要输出姓名、冒号、“【群聊 · 姓名】”或任何群聊/发言人标签，不要代替其他成员一次性发言。`,
     group.includesUser
       ? "用户是本群成员，可以自然回应用户或其他群成员。"
       : "用户不在本群中。不要向用户说话或假装用户参与；请让群成员基于群内历史自然地彼此聊天。",
@@ -693,10 +693,15 @@ export function resolveWechatGroupSpeakerSelection(
 const WECHAT_QUOTED_SPEECH_PATTERN = /[“「"]([^”」"]+)[”」"]/g;
 const WECHAT_NARRATIVE_LEAD_PATTERN = /^(?:[《〈][^》〉]{0,80}[》〉]\s*)?(?:我|他|她|对方)?(?:歪(?:了)?歪头|歪头|想了想|犹豫(?:了)?(?:一下|片刻)?|笑(?:了)?笑|轻轻一笑|点(?:了)?点头|摇(?:了)?摇头|愣(?:了)?(?:一下|片刻)?|沉默(?:了)?(?:一下|片刻)?)[，,]\s*/;
 const WECHAT_NARRATION_PATTERN = /^(?:[《〈][^》〉]{0,80}[》〉]\s*)?(?:(?:我|他|她|对方)(?:看着|盯着|望着|抬手|垂眼|转身|低头|轻声|低声|笑着|打完字|说完|发完|回过神)|(?:又)?(?:补了|补充|回了|发了|说了)(?:一句|条消息)?|打完字|说完|发完)/;
+const WECHAT_GROUP_SPEAKER_LABEL_PATTERN = /^(?:(?:【|\[)\s*(?:微信)?群聊(?:(?:\s*[·•・|｜:：]\s*|\s+)[^】\]]+)?\s*(?:】|\])\s*[：:]?\s*)+/i;
+const WECHAT_PLAIN_GROUP_SPEAKER_LABEL_PATTERN = /^(?:微信)?群聊\s*[·•・|｜]\s*[^：:\n]{1,80}\s*[：:]\s*/i;
 
 function cleanWechatReplyLine(rawLine: string) {
   const line = rawLine
     .replace(/^\s*(?:[-*]|\d+[.)、])\s*/, "")
+    .replace(/^\s*(?:微信回复|回复|联系人|Assistant|AI)\s*[：:]\s*/i, "")
+    .replace(WECHAT_GROUP_SPEAKER_LABEL_PATTERN, "")
+    .replace(WECHAT_PLAIN_GROUP_SPEAKER_LABEL_PATTERN, "")
     .replace(/^\s*(?:微信回复|回复|联系人|Assistant|AI)\s*[：:]\s*/i, "")
     .trim();
   if (!line) return [];
