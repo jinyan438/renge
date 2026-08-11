@@ -595,7 +595,9 @@ export function WechatSidebar({
       return {
         ...current,
         contacts,
-        messages: current.messages.filter((message) => message.contactId !== activeContact.id),
+        messages: current.messages.filter(
+          (message) => Boolean(message.groupId) || message.contactId !== activeContact.id,
+        ),
         groups: current.groups.map((group) => ({
           ...group,
           memberContactIds: group.memberContactIds.filter(

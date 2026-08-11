@@ -391,6 +391,59 @@ test("wechat contacts, messages and active contact stay isolated per host chat s
   assert.deepEqual(getWechatSessionStore(store, "missing-session").contacts, []);
 });
 
+test("wechat groups normalize per session and keep historical sender snapshots", () => {
+  const normalized = normalizeWechatStore({
+    version: 2,
+    sessions: {
+      "session-a": {
+        contacts: [contact, secondContact],
+        groups: [
+          {
+            ...group,
+            memberContactIds: [contact.id, secondContact.id, contact.id, "missing-contact"],
+          },
+        ],
+        messages: [
+          {
+            id: "group-message",
+            groupId: group.id,
+            contactId: "missing-contact",
+            senderName: "已删除成员",
+            senderAvatar: "data:image/png;base64,avatar",
+            role: "assistant",
+            content: "历史群消息",
+            createdAt: "2026-08-10T08:05:00.000Z",
+          },
+          {
+            id: "missing-group-message",
+            groupId: "missing-group",
+            role: "assistant",
+            content: "无效群消息",
+            createdAt: "2026-08-10T08:05:30.000Z",
+          },
+        ],
+        activeContactId: "",
+        activeGroupId: group.id,
+      },
+    },
+  });
+
+  const session = getWechatSessionStore(normalized, "session-a");
+  assert.deepEqual(session.groups[0].memberContactIds, [contact.id, secondContact.id]);
+  assert.equal(session.activeGroupId, group.id);
+  assert.deepEqual(session.messages, [
+    {
+      id: "group-message",
+      groupId: group.id,
+      senderName: "已删除成员",
+      senderAvatar: "data:image/png;base64,avatar",
+      role: "assistant",
+      content: "历史群消息",
+      createdAt: "2026-08-10T08:05:00.000Z",
+    },
+  ]);
+});
+
 test("main chat edits and deletions synchronize into phone messages", () => {
   const sessionStore = {
     contacts: [contact],
@@ -455,4 +508,78 @@ test("main chat edits and deletions synchronize into phone messages", () => {
   ]);
   assert.deepEqual(afterDelete.messages.map((message) => message.id), ["main-assistant-id"]);
   assert.deepEqual(syncWechatSessionMessages(afterDelete, []).messages, []);
+});
+
+test("main chat edits and deletions synchronize group messages without restoring removed members", () => {
+  const sessionStore = {
+    contacts: [contact, secondContact],
+    groups: [group],
+    activeContactId: "",
+    activeGroupId: group.id,
+    messages: [],
+  };
+  const initial = syncWechatSessionMessages(sessionStore, [
+    {
+      id: "group-user",
+      groupId: group.id,
+      role: "user",
+      content: "群里的用户消息",
+      createdAt: "2026-08-10T08:06:00.000Z",
+    },
+    {
+      id: "group-assistant",
+      groupId: group.id,
+      contactId: contact.id,
+      senderName: contact.name,
+      senderAvatar: contact.avatarImage,
+      role: "assistant",
+      content: "修改前的群回复",
+      createdAt: "2026-08-10T08:07:00.000Z",
+    },
+    {
+      id: "other-group",
+      groupId: "missing-group",
+      role: "assistant",
+      content: "不应同步",
+      createdAt: "2026-08-10T08:08:00.000Z",
+    },
+  ]);
+
+  assert.deepEqual(initial.messages.map((message) => message.id), [
+    "group-user",
+    "group-assistant",
+  ]);
+
+  const edited = syncWechatSessionMessages(initial, [
+    {
+      id: "group-assistant",
+      groupId: group.id,
+      contactId: contact.id,
+      senderName: contact.name,
+      senderAvatar: contact.avatarImage,
+      role: "assistant",
+      content: "她笑着说：“修改后的群回复。”",
+      createdAt: "2026-08-10T08:07:00.000Z",
+    },
+  ]);
+  assert.equal(edited.messages[0].content, "修改后的群回复。");
+
+  const withoutSender = syncWechatSessionMessages(
+    { ...edited, contacts: [secondContact] },
+    [
+      {
+        id: "group-assistant",
+        groupId: group.id,
+        contactId: contact.id,
+        senderName: contact.name,
+        senderAvatar: contact.avatarImage,
+        role: "assistant",
+        content: "修改后的群回复。",
+        createdAt: "2026-08-10T08:07:00.000Z",
+      },
+    ],
+  );
+  assert.equal(withoutSender.messages[0].contactId, undefined);
+  assert.equal(withoutSender.messages[0].senderName, contact.name);
+  assert.deepEqual(syncWechatSessionMessages(withoutSender, []).messages, []);
 });

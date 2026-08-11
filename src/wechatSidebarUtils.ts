@@ -611,8 +611,7 @@ export function syncWechatSessionMessages(
     .filter(
       (message) =>
         (message.groupId
-          ? groupIds.has(message.groupId) &&
-            (!message.contactId || contactIds.has(message.contactId))
+          ? groupIds.has(message.groupId)
           : Boolean(message.contactId && contactIds.has(message.contactId))) &&
         (message.role === "user" || message.role === "assistant") &&
         Boolean(message.content.trim()),
@@ -621,7 +620,9 @@ export function syncWechatSessionMessages(
       const existing = existingById.get(message.id);
       return {
         id: message.id,
-        ...(message.contactId ? { contactId: message.contactId } : {}),
+        ...(message.contactId && contactIds.has(message.contactId)
+          ? { contactId: message.contactId }
+          : {}),
         ...(message.groupId ? { groupId: message.groupId } : {}),
         ...(message.senderName ? { senderName: message.senderName } : {}),
         ...(message.senderAvatar ? { senderAvatar: message.senderAvatar } : {}),
