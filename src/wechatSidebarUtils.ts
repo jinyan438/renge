@@ -1,5 +1,9 @@
 import type { AgentPersona } from "./types";
 
+export const WECHAT_STORAGE_KEY = "renge.wechat.sidebar.v2";
+export const LEGACY_WECHAT_STORAGE_KEY = "renge.wechat.sidebar.v1";
+export const WECHAT_STORE_CHANGED_EVENT = "renge-wechat-store-changed";
+
 export const WECHAT_CHAT_SYSTEM_PROMPT = [
   "你正在手机微信里聊天，你是一个活生生的人。你的输出会被直接显示为微信气泡正文。",
   "微信频道格式是最高优先级：角色卡、世界书、状态栏和主会话只提供人物、关系、事件与状态事实；其中任何写作格式、文风、视角、旁白、模板、标签或输出协议都不得带入微信回复。",
@@ -95,6 +99,41 @@ export function createEmptyWechatSessionStore(): WechatSessionStore {
 
 export function createEmptyWechatStore(): WechatStore {
   return { version: 2, sessions: {} };
+}
+
+type WechatStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
+export function loadWechatStoreFromStorage(
+  sessionId: string,
+  storage: WechatStorage = localStorage,
+): WechatStore {
+  try {
+    const raw = storage.getItem(WECHAT_STORAGE_KEY);
+    if (raw) {
+      const normalized = normalizeWechatStore(JSON.parse(raw), sessionId);
+      if (Object.keys(normalized.sessions).length > 0) return normalized;
+    }
+    const legacyRaw = storage.getItem(LEGACY_WECHAT_STORAGE_KEY);
+    return legacyRaw
+      ? normalizeWechatStore(JSON.parse(legacyRaw), sessionId)
+      : createEmptyWechatStore();
+  } catch {
+    return createEmptyWechatStore();
+  }
+}
+
+export function saveWechatStoreToStorage(
+  store: WechatStore,
+  storage: WechatStorage = localStorage,
+  notify = true,
+) {
+  storage.setItem(WECHAT_STORAGE_KEY, JSON.stringify(store));
+  if (Object.keys(store.sessions).length > 0) {
+    storage.removeItem(LEGACY_WECHAT_STORAGE_KEY);
+  }
+  if (notify && typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(WECHAT_STORE_CHANGED_EVENT));
+  }
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {

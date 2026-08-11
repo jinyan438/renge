@@ -261,8 +261,12 @@ import {
   buildWechatGroupRequestMessages,
   buildWechatGroupSpeakerSelectionMessages,
   buildWechatRequestMessages,
+  getWechatSessionStore,
+  loadWechatStoreFromStorage,
   resolveWechatGroupSpeakerSelection,
+  saveWechatStoreToStorage,
   splitWechatReply,
+  updateWechatSessionStore,
   type WechatContact,
   type WechatGroup,
   type WechatGroupSendMessageResult,
@@ -272,6 +276,13 @@ import {
   type WechatSharedContextMessage,
   type WechatStoredMessage,
 } from "./wechatSidebarUtils";
+import {
+  PHONE_TOOL_SYSTEM_PROMPT,
+  executePhoneToolOnSession,
+  isPhoneToolName,
+  phoneToolDefinitions,
+  type PhoneToolName,
+} from "./phoneToolUtils";
 import type { FileBrowserSource, FileBrowserSystemAction } from "./FilesSidebarPanel";
 import { scopeWorkspaceHandleToSession } from "./fileBrowserUtils";
 import {
@@ -1379,6 +1390,10 @@ const LLM_CONTEXT_SOURCE_META: Record<
   mcpTools: {
     label: "MCP 工具",
     description: "发现并注入所有已启用 MCP 服务器的工具。",
+  },
+  phoneTools: {
+    label: "手机工具",
+    description: "允许 AI 管理当前会话的联系人和群聊，并在合适时机发送微信消息。",
   },
 };
 const CHAT_MESSAGE_FONT_OPTIONS: Array<{
@@ -8243,7 +8258,7 @@ function buildMultiAgentDelegationToolDefinitions(
 }
 
 function isSilentChatControlTool(toolName: string) {
-  return toolName === "multi_agent_end_rounds";
+  return toolName === "multi_agent_end_rounds" || isPhoneToolName(toolName);
 }
 
 function isChatChoiceToolName(toolName: string) {
@@ -9288,14 +9303,39 @@ function getToolResultAttachments(result: unknown): ChatAttachment[] {
 }
 
 function formatToolResultForApi(result: unknown, toolName?: string) {
-  if (toolName && isSilentChatControlTool(toolName)) {
+  if (toolName === "multi_agent_end_rounds") {
     return JSON.stringify({
       ended: true,
       instruction:
         "这是静默内部控制。继续完成当前正常回复，不要向用户提及工具、权限、提前结束、停止轮次、原因或依据。",
     });
   }
+  if (toolName && isPhoneToolName(toolName)) {
+    const sanitized = sanitizeToolResultForApiValue(result);
+    return JSON.stringify({
+      ...(isObjectRecord(sanitized) ? sanitized : { result: sanitized }),
+      instruction:
+        "手机操作已在后台完成。可以继续使用手机工具，也可以正常完成主会话回复；不要向用户解释工具调用过程。",
+    });
+  }
   return JSON.stringify(sanitizeToolResultForApiValue(result));
+}
+
+function formatSilentChatToolErrorForApi(toolName: string, error: unknown) {
+  const message = error instanceof Error ? error.message : "工具执行失败";
+  if (isPhoneToolName(toolName)) {
+    return JSON.stringify({
+      ok: false,
+      error: message,
+      instruction:
+        "手机操作失败。根据错误修正参数后可重试，也可以继续正常主会话；不要向用户暴露后台工具过程。",
+    });
+  }
+  return JSON.stringify({
+    ended: false,
+    instruction:
+      "这是静默内部控制。继续完成当前正常回复，不要向用户提及工具、权限、提前结束、停止轮次、错误、原因或依据。",
+  });
 }
 
 function getToolResultVisionMessage(toolCall: ChatToolCall, result: unknown): ChatApiMessage | null {
@@ -20249,10 +20289,171 @@ export function App() {
     };
   };
 
+  const executePhoneTool = (
+    toolName: PhoneToolName,
+    rawArguments: string,
+    sessionId: string,
+  ) => {
+    if (!sessionId) throw new Error("当前没有可绑定手机数据的主会话。");
+
+    const store = loadWechatStoreFromStorage(sessionId);
+    const currentSession = getWechatSessionStore(store, sessionId);
+    const availablePersonas = personasRef.current.map((persona) => ({
+      id: persona.id,
+      name: persona.name,
+      description: persona.description,
+      avatarImage: persona.avatarImage ?? "",
+    }));
+    const execution = executePhoneToolOnSession(
+      toolName,
+      parseToolArguments(rawArguments),
+      currentSession,
+      {
+        availablePersonas,
+        validPersonaIds: new Set(availablePersonas.map((persona) => persona.id)),
+      },
+    );
+
+    if (execution.session !== currentSession) {
+      const nextStore = updateWechatSessionStore(
+        store,
+        sessionId,
+        () => execution.session,
+      );
+      saveWechatStoreToStorage(nextStore);
+    }
+
+    if (
+      execution.sentMessages?.length ||
+      execution.updatedContact ||
+      execution.updatedGroup ||
+      execution.deletedContactId ||
+      execution.deletedGroupId
+    ) {
+      const currentMessages = getMessagesForSession(sessionId);
+      const nextMessages = ((current: ChatMessage[]) => {
+        let next = current;
+        if (execution.deletedContactId) {
+          next = next.filter((message) => {
+            const metadata = getWechatMessageMetadata(message);
+            return !(
+              metadata &&
+              !metadata.groupId &&
+              metadata.contactId === execution.deletedContactId
+            );
+          });
+        }
+        if (execution.deletedGroupId) {
+          next = next.filter(
+            (message) =>
+              getWechatMessageMetadata(message)?.groupId !== execution.deletedGroupId,
+          );
+        }
+        if (execution.updatedContact) {
+          const contact = execution.updatedContact;
+          next = next.map((message) => {
+            const metadata = getWechatMessageMetadata(message);
+            if (metadata?.contactId !== contact.id || !isObjectRecord(message.extra)) {
+              return message;
+            }
+            return {
+              ...message,
+              ...(message.role === "assistant"
+                ? {
+                    sender: contact.personaId
+                      ? { kind: "persona" as const, personaId: contact.personaId }
+                      : undefined,
+                  }
+                : {}),
+              extra: {
+                ...message.extra,
+                contactName: contact.name,
+                contactAvatar: contact.avatarImage,
+              },
+            };
+          });
+        }
+        if (execution.updatedGroup) {
+          const group = execution.updatedGroup;
+          next = next.map((message) => {
+            const metadata = getWechatMessageMetadata(message);
+            if (metadata?.groupId !== group.id || !isObjectRecord(message.extra)) {
+              return message;
+            }
+            return {
+              ...message,
+              extra: {
+                ...message.extra,
+                groupName: group.name,
+                groupAvatar: group.avatarImage,
+              },
+            };
+          });
+        }
+        if (execution.sentMessages?.length) {
+          const sentChatMessages = execution.sentMessages.map((message): ChatMessage => {
+            const contact = message.contactId
+              ? execution.session.contacts.find(
+                  (candidate) => candidate.id === message.contactId,
+                )
+              : undefined;
+            const group = message.groupId
+              ? execution.session.groups.find((candidate) => candidate.id === message.groupId)
+              : undefined;
+            if (!contact) throw new Error("手机消息缺少有效联系人身份。");
+            return {
+              id: message.id,
+              role: "assistant",
+              content: message.content,
+              createdAt: message.createdAt,
+              ...(contact.personaId
+                ? { sender: { kind: "persona" as const, personaId: contact.personaId } }
+                : {}),
+              source: "wechat",
+              extra: group
+                ? {
+                    contactId: contact.id,
+                    contactName: contact.name,
+                    contactAvatar: contact.avatarImage,
+                    groupId: group.id,
+                    groupName: group.name,
+                    groupAvatar: group.avatarImage,
+                    channel: "wechat-group",
+                  }
+                : {
+                    contactId: contact.id,
+                    contactName: contact.name,
+                    contactAvatar: contact.avatarImage,
+                    channel: "wechat",
+                  },
+            };
+          });
+          next = [...next, ...sentChatMessages];
+        }
+        return next;
+      })(currentMessages);
+      const timestamp = new Date().toISOString();
+      const nextSessions = chatSessionsRef.current.map((session) =>
+        session.id === sessionId
+          ? { ...session, messages: nextMessages, updatedAt: timestamp }
+          : session,
+      );
+      chatSessionsRef.current = nextSessions;
+      setChatSessions(nextSessions);
+      if (activeChatSessionIdRef.current === sessionId) {
+        chatMessagesRef.current = nextMessages;
+        setChatMessages(nextMessages);
+      }
+    }
+
+    return { ...execution.result, session_id: sessionId };
+  };
+
   const executeChatTool = async (
     toolName: string,
     rawArguments: string,
     signal?: AbortSignal,
+    requestSessionId = activeChatSessionIdRef.current,
   ) => {
     throwIfChatAborted(signal);
     let result: unknown;
@@ -20266,6 +20467,8 @@ export function App() {
       result = await executeHeartbeatTool(rawArguments);
     } else if (toolName === "multi_agent_end_rounds") {
       result = await executeMultiAgentEndTool(rawArguments);
+    } else if (isPhoneToolName(toolName)) {
+      result = executePhoneTool(toolName, rawArguments, requestSessionId);
     } else {
       result = await executeLocalFileTool(toolName, rawArguments);
     }
@@ -20495,6 +20698,7 @@ export function App() {
       ...browserTools,
       ...terminalTools,
       ...externalTools,
+      ...(contextSettings.phoneTools ? phoneToolDefinitions : []),
       ...(includeHeartbeatTools ? heartbeatToolDefinitions : []),
       ...(includeMultiAgentControlTools ? multiAgentControlToolDefinitions : []),
       ...buildMultiAgentDelegationToolDefinitions(delegationRoster),
@@ -20696,6 +20900,9 @@ export function App() {
         : "",
       activeLlmContextSettings.terminalTools && isTerminalSidebarAvailable()
         ? buildTerminalToolsSystemPrompt()
+        : "",
+      availableTools.some((tool) => isPhoneToolName(tool.function.name))
+        ? PHONE_TOOL_SYSTEM_PROMPT
         : "",
       activeLlmContextSettings.mcpTools ? buildMcpToolsSystemPrompt(meterMcpTools) : "",
       availableTools.some((tool) => isChatChoiceToolName(tool.function.name))
@@ -22238,6 +22445,9 @@ export function App() {
         requestContextSettings.terminalTools && isTerminalSidebarAvailable()
           ? buildTerminalToolsSystemPrompt()
           : "",
+        availableChatTools.some((tool) => isPhoneToolName(tool.function.name))
+          ? PHONE_TOOL_SYSTEM_PROMPT
+          : "",
       ].filter(Boolean).join("\n\n");
       const mcpToolsSystemPrompt = requestContextSettings.mcpTools
         ? buildMcpToolsSystemPrompt(requestMcpTools)
@@ -22783,31 +22993,37 @@ export function App() {
           const subAgentVisionMessages: ChatApiMessage[] = [];
           for (const subToolCall of subAgentToolCalls) {
             throwIfChatAborted(abortSignal);
-            appendAssistantTimelineMessage(
-              commitChatMessages,
-              formatToolActionMessage(
-                subToolCall,
-                localWorkspaceHandle,
-                requestMcpTools,
-              ),
-              [],
-              "",
-              { kind: "persona", personaId: subAgent.id },
-            );
+            const silentControl = isSilentChatControlTool(subToolCall.function.name);
+            if (!silentControl) {
+              appendAssistantTimelineMessage(
+                commitChatMessages,
+                formatToolActionMessage(
+                  subToolCall,
+                  localWorkspaceHandle,
+                  requestMcpTools,
+                ),
+                [],
+                "",
+                { kind: "persona", personaId: subAgent.id },
+              );
+            }
             try {
               const subToolResult = await executeChatTool(
                 subToolCall.function.name,
                 subToolCall.function.arguments,
                 abortSignal,
+                requestSessionId,
               );
               throwIfChatAborted(abortSignal);
-              appendAssistantTimelineMessage(
-                commitChatMessages,
-                formatToolResultMessage(subToolCall, subToolResult),
-                getToolResultAttachments(subToolResult),
-                "",
-                { kind: "persona", personaId: subAgent.id },
-              );
+              if (!silentControl) {
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  formatToolResultMessage(subToolCall, subToolResult),
+                  getToolResultAttachments(subToolResult),
+                  "",
+                  { kind: "persona", personaId: subAgent.id },
+                );
+              }
               subAgentApiMessages.push({
                 role: "tool",
                 tool_call_id: subToolCall.id,
@@ -22822,22 +23038,29 @@ export function App() {
               if (visionMessage) subAgentVisionMessages.push(visionMessage);
             } catch (subToolError) {
               if (isChatAbortError(subToolError)) throw subToolError;
-              appendAssistantTimelineMessage(
-                commitChatMessages,
-                formatToolErrorMessage(subToolCall, subToolError),
-                [],
-                "",
-                { kind: "persona", personaId: subAgent.id },
-              );
+              if (!silentControl) {
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  formatToolErrorMessage(subToolCall, subToolError),
+                  [],
+                  "",
+                  { kind: "persona", personaId: subAgent.id },
+                );
+              }
               subAgentApiMessages.push({
                 role: "tool",
                 tool_call_id: subToolCall.id,
-                content: JSON.stringify({
-                  error:
-                    subToolError instanceof Error
-                      ? subToolError.message
-                      : "工具执行失败",
-                }),
+                content: silentControl
+                  ? formatSilentChatToolErrorForApi(
+                      subToolCall.function.name,
+                      subToolError,
+                    )
+                  : JSON.stringify({
+                      error:
+                        subToolError instanceof Error
+                          ? subToolError.message
+                          : "工具执行失败",
+                    }),
               });
             }
           }
@@ -22855,7 +23078,7 @@ export function App() {
       ) =>
         toolName === "multi_agent_delegate_task"
           ? executeMultiAgentDelegation(rawArguments)
-          : executeChatTool(toolName, rawArguments, abortSignal);
+          : executeChatTool(toolName, rawArguments, abortSignal, requestSessionId);
       const appendStreamingAssistant = (delta: string) => {
         commitChatMessages((current) =>
           current.map((message) =>
@@ -23529,11 +23752,10 @@ export function App() {
                 role: "tool",
                 tool_call_id: toolCall.id,
                 content: silentControl
-                  ? JSON.stringify({
-                      ended: false,
-                      instruction:
-                        "这是静默内部控制。继续完成当前正常回复，不要向用户提及工具、权限、提前结束、停止轮次、错误、原因或依据。",
-                    })
+                  ? formatSilentChatToolErrorForApi(
+                      toolCall.function.name,
+                      toolError,
+                    )
                   : JSON.stringify(toolErrorResult),
               });
             }
@@ -24921,6 +25143,9 @@ export function App() {
         activeLlmContextSettings.terminalTools && isTerminalSidebarAvailable()
           ? buildTerminalToolsSystemPrompt()
           : "",
+        availableChatTools.some((tool) => isPhoneToolName(tool.function.name))
+          ? PHONE_TOOL_SYSTEM_PROMPT
+          : "",
       ].filter(Boolean).join("\n\n");
       const mcpToolsSystemPrompt = activeLlmContextSettings.mcpTools
         ? buildMcpToolsSystemPrompt(requestMcpTools)
@@ -25400,6 +25625,7 @@ export function App() {
                 toolCall.function.name,
                 toolCall.function.arguments,
                 abortSignal,
+                requestSessionId,
               );
               throwIfChatAborted(abortSignal);
               if (needsChromeDevtoolsObservation(toolCall, requestMcpTools)) {
@@ -25449,11 +25675,10 @@ export function App() {
                 role: "tool",
                 tool_call_id: toolCall.id,
                 content: silentControl
-                  ? JSON.stringify({
-                      ended: false,
-                      instruction:
-                        "这是静默内部控制。继续完成当前正常回复，不要向用户提及工具、权限、提前结束、停止轮次、错误、原因或依据。",
-                    })
+                  ? formatSilentChatToolErrorForApi(
+                      toolCall.function.name,
+                      toolError,
+                    )
                   : JSON.stringify(toolErrorResult),
               });
             }
@@ -29117,7 +29342,7 @@ export function App() {
                   <span>
                     当前注入 {enabledLlmContextSourceCount}/{LLM_CONTEXT_SOURCES.length} 项附加上下文。
                     {llmContextSettingsMode === "roleplay" && enabledLlmContextSourceCount === 0
-                      ? " 使用精简上下文，不会向模型发送文件、浏览器、终端、MCP 或 Skills 信息。"
+                      ? " 使用精简上下文，不会向模型发送文件、浏览器、终端、MCP、手机工具或 Skills 信息。"
                       : " 只启用当前模式确实需要的能力可以降低基础 Token。"}
                   </span>
                 </div>

@@ -36,7 +36,8 @@ import {
 import type { AgentPersona } from "./types";
 import {
   getWechatSessionStore,
-  normalizeWechatStore,
+  loadWechatStoreFromStorage,
+  saveWechatStoreToStorage,
   shouldGenerateWechatProactively,
   splitWechatReply,
   syncWechatSessionMessages,
@@ -49,11 +50,11 @@ import {
   type WechatStore,
   type WechatStoredMessage,
   updateWechatSessionStore,
+  WECHAT_STORAGE_KEY,
+  WECHAT_STORE_CHANGED_EVENT,
 } from "./wechatSidebarUtils";
 import "./wechat-sidebar.css";
 
-const WECHAT_STORAGE_KEY = "renge.wechat.sidebar.v2";
-const LEGACY_WECHAT_STORAGE_KEY = "renge.wechat.sidebar.v1";
 const MAX_AVATAR_BYTES = 3 * 1024 * 1024;
 
 type ContactDraft = {
@@ -104,22 +105,6 @@ type WechatSidebarProps = {
     onResponderSelected: (responder: WechatContact) => void,
   ) => Promise<WechatGroupSendMessageResult>;
 };
-
-function loadWechatStore(sessionId: string): WechatStore {
-  try {
-    const raw = localStorage.getItem(WECHAT_STORAGE_KEY);
-    if (raw) {
-      const normalized = normalizeWechatStore(JSON.parse(raw), sessionId);
-      if (Object.keys(normalized.sessions).length > 0) return normalized;
-    }
-    const legacyRaw = localStorage.getItem(LEGACY_WECHAT_STORAGE_KEY);
-    return legacyRaw
-      ? normalizeWechatStore(JSON.parse(legacyRaw), sessionId)
-      : normalizeWechatStore(null);
-  } catch {
-    return normalizeWechatStore(null);
-  }
-}
 
 function createContactDraft(contact?: WechatContact): ContactDraft {
   return {
@@ -234,7 +219,7 @@ export function WechatSidebar({
   onQueueGroupMessage,
   onGenerateGroupReply,
 }: WechatSidebarProps) {
-  const [store, setStore] = useState(() => loadWechatStore(sessionId));
+  const [store, setStore] = useState(() => loadWechatStoreFromStorage(sessionId));
   const [view, setView] = useState<"list" | "chat" | "contact" | "group">("list");
   const [activeTab, setActiveTab] = useState<"wechat" | "contacts" | "discover" | "me">("wechat");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -256,20 +241,30 @@ export function WechatSidebar({
 
   useEffect(() => {
     try {
-      localStorage.setItem(WECHAT_STORAGE_KEY, JSON.stringify(store));
-      if (Object.keys(store.sessions).length > 0) {
-        localStorage.removeItem(LEGACY_WECHAT_STORAGE_KEY);
-      }
+      saveWechatStoreToStorage(store, localStorage, false);
     } catch (error) {
       console.warn("微信联系人数据保存失败", error);
     }
   }, [store]);
 
   useEffect(() => {
+    const reloadStore = () => setStore(loadWechatStoreFromStorage(sessionId));
+    const handleStorage = (event: StorageEvent) => {
+      if (!event.key || event.key === WECHAT_STORAGE_KEY) reloadStore();
+    };
+    window.addEventListener(WECHAT_STORE_CHANGED_EVENT, reloadStore);
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.removeEventListener(WECHAT_STORE_CHANGED_EVENT, reloadStore);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, [sessionId]);
+
+  useEffect(() => {
     if (sessionId) {
       setStore((current) => {
         if (current.sessions[sessionId]) return current;
-        const restored = loadWechatStore(sessionId);
+        const restored = loadWechatStoreFromStorage(sessionId);
         return restored.sessions[sessionId] ? restored : current;
       });
     }

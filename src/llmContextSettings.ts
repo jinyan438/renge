@@ -7,6 +7,7 @@ export const LLM_CONTEXT_SOURCES = [
   "browserTools",
   "terminalTools",
   "mcpTools",
+  "phoneTools",
 ] as const;
 export type LlmContextSource = (typeof LLM_CONTEXT_SOURCES)[number];
 
@@ -19,6 +20,7 @@ const ENABLED_CONTEXT: LlmContextModeSettings = {
   browserTools: true,
   terminalTools: true,
   mcpTools: true,
+  phoneTools: false,
 };
 
 const DISABLED_CONTEXT: LlmContextModeSettings = {
@@ -27,6 +29,7 @@ const DISABLED_CONTEXT: LlmContextModeSettings = {
   browserTools: false,
   terminalTools: false,
   mcpTools: false,
+  phoneTools: false,
 };
 
 export const DEFAULT_LLM_CONTEXT_SETTINGS: LlmContextSettings = {
