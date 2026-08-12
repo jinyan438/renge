@@ -11453,7 +11453,9 @@ export function App() {
   const [desktopOverlayZIndex, setDesktopOverlayZIndex] = useState(50);
   const windowSpawnIndexRef = useRef(0);
   const settingsWindowRef = useRef<HTMLElement | null>(null);
-  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  // Keep this interaction local to the rendered shells. Toggling React state here
+  // would re-render the entire application tree just to animate a drawer.
+  const mobileSidebarOpenRef = useRef(false);
   const [chatDesktopSidebarCollapsed, setChatDesktopSidebarCollapsed] =
     useState(false);
   const [chatStatusSidebarCollapsed, setChatStatusSidebarCollapsed] =
@@ -11473,7 +11475,14 @@ export function App() {
 
   const changeChatStatusSidebarCollapsed = (collapsed: boolean) => {
     setChatStatusSidebarCollapsed(collapsed);
-    if (!collapsed) setMobileSidebarOpen(false);
+    if (!collapsed) closeMobileSidebar();
+  };
+
+  const syncMobileSidebarDomState = (open: boolean) => {
+    mobileSidebarOpenRef.current = open;
+    document
+      .querySelectorAll<HTMLElement>(".portfolio-window-body, .settings-shell")
+      .forEach((element) => element.classList.toggle("mobile-sidebar-open", open));
   };
 
   const openWindow = useCallback((id: ModuleWindowId) => {
@@ -11503,7 +11512,7 @@ export function App() {
         },
       ];
     });
-    setMobileSidebarOpen(false);
+    closeMobileSidebar();
   }, []);
 
   const activateWindow = useCallback((id: ModuleWindowId) => {
@@ -11530,7 +11539,7 @@ export function App() {
         windowState.id === id ? { ...windowState, minimized: true } : windowState,
       ),
     );
-    setMobileSidebarOpen(false);
+    closeMobileSidebar();
   }, []);
 
   const toggleMaximizeWindow = useCallback((id: ModuleWindowId) => {
@@ -12728,12 +12737,18 @@ export function App() {
   function openMobileSidebar() {
     setMobilePromptPreviewOpen(false);
     setChatStatusSidebarCollapsed(true);
-    setMobileSidebarOpen(true);
+    syncMobileSidebarDomState(true);
   }
 
   function closeMobileSidebar() {
-    setMobileSidebarOpen(false);
+    syncMobileSidebarDomState(false);
   }
+
+  useEffect(() => {
+    // Newly opened managed windows are rendered after the click. Mirror the
+    // current drawer state onto them without putting it back in App state.
+    if (mobileSidebarOpenRef.current) syncMobileSidebarDomState(true);
+  }, [openWindows]);
 
   const beginChatGeneration = () => {
     const controller = new AbortController();
@@ -28835,10 +28850,10 @@ export function App() {
   const settingsWindow = settingsWindowState ? (
       <main
         className={`settings-shell settings-desktop managed-window-layer ${
-          mobileSidebarOpen ? "mobile-sidebar-open" : ""
-        } ${settingsWindowState.minimized ? "is-minimized" : ""} ${
+          settingsWindowState.minimized ? "is-minimized" : ""
+        } ${
           settingsWindowState.maximized ? "is-maximized" : ""
-        }`}
+        } ${mobileSidebarOpenRef.current ? "mobile-sidebar-open" : ""}`}
         style={{ zIndex: settingsWindowState.zIndex }}
         aria-hidden={settingsWindowState.minimized}
       >
@@ -32497,9 +32512,11 @@ export function App() {
         title="对话工作区"
         bodyClassName={`chat-shell ${
           chatDesktopSidebarCollapsed ? "desktop-sidebar-collapsed" : ""
-        } ${mobileSidebarOpen ? "mobile-sidebar-open" : ""} ${
+        } ${
           chatPersonalization.quoteStyleEnabled ? "quote-style-enabled" : ""
-        } ${chatPersonalization.italicStyleEnabled ? "italic-style-enabled" : ""}`}
+        } ${chatPersonalization.italicStyleEnabled ? "italic-style-enabled" : ""} ${
+          mobileSidebarOpenRef.current ? "mobile-sidebar-open" : ""
+        }`}
         bodyStyle={chatVisualStyle}
         statusPrimary={
           chatMode === "multi" && multiAgentWorkflow === "supervisor"
@@ -34345,7 +34362,9 @@ export function App() {
   const studioWindow = studioWindowState ? (
     <PortfolioDesktopWindow
       title="人格工作室"
-      bodyClassName={`app-shell ${mobileSidebarOpen ? "mobile-sidebar-open" : ""}`}
+      bodyClassName={`app-shell ${
+        mobileSidebarOpenRef.current ? "mobile-sidebar-open" : ""
+      }`}
       statusPrimary={activePersona.name}
       statusSecondary={`${getEntryCount(activePersona)} 个人格条目`}
       {...createManagedWindowProps(studioWindowState)}

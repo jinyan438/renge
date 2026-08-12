@@ -997,12 +997,14 @@ button.portfolio-window-light.close:hover {
     background: rgba(255, 255, 255, 0.9);
     box-shadow: 0 5px 18px rgba(20, 20, 25, 0.1);
     color: #29292d;
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
+    transition: opacity 0.12s ease, visibility 0s linear 0s;
   }
 
   .portfolio-window-body.mobile-sidebar-open .mobile-sidebar-toggle {
-    display: none;
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease, visibility 0s linear 0.12s;
   }
 
   .portfolio-window-body .sidebar,
@@ -1019,24 +1021,37 @@ button.portfolio-window-light.close:hover {
     padding: 14px 12px 22px;
     border-right: 1px solid rgba(196, 196, 202, 0.9);
     background: rgba(237, 237, 241, 0.98);
-    box-shadow: 18px 0 40px rgba(18, 18, 22, 0.18);
-    transform: translateX(-105%);
+    box-shadow: 8px 0 20px rgba(18, 18, 22, 0.14);
+    transform: translate3d(-105%, 0, 0);
+    transition: transform 0.18s cubic-bezier(0.2, 0, 0, 1);
+    contain: layout paint style;
+    backface-visibility: hidden;
+    will-change: transform;
   }
 
   .portfolio-window-body.mobile-sidebar-open .sidebar,
   .portfolio-window-body.mobile-sidebar-open .chat-sidebar {
-    transform: translateX(0);
+    transform: translate3d(0, 0, 0);
   }
 
-  .portfolio-window-body.mobile-sidebar-open .mobile-sidebar-backdrop {
+  .portfolio-window-body .mobile-sidebar-backdrop {
     position: fixed;
     inset: 42px 0 0;
     z-index: 200;
     display: block;
     border: 0;
     background: rgba(8, 8, 10, 0.38);
-    backdrop-filter: blur(2px);
-    -webkit-backdrop-filter: blur(2px);
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.18s ease, visibility 0s linear 0.18s;
+  }
+
+  .portfolio-window-body.mobile-sidebar-open .mobile-sidebar-backdrop {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+    transition: opacity 0.18s ease, visibility 0s linear 0s;
   }
 
   .portfolio-window-body .workspace,
@@ -1053,6 +1068,15 @@ button.portfolio-window-light.close:hover {
 
   .portfolio-window-body .chat-header {
     padding-left: 64px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .portfolio-window-body .sidebar,
+    .portfolio-window-body .chat-sidebar,
+    .portfolio-window-body .mobile-sidebar-toggle,
+    .portfolio-window-body .mobile-sidebar-backdrop {
+      transition-duration: 0.01ms;
+    }
   }
 }
 
