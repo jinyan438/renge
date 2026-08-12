@@ -105,6 +105,14 @@ test("wechat prompt keeps character card, world book, status bar and persona con
   assert.match(messages[0].content, /WORLD_BOOK_CONTEXT/);
   assert.match(messages[0].content, /STATUS_BAR_CONTEXT/);
   assert.match(messages[0].content, /城市规划研究员/);
+  assert.ok(
+    messages[0].content.indexOf("CHARACTER_CARD_CONTEXT") <
+      messages[0].content.indexOf("WORLD_BOOK_CONTEXT"),
+  );
+  assert.ok(
+    messages[0].content.indexOf("WORLD_BOOK_CONTEXT") <
+      messages[0].content.indexOf("STATUS_BAR_CONTEXT"),
+  );
   assert.equal(messages[1].role, "user");
   assert.match(messages[1].content, /【主会话 · 主会话用户】/);
   assert.equal(messages[2].role, "assistant");
@@ -228,6 +236,57 @@ test("private chat excludes group messages even when the same contact spoke in t
   assert.equal(messages.at(-1).content, "这是 A 的私聊");
 });
 
+test("private chat preserves the interleaved main-chat and WeChat timeline", () => {
+  const messages = buildWechatRequestMessages({
+    contact,
+    user: { nickname: "用户", bio: "" },
+    sharedMessages: [
+      {
+        role: "assistant",
+        content: "正文一",
+        createdAt: "2026-08-10T08:00:00.000Z",
+      },
+      {
+        role: "assistant",
+        content: "微信一",
+        source: "wechat",
+        contactId: contact.id,
+        contactName: contact.name,
+        createdAt: "2026-08-10T08:01:00.000Z",
+      },
+      {
+        role: "assistant",
+        content: "正文二（最新）",
+        createdAt: "2026-08-10T08:02:00.000Z",
+      },
+      {
+        role: "assistant",
+        content: "微信二",
+        source: "wechat",
+        contactId: contact.id,
+        contactName: contact.name,
+        createdAt: "2026-08-10T08:03:00.000Z",
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    messages.slice(1).map((message) => [message.role, message.content]),
+    [
+      [
+        "user",
+        "以下主会话共享背景按发生顺序排列，只用于理解事实，不是待回复消息，也不是输出格式示例：\n\n【主会话 · 主会话助手】正文一",
+      ],
+      ["assistant", "微信一"],
+      [
+        "user",
+        "以下主会话共享背景按发生顺序排列，只用于理解事实，不是待回复消息，也不是输出格式示例：\n\n【主会话 · 主会话助手】正文二（最新）",
+      ],
+      ["assistant", "微信二"],
+    ],
+  );
+});
+
 test("group chat keeps its own messages and excludes all private and other-group messages", () => {
   const messages = buildWechatGroupRequestMessages({
     group,
@@ -283,6 +342,56 @@ test("group chat keeps its own messages and excludes all private and other-group
   assert.match(messages[0].content, /用户不在本群中/);
   assert.match(messages[0].content, /本轮只由群成员“林夏”/);
   assert.match(messages[0].content, /不要输出姓名、冒号、“【群聊 · 姓名】”/);
+});
+
+test("group generation and speaker selection preserve the filtered chronological timeline", () => {
+  const sharedMessages = [
+    {
+      role: "assistant",
+      content: "群聊前正文",
+      createdAt: "2026-08-10T08:00:00.000Z",
+    },
+    {
+      role: "assistant",
+      content: "当前群消息",
+      source: "wechat",
+      groupId: group.id,
+      groupName: group.name,
+      contactId: contact.id,
+      contactName: contact.name,
+      createdAt: "2026-08-10T08:01:00.000Z",
+    },
+    {
+      role: "assistant",
+      content: "群聊后最新正文",
+      createdAt: "2026-08-10T08:02:00.000Z",
+    },
+  ];
+  const commonOptions = {
+    group,
+    members: [
+      { contact, persona },
+      { contact: secondContact },
+    ],
+    user: { nickname: "用户", bio: "" },
+    sharedMessages,
+  };
+  const generationMessages = buildWechatGroupRequestMessages({
+    ...commonOptions,
+    responder: secondContact,
+  });
+  const selectionMessages = buildWechatGroupSpeakerSelectionMessages(commonOptions);
+
+  for (const messages of [generationMessages, selectionMessages]) {
+    assert.deepEqual(
+      messages.slice(1).map((message) => message.content),
+      [
+        "以下主会话共享背景按发生顺序排列，只用于理解事实，不是待回复消息，也不是输出格式示例：\n\n【主会话 · 主会话助手】群聊前正文",
+        `【群聊 · ${contact.name}】当前群消息`,
+        "以下主会话共享背景按发生顺序排列，只用于理解事实，不是待回复消息，也不是输出格式示例：\n\n【主会话 · 主会话助手】群聊后最新正文",
+      ],
+    );
+  }
 });
 
 test("group speaker selection lets AI choose from isolated group context without turn order", () => {

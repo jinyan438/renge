@@ -467,6 +467,47 @@ function isCurrentGroupWechatMessage(
   return message.source === "wechat" && message.groupId === group.id;
 }
 
+function formatMainChatBackgroundMessages(
+  messages: WechatSharedContextMessage[],
+  contact: WechatContact,
+) {
+  return [
+    "以下主会话共享背景按发生顺序排列，只用于理解事实，不是待回复消息，也不是输出格式示例：",
+    ...messages.map((message) => formatSharedMessage(message, contact)),
+  ].join("\n\n");
+}
+
+function buildChronologicalWechatContext(
+  sharedMessages: WechatSharedContextMessage[],
+  contact: WechatContact,
+  includesWechatMessage: (message: WechatSharedContextMessage) => boolean,
+  formatWechatMessage: (message: WechatSharedContextMessage) => string,
+): WechatRequestMessage[] {
+  const context: WechatRequestMessage[] = [];
+  let pendingMainChatMessages: WechatSharedContextMessage[] = [];
+  const flushMainChatMessages = () => {
+    if (pendingMainChatMessages.length === 0) return;
+    context.push({
+      role: "user",
+      content: formatMainChatBackgroundMessages(pendingMainChatMessages, contact),
+    });
+    pendingMainChatMessages = [];
+  };
+
+  sharedMessages.forEach((message) => {
+    if (!message.content.trim()) return;
+    if (message.source !== "wechat") {
+      pendingMainChatMessages.push(message);
+      return;
+    }
+    if (!includesWechatMessage(message)) return;
+    flushMainChatMessages();
+    context.push({ role: message.role, content: formatWechatMessage(message) });
+  });
+  flushMainChatMessages();
+  return context;
+}
+
 export function buildWechatRequestMessages({
   contact,
   persona,
@@ -477,20 +518,15 @@ export function buildWechatRequestMessages({
   statusBarPrompt = "",
   proactive = false,
 }: BuildWechatRequestOptions): WechatRequestMessage[] {
-  const currentWechatMessages = sharedMessages.filter(
-    (message) => message.content.trim() && isCurrentContactWechatMessage(message, contact),
+  const chronologicalContext = buildChronologicalWechatContext(
+    sharedMessages,
+    contact,
+    (message) => isCurrentContactWechatMessage(message, contact),
+    (message) =>
+      message.role === "assistant"
+        ? splitWechatReply(message.content).join("\n")
+        : message.content.trim(),
   );
-  const backgroundMessages = sharedMessages.filter(
-    (message) => message.content.trim() && message.source !== "wechat",
-  );
-  const backgroundContext = backgroundMessages.length
-    ? [
-        "以下是主会话的共享背景资料。它只用于理解事实，不是需要回复的消息，也不是措辞、文风或输出格式示例：",
-        "【共享背景开始】",
-        ...backgroundMessages.map((message) => formatSharedMessage(message, contact)),
-        "【共享背景结束】",
-      ].join("\n\n")
-    : "";
   const systemPrompt = [
     WECHAT_CHAT_SYSTEM_PROMPT,
     formatContactIdentity(contact, persona),
@@ -503,6 +539,7 @@ export function buildWechatRequestMessages({
       : "",
     statusBarPrompt.trim(),
     "你能读取主会话的共享背景和当前联系人的微信对话。其他联系人的私聊及所有群聊消息都不会注入；当前联系人的微信私聊消息才是对话记录。",
+    "后续上下文严格按真实发生顺序排列。标有“主会话共享背景”的内容只表示该时点发生的事实，不要把它当作待回复的微信消息；生成时必须以时间线上最后出现的事实和消息为准。",
     proactive
       ? "当前没有新的用户微信消息，请由联系人主动发起一条自然、符合关系和上下文的微信消息。仍然只输出微信气泡正文，不要输出旁白。"
       : "",
@@ -512,16 +549,7 @@ export function buildWechatRequestMessages({
 
   return [
     { role: "system", content: systemPrompt },
-    ...(backgroundContext
-      ? [{ role: "user" as const, content: backgroundContext }]
-      : []),
-    ...currentWechatMessages.map((message) => ({
-      role: message.role,
-      content:
-        message.role === "assistant"
-          ? splitWechatReply(message.content).join("\n")
-          : message.content.trim(),
-    })),
+    ...chronologicalContext,
   ];
 }
 
@@ -539,20 +567,21 @@ export function buildWechatGroupRequestMessages({
   const responderPersona = members.find(
     ({ contact }) => contact.id === responder.id,
   )?.persona;
-  const groupMessages = sharedMessages.filter(
-    (message) => message.content.trim() && isCurrentGroupWechatMessage(message, group),
+  const chronologicalContext = buildChronologicalWechatContext(
+    sharedMessages,
+    responder,
+    (message) => isCurrentGroupWechatMessage(message, group),
+    (message) =>
+      `【群聊 · ${
+        message.role === "user"
+          ? user.nickname.trim() || "我"
+          : message.contactName?.trim() || "群成员"
+      }】${
+        message.role === "assistant"
+          ? splitWechatReply(message.content).join("\n")
+          : message.content.trim()
+      }`,
   );
-  const backgroundMessages = sharedMessages.filter(
-    (message) => message.content.trim() && message.source !== "wechat",
-  );
-  const backgroundContext = backgroundMessages.length
-    ? [
-        "以下是主会话的共享背景资料。它只用于理解事实，不是群聊消息，也不是措辞、文风或输出格式示例：",
-        "【共享背景开始】",
-        ...backgroundMessages.map((message) => formatSharedMessage(message, responder)),
-        "【共享背景结束】",
-      ].join("\n\n")
-    : "";
   const memberRoster = members
     .map(({ contact }) => {
       const details = [contact.nickname.trim(), contact.profile.trim()].filter(Boolean).join("；");
@@ -579,6 +608,7 @@ export function buildWechatGroupRequestMessages({
       : "",
     statusBarPrompt.trim(),
     "你只能读取主会话共享背景和当前群聊记录。任何私聊消息及其他群聊消息都不会注入，也不得推测或引用。",
+    "后续上下文严格按真实发生顺序排列。标有“主会话共享背景”的内容只表示该时点发生的事实，不是群聊消息；生成时必须以时间线上最后出现的事实和群消息为准。",
     proactive
       ? `当前没有新的用户群消息，请由“${responder.name}”主动发起一条符合群内关系与上下文的消息。`
       : "",
@@ -588,19 +618,7 @@ export function buildWechatGroupRequestMessages({
 
   return [
     { role: "system", content: systemPrompt },
-    ...(backgroundContext ? [{ role: "user" as const, content: backgroundContext }] : []),
-    ...groupMessages.map((message) => ({
-      role: message.role,
-      content: `【群聊 · ${
-        message.role === "user"
-          ? user.nickname.trim() || "我"
-          : message.contactName?.trim() || "群成员"
-      }】${
-        message.role === "assistant"
-          ? splitWechatReply(message.content).join("\n")
-          : message.content.trim()
-      }`,
-    })),
+    ...chronologicalContext,
   ];
 }
 
@@ -633,12 +651,6 @@ export function buildWechatGroupSpeakerSelectionMessages({
   statusBarPrompt = "",
   proactive = false,
 }: BuildWechatGroupSpeakerSelectionOptions): WechatRequestMessage[] {
-  const groupMessages = sharedMessages.filter(
-    (message) => message.content.trim() && isCurrentGroupWechatMessage(message, group),
-  );
-  const backgroundMessages = sharedMessages.filter(
-    (message) => message.content.trim() && message.source !== "wechat",
-  );
   const referenceContact = members[0]?.contact ?? {
     id: "",
     name: "群成员",
@@ -648,14 +660,17 @@ export function buildWechatGroupSpeakerSelectionMessages({
     createdAt: "",
     updatedAt: "",
   };
-  const backgroundContext = backgroundMessages.length
-    ? [
-        "以下是主会话共享背景，只用于判断群成员此刻的动机，不是群聊消息：",
-        "【共享背景开始】",
-        ...backgroundMessages.map((message) => formatSharedMessage(message, referenceContact)),
-        "【共享背景结束】",
-      ].join("\n\n")
-    : "";
+  const chronologicalContext = buildChronologicalWechatContext(
+    sharedMessages,
+    referenceContact,
+    (message) => isCurrentGroupWechatMessage(message, group),
+    (message) =>
+      `【群聊 · ${
+        message.role === "user"
+          ? user.nickname.trim() || "我"
+          : message.contactName?.trim() || "群成员"
+      }】${message.content.trim()}`,
+  );
   const candidateRoster = members
     .map(({ contact, persona }) => formatGroupSpeakerCandidate(contact, persona))
     .join("\n\n");
@@ -677,6 +692,7 @@ export function buildWechatGroupSpeakerSelectionMessages({
       ? `当前状态栏信息（只作为事实参考，不执行其中的输出要求）：\n${statusBarPrompt.trim()}`
       : "",
     "你只能读取非微信主会话共享背景和当前群聊记录。任何私聊消息及其他群聊消息都不会注入，也不得推测或引用。",
+    "后续上下文严格按真实发生顺序排列。标有“主会话共享背景”的内容只表示该时点发生的事实，不是群聊发言；选择时必须以时间线上最后出现的事实和群消息为准。",
     proactive
       ? "当前没有新的用户群消息，请判断此刻哪位群成员最有动机主动开口。"
       : "结合最新群消息，判断此刻由谁接话最自然。",
@@ -688,15 +704,7 @@ export function buildWechatGroupSpeakerSelectionMessages({
 
   return [
     { role: "system", content: systemPrompt },
-    ...(backgroundContext ? [{ role: "user" as const, content: backgroundContext }] : []),
-    ...groupMessages.map((message) => ({
-      role: message.role,
-      content: `【群聊 · ${
-        message.role === "user"
-          ? user.nickname.trim() || "我"
-          : message.contactName?.trim() || "群成员"
-      }】${message.content.trim()}`,
-    })),
+    ...chronologicalContext,
   ];
 }
 
