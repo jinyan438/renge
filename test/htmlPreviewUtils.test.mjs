@@ -3,10 +3,21 @@ import test from "node:test";
 
 import {
   collectInheritedHtmlPreviewStyleResources,
+  isHtmlPreviewRootTag,
   mergeWhitespaceSeparatedHtmlPreviewSegments,
   stabilizeHtmlPreviewMapViewport,
   stabilizeHtmlPreviewRuntimeCompatibility,
 } from "../src/htmlPreviewUtils.ts";
+
+test("treats paired Tavern wrapper tags as HTML preview roots", () => {
+  const standardTags = new Set(["div", "span", "details", "summary"]);
+  const blockRootTags = new Set(["div", "details"]);
+
+  assert.equal(isHtmlPreviewRootTag("catsay", standardTags, blockRootTags), true);
+  assert.equal(isHtmlPreviewRootTag("BGINFOR", standardTags, blockRootTags), true);
+  assert.equal(isHtmlPreviewRootTag("details", standardTags, blockRootTags), true);
+  assert.equal(isHtmlPreviewRootTag("span", standardTags, blockRootTags), false);
+});
 
 test("inherits assistant style resources from earlier chat messages", () => {
   const result = collectInheritedHtmlPreviewStyleResources(

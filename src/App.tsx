@@ -71,6 +71,7 @@ import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
 import {
   collectInheritedHtmlPreviewStyleResources,
+  isHtmlPreviewRootTag,
   mergeWhitespaceSeparatedHtmlPreviewSegments,
   stabilizeHtmlPreviewMapViewport,
   stabilizeHtmlPreviewRuntimeCompatibility,
@@ -5392,13 +5393,20 @@ function splitEmbeddedHtmlBlocks(content: string): PlainChatHtmlSegment[] {
 
     if (marker.startsWith("<!doctype")) {
       blockEnd = findHtmlDocumentEnd(content, blockStart);
-    } else if (rootTagName && htmlBlockRootTags.has(rootTagName)) {
+    } else if (
+      rootTagName &&
+      isHtmlPreviewRootTag(rootTagName, htmlStandardTags, htmlBlockRootTags)
+    ) {
       blockEnd = findMatchingHtmlBlockEnd(content, blockStart, rootTagName);
     }
 
     let resumeEnd = blockEnd;
     let syntheticClosingTag = "";
-    if (blockEnd <= blockStart && rootTagName && htmlBlockRootTags.has(rootTagName)) {
+    if (
+      blockEnd <= blockStart &&
+      rootTagName &&
+      isHtmlPreviewRootTag(rootTagName, htmlStandardTags, htmlBlockRootTags)
+    ) {
       const recoverableBoundary = findRecoverableHtmlBlockBoundary(
         content,
         blockStart,

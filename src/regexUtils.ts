@@ -310,6 +310,8 @@ function compileRegex(findRegex: string) {
 function expandRegexReplacement(
   replacement: string,
   replaceArguments: unknown[],
+  trimStrings: string[],
+  options: ApplyRegexScriptsOptions,
 ) {
   const wholeMatch = String(replaceArguments[0] ?? "");
   const possibleGroups = replaceArguments[replaceArguments.length - 1];
@@ -321,22 +323,32 @@ function expandRegexReplacement(
     0,
     replaceArguments.length - (namedGroups ? 4 : 3),
   );
+  const filterCapture = (value: unknown) =>
+    trimStrings.reduce(
+      (result, trimString) => {
+        const resolvedTrimString = replaceRegexMacros(trimString, options);
+        return resolvedTrimString
+          ? result.split(resolvedTrimString).join("")
+          : result;
+      },
+      String(value ?? ""),
+    );
 
   return replacement
     .replace(/{{match}}/gi, "$0")
-    .replace(/\$(\d+)|\$<([^>]+)>/g, (token, captureIndex, captureName) => {
+    .replace(/\$(\d+)|\$<([^>]+)>/g, (_token, captureIndex, captureName) => {
       if (captureName) {
         return namedGroups && captureName in namedGroups
-          ? String(namedGroups[captureName] ?? "")
-          : token;
+          ? filterCapture(namedGroups[captureName])
+          : "";
       }
       const index = Number(captureIndex);
-      if (!Number.isInteger(index) || index < 0) return token;
+      if (!Number.isInteger(index) || index < 0) return "";
       return index === 0
-        ? wholeMatch
+        ? filterCapture(wholeMatch)
         : index <= captureCount
-          ? String(replaceArguments[index] ?? "")
-          : token;
+          ? filterCapture(replaceArguments[index])
+          : "";
     });
 }
 
@@ -389,14 +401,16 @@ export function applyRegexScripts(
       const replaceString = script.substituteRegex
         ? replaceRegexMacros(script.replaceString, options)
         : script.replaceString;
-      let nextResult = currentResult.replace(
+      const nextResult = currentResult.replace(
         compileRegex(findRegex),
         (...replaceArguments: unknown[]) =>
-          expandRegexReplacement(replaceString, replaceArguments),
+          expandRegexReplacement(
+            replaceString,
+            replaceArguments,
+            script.trimStrings,
+            options,
+          ),
       );
-      script.trimStrings.forEach((trimString) => {
-        if (trimString) nextResult = nextResult.split(trimString).join("");
-      });
       return nextResult;
     } catch {
       return currentResult;

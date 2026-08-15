@@ -8,6 +8,16 @@ type HtmlPreviewStyleMessage = {
   content?: string;
 };
 
+export function isHtmlPreviewRootTag(
+  tagName: string,
+  standardTags: ReadonlySet<string>,
+  blockRootTags: ReadonlySet<string>,
+) {
+  const normalizedTagName = tagName.trim().toLowerCase();
+  return Boolean(normalizedTagName) &&
+    (blockRootTags.has(normalizedTagName) || !standardTags.has(normalizedTagName));
+}
+
 function isHtmlStylesheetLink(resource: string) {
   return /\brel\s*=\s*(?:"[^"]*\bstylesheet\b[^"]*"|'[^']*\bstylesheet\b[^']*'|stylesheet\b)/i.test(
     resource,
