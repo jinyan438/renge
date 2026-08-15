@@ -4,7 +4,7 @@ import { createServer, request } from "node:http";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startRengeServer } from "../server.mjs";
+import { rewriteTavernModuleImports, startRengeServer } from "../server.mjs";
 
 function requestLocalServer(controller, path, host = "preview.localhost", method = "GET") {
   const serverUrl = new URL(controller.url);
@@ -156,6 +156,32 @@ test("Tavern module proxy rejects non-jsDelivr module origins", async (t) => {
 
   assert.equal(response.status, 502);
   assert.match((await response.json()).error, /jsDelivr/);
+});
+
+test("Tavern module proxy rewrites nested jsDelivr dependency paths", () => {
+  const source = [
+    "import value from '/npm/example@1.0.0/+esm';",
+    "export { helper } from './helper.js';",
+    "const lazy = import('../shared/lazy.js');",
+  ].join("\n");
+  const rewritten = rewriteTavernModuleImports(
+    source,
+    "http://127.0.0.1:5191",
+    "https://testingcf.jsdelivr.net/npm/example@1.0.0/dist/index.js",
+  );
+
+  assert.match(
+    rewritten,
+    /url=https%3A%2F%2Ftestingcf\.jsdelivr\.net%2Fnpm%2Fexample%401\.0\.0%2F%2Besm/,
+  );
+  assert.match(
+    rewritten,
+    /url=https%3A%2F%2Ftestingcf\.jsdelivr\.net%2Fnpm%2Fexample%401\.0\.0%2Fdist%2Fhelper\.js/,
+  );
+  assert.match(
+    rewritten,
+    /url=https%3A%2F%2Ftestingcf\.jsdelivr\.net%2Fnpm%2Fexample%401\.0\.0%2Fshared%2Flazy\.js/,
+  );
 });
 
 test("routes Responses providers to /responses with a converted request", async (t) => {

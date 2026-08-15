@@ -6,6 +6,8 @@ import {
   installLegacyTavernSendControls,
   installTavernPresetManagerControls,
   proxyTavernModuleUrls,
+  resolveTavernButtonOwnerId,
+  resolveTavernCallerScriptId,
   type TavernCompatibilityErrorReporter,
   type TavernPresetManagerAdapter,
 } from "./tavernCompatibilityUtils";
@@ -1581,6 +1583,7 @@ export class TavernScriptRuntime {
   private executedScriptIds = new Set<string>();
   private eventHandlers = new Map<string, RuntimeEventHandler[]>();
   private eventHandlerSequence = 0;
+  private scriptSourceOwners = new Map<string, string>();
   private chatChangeEmissionVersion = 0;
   private chatChangeEmissionQueue: Promise<void> = Promise.resolve();
   private scriptButtons = new Map<string, TavernScriptButton[]>();
@@ -1778,7 +1781,17 @@ export class TavernScriptRuntime {
   }
 
   async triggerButton(button: TavernRuntimeButton) {
-    const eventName = this.getButtonEventName(button.scriptId, button.name);
+    const expectedEventName = this.getButtonEventName(button.scriptId, button.name);
+    const matchingEventNames = [...this.eventHandlers.keys()].filter(
+      (eventName) =>
+        eventName.startsWith("tavern_script_button:") &&
+        eventName.endsWith(`:${button.name}`),
+    );
+    const eventName = this.eventHandlers.has(expectedEventName)
+      ? expectedEventName
+      : matchingEventNames.length === 1
+        ? matchingEventNames[0]
+        : expectedEventName;
     const results = await this.emit(eventName, {
       name: button.name,
       scriptId: button.scriptId,
@@ -1796,6 +1809,7 @@ export class TavernScriptRuntime {
     this.ready = false;
     this.chatChangeEmissionVersion += 1;
     this.eventHandlers.clear();
+    this.scriptSourceOwners.clear();
     this.scriptButtons.clear();
     this.variableSchemas.clear();
     this.sillyTavernChatCache.splice(0);
@@ -1996,6 +2010,14 @@ export class TavernScriptRuntime {
       return nativeFetch(input, init);
     }) as typeof fetch;
 
+    const getScriptId = () =>
+      resolveTavernCallerScriptId(
+        new Error().stack,
+        this.currentScriptId,
+        this.lastScriptId || this.scripts[0]?.id || "renge-script",
+        this.scriptSourceOwners,
+      );
+
     const registerEventHandler = (
       eventName: unknown,
       callback: unknown,
@@ -2008,7 +2030,7 @@ export class TavernScriptRuntime {
       if (!callbacks.some((handler) => handler.callback === typedCallback)) {
         callbacks.push({
           callback: typedCallback,
-          scriptId: this.currentScriptId || this.lastScriptId,
+          scriptId: getScriptId(),
           priority,
           sequence: this.eventHandlerSequence++,
         });
@@ -2096,8 +2118,6 @@ export class TavernScriptRuntime {
       clearAll: () => this.eventHandlers.clear(),
     };
 
-    const getScriptId = () =>
-      this.currentScriptId || this.lastScriptId || this.scripts[0]?.id || "renge-script";
     const getScript = () =>
       this.scripts.find((script) => script.id === getScriptId()) ?? this.scripts[0];
     const runWithScriptContext = <T>(scriptId: string, callback: () => T) => {
@@ -2116,7 +2136,7 @@ export class TavernScriptRuntime {
     const nativeCancelAnimationFrame = win.cancelAnimationFrame?.bind(win);
     const animationFrameFallbacks = new Map<number, number>();
     win.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
-      const ownerScriptId = this.currentScriptId;
+      const ownerScriptId = getScriptId();
       return nativeSetTimeout(
         typeof handler === "function" && ownerScriptId
           ? (...callbackArgs: unknown[]) =>
@@ -2127,7 +2147,7 @@ export class TavernScriptRuntime {
       );
     }) as typeof win.setTimeout;
     win.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
-      const ownerScriptId = this.currentScriptId;
+      const ownerScriptId = getScriptId();
       return nativeSetInterval(
         typeof handler === "function" && ownerScriptId
           ? (...callbackArgs: unknown[]) =>
@@ -2139,7 +2159,7 @@ export class TavernScriptRuntime {
     }) as typeof win.setInterval;
     if (nativeRequestAnimationFrame) {
       win.requestAnimationFrame = ((callback: FrameRequestCallback) => {
-        const ownerScriptId = this.currentScriptId;
+        const ownerScriptId = getScriptId();
         let completed = false;
         let fallbackTimer = 0;
         const frameId = nativeRequestAnimationFrame((time) => {
@@ -2210,10 +2230,34 @@ export class TavernScriptRuntime {
         return nativeRemoveEventListener.call(this, type, wrapped, options);
       };
     }
-    const getScriptButtons = () => cloneValue(this.scriptButtons.get(getScriptId()) ?? []);
+    let lastButtonScriptId = "";
+    const resolveButtonScript = (buttons: unknown[]) => {
+      const fallbackScriptId = getScriptId();
+      const buttonNames = buttons
+        .map((button) =>
+          isRecord(button) ? String(button.name ?? button.label ?? "").trim() : String(button).trim(),
+        )
+        .filter(Boolean);
+      const scriptId = resolveTavernButtonOwnerId(
+        buttonNames,
+        fallbackScriptId,
+        this.scripts.map((script) => ({
+          id: script.id,
+          buttonNames: (this.scriptButtons.get(script.id) ?? []).map((button) => button.name),
+        })),
+      );
+      lastButtonScriptId = scriptId;
+      return this.scripts.find((script) => script.id === scriptId) ?? this.scripts[0];
+    };
+    const getScriptButtons = () => {
+      const script = getScript();
+      const buttons = this.scriptButtons.get(script?.id ?? "") ?? [];
+      if (buttons.length > 0 || !lastButtonScriptId) return cloneValue(buttons);
+      return cloneValue(this.scriptButtons.get(lastButtonScriptId) ?? []);
+    };
     const replaceScriptButtons = (buttons: unknown) => {
       if (!Array.isArray(buttons)) return;
-      const script = getScript();
+      const script = resolveButtonScript(buttons);
       if (!script) return;
       const normalized = this.normalizeRuntimeButtons(buttons, script.id);
       this.scriptButtons.set(script.id, normalized);
@@ -2221,7 +2265,7 @@ export class TavernScriptRuntime {
     };
     const appendInexistentScriptButtons = (buttons: unknown) => {
       if (!Array.isArray(buttons)) return;
-      const script = getScript();
+      const script = resolveButtonScript(buttons);
       if (!script) return;
       const existing = this.scriptButtons.get(script.id) ?? [];
       const names = new Set(existing.map((button) => button.name));
@@ -2491,6 +2535,22 @@ export class TavernScriptRuntime {
       getGlobalWorldBooks().filter((book) => book.active).map((book) => book.name);
     const getWorldbook = (name: unknown) =>
       cloneValue(findWorldBook(name)?.entries.map(formatTavernWorldBookEntry) ?? []);
+    const loadWorldInfo = async (name: unknown) => {
+      const book = findWorldBook(name);
+      if (!book) return null;
+      return {
+        name: book.name,
+        entries: Object.fromEntries(
+          book.entries.map((entry, index) => {
+            const formatted = formatTavernWorldBookEntry(entry);
+            return [
+              String(formatted.uid || index),
+              { ...formatted, displayIndex: index },
+            ];
+          }),
+        ),
+      };
+    };
     const getLorebooks = () =>
       getWorldBooks().map((book) => ({
         id: book.id,
@@ -2982,6 +3042,7 @@ export class TavernScriptRuntime {
       deleteLastMessage,
       stopGeneration,
       updateChatMetadata,
+      loadWorldInfo,
       getWorldBooks: getLorebooks,
       createOrReplaceWorldbook,
       replaceWorldbook,
@@ -3091,10 +3152,24 @@ export class TavernScriptRuntime {
       getCurrentChatId: () => this.adapter.getChatId(),
       getRequestHeaders: () => ({ "Content-Type": "application/json" }),
       getChatCompletionModel,
+      getCharacterCardFields: () => {
+        const character = getCharacter();
+        return character
+          ? {
+              name: character.name,
+              description: character.description,
+              personality: character.personality,
+              scenario: character.scenario,
+              first_mes: character.firstMessage,
+              mes_example: character.messageExample,
+            }
+          : null;
+      },
       getWorldbookNames,
       getWorldBooks: getLorebooks,
       getGlobalWorldbookNames,
       getWorldbook,
+      loadWorldInfo,
       createOrReplaceWorldbook,
       replaceWorldbook,
       deleteWorldbook,
@@ -3358,6 +3433,7 @@ export class TavernScriptRuntime {
       getWorldbookNames,
       getGlobalWorldbookNames,
       getWorldbook,
+      loadWorldInfo,
       createOrReplaceWorldbook,
       replaceWorldbook,
       deleteWorldbook,
@@ -3397,7 +3473,11 @@ export class TavernScriptRuntime {
       getScriptButtons,
       replaceScriptButtons,
       appendInexistentScriptButtons,
-      getButtonEvent: (name: unknown) => this.getButtonEventName(getScriptId(), String(name)),
+      getButtonEvent: (name: unknown) =>
+        this.getButtonEventName(
+          resolveButtonScript([name])?.id ?? getScriptId(),
+          String(name),
+        ),
       waitGlobalInitialized,
       getModelList,
       getChatCompletionModel,

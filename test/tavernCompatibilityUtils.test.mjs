@@ -5,10 +5,74 @@ import {
   attachTavernSubscriptionControls,
   createTavernMacroRegistry,
   createTavernErrorCatched,
+  getTavernCallerScriptSource,
   installLegacyTavernSendControls,
   installTavernPresetManagerControls,
   proxyTavernModuleUrls,
+  resolveTavernButtonOwnerId,
+  resolveTavernCallerScriptId,
 } from "../src/tavernCompatibilityUtils.ts";
+
+test("keeps TavernHelper module ownership across asynchronous callbacks", () => {
+  const sourceOwners = new Map();
+  const moduleStack = [
+    "Error",
+    "    at getScriptId (http://127.0.0.1:5191/src/tavernScriptRuntime.ts:2100:10)",
+    "    at initialize (http://127.0.0.1:5191/api/tavern-module-proxy?url=https%3A%2F%2Ftestingcf.jsdelivr.net%2Fgh%2FMagicalAstrogy%2FMagVarUpdate%40beta%2Fartifact%2Fbundle.js:1:9234)",
+  ].join("\n");
+
+  assert.equal(
+    getTavernCallerScriptSource(moduleStack),
+    "http://127.0.0.1:5191/api/tavern-module-proxy?url=https%3A%2F%2Ftestingcf.jsdelivr.net%2Fgh%2FMagicalAstrogy%2FMagVarUpdate%40beta%2Fartifact%2Fbundle.js",
+  );
+  assert.equal(
+    resolveTavernCallerScriptId(moduleStack, "mvu-script", "other-script", sourceOwners),
+    "mvu-script",
+  );
+  assert.equal(
+    resolveTavernCallerScriptId(moduleStack, "", "later-script", sourceOwners),
+    "mvu-script",
+  );
+});
+
+test("falls back when a TavernHelper call has no character-card module source", () => {
+  assert.equal(
+    resolveTavernCallerScriptId(
+      "Error\n    at getScriptId (http://127.0.0.1:5191/assets/index.js:1:20)",
+      "",
+      "latest-script",
+      new Map(),
+    ),
+    "latest-script",
+  );
+});
+
+test("resolves an asynchronous button API call to its unique owning script", () => {
+  const candidates = [
+    { id: "preset-script", buttonNames: [] },
+    {
+      id: "mvu-script",
+      buttonNames: ["重新处理变量", "重新读取初始变量", "清除旧楼层变量"],
+    },
+    { id: "other-script", buttonNames: ["打开设置"] },
+  ];
+
+  assert.equal(
+    resolveTavernButtonOwnerId(
+      ["重新处理变量", "重新读取初始变量"],
+      "preset-script",
+      candidates,
+    ),
+    "mvu-script",
+  );
+  assert.equal(
+    resolveTavernButtonOwnerId(["重复按钮"], "preset-script", [
+      { id: "first", buttonNames: ["重复按钮"] },
+      { id: "second", buttonNames: ["重复按钮"] },
+    ]),
+    "preset-script",
+  );
+});
 
 class FakeClassList {
   constructor() {

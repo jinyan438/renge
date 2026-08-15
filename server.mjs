@@ -185,10 +185,23 @@ function getTavernModuleProxyUrl(origin, remoteUrl) {
   return `${origin}/api/tavern-module-proxy?url=${encodeURIComponent(remoteUrl)}`;
 }
 
-function rewriteTavernModuleImports(source, origin) {
-  return source.replace(
+export function rewriteTavernModuleImports(source, origin, remoteUrl) {
+  const rewrittenSource = source.replace(
     /https:\/\/(?:testingcf|cdn|fastly)\.jsdelivr\.net\/[^'"`\s)]+/g,
     (remoteUrl) => getTavernModuleProxyUrl(origin, remoteUrl),
+  );
+  return rewrittenSource.replace(
+    /(\b(?:from|import)\s*(?:\(\s*)?)(['"])((?:\/|\.{1,2}\/)[^'"\s]+)\2/g,
+    (match, prefix, quote, modulePath) => {
+      try {
+        return `${prefix}${quote}${getTavernModuleProxyUrl(
+          origin,
+          new URL(modulePath, remoteUrl).href,
+        )}${quote}`;
+      } catch {
+        return match;
+      }
+    },
   );
 }
 
@@ -225,7 +238,7 @@ async function loadTavernModule(remoteUrl, origin) {
             throw new Error(`远程模块返回 ${remoteResponse.status}`);
           }
           const source = await remoteResponse.text();
-          return rewriteTavernModuleImports(source, origin);
+          return rewriteTavernModuleImports(source, origin, candidate);
         } catch (error) {
           lastError = error;
         }

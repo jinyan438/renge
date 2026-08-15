@@ -1,5 +1,74 @@
 export type TavernCompatibilityErrorReporter = (error: unknown) => void;
 
+const TAVERN_SCRIPT_SOURCE_MARKERS = [
+  "/api/tavern-module-proxy?url=",
+  "/renge-tavern-script-",
+  "renge-tavern-script-",
+];
+
+/** Identifies the character-card module that called a global TavernHelper API. */
+export function getTavernCallerScriptSource(stack: string | undefined) {
+  if (!stack) return "";
+  for (const line of stack.split(/\r?\n/)) {
+    const suffix = /:\d+:\d+\)?\s*$/.exec(line);
+    if (!suffix || suffix.index === undefined) continue;
+    const prefix = line.slice(0, suffix.index);
+    const httpStart = Math.max(prefix.lastIndexOf("http://"), prefix.lastIndexOf("https://"));
+    const scriptStart = prefix.lastIndexOf("renge-tavern-script-");
+    const start = httpStart >= 0 ? httpStart : scriptStart;
+    if (start < 0) continue;
+    const source = prefix.slice(start).replace(/^\(+|\)+$/g, "");
+    if (TAVERN_SCRIPT_SOURCE_MARKERS.some((marker) => source.includes(marker))) return source;
+  }
+  return "";
+}
+
+/**
+ * Preserves script ownership when an imported module resumes through a promise
+ * after the root character-card script has finished evaluating.
+ */
+export function resolveTavernCallerScriptId(
+  stack: string | undefined,
+  activeScriptId: string,
+  fallbackScriptId: string,
+  sourceOwners: Map<string, string>,
+) {
+  const source = getTavernCallerScriptSource(stack);
+  const knownOwner = source ? sourceOwners.get(source) : undefined;
+  if (knownOwner) return knownOwner;
+  const scriptId = activeScriptId || fallbackScriptId;
+  if (source && activeScriptId) sourceOwners.set(source, activeScriptId);
+  return scriptId;
+}
+
+export type TavernButtonOwnerCandidate = {
+  id: string;
+  buttonNames: string[];
+};
+
+/** Resolves a script from the unique strongest overlap with an imported button set. */
+export function resolveTavernButtonOwnerId(
+  buttonNames: string[],
+  fallbackScriptId: string,
+  candidates: TavernButtonOwnerCandidate[],
+) {
+  const requestedNames = new Set(buttonNames.map((name) => name.trim()).filter(Boolean));
+  if (requestedNames.size === 0) return fallbackScriptId;
+  let bestScore = 0;
+  let bestIds: string[] = [];
+  for (const candidate of candidates) {
+    const candidateNames = new Set(candidate.buttonNames);
+    const score = [...requestedNames].filter((name) => candidateNames.has(name)).length;
+    if (score > bestScore) {
+      bestScore = score;
+      bestIds = [candidate.id];
+    } else if (score > 0 && score === bestScore) {
+      bestIds.push(candidate.id);
+    }
+  }
+  return bestIds.length === 1 ? bestIds[0] : fallbackScriptId;
+}
+
 export type TavernPresetManagerPrompt = {
   identifier: string;
   name: string;
