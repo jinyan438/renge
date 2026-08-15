@@ -3,11 +3,18 @@ import test from "node:test";
 
 import {
   collectInheritedHtmlPreviewStyleResources,
+  getHtmlPreviewLayoutSettleDelays,
   isHtmlPreviewRootTag,
   mergeWhitespaceSeparatedHtmlPreviewSegments,
   stabilizeHtmlPreviewMapViewport,
   stabilizeHtmlPreviewRuntimeCompatibility,
 } from "../src/htmlPreviewUtils.ts";
+
+test("bounds HTML preview fallback measurements to the startup window", () => {
+  assert.deepEqual(getHtmlPreviewLayoutSettleDelays(false), [80, 240, 600, 1200, 2400]);
+  assert.deepEqual(getHtmlPreviewLayoutSettleDelays(true), [240, 1000, 3000, 6000]);
+  assert.ok(Math.max(...getHtmlPreviewLayoutSettleDelays(false)) < 3000);
+});
 
 test("treats paired Tavern wrapper tags as HTML preview roots", () => {
   const standardTags = new Set(["div", "span", "details", "summary"]);

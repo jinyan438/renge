@@ -8,6 +8,15 @@ type HtmlPreviewStyleMessage = {
   content?: string;
 };
 
+const HTML_PREVIEW_LIGHTWEIGHT_SETTLE_DELAYS = [80, 240, 600, 1200, 2400] as const;
+const HTML_PREVIEW_HEAVY_SETTLE_DELAYS = [240, 1000, 3000, 6000] as const;
+
+export function getHtmlPreviewLayoutSettleDelays(heavyContent: boolean) {
+  return heavyContent
+    ? [...HTML_PREVIEW_HEAVY_SETTLE_DELAYS]
+    : [...HTML_PREVIEW_LIGHTWEIGHT_SETTLE_DELAYS];
+}
+
 export function isHtmlPreviewRootTag(
   tagName: string,
   standardTags: ReadonlySet<string>,

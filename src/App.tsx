@@ -71,6 +71,7 @@ import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
 import {
   collectInheritedHtmlPreviewStyleResources,
+  getHtmlPreviewLayoutSettleDelays,
   isHtmlPreviewRootTag,
   mergeWhitespaceSeparatedHtmlPreviewSegments,
   stabilizeHtmlPreviewMapViewport,
@@ -5812,6 +5813,9 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
   const previewIdLiteral = JSON.stringify(previewId);
   const messageTypeLiteral = JSON.stringify(HTML_PREVIEW_RESIZE_MESSAGE);
   const remeasureMessageTypeLiteral = JSON.stringify(HTML_PREVIEW_REMEASURE_MESSAGE);
+  const settleDelaysLiteral = JSON.stringify(
+    getHtmlPreviewLayoutSettleDelays(heavyContent),
+  );
 
   return [
     '<script data-renge-html-preview="true">',
@@ -5819,6 +5823,7 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     `const previewId = ${previewIdLiteral};`,
     `const messageType = ${messageTypeLiteral};`,
     `const remeasureMessageType = ${remeasureMessageTypeLiteral};`,
+    `const settleDelays = ${settleDelaysLiteral};`,
     `const maxHeight = ${HTML_PREVIEW_MAX_HEIGHT};`,
     `const heavyContent = ${heavyContent ? "true" : "false"};`,
     "const defaultHeight = 420;",
@@ -6043,8 +6048,8 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "};",
     "const observedLayoutAssets = new WeakSet();",
     "const invalidateLayout = () => { naturalLayoutDirty = true; schedulePost(); };",
-    "/* Parent remeasure requests are readiness handshakes, so report even when geometry is unchanged. */",
-    "const requestMeasurementReport = () => { forceNextPost = true; invalidateLayout(); };",
+    "/* Readiness handshakes report cached geometry; width changes and observers invalidate it separately. */",
+    "const requestMeasurementReport = () => { forceNextPost = true; schedulePost(); };",
     "const watchLayoutAssets = () => {",
     '  document.querySelectorAll("img,video,audio").forEach((asset) => {',
     "    if (observedLayoutAssets.has(asset)) return;",
@@ -6139,11 +6144,8 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "} catch {}",
     "watchLayoutAssets();",
     "schedulePost();",
-    "(heavyContent ? [240, 1000, 3000, 6000, 12000, 24000] : [80, 240, 600, 1200, 2400, 4000, 8000, 12000, 20000, 30000]).forEach((delay) => setTimeout(() => { naturalLayoutDirty = true; schedulePost(); }, delay));",
-    "if (!heavyContent) {",
-    "  const intervalId = setInterval(() => { naturalLayoutDirty = true; schedulePost(); }, 750);",
-    "  setTimeout(() => clearInterval(intervalId), 30000);",
-    "}",
+    "/* Observers handle late changes; bounded startup checks avoid repeatedly unzooming scaled cards. */",
+    "settleDelays.forEach((delay) => setTimeout(() => { naturalLayoutDirty = true; schedulePost(); }, delay));",
     "})();",
     "</script>",
   ].join("");
