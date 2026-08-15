@@ -6,8 +6,10 @@ import {
   getHtmlPreviewLayoutSettleDelays,
   isHtmlPreviewRootTag,
   mergeWhitespaceSeparatedHtmlPreviewSegments,
+  normalizeRedundantTavernQuotePairs,
   stabilizeHtmlPreviewMapViewport,
   stabilizeHtmlPreviewRuntimeCompatibility,
+  unwrapTavernProseWrappers,
 } from "../src/htmlPreviewUtils.ts";
 
 test("bounds HTML preview fallback measurements to the startup window", () => {
@@ -24,6 +26,27 @@ test("treats paired Tavern wrapper tags as HTML preview roots", () => {
   assert.equal(isHtmlPreviewRootTag("BGINFOR", standardTags, blockRootTags), true);
   assert.equal(isHtmlPreviewRootTag("details", standardTags, blockRootTags), true);
   assert.equal(isHtmlPreviewRootTag("span", standardTags, blockRootTags), false);
+});
+
+test("unwraps Tavern content blocks so prose keeps Markdown layout", () => {
+  const source = `<content>\n第一段。\n\n*第二段斜体。*\n</content>`;
+
+  assert.equal(unwrapTavernProseWrappers(source), "\n第一段。\n\n*第二段斜体。*\n");
+  assert.equal(
+    unwrapTavernProseWrappers("<catsay><details>点评</details></catsay>"),
+    "<catsay><details>点评</details></catsay>",
+  );
+});
+
+test("removes redundant straight quotes around localized dialogue quotes", () => {
+  assert.equal(
+    normalizeRedundantTavernQuotePairs('她说："“欢迎回来。”"'),
+    "她说：“欢迎回来。”",
+  );
+  assert.equal(
+    normalizeRedundantTavernQuotePairs('居民称他为""“神大人”""。'),
+    "居民称他为“神大人”。",
+  );
 });
 
 test("inherits assistant style resources from earlier chat messages", () => {

@@ -8,6 +8,13 @@ type HtmlPreviewStyleMessage = {
   content?: string;
 };
 
+const TAVERN_PROSE_WRAPPER_PATTERN =
+  /<\s*content(?:\s[^<>]*?)?\s*>[\s\S]*?<\s*\/\s*content\s*>/i;
+const TAVERN_PROSE_WRAPPER_TAG_PATTERN =
+  /<\s*(?:content(?:\s[^<>]*?)?|\/\s*content)\s*>/gi;
+const LOCALIZED_QUOTE_PAIR_PATTERN =
+  /(["＂])(“[^”\n]+”|〝[^〞\n]+〞|「[^」\n]+」|｢[^｣\n]+｣|『[^』\n]+』)\1/g;
+
 const HTML_PREVIEW_LIGHTWEIGHT_SETTLE_DELAYS = [80, 240, 600, 1200, 2400] as const;
 const HTML_PREVIEW_HEAVY_SETTLE_DELAYS = [240, 1000, 3000, 6000] as const;
 
@@ -25,6 +32,23 @@ export function isHtmlPreviewRootTag(
   const normalizedTagName = tagName.trim().toLowerCase();
   return Boolean(normalizedTagName) &&
     (blockRootTags.has(normalizedTagName) || !standardTags.has(normalizedTagName));
+}
+
+export function unwrapTavernProseWrappers(content: string) {
+  if (!TAVERN_PROSE_WRAPPER_PATTERN.test(content)) return content;
+  return content.replace(TAVERN_PROSE_WRAPPER_TAG_PATTERN, "");
+}
+
+export function normalizeRedundantTavernQuotePairs(content: string) {
+  let normalized = content;
+  let previous = "";
+
+  while (normalized !== previous) {
+    previous = normalized;
+    normalized = normalized.replace(LOCALIZED_QUOTE_PAIR_PATTERN, "$2");
+  }
+
+  return normalized;
 }
 
 function isHtmlStylesheetLink(resource: string) {
