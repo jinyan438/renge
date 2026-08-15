@@ -5,9 +5,11 @@ import {
   BookOpen,
   Boxes,
   Braces,
+  CalendarDays,
   ChevronDown,
   ChevronRight,
   Check,
+  Clock3,
   Copy,
   Crown,
   Database,
@@ -24,6 +26,7 @@ import {
   Languages,
   MessageSquare,
   Menu,
+  MapPin,
   Palette,
   PanelLeftClose,
   PanelLeftOpen,
@@ -152,6 +155,7 @@ import {
   renderCharacterRegexTemplate,
 } from "./characterTemplateUtils";
 import { HTML_PREVIEW_STSCRIPT_COMPAT_SOURCE } from "./htmlPreviewStscript";
+import { splitTavernContextHeaders } from "./tavernCompatibilityUtils";
 import {
   getTavernGreetingSwipeIndex,
   getTavernMessageSwipeState,
@@ -3504,6 +3508,12 @@ type RenderedChatItem =
 
 type ChatContentPart =
   | { type: "text"; content: string }
+  | {
+      type: "tavernContext";
+      content: string;
+      label: string;
+      items: string[];
+    }
   | { type: "code"; content: string; language: string; executable: boolean }
   | ChatAudioEmbed
   | ChatLiveStreamEmbed;
@@ -5520,6 +5530,22 @@ function parsePlainChatContent(
   // 酒馆角色卡常用正则只替换 XML 风格包装标签的开头，并把原闭标签留在消息里。
   // 这些孤立闭标签不应作为正文显示；真正的 HTML 容器会在下方提取时补齐。
   normalized = stripStandaloneOrphanCustomClosingTags(normalized);
+  const contextSegments = splitTavernContextHeaders(normalized);
+  if (contextSegments.some((segment) => segment.type === "context")) {
+    for (const segment of contextSegments) {
+      if (segment.type === "context") {
+        parts.push({
+          type: "tavernContext",
+          content: segment.content,
+          label: segment.label,
+          items: segment.items,
+        });
+      } else if (segment.content) {
+        parts.push(...parsePlainChatContent(segment.content, audioRenderingEnabled));
+      }
+    }
+    return parts;
+  }
   // 合并 \"]\" 与 \"(\" 之间的换行与空白
   normalized = normalized.replace(/\](\s*\n\s*)+\(/g, "](");
   // 合并 \"(\" 与 url 之间的空白/换行
@@ -21505,6 +21531,34 @@ export function App() {
                 key={`${messageId}-text-${partIndex}`}
                 keyPrefix={`${messageId}-text-${partIndex}`}
               />
+            );
+          }
+
+          if (part.type === "tavernContext") {
+            return (
+              <section
+                aria-label={part.label}
+                className="chat-tavern-context"
+                key={`${messageId}-tavern-context-${partIndex}`}
+              >
+                <div className="chat-tavern-context-label">
+                  <Check aria-hidden="true" size={14} />
+                  <strong>{part.label}</strong>
+                </div>
+                <div className="chat-tavern-context-values">
+                  {part.items.map((item, itemIndex) => {
+                    const isTime = /\d{1,2}[:：]\d{2}/.test(item);
+                    const isCalendar = /(?:\d{4}\s*年|\d{4}[-/]\d{1,2}|星期|周[一二三四五六日天])/.test(item);
+                    const ContextIcon = isTime ? Clock3 : isCalendar ? CalendarDays : MapPin;
+                    return (
+                      <span key={`${item}-${itemIndex}`}>
+                        <ContextIcon aria-hidden="true" size={14} />
+                        {item}
+                      </span>
+                    );
+                  })}
+                </div>
+              </section>
             );
           }
 

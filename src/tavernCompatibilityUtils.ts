@@ -1,5 +1,56 @@
 export type TavernCompatibilityErrorReporter = (error: unknown) => void;
 
+export type TavernContextHeaderSegment =
+  | { type: "text"; content: string }
+  | {
+      type: "context";
+      content: string;
+      label: string;
+      items: string[];
+    };
+
+const TAVERN_CONTEXT_HEADER_PATTERN =
+  /^[ \t]*<([A-Za-z\u3400-\u9fff][A-Za-z0-9_\-\u3400-\u9fff]{0,31})>[ \t]*\r?\n[ \t]*```[ \t]*([^\r\n`]{2,300}?)[ \t]*```[ \t]*(?=\r?\n|$)/gm;
+
+function looksLikeTavernContextHeader(value: string) {
+  return /(?:\d{4}\s*年|\d{4}[-/]\d{1,2}[-/]\d{1,2}|星期[一二三四五六日天]|周[一二三四五六日天]|\d{1,2}[:：]\d{2})/.test(
+    value,
+  );
+}
+
+/**
+ * Extracts the compact context header emitted by Chinese Tavern presets. These
+ * presets often wrap a location/date line in same-line triple backticks, which
+ * is neither a valid fenced block nor useful raw text in the rendered chat.
+ */
+export function splitTavernContextHeaders(content: string): TavernContextHeaderSegment[] {
+  const segments: TavernContextHeaderSegment[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  TAVERN_CONTEXT_HEADER_PATTERN.lastIndex = 0;
+
+  while ((match = TAVERN_CONTEXT_HEADER_PATTERN.exec(content))) {
+    const value = match[2].trim();
+    if (!looksLikeTavernContextHeader(value)) continue;
+    if (match.index > cursor) {
+      segments.push({ type: "text", content: content.slice(cursor, match.index) });
+    }
+    segments.push({
+      type: "context",
+      content: value,
+      label: match[1],
+      items: value.split(/[\u00b7\u2022|\uff5c]/).map((item) => item.trim()).filter(Boolean),
+    });
+    cursor = match.index + match[0].length;
+  }
+
+  if (cursor === 0) return [{ type: "text", content }];
+  if (cursor < content.length) {
+    segments.push({ type: "text", content: content.slice(cursor) });
+  }
+  return segments;
+}
+
 const TAVERN_SCRIPT_SOURCE_MARKERS = [
   "/api/tavern-module-proxy?url=",
   "/renge-tavern-script-",

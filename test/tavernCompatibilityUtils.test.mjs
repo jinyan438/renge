@@ -11,7 +11,29 @@ import {
   proxyTavernModuleUrls,
   resolveTavernButtonOwnerId,
   resolveTavernCallerScriptId,
+  splitTavernContextHeaders,
 } from "../src/tavernCompatibilityUtils.ts";
+
+test("extracts Tavern context headers from same-line code fences", () => {
+  const segments = splitTavernContextHeaders(
+    "<基础确认>\n```金陵高中图书馆二楼·2010年09月01日·星期三·14:20```\n\n<quzhong>正文</quzhong>",
+  );
+
+  assert.deepEqual(segments, [
+    {
+      type: "context",
+      content: "金陵高中图书馆二楼·2010年09月01日·星期三·14:20",
+      label: "基础确认",
+      items: ["金陵高中图书馆二楼", "2010年09月01日", "星期三", "14:20"],
+    },
+    { type: "text", content: "\n\n<quzhong>正文</quzhong>" },
+  ]);
+});
+
+test("leaves ordinary custom tags and inline code untouched", () => {
+  const content = "<角色旁白>\n```这不是场景时间```\n\n正文";
+  assert.deepEqual(splitTavernContextHeaders(content), [{ type: "text", content }]);
+});
 
 test("keeps TavernHelper module ownership across asynchronous callbacks", () => {
   const sourceOwners = new Map();

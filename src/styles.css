@@ -5250,6 +5250,63 @@ summary:focus-visible {
   gap: 10px;
 }
 
+.chat-tavern-context {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 8px 10px;
+  border-top: 1px solid rgba(100, 116, 139, 0.22);
+  border-right: 1px solid rgba(100, 116, 139, 0.22);
+  border-bottom: 1px solid rgba(100, 116, 139, 0.22);
+  border-left: 3px solid #2f8f6b;
+  border-radius: 0 6px 6px 0;
+  color: #263548;
+  background: rgba(248, 250, 252, 0.78);
+}
+
+.chat-tavern-context-label,
+.chat-tavern-context-values,
+.chat-tavern-context-values span {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.chat-tavern-context-label {
+  flex: 0 0 auto;
+  gap: 5px;
+  color: #1f7255;
+  font-size: 12px;
+}
+
+.chat-tavern-context-values {
+  flex: 1 1 360px;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.chat-tavern-context-values span {
+  gap: 5px;
+  overflow-wrap: anywhere;
+  color: inherit;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.chat-tavern-context-values svg {
+  flex: 0 0 auto;
+  color: #64748b;
+}
+
+.chat-message.user .chat-tavern-context {
+  border-color: rgba(15, 23, 42, 0.18);
+  border-left-color: #19764a;
+  color: #172033;
+  background: rgba(255, 255, 255, 0.24);
+}
+
 .chat-audio-card {
   display: grid;
   width: min(520px, 100%);
@@ -9179,6 +9236,17 @@ input[type="range"] {
 
   .chat-markdown {
     gap: 6px;
+  }
+
+  .chat-tavern-context {
+    align-items: flex-start;
+    gap: 6px 10px;
+    padding: 7px 8px;
+  }
+
+  .chat-tavern-context-values {
+    flex-basis: 100%;
+    gap: 5px 10px;
   }
 
   .chat-code-block,
