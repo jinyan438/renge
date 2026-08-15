@@ -153,6 +153,10 @@ import {
 } from "./characterTemplateUtils";
 import { HTML_PREVIEW_STSCRIPT_COMPAT_SOURCE } from "./htmlPreviewStscript";
 import {
+  getTavernGreetingSwipeIndex,
+  getTavernMessageSwipeState,
+} from "./tavernGreetingUtils";
+import {
   createTavernScript,
   exportTavernScriptCollectionJson,
   exportTavernScriptJson,
@@ -3509,8 +3513,10 @@ type HtmlPreviewContext = {
   messages: Array<{
     role: ChatRole;
     content: string;
+    source?: string;
     variables: Record<string, unknown>;
     extra: Record<string, unknown>;
+    tavernSwipeState?: ReturnType<typeof getTavernMessageSwipeState>;
   }>;
   chatVariables: Record<string, unknown>;
   characterVariables: Record<string, unknown>;
@@ -4296,13 +4302,18 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "const formatMessage = (message, index, sillyTavern = false) => {",
     "  const variables = clone(message.variables || {});",
     "  const extra = clone(message.extra || {});",
+    "  const storedSwipeState = isRecord(message.tavernSwipeState) ? message.tavernSwipeState : {};",
+    "  const swipeId = Number.isInteger(Number(storedSwipeState.swipeId)) ? Math.max(0, Number(storedSwipeState.swipeId)) : 0;",
+    "  const swipes = Array.isArray(storedSwipeState.swipes) && storedSwipeState.swipes.length > 0 ? clone(storedSwipeState.swipes) : [message.content];",
+    "  const swipesData = Array.isArray(storedSwipeState.swipesData) ? clone(storedSwipeState.swipesData) : [clone(variables)];",
+    "  const swipesInfo = Array.isArray(storedSwipeState.swipesInfo) ? clone(storedSwipeState.swipesInfo) : [clone(extra)];",
     "  return {",
     "    message_id: index, mesid: index, id: index,",
     "    name: message.role === \"user\" ? snapshot.userName : snapshot.characterName,",
     "    role: message.role, is_user: message.role === \"user\", is_system: false, is_hidden: false,",
     "    message: message.content, mes: message.content, data: variables,",
-    "    variables: sillyTavern ? [clone(variables)] : variables, extra, swipe_id: 0,",
-    "    swipes: [message.content], swipes_data: [clone(variables)], swipes_info: [clone(extra)],",
+    "    variables: sillyTavern ? [clone(variables)] : variables, extra, swipe_id: swipeId,",
+    "    swipes, swipes_data: swipesData, swipes_info: swipesInfo,",
     "  };",
     "};",
     "const getChatMessages = (range = null, options = {}) => {",
@@ -4330,7 +4341,8 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "    const index = normalizeMessageId(update.message_id, false);",
     "    const message = snapshot.messages[index];",
     "    if (!message) return;",
-    "    if (typeof update.message === \"string\") message.content = update.message;",
+    "    if (typeof update.mes === \"string\") message.content = update.mes;",
+    "    else if (typeof update.message === \"string\") message.content = update.message;",
     "    else if (typeof update.content === \"string\") message.content = update.content;",
     "    const swipeIndex = Number.isInteger(Number(update.swipe_id)) ? Math.max(0, Number(update.swipe_id)) : 0;",
     "    if (Array.isArray(update.swipes) && typeof update.swipes[swipeIndex] === \"string\") message.content = update.swipes[swipeIndex];",
@@ -4348,6 +4360,25 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  if (!applyMessageUpdates(updates)) return false;",
     "  try { parent.postMessage({ type: updateMessageType, id: previewId, operation: \"setChatMessages\", updates: clone(updates) }, \"*\"); } catch {}",
     "  return true;",
+    "};",
+    "const sillyTavernChatCache = snapshot.messages.map((message, index) => formatMessage(message, index, true));",
+    "const saveSillyTavernChat = async () => {",
+    "  const updates = [];",
+    "  sillyTavernChatCache.forEach((cachedMessage, index) => {",
+    "    const sourceMessage = snapshot.messages[index];",
+    "    if (!sourceMessage) return;",
+    "    const swipeIndex = Number.isInteger(Number(cachedMessage.swipe_id)) ? Math.max(0, Number(cachedMessage.swipe_id)) : 0;",
+    "    const originalSwipeIndex = Number(sourceMessage.tavernSwipeState?.swipeId) || 0;",
+    "    if (sourceMessage.source === \"roleplay-greeting\" && swipeIndex !== originalSwipeIndex && typeof cachedMessage.swipes?.[swipeIndex] === \"string\") {",
+    "      updates.push({ message_id: index, swipe_id: swipeIndex });",
+    "      return;",
+    "    }",
+    "    const swipeContent = Array.isArray(cachedMessage.swipes) ? cachedMessage.swipes[swipeIndex] : undefined;",
+    "    const contentCandidates = [cachedMessage.mes, cachedMessage.message, cachedMessage.content, swipeContent].filter((value) => typeof value === \"string\");",
+    "    const nextContent = contentCandidates.find((value) => value !== sourceMessage.content);",
+    "    if (typeof nextContent === \"string\") updates.push({ message_id: index, message: nextContent });",
+    "  });",
+    "  return updates.length > 0 ? setChatMessages(updates) : true;",
     "};",
     "const getAllVariables = () => {",
     "  const messageVariables = snapshot.messages",
@@ -4405,12 +4436,12 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "const stopAllGeneration = () => requestParentCommand(\"stopGeneration\");",
     "const getContext = () => {",
     "  const context = {",
-    "    chat: snapshot.messages.map((message, index) => formatMessage(message, index, true)),",
+    "    chat: sillyTavernChatCache,",
     "    characters: [], characterId: snapshot.characterName ? \"0\" : undefined,",
     "    name1: snapshot.userName, name2: snapshot.characterName, chatId: snapshot.chatId,",
     "    variables: getVariables({ type: \"message\", message_id: \"current\" }),",
     "    chatMetadata: clone(snapshot.chatVariables || {}),",
-    "    saveChat: async () => true, getRequestHeaders: () => ({ \"Content-Type\": \"application/json\" }),",
+    "    saveChat: saveSillyTavernChat, getRequestHeaders: () => ({ \"Content-Type\": \"application/json\" }),",
     "  };",
     "  Object.defineProperty(context, \"then\", {",
     "    configurable: true, enumerable: false,",
@@ -4472,9 +4503,9 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  ? setChatMessages([{ ...clone(messageOrId), message_id: idOrContent }])",
     "  : setChatMessages([{ message_id: messageOrId, message: String(idOrContent ?? \"\") }]);",
     "window.TavernHelper = window.tavernHelper = window.tavernHelperAPI = window.th = api;",
-    "const sillyTavern = { version: \"3.5.0\", getContext, getCurrentChatId: () => snapshot.chatId, saveChat: async () => true };",
+    "const sillyTavern = { version: \"3.5.0\", getContext, getCurrentChatId: () => snapshot.chatId, saveChat: saveSillyTavernChat, reloadCurrentChat: async () => true };",
     "Object.defineProperties(sillyTavern, {",
-    "  chat: { get: () => snapshot.messages.map((message, index) => formatMessage(message, index, true)), configurable: true },",
+    "  chat: { get: () => sillyTavernChatCache, configurable: true },",
     "  name1: { get: () => snapshot.userName, configurable: true },",
     "  name2: { get: () => snapshot.characterName, configurable: true },",
     "});",
@@ -11972,7 +12003,14 @@ export function App() {
   const htmlPreviewMessagesCacheRef = useRef<{
     sources: ChatMessage[];
     values: HtmlPreviewContext["messages"];
-  }>({ sources: [], values: [] });
+    roleplayGreetingIndex: number;
+    roleplayGreetings: string[] | null;
+  }>({
+    sources: [],
+    values: [],
+    roleplayGreetingIndex: -1,
+    roleplayGreetings: null,
+  });
   const regexDisplayCacheRef = useRef<{
     context: readonly unknown[] | null;
     entries: Map<
@@ -12635,19 +12673,12 @@ export function App() {
             const swipeIndex = Number.isInteger(Number(rawUpdate.swipe_id))
               ? Math.max(0, Number(rawUpdate.swipe_id))
               : 0;
-            const hasExplicitSwipeContent =
-              typeof rawUpdate.message === "string" ||
-              typeof rawUpdate.content === "string" ||
-              (Array.isArray(rawUpdate.swipes) &&
-                typeof rawUpdate.swipes[swipeIndex] === "string");
-            if (
-              message.source === "roleplay-greeting" &&
-              rawUpdate.swipe_id != null &&
-              !hasExplicitSwipeContent
-            ) {
-              requestedGreetingIndex = swipeIndex;
+            const greetingSwipeIndex = getTavernGreetingSwipeIndex(message, rawUpdate);
+            if (greetingSwipeIndex !== null) {
+              requestedGreetingIndex = greetingSwipeIndex;
               return;
             }
+            if (typeof rawUpdate.mes === "string") message.content = rawUpdate.mes;
             if (
               Array.isArray(rawUpdate.swipes) &&
               typeof rawUpdate.swipes[swipeIndex] === "string"
@@ -18009,6 +18040,9 @@ export function App() {
   );
   const htmlPreviewMessages = useMemo(() => {
     const previous = htmlPreviewMessagesCacheRef.current;
+    const greetingStateUnchanged =
+      previous.roleplayGreetingIndex === activeRoleplayGreetingIndex &&
+      previous.roleplayGreetings === activeRoleplayGreetings;
     const previousById = new Map(
       previous.sources.map((source, index) => [
         source.id,
@@ -18020,16 +18054,25 @@ export function App() {
       if (
         cached &&
         (cached.source === message ||
-          (cached.source.renderAsPlainText === true && message.renderAsPlainText === true))
+          (cached.source.renderAsPlainText === true && message.renderAsPlainText === true)) &&
+        (message.source !== "roleplay-greeting" || greetingStateUnchanged)
       ) {
         return cached.value;
       }
-      return {
+      const value: HtmlPreviewContext["messages"][number] = {
         role: message.role,
         content: message.content,
+        source: message.source,
         variables: message.variables ?? {},
         extra: message.extra ?? {},
       };
+      if (message.source === "roleplay-greeting") {
+        value.tavernSwipeState = getTavernMessageSwipeState(message, {
+          index: activeRoleplayGreetingIndex,
+          greetings: activeRoleplayGreetings,
+        });
+      }
+      return value;
     });
     const stableValues =
       values.length === previous.values.length &&
@@ -18039,9 +18082,11 @@ export function App() {
     htmlPreviewMessagesCacheRef.current = {
       sources: chatMessages,
       values: stableValues,
+      roleplayGreetingIndex: activeRoleplayGreetingIndex,
+      roleplayGreetings: activeRoleplayGreetings,
     };
     return stableValues;
-  }, [chatMessages]);
+  }, [activeRoleplayGreetingIndex, activeRoleplayGreetings, chatMessages]);
   const htmlPreviewContextBase = useMemo<Omit<HtmlPreviewContext, "currentMessageIndex">>(
     () => ({
       messages: htmlPreviewMessages,

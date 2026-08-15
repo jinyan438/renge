@@ -34,6 +34,7 @@ test("a pure greeting swipe update requests an opening switch", () => {
 test("explicit swipe content does not request an opening switch", () => {
   const message = { content: "spring", source: "roleplay-greeting" };
 
+  assert.equal(getTavernGreetingSwipeIndex(message, { swipe_id: 1, mes: "edited" }), null);
   assert.equal(
     getTavernGreetingSwipeIndex(message, { swipe_id: 1, message: "edited" }),
     null,
