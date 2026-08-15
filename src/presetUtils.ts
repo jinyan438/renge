@@ -42,6 +42,8 @@ export type ChatPreset = {
   maxTokens: number;
   maxContext: number;
   squashSystemMessages: boolean;
+  customIncludeBody: string;
+  customExcludeBody: string;
   prompts: ChatPresetPrompt[];
   backupPrompts: ChatPresetPrompt[];
   regexScripts: RegexScript[];
@@ -156,6 +158,8 @@ export function createDefaultChatPreset(name = "默认预设"): ChatPreset {
     maxTokens: 4096,
     maxContext: 128000,
     squashSystemMessages: false,
+    customIncludeBody: "",
+    customExcludeBody: "",
     prompts: [],
     backupPrompts: [],
     regexScripts: [],
@@ -246,6 +250,14 @@ export function normalizeChatPreset(rawPreset: unknown, index = 0): ChatPreset {
       raw.squashSystemMessages ?? raw.squash_system_messages,
       fallback.squashSystemMessages,
     ),
+    customIncludeBody:
+      typeof (raw.customIncludeBody ?? raw.custom_include_body) === "string"
+        ? String(raw.customIncludeBody ?? raw.custom_include_body)
+        : fallback.customIncludeBody,
+    customExcludeBody:
+      typeof (raw.customExcludeBody ?? raw.custom_exclude_body) === "string"
+        ? String(raw.customExcludeBody ?? raw.custom_exclude_body)
+        : fallback.customExcludeBody,
     prompts,
     backupPrompts,
     regexScripts,
@@ -364,6 +376,14 @@ export function importSillyTavernPreset(rawPreset: unknown, fileName: string): C
     maxTokens: integerNumber(rawPreset.openai_max_tokens, fallback.maxTokens),
     maxContext: integerNumber(rawPreset.openai_max_context, fallback.maxContext),
     squashSystemMessages: booleanValue(rawPreset.squash_system_messages, false),
+    customIncludeBody:
+      typeof rawPreset.custom_include_body === "string"
+        ? rawPreset.custom_include_body
+        : fallback.customIncludeBody,
+    customExcludeBody:
+      typeof rawPreset.custom_exclude_body === "string"
+        ? rawPreset.custom_exclude_body
+        : fallback.customExcludeBody,
     prompts: orderedPrompts,
     backupPrompts,
     regexScripts,
@@ -502,6 +522,12 @@ export function buildChatPresetRequestParameters(preset: ChatPreset) {
       : {}),
     ...(preset.topA > 0 ? { top_a: preset.topA } : {}),
     ...(preset.minP > 0 ? { min_p: preset.minP } : {}),
+    ...(preset.customIncludeBody.trim()
+      ? { custom_include_body: preset.customIncludeBody }
+      : {}),
+    ...(preset.customExcludeBody.trim()
+      ? { custom_exclude_body: preset.customExcludeBody }
+      : {}),
   };
 }
 
@@ -550,6 +576,8 @@ export function exportSillyTavernPresetJson(preset: ChatPreset) {
       openai_max_tokens: preset.maxTokens,
       openai_max_context: preset.maxContext,
       squash_system_messages: preset.squashSystemMessages,
+      custom_include_body: preset.customIncludeBody,
+      custom_exclude_body: preset.customExcludeBody,
       prompts: [...preset.prompts, ...preset.backupPrompts].map(serializeChatPresetPrompt),
       prompt_order: [
         {

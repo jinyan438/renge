@@ -4,8 +4,10 @@ import {
   createTavernMacroRegistry,
   createTavernErrorCatched,
   installLegacyTavernSendControls,
+  installTavernPresetManagerControls,
   proxyTavernModuleUrls,
   type TavernCompatibilityErrorReporter,
+  type TavernPresetManagerAdapter,
 } from "./tavernCompatibilityUtils";
 import fontAwesomeCss from "@fortawesome/fontawesome-free/css/all.min.css?raw";
 import fontAwesomeBrandsUrl from "@fortawesome/fontawesome-free/webfonts/fa-brands-400.woff2?url";
@@ -100,6 +102,20 @@ export type TavernRuntimeStatus = {
   message: string;
 };
 
+export type TavernRuntimePresetPrompt = {
+  identifier: string;
+  name: string;
+  content: string;
+  enabled: boolean;
+};
+
+export type TavernRuntimePresetState = {
+  prompts: TavernRuntimePresetPrompt[];
+  topP: number;
+  customIncludeBody: string;
+  customExcludeBody: string;
+};
+
 export type TavernScriptRuntimeAdapter = {
   getMessages(): TavernRuntimeMessage[];
   setMessages(messages: TavernRuntimeMessage[]): void;
@@ -131,6 +147,10 @@ export type TavernScriptRuntimeAdapter = {
   getModelId?(): string;
   getPresetNames?(): string[];
   loadPreset?(name: string): boolean;
+  getPresetState?(): TavernRuntimePresetState | null;
+  setPresetPromptEnabled?(identifier: string, enabled: boolean): void;
+  setPresetTopP?(value: number): void;
+  savePresetSettings?(settings: TavernRuntimePresetState): void;
   getInput?(): string;
   setInput?(value: string): unknown;
   appendInput?(value: string): unknown;
@@ -959,14 +979,20 @@ function installRuntimeStyleBridge(
   };
 }
 
+type ParentTavernApiBridge = {
+  syncPresetManager(): void;
+  cleanup(): void;
+};
+
 function installParentTavernApiBridge(
   hostWindow: Window,
   api: Record<string, unknown>,
   sillyTavern: Record<string, unknown>,
   eventSource: Record<string, unknown>,
   toastr: Record<string, unknown>,
+  presetManagerAdapter: TavernPresetManagerAdapter,
   reportError: TavernCompatibilityErrorReporter,
-) {
+): ParentTavernApiBridge {
   const host = hostWindow as unknown as Record<string, unknown>;
   const values: Record<string, unknown> = {
     ...api,
@@ -1009,15 +1035,24 @@ function installParentTavernApiBridge(
     },
     reportError,
   );
-  return () => {
-    legacySendControlsCleanup();
-    Array.from(previousDescriptors.entries()).reverse().forEach(([name, descriptor]) => {
-      try {
-        if (descriptor) Object.defineProperty(hostWindow, name, descriptor);
-        else delete host[name];
-      } catch {}
-    });
-    previousDescriptors.clear();
+  const presetManagerControls = installTavernPresetManagerControls(
+    hostWindow.document,
+    presetManagerAdapter,
+    reportError,
+  );
+  return {
+    syncPresetManager: presetManagerControls.sync,
+    cleanup: () => {
+      presetManagerControls.cleanup();
+      legacySendControlsCleanup();
+      Array.from(previousDescriptors.entries()).reverse().forEach(([name, descriptor]) => {
+        try {
+          if (descriptor) Object.defineProperty(hostWindow, name, descriptor);
+          else delete host[name];
+        } catch {}
+      });
+      previousDescriptors.clear();
+    },
   };
 }
 
@@ -1553,7 +1588,7 @@ export class TavernScriptRuntime {
   private sillyTavernChatCache: Array<Record<string, unknown>> = [];
   private syncChatMetadata: (() => void) | null = null;
   private parentSideEffectCleanup: (() => void) | null = null;
-  private parentApiBridgeCleanup: (() => void) | null = null;
+  private parentApiBridge: ParentTavernApiBridge | null = null;
   private parentJQueryCleanup: (() => void) | null = null;
   private runtimeStyleBridgeCleanup: (() => void) | null = null;
   private fontAwesomeCleanups: Array<() => void> = [];
@@ -1575,6 +1610,11 @@ export class TavernScriptRuntime {
     if (this.destroyed) return;
     this.refreshSillyTavernChatCache();
     this.syncChatMetadata?.();
+  }
+
+  syncPresetCompatibility() {
+    if (this.destroyed) return;
+    this.parentApiBridge?.syncPresetManager();
   }
 
   async initializeGreeting(swipeIndex: number) {
@@ -1767,8 +1807,8 @@ export class TavernScriptRuntime {
     this.runtimeStyleBridgeCleanup = null;
     this.parentSideEffectCleanup?.();
     this.parentSideEffectCleanup = null;
-    this.parentApiBridgeCleanup?.();
-    this.parentApiBridgeCleanup = null;
+    this.parentApiBridge?.cleanup();
+    this.parentApiBridge = null;
     this.parentJQueryCleanup?.();
     this.parentJQueryCleanup = null;
     this.iframe?.remove();
@@ -2888,6 +2928,30 @@ export class TavernScriptRuntime {
     Object.entries(chatCompletionDefaults).forEach(([key, value]) => {
       if (chatCompletionSettings[key] === undefined) chatCompletionSettings[key] = value;
     });
+    const syncChatCompletionSettingsFromPreset = () => {
+      const preset = this.adapter.getPresetState?.();
+      if (!preset) {
+        chatCompletionSettings.prompts = [];
+        return null;
+      }
+      const currentPrompts = Array.isArray(chatCompletionSettings.prompts)
+        ? chatCompletionSettings.prompts.filter(isRecord)
+        : [];
+      const promptsByIdentifier = new Map(
+        currentPrompts.map((prompt) => [String(prompt.identifier ?? prompt.id ?? ""), prompt]),
+      );
+      chatCompletionSettings.prompts = preset.prompts.map((prompt) => {
+        const current = promptsByIdentifier.get(prompt.identifier) ?? {};
+        Object.assign(current, cloneValue(prompt));
+        return current;
+      });
+      chatCompletionSettings.top_p_openai = preset.topP;
+      chatCompletionSettings.top_p = preset.topP;
+      chatCompletionSettings.custom_include_body = preset.customIncludeBody;
+      chatCompletionSettings.custom_exclude_body = preset.customExcludeBody;
+      return preset;
+    };
+    syncChatCompletionSettingsFromPreset();
     const getChatCompletionModel = () =>
       String(
         [
@@ -2955,11 +3019,51 @@ export class TavernScriptRuntime {
     const saveSettingsDebounced = () => {
       if (this.adapter.setExtensionSettings) {
         this.adapter.setExtensionSettings(cloneValue(extensionSettings));
-        return;
+      } else {
+        const variables = cloneValue(this.adapter.getGlobalVariables());
+        variables[TAVERN_EXTENSION_SETTINGS_VARIABLE_KEY] = cloneValue(extensionSettings);
+        this.adapter.setGlobalVariables(variables);
       }
-      const variables = cloneValue(this.adapter.getGlobalVariables());
-      variables[TAVERN_EXTENSION_SETTINGS_VARIABLE_KEY] = cloneValue(extensionSettings);
-      this.adapter.setGlobalVariables(variables);
+
+      const preset = this.adapter.getPresetState?.();
+      if (!preset || !this.adapter.savePresetSettings) return;
+      const completionPrompts = Array.isArray(chatCompletionSettings.prompts)
+        ? chatCompletionSettings.prompts.filter(isRecord)
+        : [];
+      const promptsByIdentifier = new Map(
+        completionPrompts.map((prompt) => [
+          String(prompt.identifier ?? prompt.id ?? ""),
+          prompt,
+        ]),
+      );
+      const topP = Number(
+        chatCompletionSettings.top_p_openai ?? chatCompletionSettings.top_p ?? preset.topP,
+      );
+      this.adapter.savePresetSettings({
+        prompts: preset.prompts.map((prompt) => {
+          const completionPrompt = promptsByIdentifier.get(prompt.identifier);
+          return {
+            ...prompt,
+            content:
+              typeof completionPrompt?.content === "string"
+                ? completionPrompt.content
+                : prompt.content,
+            enabled:
+              typeof completionPrompt?.enabled === "boolean"
+                ? completionPrompt.enabled
+                : prompt.enabled,
+          };
+        }),
+        topP: Number.isFinite(topP) ? topP : preset.topP,
+        customIncludeBody:
+          typeof chatCompletionSettings.custom_include_body === "string"
+            ? chatCompletionSettings.custom_include_body
+            : preset.customIncludeBody,
+        customExcludeBody:
+          typeof chatCompletionSettings.custom_exclude_body === "string"
+            ? chatCompletionSettings.custom_exclude_body
+            : preset.customExcludeBody,
+      });
     };
 
     const sillyTavern: Record<string, unknown> = {
@@ -3370,16 +3474,48 @@ export class TavernScriptRuntime {
       isRecord(message) ? String(message.message ?? message.content ?? "") : String(message ?? "");
     win.retrieveDisplayedMessage = (messageId: unknown) =>
       getChatMessages(messageId)[0] ?? null;
-    this.parentApiBridgeCleanup?.();
-    this.parentApiBridgeCleanup = installParentTavernApiBridge(
+    const presetManagerAdapter: TavernPresetManagerAdapter = {
+      getPrompts: () =>
+        (syncChatCompletionSettingsFromPreset()?.prompts ?? []).map((prompt) => ({
+          identifier: prompt.identifier,
+          name: prompt.name,
+          enabled: prompt.enabled,
+        })),
+      setPromptEnabled: (identifier, enabled) => {
+        if (Array.isArray(chatCompletionSettings.prompts)) {
+          const prompt = chatCompletionSettings.prompts
+            .filter(isRecord)
+            .find((candidate) =>
+              String(candidate.identifier ?? candidate.id ?? "") === identifier,
+            );
+          if (prompt) prompt.enabled = enabled;
+        }
+        this.adapter.setPresetPromptEnabled?.(identifier, enabled);
+      },
+      getTopP: () => {
+        const value = Number(
+          chatCompletionSettings.top_p_openai ?? chatCompletionSettings.top_p ?? 1,
+        );
+        return Number.isFinite(value) ? value : 1;
+      },
+      setTopP: (value) => {
+        chatCompletionSettings.top_p_openai = value;
+        chatCompletionSettings.top_p = value;
+        this.adapter.setPresetTopP?.(value);
+      },
+      savePreset: saveSettingsDebounced,
+    };
+    this.parentApiBridge?.cleanup();
+    this.parentApiBridge = installParentTavernApiBridge(
       window,
       api,
       sillyTavern,
       eventSource as unknown as Record<string, unknown>,
       toastr,
+      presetManagerAdapter,
       (error) => this.writeRuntimeLog(
         "error",
-        `兼容发送控件提交失败：${toErrorMessage(error)}`,
+        `酒馆兼容控件操作失败：${toErrorMessage(error)}`,
       ),
     );
   }

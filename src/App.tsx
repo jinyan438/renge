@@ -12177,6 +12177,10 @@ export function App() {
   }, [activeChatPresetId, activePersonaId, activeWorldBookIds, characterCards, chatMessages, chatPresetEnabled, chatPresets, chatSessions, personas, regexScripts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
+    tavernScriptRuntimeRef.current?.syncPresetCompatibility();
+  }, [activeChatPresetId, chatPresetEnabled, chatPresets]);
+
+  useEffect(() => {
     if (!appDataLoaded || !activeChatSessionId) return;
     tavernChatChangeTransitionRef.current = {
       configurationKey: tavernRuntimeConfigurationKeyRef.current,
@@ -17282,6 +17286,84 @@ export function App() {
         setActiveChatPresetId(preset.id);
         setChatPresetEnabled(true);
         return true;
+      },
+      getPresetState: () => {
+        if (!chatPresetEnabledRef.current) return null;
+        const preset = chatPresetsRef.current.find(
+          (candidate) => candidate.id === activeChatPresetIdRef.current,
+        );
+        if (!preset) return null;
+        return {
+          prompts: preset.prompts.map((prompt) => ({
+            identifier: prompt.identifier,
+            name: prompt.name,
+            content: prompt.content,
+            enabled: prompt.enabled,
+          })),
+          topP: preset.topP,
+          customIncludeBody: preset.customIncludeBody,
+          customExcludeBody: preset.customExcludeBody,
+        };
+      },
+      setPresetPromptEnabled: (identifier, enabled) => {
+        const presetId = activeChatPresetIdRef.current;
+        if (!chatPresetEnabledRef.current || !presetId) return;
+        updatePresets((presets) =>
+          presets.map((preset) =>
+            preset.id === presetId
+              ? {
+                  ...preset,
+                  prompts: preset.prompts.map((prompt) =>
+                    prompt.identifier === identifier
+                      ? { ...prompt, enabled }
+                      : prompt,
+                  ),
+                  updatedAt: new Date().toISOString(),
+                }
+              : preset,
+          ),
+        );
+      },
+      setPresetTopP: (topP) => {
+        const presetId = activeChatPresetIdRef.current;
+        if (!chatPresetEnabledRef.current || !presetId || !Number.isFinite(topP)) return;
+        updatePresets((presets) =>
+          presets.map((preset) =>
+            preset.id === presetId
+              ? { ...preset, topP, updatedAt: new Date().toISOString() }
+              : preset,
+          ),
+        );
+      },
+      savePresetSettings: (settings) => {
+        const presetId = activeChatPresetIdRef.current;
+        if (!chatPresetEnabledRef.current || !presetId) return;
+        const settingsByIdentifier = new Map(
+          settings.prompts.map((prompt) => [prompt.identifier, prompt]),
+        );
+        updatePresets((presets) =>
+          presets.map((preset) =>
+            preset.id === presetId
+              ? {
+                  ...preset,
+                  prompts: preset.prompts.map((prompt) => {
+                    const setting = settingsByIdentifier.get(prompt.identifier);
+                    return setting
+                      ? {
+                          ...prompt,
+                          content: setting.content,
+                          enabled: setting.enabled,
+                        }
+                      : prompt;
+                  }),
+                  topP: Number.isFinite(settings.topP) ? settings.topP : preset.topP,
+                  customIncludeBody: settings.customIncludeBody,
+                  customExcludeBody: settings.customExcludeBody,
+                  updatedAt: new Date().toISOString(),
+                }
+              : preset,
+          ),
+        );
       },
       getInput: () => chatInputRef.current?.value ?? "",
       setInput: (value) => {

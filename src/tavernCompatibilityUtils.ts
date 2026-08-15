@@ -1,5 +1,219 @@
 export type TavernCompatibilityErrorReporter = (error: unknown) => void;
 
+export type TavernPresetManagerPrompt = {
+  identifier: string;
+  name: string;
+  enabled: boolean;
+};
+
+export type TavernPresetManagerAdapter = {
+  getPrompts(): TavernPresetManagerPrompt[];
+  setPromptEnabled(identifier: string, enabled: boolean): unknown;
+  getTopP(): number;
+  setTopP(value: number): unknown;
+  savePreset(): unknown;
+};
+
+export type TavernPresetManagerControls = {
+  sync(): void;
+  cleanup(): void;
+};
+
+const PRESET_MANAGER_BRIDGE_ATTRIBUTE = "data-renge-tavern-preset-bridge";
+const PRESET_PROMPT_DISABLED_CLASS = "completion_prompt_manager_prompt_disabled";
+
+function markPresetManagerBridgeElement(element: HTMLElement) {
+  element.hidden = true;
+  element.setAttribute("aria-hidden", "true");
+  element.setAttribute(PRESET_MANAGER_BRIDGE_ATTRIBUTE, "true");
+}
+
+/**
+ * Installs the hidden preset-manager DOM expected by SillyTavern preset scripts.
+ * The controls remain backed by Renge's active preset even when its editor is closed.
+ */
+export function installTavernPresetManagerControls(
+  document: Document,
+  adapter: TavernPresetManagerAdapter,
+  reportError: TavernCompatibilityErrorReporter = () => undefined,
+): TavernPresetManagerControls {
+  const root = document.body ?? document.documentElement;
+  const ownedElements: HTMLElement[] = [];
+  const promptToggleListeners = new Map<
+    HTMLButtonElement,
+    { listener: () => void; identifier: string }
+  >();
+
+  const own = <T extends HTMLElement>(element: T) => {
+    markPresetManagerBridgeElement(element);
+    ownedElements.push(element);
+    return element;
+  };
+
+  let promptList = document.getElementById("completion_prompt_manager_list") as
+    | HTMLElement
+    | null;
+  if (!promptList && root) {
+    promptList = own(document.createElement("ul"));
+    promptList.id = "completion_prompt_manager_list";
+    root.append(promptList);
+  }
+
+  let saveButton = document.getElementById("update_oai_preset") as
+    | HTMLButtonElement
+    | null;
+  if (!saveButton && root) {
+    saveButton = own(document.createElement("button"));
+    saveButton.id = "update_oai_preset";
+    saveButton.type = "button";
+    root.append(saveButton);
+  }
+
+  const createTopPInput = (id: string, type: "range" | "number") => {
+    const existing = document.getElementById(id) as HTMLInputElement | null;
+    if (existing || !root) return existing;
+    const input = own(document.createElement("input"));
+    input.id = id;
+    input.type = type;
+    input.min = "0";
+    input.max = "1";
+    input.step = "0.01";
+    root.append(input);
+    return input;
+  };
+  const topPSlider = createTopPInput("top_p_openai", "range");
+  const topPCounter = createTopPInput("top_p_counter_openai", "number");
+  const ownsPromptList = Boolean(promptList && ownedElements.includes(promptList));
+  const ownsSaveButton = Boolean(saveButton && ownedElements.includes(saveButton));
+  const ownsTopPSlider = Boolean(topPSlider && ownedElements.includes(topPSlider));
+  const ownsTopPCounter = Boolean(topPCounter && ownedElements.includes(topPCounter));
+
+  const report = (error: unknown) => {
+    try {
+      reportError(error);
+    } catch {}
+  };
+  const save = () => {
+    try {
+      void Promise.resolve(adapter.savePreset()).catch(report);
+    } catch (error) {
+      report(error);
+    }
+  };
+  if (ownsSaveButton) saveButton?.addEventListener("click", save);
+
+  const setTopP = (event: Event) => {
+    const input = event.currentTarget as HTMLInputElement | null;
+    const value = Number(input?.value);
+    if (!Number.isFinite(value)) return;
+    if (ownsTopPSlider && topPSlider && topPSlider !== input) {
+      topPSlider.value = String(value);
+    }
+    if (ownsTopPCounter && topPCounter && topPCounter !== input) {
+      topPCounter.value = String(value);
+    }
+    try {
+      void Promise.resolve(adapter.setTopP(value)).catch(report);
+    } catch (error) {
+      report(error);
+    }
+  };
+  if (ownsTopPSlider) topPSlider?.addEventListener("input", setTopP);
+  if (ownsTopPCounter) topPCounter?.addEventListener("input", setTopP);
+
+  const removePromptItem = (item: HTMLLIElement) => {
+    const toggle = item.querySelector<HTMLButtonElement>(".prompt-manager-toggle-action");
+    const registration = toggle ? promptToggleListeners.get(toggle) : undefined;
+    if (toggle && registration) {
+      toggle.removeEventListener("click", registration.listener);
+      promptToggleListeners.delete(toggle);
+    }
+    item.remove();
+  };
+
+  const sync = () => {
+    if (promptList && ownsPromptList) {
+      const existingItems = new Map<string, HTMLLIElement>();
+      promptList.querySelectorAll<HTMLLIElement>("li[data-pm-identifier]").forEach((item) => {
+        const identifier = item.getAttribute("data-pm-identifier") ?? "";
+        if (identifier && !existingItems.has(identifier)) existingItems.set(identifier, item);
+        else removePromptItem(item);
+      });
+      const nextItems: HTMLLIElement[] = [];
+      adapter.getPrompts().forEach((prompt) => {
+        const identifier = String(prompt.identifier);
+        let item = existingItems.get(identifier);
+        if (item) existingItems.delete(identifier);
+        else {
+          item = document.createElement("li");
+          item.setAttribute("data-pm-identifier", identifier);
+          const name = document.createElement("span");
+          name.setAttribute("data-pm-name", "");
+          const toggle = document.createElement("button");
+          toggle.type = "button";
+          toggle.classList.add("prompt-manager-toggle-action");
+          item.append(name, toggle);
+        }
+
+        item.setAttribute("data-pm-identifier", identifier);
+        item.classList.toggle(PRESET_PROMPT_DISABLED_CLASS, !prompt.enabled);
+        const name = item.querySelector<HTMLElement>("[data-pm-name]");
+        name?.setAttribute("data-pm-name", prompt.name);
+        const toggle = item.querySelector<HTMLButtonElement>(".prompt-manager-toggle-action");
+        if (toggle) {
+          const previous = promptToggleListeners.get(toggle);
+          if (!previous || previous.identifier !== identifier) {
+            if (previous) toggle.removeEventListener("click", previous.listener);
+            const listener = () => {
+              const wasEnabled = !item?.classList.contains(PRESET_PROMPT_DISABLED_CLASS);
+              const nextEnabled = !wasEnabled;
+              item?.classList.toggle(PRESET_PROMPT_DISABLED_CLASS, !nextEnabled);
+              try {
+                void Promise.resolve(
+                  adapter.setPromptEnabled(identifier, nextEnabled),
+                ).catch((error) => {
+                  item?.classList.toggle(PRESET_PROMPT_DISABLED_CLASS, !wasEnabled);
+                  report(error);
+                });
+              } catch (error) {
+                item?.classList.toggle(PRESET_PROMPT_DISABLED_CLASS, !wasEnabled);
+                report(error);
+              }
+            };
+            toggle.addEventListener("click", listener);
+            promptToggleListeners.set(toggle, { listener, identifier });
+          }
+        }
+        nextItems.push(item);
+      });
+      existingItems.forEach(removePromptItem);
+      promptList.append(...nextItems);
+    }
+
+    const topP = Number(adapter.getTopP());
+    if (Number.isFinite(topP)) {
+      if (ownsTopPSlider && topPSlider) topPSlider.value = String(topP);
+      if (ownsTopPCounter && topPCounter) topPCounter.value = String(topP);
+    }
+  };
+
+  sync();
+
+  return {
+    sync,
+    cleanup: () => {
+      if (ownsSaveButton) saveButton?.removeEventListener("click", save);
+      if (ownsTopPSlider) topPSlider?.removeEventListener("input", setTopP);
+      if (ownsTopPCounter) topPCounter?.removeEventListener("input", setTopP);
+      promptToggleListeners.forEach(({ listener }, toggle) =>
+        toggle.removeEventListener("click", listener),
+      );
+      promptToggleListeners.clear();
+      ownedElements.reverse().forEach((element) => element.remove());
+    },
+  };
+}
+
 /**
  * Installs the legacy SillyTavern composer elements used by character-card
  * scripts that submit through window.parent.document.
