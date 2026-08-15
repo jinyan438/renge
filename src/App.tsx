@@ -146,6 +146,11 @@ import {
   type CharacterCard,
 } from "./characterCardUtils";
 import {
+  getCharacterRegexTemplateConfig,
+  isCharacterRegexTemplateMessageEligible,
+  renderCharacterRegexTemplate,
+} from "./characterTemplateUtils";
+import {
   createTavernScript,
   exportTavernScriptCollectionJson,
   exportTavernScriptJson,
@@ -17921,6 +17926,13 @@ export function App() {
           message.role === "assistant" ? index : latestIndex,
         -1,
       );
+      const firstAssistantMessageIndex = visibleChatMessages.findIndex(
+        (message) => message.role === "assistant",
+      );
+      const characterTemplate =
+        chatMode === "roleplay" && activeSessionRoleplayCard
+          ? getCharacterRegexTemplateConfig(activeSessionRoleplayCard.extensions)
+          : null;
       const processed = visibleChatMessages.map((message, index) => {
         if (message.role !== "assistant" || !message.content) return message;
         const depth = visibleChatMessages.length - index - 1;
@@ -17958,7 +17970,21 @@ export function App() {
                 regexOptions,
               )
             : message.content;
-        const content = applyRegexScripts(displaySource, effectiveRegexScripts, regexOptions);
+        const regexContent = characterTemplate?.disableParsers
+          ? displaySource
+          : applyRegexScripts(displaySource, effectiveRegexScripts, regexOptions);
+        const templatedContent =
+          characterTemplate &&
+          message.renderAsPlainText !== true &&
+          isCharacterRegexTemplateMessageEligible(
+            characterTemplate,
+            index,
+            visibleChatMessages.length,
+            firstAssistantMessageIndex,
+          )
+            ? renderCharacterRegexTemplate(regexContent, characterTemplate)
+            : null;
+        const content = templatedContent ?? regexContent;
         const result = content === message.content ? message : { ...message, content };
         cache.entries.set(message.id, {
           source: message,
