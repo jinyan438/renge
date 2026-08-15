@@ -150,6 +150,7 @@ import {
   isCharacterRegexTemplateMessageEligible,
   renderCharacterRegexTemplate,
 } from "./characterTemplateUtils";
+import { HTML_PREVIEW_STSCRIPT_COMPAT_SOURCE } from "./htmlPreviewStscript";
 import {
   createTavernScript,
   exportTavernScriptCollectionJson,
@@ -4390,6 +4391,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "};",
     "const triggerSlash = (command) => requestParentCommand(\"triggerSlash\", { command: String(command ?? \"\") });",
     "const sendMessage = (text = getInput()) => requestParentCommand(\"send\", { text: String(text ?? \"\") });",
+    HTML_PREVIEW_STSCRIPT_COMPAT_SOURCE,
     "const generate = (config = {}) => {",
     "  const normalized = isRecord(config) ? config : { user_input: config };",
     "  const userInput = String(normalized.user_input ?? normalized.prompt ?? getInput());",
