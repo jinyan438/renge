@@ -360,6 +360,7 @@ const image = "https://files.example.test/card.png";
     transformed,
     /http:\/\/127\.0\.0\.1:5190\/api\/tavern-module-proxy\?url=https%3A%2F%2Fcdn\.jsdelivr\.net/,
   );
+  assert.equal((transformed.match(/&v=2/g) ?? []).length, 2);
   assert.match(transformed, /https:\/\/files\.example\.test\/card\.png/);
 });
 

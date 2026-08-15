@@ -182,6 +182,7 @@ test("Tavern module proxy rewrites nested jsDelivr dependency paths", () => {
     rewritten,
     /url=https%3A%2F%2Ftestingcf\.jsdelivr\.net%2Fnpm%2Fexample%401\.0\.0%2Fshared%2Flazy\.js/,
   );
+  assert.equal((rewritten.match(/&v=2/g) ?? []).length, 3);
 });
 
 test("routes Responses providers to /responses with a converted request", async (t) => {

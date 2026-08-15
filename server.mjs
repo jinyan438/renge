@@ -19,6 +19,7 @@ const defaultPort = Number(process.env.PORT ?? 5190);
 const appDataFileName = "app-data.json";
 const appDataBackupCount = 3;
 const appDataWriteQueues = new Map();
+const tavernModuleProxyVersion = "2";
 const mcpClientCache = new Map();
 const tavernModuleProxyCache = new Map();
 
@@ -182,7 +183,7 @@ function sendTavernCompatModule(response) {
 }
 
 function getTavernModuleProxyUrl(origin, remoteUrl) {
-  return `${origin}/api/tavern-module-proxy?url=${encodeURIComponent(remoteUrl)}`;
+  return `${origin}/api/tavern-module-proxy?url=${encodeURIComponent(remoteUrl)}&v=${tavernModuleProxyVersion}`;
 }
 
 export function rewriteTavernModuleImports(source, origin, remoteUrl) {
@@ -266,7 +267,7 @@ async function serveTavernModuleProxy(request, response, url) {
     const source = await loadTavernModule(remoteUrl, origin);
     response.writeHead(200, {
       "Content-Type": "text/javascript;charset=utf-8",
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": "*",
       "X-Content-Type-Options": "nosniff",
     });
