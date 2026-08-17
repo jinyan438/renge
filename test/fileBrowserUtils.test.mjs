@@ -8,7 +8,10 @@ import {
   getFileBrowserPreviewKind,
   getFileBrowserRootPath,
   getWorkspaceHandleKey,
+  inferDefaultTextFileName,
+  isConcreteTextFileWritePath,
   normalizeFileBrowserEntries,
+  normalizeTextFileWriteArguments,
   normalizeTextFileWritePath,
   scopeWorkspaceHandleToSession,
 } from "../src/fileBrowserUtils.ts";
@@ -66,6 +69,24 @@ test("turns workspace-directory text writes into concrete file paths", () => {
   assert.equal(normalizeTextFileWritePath("generated/", html), "generated/index.html");
   assert.equal(normalizeTextFileWritePath("game.html", html), "game.html");
   assert.equal(normalizeTextFileWritePath("", "<svg></svg>"), "image.svg");
+  assert.equal(
+    inferDefaultTextFileName("```html\n<head><title>Game</title></head><body></body>"),
+    "index.html",
+  );
+  assert.equal(isConcreteTextFileWritePath("game.html", "E:\\AI\\test"), true);
+  assert.equal(isConcreteTextFileWritePath("E:\\AI\\test", "E:\\AI\\test"), false);
+  assert.deepEqual(
+    normalizeTextFileWriteArguments("E:\\AI\\test", html, "E:\\AI\\test"),
+    { path: "index.html", content: html },
+  );
+  assert.throws(
+    () => normalizeTextFileWriteArguments("", "plain text without a filename"),
+    /缺少具体文件名/,
+  );
+  assert.throws(
+    () => normalizeTextFileWriteArguments("", undefined),
+    /content 缺失/,
+  );
 });
 
 test("scopes file handles to the chat workspace and excludes the default workspace", () => {

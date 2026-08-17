@@ -1,3 +1,5 @@
+import { normalizeTextFileWritePath } from "./fileBrowserUtils.ts";
+
 export type ChatToolProgressLink = {
   label: string;
   href?: string;
@@ -20,7 +22,10 @@ type ReplayableToolCall = {
   [key: string]: unknown;
 };
 
-export function compactToolCallForReplay<T extends ReplayableToolCall>(toolCall: T): T {
+export function compactToolCallForReplay<T extends ReplayableToolCall>(
+  toolCall: T,
+  workspacePath = "",
+): T {
   const toolName = toolCall.function.name;
   if (toolName !== "local_write_file" && toolName !== "local_write_binary_file") {
     return toolCall;
@@ -30,19 +35,49 @@ export function compactToolCallForReplay<T extends ReplayableToolCall>(toolCall:
     const args = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
     const payloadKey = toolName === "local_write_file" ? "content" : "base64";
     const payload = typeof args[payloadKey] === "string" ? args[payloadKey] : "";
-    if (payload.length <= 4096) return toolCall;
+    const replayArgs =
+      toolName === "local_write_file"
+        ? {
+            ...args,
+            path: normalizeTextFileWritePath(args.path, payload, workspacePath),
+            content: payload,
+          }
+        : {
+            ...args,
+            path:
+              typeof args.path === "string" && args.path.trim()
+                ? args.path
+                : "invalid-binary-write.bin",
+            base64: payload,
+          };
+    const argumentsJson = JSON.stringify(
+      payload.length <= 4096
+        ? replayArgs
+        : {
+            ...replayArgs,
+            [payloadKey]: `[工具执行时已提供，后续上下文省略 ${payload.length} 个字符]`,
+          },
+    );
+    if (argumentsJson === toolCall.function.arguments) return toolCall;
     return {
       ...toolCall,
       function: {
         ...toolCall.function,
-        arguments: JSON.stringify({
-          ...args,
-          [payloadKey]: `[工具执行时已提供，后续上下文省略 ${payload.length} 个字符]`,
-        }),
+        arguments: argumentsJson,
       },
     } as T;
   } catch {
-    return toolCall;
+    return {
+      ...toolCall,
+      function: {
+        ...toolCall.function,
+        arguments: JSON.stringify(
+          toolName === "local_write_file"
+            ? { path: "invalid-tool-arguments.txt", content: "" }
+            : { path: "invalid-tool-arguments.bin", base64: "" },
+        ),
+      },
+    } as T;
   }
 }
 

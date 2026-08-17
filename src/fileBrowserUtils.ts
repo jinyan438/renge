@@ -188,9 +188,13 @@ function normalizePath(value: unknown) {
     .replace(/^\/+|\/+$/g, "");
 }
 
-function inferDefaultTextFileName(content: unknown) {
-  const text = String(content ?? "").trimStart();
+export function inferDefaultTextFileName(content: unknown) {
+  const text = String(content ?? "")
+    .trimStart()
+    .replace(/^```(?:html|xml|svg|json|css|javascript|typescript|js|ts)?\s*/i, "")
+    .trimStart();
   if (/^(?:<!doctype\s+html\b|<html\b)/i.test(text)) return "index.html";
+  if (/<head\b[\s\S]*<body\b/i.test(text.slice(0, 4096))) return "index.html";
   if (/^<svg\b/i.test(text)) return "image.svg";
   if (/^(?:@charset\b|@import\b|:root\s*\{|[.#]?[a-z][\w-]*\s*\{)/i.test(text)) {
     return "styles.css";
@@ -210,6 +214,19 @@ function normalizeComparableWorkspacePath(value: unknown) {
   return /^[a-z]:\//i.test(path) ? path.toLowerCase() : path;
 }
 
+export function isConcreteTextFileWritePath(
+  inputPath: unknown,
+  workspacePath: unknown = "",
+) {
+  const path = String(inputPath ?? "").trim();
+  if (!path || /^\.?[\\/]?$/.test(path) || /[\\/]$/.test(path)) return false;
+  const comparableWorkspacePath = normalizeComparableWorkspacePath(workspacePath);
+  return !(
+    comparableWorkspacePath &&
+    normalizeComparableWorkspacePath(path) === comparableWorkspacePath
+  );
+}
+
 export function normalizeTextFileWritePath(
   inputPath: unknown,
   content: unknown,
@@ -226,6 +243,28 @@ export function normalizeTextFileWritePath(
   }
   if (/[\\/]$/.test(path)) return `${path}${defaultFileName}`;
   return path;
+}
+
+export function normalizeTextFileWriteArguments(
+  inputPath: unknown,
+  content: unknown,
+  workspacePath: unknown = "",
+) {
+  if (typeof content !== "string") {
+    throw new Error("local_write_file 的 content 缺失；请提供要写入的完整文本内容");
+  }
+  if (
+    !isConcreteTextFileWritePath(inputPath, workspacePath) &&
+    inferDefaultTextFileName(content) === "output.txt"
+  ) {
+    throw new Error(
+      "local_write_file 的 path 缺少具体文件名，且无法从内容可靠判断文件类型；请提供包含扩展名的路径，例如 index.html",
+    );
+  }
+  return {
+    path: normalizeTextFileWritePath(inputPath, content, workspacePath),
+    content,
+  };
 }
 
 export function normalizeFileBrowserEntries(value: unknown): FileBrowserEntry[] {

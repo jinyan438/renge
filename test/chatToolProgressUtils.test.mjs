@@ -100,3 +100,38 @@ test("compacts large write payloads before replaying tool history", () => {
   assert.match(args.content, /省略 5000 个字符/);
   assert.equal(toolCall.function.arguments.includes("x".repeat(5000)), true);
 });
+
+test("replays file writes with the concrete path used by the client", () => {
+  const html = "<!DOCTYPE html><html><body>game</body></html>";
+  const toolCall = {
+    id: "call-write-root",
+    type: "function",
+    function: {
+      name: "local_write_file",
+      arguments: JSON.stringify({ path: "E:\\AI\\test", content: html }),
+    },
+  };
+  const replayed = compactToolCallForReplay(toolCall, "E:\\AI\\test");
+  assert.deepEqual(JSON.parse(replayed.function.arguments), {
+    path: "index.html",
+    content: html,
+  });
+
+  const malformed = compactToolCallForReplay({
+    ...toolCall,
+    function: { ...toolCall.function, arguments: '{"path":' },
+  });
+  assert.deepEqual(JSON.parse(malformed.function.arguments), {
+    path: "invalid-tool-arguments.txt",
+    content: "",
+  });
+
+  const missing = compactToolCallForReplay({
+    ...toolCall,
+    function: { ...toolCall.function, arguments: "{}" },
+  });
+  assert.deepEqual(JSON.parse(missing.function.arguments), {
+    path: "output.txt",
+    content: "",
+  });
+});

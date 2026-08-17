@@ -310,7 +310,7 @@ import {
 } from "./phoneToolUtils";
 import type { FileBrowserSource, FileBrowserSystemAction } from "./FilesSidebarPanel";
 import {
-  normalizeTextFileWritePath,
+  normalizeTextFileWriteArguments,
   scopeWorkspaceHandleToSession,
 } from "./fileBrowserUtils";
 import {
@@ -19636,20 +19636,23 @@ export function App() {
     }
   };
 
+  const getTextWriteWorkspacePath = () =>
+    activeWorkspaceKey !== DEFAULT_WORKSPACE_KEY &&
+    (activeLocalWorkspaceHandle?.kind === "electron" ||
+      activeLocalWorkspaceHandle?.kind === "pc")
+      ? activeLocalWorkspaceHandle.path
+      : "";
+
   const executeLocalFileTool = async (toolName: string, rawArguments: string) => {
     const args = parseToolArguments(rawArguments);
     if (toolName === "local_write_file") {
-      const writeWorkspacePath =
-        activeWorkspaceKey !== DEFAULT_WORKSPACE_KEY &&
-        (activeLocalWorkspaceHandle?.kind === "electron" ||
-          activeLocalWorkspaceHandle?.kind === "pc")
-          ? activeLocalWorkspaceHandle.path
-          : "";
-      args.path = normalizeTextFileWritePath(
+      const writePayload = normalizeTextFileWriteArguments(
         args.path,
         args.content,
-        writeWorkspacePath,
+        getTextWriteWorkspacePath(),
       );
+      args.path = writePayload.path;
+      args.content = writePayload.content;
     }
     const executeDesktopSystemFileTool = async () => {
       const desktopApi = window.rengeDesktop;
@@ -23316,7 +23319,9 @@ export function App() {
             streamResult?.responsesReasoningItems.length
               ? { responses_reasoning_items: streamResult.responsesReasoningItems }
               : {}),
-            tool_calls: subAgentToolCalls.map(compactToolCallForReplay),
+            tool_calls: subAgentToolCalls.map((toolCall) =>
+              compactToolCallForReplay(toolCall, getTextWriteWorkspacePath()),
+            ),
           });
           const subAgentVisionMessages: ChatApiMessage[] = [];
           for (const subToolCall of subAgentToolCalls) {
@@ -24017,7 +24022,9 @@ export function App() {
             completionResult.responsesReasoningItems.length
               ? { responses_reasoning_items: completionResult.responsesReasoningItems }
               : {}),
-            tool_calls: toolCalls.map(compactToolCallForReplay),
+            tool_calls: toolCalls.map((toolCall) =>
+              compactToolCallForReplay(toolCall, getTextWriteWorkspacePath()),
+            ),
           });
           setChatStatus({
             status: "loading",
@@ -26030,7 +26037,9 @@ export function App() {
             completionResult.responsesReasoningItems.length
               ? { responses_reasoning_items: completionResult.responsesReasoningItems }
               : {}),
-            tool_calls: toolCalls.map(compactToolCallForReplay),
+            tool_calls: toolCalls.map((toolCall) =>
+              compactToolCallForReplay(toolCall, getTextWriteWorkspacePath()),
+            ),
           });
           setChatStatus({
             status: "loading",
