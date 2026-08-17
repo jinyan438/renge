@@ -227,7 +227,7 @@ import {
   buildProviderReasoningDisableRequest,
   buildProviderReasoningReplay,
   buildProviderReasoningRequest,
-  buildProviderToolContinuationContent,
+  buildProviderReasoningContinuationContent,
   getFirstReasoningText,
   getReasoningTextFromValue,
   hasAssistantTimelinePayload,
@@ -238,6 +238,7 @@ import {
   sanitizeProviderAssistantMessageForReplay,
   splitSseFrames,
   type ProviderReasoningEffort,
+  type ReasoningProviderConfig,
   type ReasoningMessageStreamMode,
 } from "./reasoningUtils";
 import {
@@ -7830,22 +7831,32 @@ function buildChatMessageForApi(
     sendImageAttachmentsToProvider?: boolean;
     hasImageRecognitionMcp?: boolean;
     replayReasoningContent?: boolean;
+    reasoningReplayProvider?: ReasoningProviderConfig;
   } = {},
 ): ChatApiMessage {
   const senderPersona =
     message.role === "assistant"
       ? getChatSenderPersona(message.sender, personas)
       : null;
+  const formattedContent = formatChatMessageForApi(
+    message,
+    personas,
+    userProfile,
+    activeChatPersona,
+    options,
+  );
+  const replayableContent =
+    message.role === "assistant" && typeof formattedContent === "string"
+      ? buildProviderReasoningContinuationContent(
+          options.reasoningReplayProvider,
+          formattedContent,
+          message.reasoning ?? "",
+        )
+      : formattedContent;
   return {
     role: message.role,
     ...(senderPersona ? { name: getAgentApiName(senderPersona.id) } : {}),
-    content: formatChatMessageForApi(
-      message,
-      personas,
-      userProfile,
-      activeChatPersona,
-      options,
-    ),
+    content: replayableContent,
     ...(message.role === "assistant" && options.replayReasoningContent
       ? { reasoning_content: message.reasoning ?? "" }
       : {}),
@@ -21052,6 +21063,7 @@ export function App() {
         sendImageAttachmentsToProvider,
         hasImageRecognitionMcp: false,
         replayReasoningContent,
+        reasoningReplayProvider: meterProvider,
       }),
     );
     const meterHistory = chatMessages.map((message) => ({
@@ -22812,6 +22824,7 @@ export function App() {
                   hasImageRecognitionMcp,
                   replayReasoningContent:
                     providerRequiresReasoningContentReplay(requestProvider),
+                  reasoningReplayProvider: requestProvider,
                 },
               ),
             ),
@@ -23110,6 +23123,7 @@ export function App() {
               hasImageRecognitionMcp,
               replayReasoningContent:
                 providerRequiresReasoningContentReplay(subAgentProvider),
+              reasoningReplayProvider: subAgentProvider,
             },
           ),
         );
@@ -23265,7 +23279,7 @@ export function App() {
             ),
             role: "assistant",
             content:
-              buildProviderToolContinuationContent(
+              buildProviderReasoningContinuationContent(
                 subAgentProvider,
                 subAgentContent,
                 subAgentReasoning,
@@ -23928,7 +23942,7 @@ export function App() {
             role: "assistant",
             content: hasHiddenAssistantContentTool
               ? null
-              : buildProviderToolContinuationContent(
+              : buildProviderReasoningContinuationContent(
                     requestProvider,
                     assistantMessageContent,
                     assistantMessageReasoning,
@@ -25530,6 +25544,7 @@ export function App() {
                   hasImageRecognitionMcp,
                   replayReasoningContent:
                     providerRequiresReasoningContentReplay(chatProvider),
+                  reasoningReplayProvider: chatProvider,
                 },
               ),
             ),
@@ -25899,7 +25914,7 @@ export function App() {
             role: "assistant",
             content: hasHiddenAssistantContentTool
               ? null
-              : buildProviderToolContinuationContent(
+              : buildProviderReasoningContinuationContent(
                     chatProvider,
                     assistantMessageContent,
                     assistantMessageReasoning,

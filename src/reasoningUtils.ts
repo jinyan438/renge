@@ -167,7 +167,7 @@ export function buildProviderReasoningReplay(
   return {};
 }
 
-export function buildProviderToolContinuationContent(
+export function buildProviderReasoningContinuationContent(
   provider: ReasoningProviderConfig | undefined,
   content: string,
   reasoning: string,
@@ -178,8 +178,8 @@ export function buildProviderToolContinuationContent(
   const reasoningState = reasoning.trim();
   if (!reasoningState) return content;
   return [
-    "【内部工具续执行状态：不要向用户复述】",
-    "以下设计已在本轮工具调用前完成。请直接依据它和工具结果继续执行，不要重新从头规划：",
+    "【内部任务续执行状态：不要向用户复述】",
+    "以下设计已在先前步骤完成。请直接依据它和后续消息、工具结果继续执行，不要重新从头规划：",
     reasoningState,
   ].join("\n\n");
 }
