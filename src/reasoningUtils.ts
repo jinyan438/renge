@@ -161,10 +161,21 @@ export function buildProviderReasoningReplay(
   provider: ReasoningProviderConfig | undefined,
   reasoning: string,
 ) {
-  if (providerRequiresReasoningContentReplay(provider)) {
+  if (
+    providerRequiresReasoningContentReplay(provider) ||
+    (provider?.reasoningEnabled === true && isLocalApiBaseUrl(provider.apiBaseUrl))
+  ) {
     return { reasoning_content: reasoning };
   }
   return {};
+}
+
+export function hasAssistantTimelinePayload(
+  content: string,
+  reasoning = "",
+  attachmentCount = 0,
+) {
+  return Boolean(content.trim() || reasoning.trim() || attachmentCount > 0);
 }
 
 export function buildProviderReasoningRequest(

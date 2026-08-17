@@ -5,6 +5,7 @@ import {
   buildProviderReasoningReplay,
   buildProviderReasoningRequest,
   getFirstReasoningText,
+  hasAssistantTimelinePayload,
   isLocalProviderEndpoint,
   mergeReasoningStreamChunk,
   splitSseFrames,
@@ -160,6 +161,37 @@ test("replays DeepSeek reasoning content, including the required empty value", (
     ),
     {},
   );
+});
+
+test("replays streamed reasoning across tool calls for local model endpoints", () => {
+  assert.deepEqual(
+    buildProviderReasoningReplay(
+      {
+        apiBaseUrl: "http://127.0.0.1:1234/v1",
+        modelId: "local-reasoning-model",
+        reasoningEnabled: true,
+      },
+      "keep the completed project design",
+    ),
+    { reasoning_content: "keep the completed project design" },
+  );
+  assert.deepEqual(
+    buildProviderReasoningReplay(
+      {
+        apiBaseUrl: "http://127.0.0.1:1234/v1",
+        modelId: "local-reasoning-model",
+        reasoningEnabled: false,
+      },
+      "disabled reasoning",
+    ),
+    {},
+  );
+});
+
+test("keeps reasoning-only assistant turns visible in the tool timeline", () => {
+  assert.equal(hasAssistantTimelinePayload("", "complete project design"), true);
+  assert.equal(hasAssistantTimelinePayload("", "", 1), true);
+  assert.equal(hasAssistantTimelinePayload("  ", "\n\t"), false);
 });
 
 test("keeps OpenCode and OpenCode Go DeepSeek request formats distinct", () => {

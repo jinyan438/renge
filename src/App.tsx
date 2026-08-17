@@ -228,6 +228,7 @@ import {
   buildProviderReasoningRequest,
   getFirstReasoningText,
   getReasoningTextFromValue,
+  hasAssistantTimelinePayload,
   isLocalProviderEndpoint,
   mergeReasoningStreamChunk,
   normalizeProviderReasoningEffort,
@@ -8686,7 +8687,7 @@ function appendAssistantTimelineMessage(
 ) {
   const trimmedContent = content.trim();
   const trimmedReasoning = reasoning.trim();
-  if (!trimmedContent && attachments.length === 0) return;
+  if (!hasAssistantTimelinePayload(trimmedContent, trimmedReasoning, attachments.length)) return;
 
   setChatMessages((current) => [
     ...current,
@@ -10347,7 +10348,7 @@ function createStreamingAssistantMessage(
     complete(content: string, reasoning = "") {
       contentWriter.cancel();
       reasoningWriter.cancel();
-      if (!content.trim()) {
+      if (!hasAssistantTimelinePayload(content, reasoning)) {
         setChatMessages((current) => current.filter((message) => message.id !== messageId));
         return false;
       }
@@ -23861,7 +23862,10 @@ export function App() {
             break;
           }
 
-          if (assistantMessageContent && !hasHiddenAssistantContentTool) {
+          if (
+            !hasHiddenAssistantContentTool &&
+            hasAssistantTimelinePayload(assistantMessageContent, assistantMessageReasoning)
+          ) {
             if (!streamingRound) {
               appendAssistantTimelineMessage(
                 commitChatMessages,
@@ -24301,7 +24305,9 @@ export function App() {
         if (streamingAssistantInserted && assistantMessageId) {
           commitChatMessages((current) =>
             current.filter(
-              (message) => message.id !== assistantMessageId || message.content.trim(),
+              (message) =>
+                message.id !== assistantMessageId ||
+                hasAssistantTimelinePayload(message.content, message.reasoning),
             ),
           );
         }
@@ -25822,7 +25828,10 @@ export function App() {
             break;
           }
 
-          if (assistantMessageContent && !hasHiddenAssistantContentTool) {
+          if (
+            !hasHiddenAssistantContentTool &&
+            hasAssistantTimelinePayload(assistantMessageContent, assistantMessageReasoning)
+          ) {
             if (!streamingRound) {
               appendAssistantTimelineMessage(
                 commitChatMessages,
@@ -26045,7 +26054,9 @@ export function App() {
         if (streamingAssistantInserted && assistantMessageId) {
           commitChatMessages((current) =>
             current.filter(
-              (message) => message.id !== assistantMessageId || message.content.trim(),
+              (message) =>
+                message.id !== assistantMessageId ||
+                hasAssistantTimelinePayload(message.content, message.reasoning),
             ),
           );
         }
