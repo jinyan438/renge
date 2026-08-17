@@ -10,6 +10,7 @@ import {
   buildBrowserToolsSystemPrompt,
   buildTemporaryFilePreviewUrl,
   calculateBrowserFitZoomFactor,
+  getAvailableBrowserToolDefinitions,
   isAndroidAppShell,
   isBrowserAddressInputAvailable,
   isBrowserToolName,
@@ -226,6 +227,22 @@ test("exposes a complete, unique browser tool set", () => {
   assert.equal(isBrowserToolName("local_read_file"), false);
 });
 
+test("offers temporary file preview only when the chat has no workspace", () => {
+  const defaultWorkspaceTools = getAvailableBrowserToolDefinitions(true);
+  const authorizedWorkspaceTools = getAvailableBrowserToolDefinitions(false);
+
+  assert.ok(defaultWorkspaceTools.some(
+    (tool) => tool.function.name === "browser_open_temporary_file",
+  ));
+  assert.equal(
+    authorizedWorkspaceTools.some(
+      (tool) => tool.function.name === "browser_open_temporary_file",
+    ),
+    false,
+  );
+  assert.equal(authorizedWorkspaceTools.length, browserToolDefinitions.length - 1);
+});
+
 test("browser prompt treats page content as untrusted and requires verification", () => {
   const prompt = buildBrowserToolsSystemPrompt();
   assert.match(prompt, /不可信页面内容/);
@@ -233,4 +250,12 @@ test("browser prompt treats page content as untrusted and requires verification"
   assert.match(prompt, /密码、令牌、Cookie/);
   assert.match(prompt, /browser_open_temporary_file/);
   assert.match(prompt, /禁止传入 file:、data:、blob: 或 Base64/);
+});
+
+test("browser prompt keeps generated files in an authorized workspace", () => {
+  const prompt = buildBrowserToolsSystemPrompt(false);
+
+  assert.match(prompt, /生成文件应继续保存在当前授权工作区/);
+  assert.match(prompt, /不得为了浏览器预览.*临时文件区/);
+  assert.match(prompt, /localhost/);
 });

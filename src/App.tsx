@@ -315,9 +315,9 @@ import {
   scopeWorkspaceHandleToSession,
 } from "./fileBrowserUtils";
 import {
-  browserToolDefinitions,
   buildBrowserToolsSystemPrompt,
   executeBrowserTool,
+  getAvailableBrowserToolDefinitions,
   isAndroidAppShell,
   isBrowserAddressInputAvailable,
   isBrowserToolName,
@@ -8486,7 +8486,7 @@ function buildLocalToolsSystemPrompt(
     "- local_file_info：查看文件或目录元信息。",
     "- local_search_files：按文件名或文本内容搜索。",
     "- local_create_directory：创建目录。",
-    "- local_write_file：新建或覆盖写入文本文件；path 必须包含文件名和扩展名，例如 index.html，禁止只传工作区目录。",
+    "- local_write_file：在当前授权工作区新建或覆盖文本文件；path 必须包含文件名和扩展名，例如 index.html，禁止只传工作区目录。",
     "- local_write_binary_file：把 Base64 写成任意文件，适合保存 ZIP、图片、音频、视频、APK 等二进制文件。",
     "- local_transfer_attachment_file：把聊天里的附件或 AI 生成图片直接保存到当前授权工作区，适合保存图片、ZIP、APK、音频、视频等；生成图片可用 generated-image-1.png、generated-image-2.png 这样的名称或附件ID；不会把附件内容交给 AI 分析。",
     "- local_transfer_file：在手机工作区和已连接电脑工作区之间直接流式传输文件，适合大文件；不会把文件内容读入模型上下文或 JS 内存。",
@@ -8531,6 +8531,7 @@ function buildLocalToolsSystemPrompt(
       : handle.kind === "electron"
         ? "读取工具的 path 可以使用绝对路径或越出工作区的相对路径；变更工具也可以使用这些路径，但工作区外变更需要用户弹窗授权。"
         : "所有 path/from/to 必须是相对工作区根目录的路径；不要使用绝对路径或 ..。",
+    "文件写入位置遵循工作区优先：当前已有授权工作区，用户要求创建或生成的新文件必须默认写入当前工作区；除非用户明确指定其他位置，否则不得复制、重写或转存到临时文件区。只有没有授权工作区的默认会话才使用临时文件区。",
     "写文件时必须把具体文件名写入 path。即使目标位于工作区根目录，也应传 index.html 等文件名，不能把工作区目录本身作为 path。",
     "当用户已经明确要求执行文件操作时，不要二次确认，必须直接调用对应工具；不要只描述将要操作。",
     "当用户提出安装、部署、创建启动脚本、构建验证等多步骤任务时，必须连续调用工具推进，直到任务完成、遇到真实阻塞或用户中断；不要在中途只汇报计划并要求用户继续。",
@@ -11273,11 +11274,11 @@ const localFileToolDefinitions = [
     type: "function",
     function: {
       name: "local_write_file",
-      description: "新建或覆盖写入用户授权工作区内的文本文件。path 必须包含文件名和扩展名，不能只传工作区目录；例如 index.html。",
+      description: "新建或覆盖文本文件。写入位置遵循工作区优先：有授权工作区时写入当前工作区，只有没有工作区的默认会话才写入临时文件区；不得为了浏览器预览改写到临时文件区。path 必须包含文件名和扩展名，例如 index.html。",
       parameters: {
         type: "object",
         properties: {
-          path: { type: "string", description: "相对工作区根目录的文件路径。" },
+          path: { type: "string", description: "相对当前写入根目录的文件路径；优先当前授权工作区，无工作区时才是临时文件区。" },
           content: { type: "string", description: "完整文件内容。" },
         },
         required: ["path", "content"],
@@ -11288,11 +11289,11 @@ const localFileToolDefinitions = [
     type: "function",
     function: {
       name: "local_write_binary_file",
-      description: "把已有的完整 Base64 内容写成用户授权工作区内的任意文件。用于保存明确提供的 ZIP、APK、图片、音频、视频等二进制内容；保存用户刚上传的聊天附件时应使用 local_transfer_attachment_file，不要在附件直传后再调用本工具覆盖同名文件。",
+      description: "把已有的完整 Base64 内容写成文件。写入位置遵循工作区优先：有授权工作区时写入当前工作区，只有没有工作区的默认会话才写入临时文件区。用于保存明确提供的 ZIP、APK、图片、音频、视频等二进制内容；保存用户刚上传的聊天附件时应使用 local_transfer_attachment_file，不要在附件直传后再调用本工具覆盖同名文件。",
       parameters: {
         type: "object",
         properties: {
-          path: { type: "string", description: "相对工作区根目录的目标文件路径。" },
+          path: { type: "string", description: "相对当前写入根目录的目标路径；优先当前授权工作区，无工作区时才是临时文件区。" },
           base64: { type: "string", description: "完整 Base64 内容；可带 data: 前缀，也可只传纯 Base64。" },
           mimeType: { type: "string", description: "可选 MIME 类型，例如 application/zip、image/png。" },
         },
@@ -20976,10 +20977,8 @@ export function App() {
         || isAndroidAppShell(window.location.search, window.navigator.userAgent),
       ),
     )
-      ? browserToolDefinitions.filter(
-          (tool) =>
-            tool.function.name !== "browser_open_temporary_file"
-            || temporaryFileToolsAvailable,
+      ? getAvailableBrowserToolDefinitions(
+          temporaryFileToolsAvailable && activeWorkspaceKey === DEFAULT_WORKSPACE_KEY,
         )
       : [];
     const terminalTools = contextSettings.terminalTools && isTerminalSidebarAvailable()
@@ -21190,7 +21189,11 @@ export function App() {
       characterWorldBookSystemPrompt,
       activeLlmContextSettings.workspaceTools ? activeLocalToolsSystemPrompt : "",
       activeLlmContextSettings.browserTools && window.rengeDesktop?.isElectron
-        ? buildBrowserToolsSystemPrompt()
+        ? buildBrowserToolsSystemPrompt(
+            availableTools.some(
+              (tool) => tool.function.name === "browser_open_temporary_file",
+            ),
+          )
         : "",
       activeLlmContextSettings.terminalTools && isTerminalSidebarAvailable()
         ? buildTerminalToolsSystemPrompt()
@@ -22763,7 +22766,11 @@ export function App() {
           ? activeLocalToolsSystemPrompt
           : "",
         requestContextSettings.browserTools && window.rengeDesktop?.isElectron
-          ? buildBrowserToolsSystemPrompt()
+          ? buildBrowserToolsSystemPrompt(
+              availableChatTools.some(
+                (tool) => tool.function.name === "browser_open_temporary_file",
+              ),
+            )
           : "",
         requestContextSettings.terminalTools && isTerminalSidebarAvailable()
           ? buildTerminalToolsSystemPrompt()
@@ -25524,7 +25531,11 @@ export function App() {
       const toolSystemPrompt = [
         activeLlmContextSettings.workspaceTools ? activeLocalToolsSystemPrompt : "",
         activeLlmContextSettings.browserTools && window.rengeDesktop?.isElectron
-          ? buildBrowserToolsSystemPrompt()
+          ? buildBrowserToolsSystemPrompt(
+              availableChatTools.some(
+                (tool) => tool.function.name === "browser_open_temporary_file",
+              ),
+            )
           : "",
         activeLlmContextSettings.terminalTools && isTerminalSidebarAvailable()
           ? buildTerminalToolsSystemPrompt()
