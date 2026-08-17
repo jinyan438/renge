@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   applyContextCompressionSummary,
   buildFallbackContextSummary,
+  compactOversizedAssistantContextMessages,
   compactPriorityContextMessages,
   compactPriorityMachineText,
   createContextCompressionPlan,
@@ -83,6 +84,27 @@ test("does not compress requests below the configured safety threshold", () => {
     { role: "user", content: "Short question" },
   ];
   assert.equal(createContextCompressionPlan(messages, settings(), "demo/model"), null);
+});
+
+test("windows oversized assistant history while preserving the chat source", () => {
+  const longContent = `opening-plan\n${"middle implementation detail\n".repeat(2_000)}final-breakpoint`;
+  const messages = [
+    { role: "system", content: "Keep this instruction." },
+    { role: "assistant", content: longContent, name: "builder" },
+    { role: "user", content: "继续" },
+  ];
+  const result = compactOversizedAssistantContextMessages(messages, 600);
+
+  assert.equal(result.windowedMessageCount, 1);
+  assert.equal(messages[1].content, longContent);
+  assert.notEqual(result.messages[1], messages[1]);
+  assert.equal(result.messages[1].name, "builder");
+  assert.match(result.messages[1].content, /^opening-plan/);
+  assert.match(result.messages[1].content, /超长 assistant 上下文已窗口化/);
+  assert.match(result.messages[1].content, /final-breakpoint$/);
+  assert.ok(estimateContextTextTokens(result.messages[1].content) <= 600);
+  assert.equal(result.messages[0], messages[0]);
+  assert.equal(result.messages[2], messages[2]);
 });
 
 test("compresses priority tool and log text to at most ten percent of its tokens", () => {

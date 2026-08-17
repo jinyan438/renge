@@ -48,6 +48,11 @@ export type ContextAstPruningResult<T extends ContextCompressionMessage> = {
   prunedBlockCount: number;
 };
 
+export type ContextAssistantWindowResult<T extends ContextCompressionMessage> = {
+  messages: T[];
+  windowedMessageCount: number;
+};
+
 export const MIN_CONTEXT_LIMIT_TOKENS = 512;
 export const MAX_CONTEXT_LIMIT_TOKENS = 4_000_000;
 export const DEFAULT_CONTEXT_COMPRESSION_SETTINGS: ContextCompressionSettings = {
@@ -183,6 +188,65 @@ export function estimateContextMessageTokens(message: ContextCompressionMessage)
 
 export function estimateContextMessagesTokens(messages: ContextCompressionMessage[]) {
   return messages.reduce((total, message) => total + estimateContextMessageTokens(message), 2);
+}
+
+function takeContextTextPrefix(value: string, maxTokens: number) {
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (estimateContextTextTokens(value.slice(0, middle)) <= maxTokens) low = middle;
+    else high = middle - 1;
+  }
+  return value.slice(0, low).trimEnd();
+}
+
+function takeContextTextSuffix(value: string, maxTokens: number) {
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (estimateContextTextTokens(value.slice(value.length - middle)) <= maxTokens) low = middle;
+    else high = middle - 1;
+  }
+  return value.slice(value.length - low).trimStart();
+}
+
+export function compactOversizedAssistantContextMessages<T extends ContextCompressionMessage>(
+  messages: T[],
+  maxMessageTokens: number,
+): ContextAssistantWindowResult<T> {
+  const normalizedMaxTokens = Math.max(256, Math.floor(maxMessageTokens));
+  const marker = [
+    "",
+    "【超长 assistant 上下文已窗口化】",
+    "中间原文仍完整保存在聊天记录中，本次请求仅保留开头和最近断点。不要重新规划、复述或补写省略部分；直接依据保留内容继续当前任务。",
+    "",
+  ].join("\n");
+  const markerTokens = estimateContextTextTokens(marker);
+  const contentBudget = Math.max(64, normalizedMaxTokens - markerTokens - 4);
+  const prefixBudget = Math.max(32, Math.floor(contentBudget * 0.3));
+  const suffixBudget = Math.max(32, contentBudget - prefixBudget);
+  let windowedMessageCount = 0;
+
+  const nextMessages = messages.map((message) => {
+    if (
+      message.role !== "assistant"
+      || typeof message.content !== "string"
+      || estimateContextTextTokens(message.content) <= normalizedMaxTokens
+    ) {
+      return message;
+    }
+    const prefix = takeContextTextPrefix(message.content, prefixBudget);
+    const suffix = takeContextTextSuffix(message.content, suffixBudget);
+    windowedMessageCount += 1;
+    return {
+      ...message,
+      content: `${prefix}${marker}${suffix}`,
+    } as T;
+  });
+
+  return { messages: nextMessages, windowedMessageCount };
 }
 
 const SOURCE_CODE_FENCE_LANGUAGES = new Set([

@@ -255,6 +255,7 @@ import {
 import {
   applyContextCompressionSummary,
   buildFallbackContextSummary,
+  compactOversizedAssistantContextMessages,
   compactPriorityContextMessages,
   createContextCompressionPlan,
   createContextSummaryCacheKey,
@@ -604,6 +605,7 @@ type ContextRuntimeUsage = {
   removedMessageCount: number;
   machineCompressedMessageCount: number;
   astPrunedMessageCount: number;
+  assistantWindowedMessageCount: number;
   chatMessageSignatures: string[];
   mutableChatMessageId?: string;
   mutableChatMessageIndex?: number;
@@ -15171,6 +15173,7 @@ export function App() {
         removedMessageCount: number;
         machineCompressedMessageCount: number;
         astPrunedMessageCount: number;
+        assistantWindowedMessageCount: number;
       },
     ) => {
       if (!trackUsage || !sessionId || !modelId.trim()) return;
@@ -15198,7 +15201,8 @@ export function App() {
         compressed:
           stats.removedMessageCount > 0 ||
           stats.machineCompressedMessageCount > 0 ||
-          stats.astPrunedMessageCount > 0,
+          stats.astPrunedMessageCount > 0 ||
+          stats.assistantWindowedMessageCount > 0,
         ...stats,
         chatMessageSignatures: sessionMessages.map(getChatMessageContextSignature),
         ...(mutableChatMessage
@@ -15219,9 +15223,15 @@ export function App() {
       removedMessageCount: 0,
       machineCompressedMessageCount: 0,
       astPrunedMessageCount: 0,
+      assistantWindowedMessageCount: 0,
     };
     const tokenBudget = getContextCompressionTokenBudget(
       contextCompressionSettings,
+      modelId,
+      requestedOutputTokens,
+    );
+    const safetyTokenBudget = getContextCompressionTokenBudget(
+      { ...contextCompressionSettings, enabled: true },
       modelId,
       requestedOutputTokens,
     );
@@ -15230,6 +15240,7 @@ export function App() {
     let preparedMessages = messages;
     let machineCompressedMessageCount = 0;
     let astPrunedMessageCount = 0;
+    let assistantWindowedMessageCount = 0;
     if (tokenBudget && rawEstimatedInputTokens > tokenBudget.safetyThresholdTokens) {
       throwIfChatAborted(signal);
       if (contextCompressionSettings.astPruningEnabled) {
@@ -15242,11 +15253,31 @@ export function App() {
       preparedMessages = priorityResult.messages;
       machineCompressedMessageCount = priorityResult.compressedMessageCount;
     }
+    const estimatedPreprocessedTokens =
+      estimateContextMessagesTokens(preparedMessages) + additionalTokens;
+    if (
+      safetyTokenBudget &&
+      estimatedPreprocessedTokens > safetyTokenBudget.safetyThresholdTokens
+    ) {
+      const assistantWindowResult = compactOversizedAssistantContextMessages(
+        preparedMessages,
+        Math.max(
+          512,
+          Math.min(12_000, Math.floor(safetyTokenBudget.safetyThresholdTokens * 0.3)),
+        ),
+      );
+      preparedMessages = assistantWindowResult.messages;
+      assistantWindowedMessageCount = assistantWindowResult.windowedMessageCount;
+    }
     const preprocessingStats = {
       ...emptyCompressionStats,
       machineCompressedMessageCount,
       astPrunedMessageCount,
+      assistantWindowedMessageCount,
     };
+    const safeInputLimit = safetyTokenBudget?.safetyThresholdTokens
+      ?? tokenBudget?.inputBudgetTokens
+      ?? null;
     const plan = createContextCompressionPlan(
       preparedMessages,
       contextCompressionSettings,
@@ -15259,23 +15290,36 @@ export function App() {
     if (!plan) {
       const preparedInputTokens =
         estimateContextMessagesTokens(preparedMessages) + additionalTokens;
-      if (tokenBudget && preparedInputTokens > tokenBudget.inputBudgetTokens) {
+      if (safeInputLimit && preparedInputTokens > safeInputLimit) {
         const sourceCodeAdvice = contextCompressionSettings.astPruningEnabled
           ? "当前代码语言或结构无法继续安全剪枝；请减少代码、系统提示词及工具定义。"
           : "源代码默认不会进入摘要；可在 LLM 设置中开启 AST 剪枝，或减少代码、系统提示词及工具定义。";
         throw new Error(
-          `上下文仍需约 ${preparedInputTokens.toLocaleString()} Token，超过 ${modelId} 的输入预算 ${tokenBudget.inputBudgetTokens.toLocaleString()} Token。${sourceCodeAdvice}`,
+          `上下文仍需约 ${preparedInputTokens.toLocaleString()} Token，超过 ${modelId} 的安全输入预算 ${safeInputLimit.toLocaleString()} Token。${sourceCodeAdvice}`,
         );
       }
       if (
         !quiet &&
-        (machineCompressedMessageCount > 0 || astPrunedMessageCount > 0)
+        (
+          machineCompressedMessageCount > 0 ||
+          astPrunedMessageCount > 0 ||
+          assistantWindowedMessageCount > 0
+        )
       ) {
+        const preprocessingDetails = [
+          assistantWindowedMessageCount > 0
+            ? `窗口化 ${assistantWindowedMessageCount} 条超长 assistant 历史`
+            : "",
+          machineCompressedMessageCount > 0
+            ? `高压缩 ${machineCompressedMessageCount} 条工具/日志消息`
+            : "",
+          astPrunedMessageCount > 0
+            ? `对 ${astPrunedMessageCount} 条代码消息完成 AST 剪枝`
+            : "",
+        ].filter(Boolean);
         setChatStatus({
           status: "loading",
-          message: `已优先高压缩 ${machineCompressedMessageCount} 条工具/日志消息${
-            astPrunedMessageCount > 0 ? `，并对 ${astPrunedMessageCount} 条代码消息完成 AST 剪枝` : ""
-          }，正在继续生成...`,
+          message: `已${preprocessingDetails.join("，")}，正在继续生成...`,
         });
       }
       recordPreparedContextUsage(preparedMessages, preprocessingStats);
@@ -15283,6 +15327,10 @@ export function App() {
     }
 
     const applySummaryWithinBudget = (summary: string) => {
+      const summaryInputLimit = Math.min(
+        plan.inputBudgetTokens,
+        safeInputLimit ?? plan.inputBudgetTokens,
+      );
       const keptTokens = estimateContextMessagesTokens(plan.keptMessages);
       const summaryEnvelopeTokens =
         estimateContextMessagesTokens(
@@ -15290,7 +15338,7 @@ export function App() {
         ) - keptTokens;
       const availableSummaryTokens = Math.max(
         1,
-        plan.inputBudgetTokens -
+        summaryInputLimit -
           additionalTokens -
           keptTokens -
           summaryEnvelopeTokens -
@@ -15305,15 +15353,16 @@ export function App() {
       );
       const compressedTokens =
         estimateContextMessagesTokens(compressedMessages) + additionalTokens;
-      if (compressedTokens > plan.inputBudgetTokens) {
+      if (compressedTokens > summaryInputLimit) {
         throw new Error(
-          `上下文压缩后仍需约 ${compressedTokens.toLocaleString()} Token，超过 ${modelId} 的输入预算 ${plan.inputBudgetTokens.toLocaleString()} Token。请提高该模型的上下文上限，或减少系统提示词、工具定义和最近一条消息的长度。`,
+          `上下文压缩后仍需约 ${compressedTokens.toLocaleString()} Token，超过 ${modelId} 的安全输入预算 ${summaryInputLimit.toLocaleString()} Token。请提高该模型的上下文上限，或减少系统提示词、工具定义和最近一条消息的长度。`,
         );
       }
       recordPreparedContextUsage(compressedMessages, {
         removedMessageCount: plan.removedMessages.length,
         machineCompressedMessageCount,
         astPrunedMessageCount,
+        assistantWindowedMessageCount,
       });
       return compressedMessages;
     };
@@ -21011,6 +21060,7 @@ export function App() {
         removedMessageCount: 0,
         machineCompressedMessageCount: 0,
         astPrunedMessageCount: 0,
+        assistantWindowedMessageCount: 0,
         appendedMessageCount: 0,
       };
     }
@@ -21296,6 +21346,10 @@ export function App() {
         runtimeUsage && runtimeUsageMatchesCurrentHistory
           ? runtimeUsage.astPrunedMessageCount
           : 0,
+      assistantWindowedMessageCount:
+        runtimeUsage && runtimeUsageMatchesCurrentHistory
+          ? runtimeUsage.assistantWindowedMessageCount
+          : 0,
       appendedMessageCount,
     };
   }, [
@@ -21348,10 +21402,12 @@ export function App() {
         : `模型 ${contextTokenMeter.limitingModelId}`;
     const compressionNote = contextCompressionSettings.enabled
       ? "上下文压缩已开启"
-      : "上下文压缩当前已关闭";
+      : contextTokenMeter.assistantWindowedMessageCount > 0
+        ? "自动摘要已关闭，但发送安全窗口已生效"
+        : "上下文压缩当前已关闭";
     const usageNote = contextTokenMeter.usesActualRequestTokens
       ? contextTokenMeter.compressed
-        ? `按最后一次实际发送的压缩上下文计数；高压缩工具/日志 ${contextTokenMeter.machineCompressedMessageCount} 条，AST 剪枝代码 ${contextTokenMeter.astPrunedMessageCount} 条，摘要替换较早消息 ${contextTokenMeter.removedMessageCount} 条；被替换原文未进入生成请求${
+        ? `按最后一次实际发送的压缩上下文计数；窗口化超长 assistant 历史 ${contextTokenMeter.assistantWindowedMessageCount} 条，高压缩工具/日志 ${contextTokenMeter.machineCompressedMessageCount} 条，AST 剪枝代码 ${contextTokenMeter.astPrunedMessageCount} 条，摘要替换较早消息 ${contextTokenMeter.removedMessageCount} 条；被缩减原文仍保留在聊天记录中但未进入本次生成请求${
             contextTokenMeter.appendedMessageCount > 0
               ? `，另计后续新增 ${contextTokenMeter.appendedMessageCount} 条消息`
               : ""
