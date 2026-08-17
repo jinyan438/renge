@@ -3,7 +3,27 @@ import test from "node:test";
 import {
   compactToolCallForReplay,
   parseToolProgressContent,
+  waitForToolProgressPaint,
 } from "../src/chatToolProgressUtils.ts";
+
+test("waits for two animation frames before starting visible tool work", async () => {
+  const pendingFrames = [];
+  let resolved = false;
+  const progressPaint = waitForToolProgressPaint((callback) => pendingFrames.push(callback));
+  void progressPaint.then(() => {
+    resolved = true;
+  });
+
+  assert.equal(pendingFrames.length, 1);
+  pendingFrames.shift()();
+  await Promise.resolve();
+  assert.equal(resolved, false);
+  assert.equal(pendingFrames.length, 1);
+
+  pendingFrames.shift()();
+  await progressPaint;
+  assert.equal(resolved, true);
+});
 
 const browserCases = [
   ["打开网页：\nhttp://localhost:8123/snake.html", "action", "浏览器导航"],

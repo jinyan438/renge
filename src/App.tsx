@@ -221,6 +221,7 @@ import {
   parseToolProgressContent,
   stripMarkdownLinks,
   toolActionTitleMap,
+  waitForToolProgressPaint,
   type ChatToolProgressBlock,
 } from "./chatToolProgressUtils";
 import {
@@ -21390,6 +21391,7 @@ export function App() {
         commitChatMessages,
         formatToolActionMessage(toolCall, localWorkspaceHandle),
       );
+      await waitForToolProgressPaint();
 
       try {
               const toolResult = await executeLocalFileTool(
@@ -23339,6 +23341,7 @@ export function App() {
                 "",
                 { kind: "persona", personaId: subAgent.id },
               );
+              await waitForToolProgressPaint();
             }
             try {
               const subToolResult = await executeChatTool(
@@ -24070,6 +24073,7 @@ export function App() {
                 "",
                 assistantSender,
               );
+              await waitForToolProgressPaint();
             }
             try {
               const toolResult = await executeRequestChatTool(
@@ -26057,6 +26061,7 @@ export function App() {
                 commitChatMessages,
                 formatToolActionMessage(toolCall, localWorkspaceHandle, requestMcpTools),
               );
+              await waitForToolProgressPaint();
             }
             try {
               const toolResult = await executeChatTool(

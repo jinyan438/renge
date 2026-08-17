@@ -22,6 +22,26 @@ type ReplayableToolCall = {
   [key: string]: unknown;
 };
 
+type ToolProgressFrameScheduler = (callback: () => void) => void;
+
+const scheduleToolProgressFrame: ToolProgressFrameScheduler = (callback) => {
+  if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+    window.requestAnimationFrame(() => callback());
+    return;
+  }
+  setTimeout(callback, 0);
+};
+
+export function waitForToolProgressPaint(
+  scheduleFrame: ToolProgressFrameScheduler = scheduleToolProgressFrame,
+) {
+  return new Promise<void>((resolve) => {
+    scheduleFrame(() => {
+      scheduleFrame(resolve);
+    });
+  });
+}
+
 export function compactToolCallForReplay<T extends ReplayableToolCall>(
   toolCall: T,
   workspacePath = "",
