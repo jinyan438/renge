@@ -188,6 +188,46 @@ function normalizePath(value: unknown) {
     .replace(/^\/+|\/+$/g, "");
 }
 
+function inferDefaultTextFileName(content: unknown) {
+  const text = String(content ?? "").trimStart();
+  if (/^(?:<!doctype\s+html\b|<html\b)/i.test(text)) return "index.html";
+  if (/^<svg\b/i.test(text)) return "image.svg";
+  if (/^(?:@charset\b|@import\b|:root\s*\{|[.#]?[a-z][\w-]*\s*\{)/i.test(text)) {
+    return "styles.css";
+  }
+  if (/^#!.*\bpython\b/i.test(text)) return "main.py";
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed !== null && typeof parsed === "object") return "output.json";
+  } catch {
+    // Continue with the generic text fallback.
+  }
+  return "output.txt";
+}
+
+function normalizeComparableWorkspacePath(value: unknown) {
+  const path = String(value ?? "").trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  return /^[a-z]:\//i.test(path) ? path.toLowerCase() : path;
+}
+
+export function normalizeTextFileWritePath(
+  inputPath: unknown,
+  content: unknown,
+  workspacePath: unknown = "",
+) {
+  const path = String(inputPath ?? "").trim();
+  const defaultFileName = inferDefaultTextFileName(content);
+  if (!path || /^\.?[\\/]?$/.test(path)) return defaultFileName;
+
+  const comparablePath = normalizeComparableWorkspacePath(path);
+  const comparableWorkspacePath = normalizeComparableWorkspacePath(workspacePath);
+  if (comparableWorkspacePath && comparablePath === comparableWorkspacePath) {
+    return defaultFileName;
+  }
+  if (/[\\/]$/.test(path)) return `${path}${defaultFileName}`;
+  return path;
+}
+
 export function normalizeFileBrowserEntries(value: unknown): FileBrowserEntry[] {
   const rawEntries = Array.isArray(value)
     ? value

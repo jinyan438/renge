@@ -1560,6 +1560,13 @@ function registerIpcHandlers() {
 
   ipcMain.handle("workspace:write", async (_event, options = {}) => {
     const [targetPath] = await authorizeWorkspaceMutation("写入文件", [options.path]);
+    const existingTarget = await stat(targetPath).catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    });
+    if (existingTarget?.isDirectory()) {
+      throw new Error(`目标路径是目录：${options.path || "."}。请提供包含文件名和扩展名的文件路径，例如 index.html`);
+    }
     await mkdir(dirname(targetPath), { recursive: true });
     await writeFile(targetPath, String(options.content ?? ""), "utf8");
     return { ok: true, path: options.path, operation: "write" };
@@ -1567,6 +1574,13 @@ function registerIpcHandlers() {
 
   ipcMain.handle("workspace:write-binary", async (_event, options = {}) => {
     const [targetPath] = await authorizeWorkspaceMutation("写入二进制文件", [options.path]);
+    const existingTarget = await stat(targetPath).catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    });
+    if (existingTarget?.isDirectory()) {
+      throw new Error(`目标路径是目录：${options.path || "."}。请提供包含文件名和扩展名的文件路径`);
+    }
     const base64 = String(options.base64 ?? "").replace(/^data:[^,]*,/, "").replace(/\s+/g, "");
     const content = Buffer.from(base64, "base64");
     await mkdir(dirname(targetPath), { recursive: true });

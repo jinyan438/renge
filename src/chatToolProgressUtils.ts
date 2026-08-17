@@ -11,6 +11,41 @@ export type ChatToolProgressBlock = {
   details: string[];
 };
 
+type ReplayableToolCall = {
+  function: {
+    name: string;
+    arguments: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+};
+
+export function compactToolCallForReplay<T extends ReplayableToolCall>(toolCall: T): T {
+  const toolName = toolCall.function.name;
+  if (toolName !== "local_write_file" && toolName !== "local_write_binary_file") {
+    return toolCall;
+  }
+
+  try {
+    const args = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
+    const payloadKey = toolName === "local_write_file" ? "content" : "base64";
+    const payload = typeof args[payloadKey] === "string" ? args[payloadKey] : "";
+    if (payload.length <= 4096) return toolCall;
+    return {
+      ...toolCall,
+      function: {
+        ...toolCall.function,
+        arguments: JSON.stringify({
+          ...args,
+          [payloadKey]: `[工具执行时已提供，后续上下文省略 ${payload.length} 个字符]`,
+        }),
+      },
+    } as T;
+  } catch {
+    return toolCall;
+  }
+}
+
 export const toolActionTitleMap: ReadonlyArray<readonly [string, string]> = [
   ["打开网页", "浏览器导航"],
   ["预览临时文件：", "预览临时文件"],

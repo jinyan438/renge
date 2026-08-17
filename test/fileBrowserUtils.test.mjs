@@ -9,6 +9,7 @@ import {
   getFileBrowserRootPath,
   getWorkspaceHandleKey,
   normalizeFileBrowserEntries,
+  normalizeTextFileWritePath,
   scopeWorkspaceHandleToSession,
 } from "../src/fileBrowserUtils.ts";
 
@@ -53,6 +54,18 @@ test("formats compact file sizes", () => {
   assert.equal(formatFileBrowserSize(850), "850 B");
   assert.equal(formatFileBrowserSize(1536), "1.5 KB");
   assert.equal(formatFileBrowserSize(5 * 1024 * 1024), "5.0 MB");
+});
+
+test("turns workspace-directory text writes into concrete file paths", () => {
+  const html = "<!DOCTYPE html><html><body>game</body></html>";
+  assert.equal(normalizeTextFileWritePath("", html), "index.html");
+  assert.equal(
+    normalizeTextFileWritePath("E:\\AI\\test", html, "E:\\AI\\test"),
+    "index.html",
+  );
+  assert.equal(normalizeTextFileWritePath("generated/", html), "generated/index.html");
+  assert.equal(normalizeTextFileWritePath("game.html", html), "game.html");
+  assert.equal(normalizeTextFileWritePath("", "<svg></svg>"), "image.svg");
 });
 
 test("scopes file handles to the chat workspace and excludes the default workspace", () => {

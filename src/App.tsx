@@ -217,6 +217,7 @@ import {
   type ChatLiveStreamTextItem,
 } from "./chatLiveStreamUtils";
 import {
+  compactToolCallForReplay,
   parseToolProgressContent,
   stripMarkdownLinks,
   toolActionTitleMap,
@@ -226,6 +227,7 @@ import {
   buildProviderReasoningDisableRequest,
   buildProviderReasoningReplay,
   buildProviderReasoningRequest,
+  buildProviderToolContinuationContent,
   getFirstReasoningText,
   getReasoningTextFromValue,
   hasAssistantTimelinePayload,
@@ -233,6 +235,7 @@ import {
   mergeReasoningStreamChunk,
   normalizeProviderReasoningEffort,
   providerRequiresReasoningContentReplay,
+  sanitizeProviderAssistantMessageForReplay,
   splitSseFrames,
   type ProviderReasoningEffort,
   type ReasoningMessageStreamMode,
@@ -303,7 +306,10 @@ import {
   type PhoneToolName,
 } from "./phoneToolUtils";
 import type { FileBrowserSource, FileBrowserSystemAction } from "./FilesSidebarPanel";
-import { scopeWorkspaceHandleToSession } from "./fileBrowserUtils";
+import {
+  normalizeTextFileWritePath,
+  scopeWorkspaceHandleToSession,
+} from "./fileBrowserUtils";
 import {
   browserToolDefinitions,
   buildBrowserToolsSystemPrompt,
@@ -8466,7 +8472,7 @@ function buildLocalToolsSystemPrompt(
     "- local_file_info：查看文件或目录元信息。",
     "- local_search_files：按文件名或文本内容搜索。",
     "- local_create_directory：创建目录。",
-    "- local_write_file：新建或覆盖写入文本文件。",
+    "- local_write_file：新建或覆盖写入文本文件；path 必须包含文件名和扩展名，例如 index.html，禁止只传工作区目录。",
     "- local_write_binary_file：把 Base64 写成任意文件，适合保存 ZIP、图片、音频、视频、APK 等二进制文件。",
     "- local_transfer_attachment_file：把聊天里的附件或 AI 生成图片直接保存到当前授权工作区，适合保存图片、ZIP、APK、音频、视频等；生成图片可用 generated-image-1.png、generated-image-2.png 这样的名称或附件ID；不会把附件内容交给 AI 分析。",
     "- local_transfer_file：在手机工作区和已连接电脑工作区之间直接流式传输文件，适合大文件；不会把文件内容读入模型上下文或 JS 内存。",
@@ -8511,6 +8517,7 @@ function buildLocalToolsSystemPrompt(
       : handle.kind === "electron"
         ? "读取工具的 path 可以使用绝对路径或越出工作区的相对路径；变更工具也可以使用这些路径，但工作区外变更需要用户弹窗授权。"
         : "所有 path/from/to 必须是相对工作区根目录的路径；不要使用绝对路径或 ..。",
+    "写文件时必须把具体文件名写入 path。即使目标位于工作区根目录，也应传 index.html 等文件名，不能把工作区目录本身作为 path。",
     "当用户已经明确要求执行文件操作时，不要二次确认，必须直接调用对应工具；不要只描述将要操作。",
     "当用户提出安装、部署、创建启动脚本、构建验证等多步骤任务时，必须连续调用工具推进，直到任务完成、遇到真实阻塞或用户中断；不要在中途只汇报计划并要求用户继续。",
     "如果用户要求重命名或移动文件/目录，并且 local_rename_path 可用，必须调用 local_rename_path。",
@@ -9426,6 +9433,19 @@ function formatSilentChatToolErrorForApi(toolName: string, error: unknown) {
     ended: false,
     instruction:
       "这是静默内部控制。继续完成当前正常回复，不要向用户提及工具、权限、提前结束、停止轮次、错误、原因或依据。",
+  });
+}
+
+function formatChatToolErrorForApi(toolName: string, error: unknown) {
+  const message = error instanceof Error ? error.message : "工具执行失败";
+  return JSON.stringify({
+    ok: false,
+    error: message,
+    retryable: true,
+    instruction:
+      toolName === "local_write_file"
+        ? "请根据错误修正 path 后立即重试 local_write_file。path 必须指向具体文件并包含文件名和扩展名，例如 index.html；不要只传工作区目录。"
+        : "请根据错误修正工具参数后重试；如果错误表明当前方法不可用，再选择其他可用工具继续任务。",
   });
 }
 
@@ -11219,7 +11239,7 @@ const localFileToolDefinitions = [
     type: "function",
     function: {
       name: "local_write_file",
-      description: "新建或覆盖写入用户授权工作区内的文本文件。",
+      description: "新建或覆盖写入用户授权工作区内的文本文件。path 必须包含文件名和扩展名，不能只传工作区目录；例如 index.html。",
       parameters: {
         type: "object",
         properties: {
@@ -19585,6 +19605,19 @@ export function App() {
 
   const executeLocalFileTool = async (toolName: string, rawArguments: string) => {
     const args = parseToolArguments(rawArguments);
+    if (toolName === "local_write_file") {
+      const writeWorkspacePath =
+        activeWorkspaceKey !== DEFAULT_WORKSPACE_KEY &&
+        (activeLocalWorkspaceHandle?.kind === "electron" ||
+          activeLocalWorkspaceHandle?.kind === "pc")
+          ? activeLocalWorkspaceHandle.path
+          : "";
+      args.path = normalizeTextFileWritePath(
+        args.path,
+        args.content,
+        writeWorkspacePath,
+      );
+    }
     const executeDesktopSystemFileTool = async () => {
       const desktopApi = window.rengeDesktop;
       if (!desktopApi?.isElectron) throw new Error("本机系统文件工具仅支持 Electron 桌面版");
@@ -23226,9 +23259,17 @@ export function App() {
           }
 
           subAgentApiMessages.push({
-            ...(subAgentMessage ?? {}),
+            ...sanitizeProviderAssistantMessageForReplay(
+              subAgentProvider,
+              subAgentMessage,
+            ),
             role: "assistant",
-            content: subAgentContent || null,
+            content:
+              buildProviderToolContinuationContent(
+                subAgentProvider,
+                subAgentContent,
+                subAgentReasoning,
+              ) || null,
             ...(subAgentMessage?.reasoning_content === undefined
               ? buildProviderReasoningReplay(
                   subAgentProvider,
@@ -23239,7 +23280,7 @@ export function App() {
             streamResult?.responsesReasoningItems.length
               ? { responses_reasoning_items: streamResult.responsesReasoningItems }
               : {}),
-            tool_calls: subAgentToolCalls,
+            tool_calls: subAgentToolCalls.map(compactToolCallForReplay),
           });
           const subAgentVisionMessages: ChatApiMessage[] = [];
           for (const subToolCall of subAgentToolCalls) {
@@ -23306,12 +23347,10 @@ export function App() {
                       subToolCall.function.name,
                       subToolError,
                     )
-                  : JSON.stringify({
-                      error:
-                        subToolError instanceof Error
-                          ? subToolError.message
-                          : "工具执行失败",
-                    }),
+                  : formatChatToolErrorForApi(
+                      subToolCall.function.name,
+                      subToolError,
+                    ),
               });
             }
           }
@@ -23882,9 +23921,18 @@ export function App() {
           }
 
           apiMessages.push({
-            ...(assistantMessage ?? {}),
+            ...sanitizeProviderAssistantMessageForReplay(
+              requestProvider,
+              assistantMessage,
+            ),
             role: "assistant",
-            content: hasHiddenAssistantContentTool ? null : assistantMessageContent || null,
+            content: hasHiddenAssistantContentTool
+              ? null
+              : buildProviderToolContinuationContent(
+                    requestProvider,
+                    assistantMessageContent,
+                    assistantMessageReasoning,
+                  ) || null,
             ...(assistantMessage?.reasoning_content === undefined
               ? buildProviderReasoningReplay(
                   requestProvider,
@@ -23895,7 +23943,7 @@ export function App() {
             completionResult.responsesReasoningItems.length
               ? { responses_reasoning_items: completionResult.responsesReasoningItems }
               : {}),
-            tool_calls: toolCalls,
+            tool_calls: toolCalls.map(compactToolCallForReplay),
           });
           setChatStatus({
             status: "loading",
@@ -23989,9 +24037,6 @@ export function App() {
               if (visionMessage) toolVisionMessages.push(visionMessage);
             } catch (toolError) {
               if (isChatAbortError(toolError)) throw toolError;
-              const toolErrorResult = {
-                error: toolError instanceof Error ? toolError.message : "工具执行失败",
-              };
               if (!silentControl) {
                 appendAssistantTimelineMessage(
                   commitChatMessages,
@@ -24010,7 +24055,7 @@ export function App() {
                       toolCall.function.name,
                       toolError,
                     )
-                  : JSON.stringify(toolErrorResult),
+                  : formatChatToolErrorForApi(toolCall.function.name, toolError),
               });
             }
           }
@@ -25847,9 +25892,18 @@ export function App() {
           }
 
           apiMessages.push({
-            ...(assistantMessage ?? {}),
+            ...sanitizeProviderAssistantMessageForReplay(
+              chatProvider,
+              assistantMessage,
+            ),
             role: "assistant",
-            content: hasHiddenAssistantContentTool ? null : assistantMessageContent || null,
+            content: hasHiddenAssistantContentTool
+              ? null
+              : buildProviderToolContinuationContent(
+                    chatProvider,
+                    assistantMessageContent,
+                    assistantMessageReasoning,
+                  ) || null,
             ...(assistantMessage?.reasoning_content === undefined
               ? buildProviderReasoningReplay(
                   chatProvider,
@@ -25860,7 +25914,7 @@ export function App() {
             completionResult.responsesReasoningItems.length
               ? { responses_reasoning_items: completionResult.responsesReasoningItems }
               : {}),
-            tool_calls: toolCalls,
+            tool_calls: toolCalls.map(compactToolCallForReplay),
           });
           setChatStatus({
             status: "loading",
@@ -25920,9 +25974,6 @@ export function App() {
               if (visionMessage) directToolVisionMessages.push(visionMessage);
             } catch (toolError) {
               if (isChatAbortError(toolError)) throw toolError;
-              const toolErrorResult = {
-                error: toolError instanceof Error ? toolError.message : "工具执行失败",
-              };
               if (!silentControl) {
                 appendAssistantTimelineMessage(
                   commitChatMessages,
@@ -25938,7 +25989,7 @@ export function App() {
                       toolCall.function.name,
                       toolError,
                     )
-                  : JSON.stringify(toolErrorResult),
+                  : formatChatToolErrorForApi(toolCall.function.name, toolError),
               });
             }
           }

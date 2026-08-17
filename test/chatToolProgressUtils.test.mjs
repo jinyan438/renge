@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseToolProgressContent } from "../src/chatToolProgressUtils.ts";
+import {
+  compactToolCallForReplay,
+  parseToolProgressContent,
+} from "../src/chatToolProgressUtils.ts";
 
 const browserCases = [
   ["打开网页：\nhttp://localhost:8123/snake.html", "action", "浏览器导航"],
@@ -79,4 +82,21 @@ test("preserves existing file tool progress parsing", () => {
   assert.equal(block?.variant, "success");
   assert.equal(block?.title, "写入文件");
   assert.deepEqual(block?.links, [{ label: "src/App.tsx" }]);
+});
+
+test("compacts large write payloads before replaying tool history", () => {
+  const toolCall = {
+    id: "call-write",
+    type: "function",
+    function: {
+      name: "local_write_file",
+      arguments: JSON.stringify({ path: "index.html", content: "x".repeat(5000) }),
+    },
+  };
+  const compacted = compactToolCallForReplay(toolCall);
+  const args = JSON.parse(compacted.function.arguments);
+
+  assert.equal(args.path, "index.html");
+  assert.match(args.content, /省略 5000 个字符/);
+  assert.equal(toolCall.function.arguments.includes("x".repeat(5000)), true);
 });

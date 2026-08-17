@@ -1917,6 +1917,13 @@ async function handlePcFiles(request, response, pathname) {
   }
 
   if (pathname === "/api/pc/write-file") {
+    const existingTarget = await stat(targetPath).catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    });
+    if (existingTarget?.isDirectory()) {
+      throw new Error(`目标路径是目录：${relativePath || "."}。请提供包含文件名和扩展名的文件路径，例如 index.html`);
+    }
     await mkdir(dirname(targetPath), { recursive: true });
     await writeFile(targetPath, String(body.content ?? ""), "utf8");
     sendJson(response, 200, { ok: true, path: relativePath, operation: "write" });
@@ -2565,6 +2572,24 @@ async function listProviderModels({ apiBaseUrl, apiKey }) {
   };
 }
 
+export function normalizeUpstreamErrorMessage(text, statusText = "") {
+  const raw = String(text ?? "").trim();
+  if (!raw) return String(statusText || "Upstream request failed");
+  if (!/<(?:!doctype|html|head|body|pre)\b/i.test(raw)) return raw;
+  const htmlMessage = /<pre\b[^>]*>([\s\S]*?)<\/pre>/i.exec(raw)?.[1]
+    ?? /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(raw)?.[1]
+    ?? "";
+  return htmlMessage
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#(?:39|x27);/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim() || String(statusText || "Upstream request failed");
+}
+
 async function proxyStream({ url, apiKey, body, response }) {
   const ac = new AbortController();
   const abortUpstream = () => {
@@ -2597,7 +2622,9 @@ async function proxyStream({ url, apiKey, body, response }) {
     try {
       payload = text ? JSON.parse(text) : {};
     } catch {
-      payload = { error: text || upstreamResponse.statusText };
+      payload = {
+        error: normalizeUpstreamErrorMessage(text, upstreamResponse.statusText),
+      };
     }
     sendJson(response, upstreamResponse.status, payload);
     return;

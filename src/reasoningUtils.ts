@@ -161,13 +161,44 @@ export function buildProviderReasoningReplay(
   provider: ReasoningProviderConfig | undefined,
   reasoning: string,
 ) {
-  if (
-    providerRequiresReasoningContentReplay(provider) ||
-    (provider?.reasoningEnabled === true && isLocalApiBaseUrl(provider.apiBaseUrl))
-  ) {
+  if (providerRequiresReasoningContentReplay(provider)) {
     return { reasoning_content: reasoning };
   }
   return {};
+}
+
+export function buildProviderToolContinuationContent(
+  provider: ReasoningProviderConfig | undefined,
+  content: string,
+  reasoning: string,
+) {
+  if (content.trim() || !provider?.reasoningEnabled || !isLocalApiBaseUrl(provider.apiBaseUrl)) {
+    return content;
+  }
+  const reasoningState = reasoning.trim();
+  if (!reasoningState) return content;
+  return [
+    "【内部工具续执行状态：不要向用户复述】",
+    "以下设计已在本轮工具调用前完成。请直接依据它和工具结果继续执行，不要重新从头规划：",
+    reasoningState,
+  ].join("\n\n");
+}
+
+export function sanitizeProviderAssistantMessageForReplay<
+  T extends Record<string, unknown>,
+>(provider: ReasoningProviderConfig | undefined, message?: T) {
+  if (!message) return {};
+  if (!isLocalApiBaseUrl(provider?.apiBaseUrl)) return message;
+  const {
+    reasoning: _reasoning,
+    reasoning_content: _reasoningContent,
+    reasoning_text: _reasoningText,
+    reasoning_details: _reasoningDetails,
+    thinking: _thinking,
+    thinking_content: _thinkingContent,
+    ...standardMessage
+  } = message;
+  return standardMessage;
 }
 
 export function hasAssistantTimelinePayload(

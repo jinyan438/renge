@@ -4,7 +4,21 @@ import { createServer, request } from "node:http";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rewriteTavernModuleImports, startRengeServer } from "../server.mjs";
+import {
+  normalizeUpstreamErrorMessage,
+  rewriteTavernModuleImports,
+  startRengeServer,
+} from "../server.mjs";
+
+test("reduces HTML upstream failures to a readable error message", () => {
+  assert.equal(
+    normalizeUpstreamErrorMessage(
+      '<!DOCTYPE html><html><head><title>Error</title></head><body><pre>Internal Server Error</pre></body></html>',
+      "Internal Server Error",
+    ),
+    "Internal Server Error",
+  );
+});
 
 function requestLocalServer(controller, path, host = "preview.localhost", method = "GET") {
   const serverUrl = new URL(controller.url);

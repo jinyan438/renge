@@ -4,10 +4,12 @@ import {
   buildProviderReasoningDisableRequest,
   buildProviderReasoningReplay,
   buildProviderReasoningRequest,
+  buildProviderToolContinuationContent,
   getFirstReasoningText,
   hasAssistantTimelinePayload,
   isLocalProviderEndpoint,
   mergeReasoningStreamChunk,
+  sanitizeProviderAssistantMessageForReplay,
   splitSseFrames,
 } from "../src/reasoningUtils.ts";
 
@@ -163,17 +165,33 @@ test("replays DeepSeek reasoning content, including the required empty value", (
   );
 });
 
-test("replays streamed reasoning across tool calls for local model endpoints", () => {
+test("keeps local tool continuation state in standard assistant content", () => {
+  const localProvider = {
+    apiBaseUrl: "http://127.0.0.1:1234/v1",
+    modelId: "local-reasoning-model",
+    reasoningEnabled: true,
+  };
+  assert.deepEqual(buildProviderReasoningReplay(localProvider, "completed design"), {});
+  assert.match(
+    buildProviderToolContinuationContent(localProvider, "", "completed design"),
+    /completed design/,
+  );
+  assert.equal(
+    buildProviderToolContinuationContent(localProvider, "visible tool note", "completed design"),
+    "visible tool note",
+  );
   assert.deepEqual(
-    buildProviderReasoningReplay(
-      {
-        apiBaseUrl: "http://127.0.0.1:1234/v1",
-        modelId: "local-reasoning-model",
-        reasoningEnabled: true,
-      },
-      "keep the completed project design",
-    ),
-    { reasoning_content: "keep the completed project design" },
+    sanitizeProviderAssistantMessageForReplay(localProvider, {
+      role: "assistant",
+      content: null,
+      reasoning_content: "completed design",
+      tool_calls: [{ id: "call-1" }],
+    }),
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [{ id: "call-1" }],
+    },
   );
   assert.deepEqual(
     buildProviderReasoningReplay(
