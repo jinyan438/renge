@@ -228,6 +228,7 @@ import {
   buildProviderReasoningReplay,
   buildProviderReasoningRequest,
   buildProviderReasoningContinuationContent,
+  buildReasoningOnlyToolRetryPrompt,
   getFirstReasoningText,
   getReasoningTextFromValue,
   hasAssistantTimelinePayload,
@@ -236,6 +237,7 @@ import {
   normalizeProviderReasoningEffort,
   providerRequiresReasoningContentReplay,
   sanitizeProviderAssistantMessageForReplay,
+  shouldRetryReasoningOnlyToolCompletion,
   splitSseFrames,
   type ProviderReasoningEffort,
   type ReasoningProviderConfig,
@@ -8693,6 +8695,26 @@ function shouldAutoContinueLocalTask(content: string) {
 
   return /(还没有完成|尚未完成|需要继续|继续执行|下一步|还需要|待完成|未完成|没有完成|需要安装|需要创建|需要构建|need to continue|not complete|next step|still need)/i.test(
     normalizedContent,
+  );
+}
+
+function appendReasoningOnlyToolRetryApiMessages(
+  apiMessages: ChatApiMessage[],
+  provider: ReasoningProviderConfig | undefined,
+  reasoning: string,
+  finishReason?: string,
+) {
+  apiMessages.push(
+    {
+      role: "assistant",
+      content:
+        buildProviderReasoningContinuationContent(provider, "", reasoning) || null,
+      ...buildProviderReasoningReplay(provider, reasoning),
+    },
+    {
+      role: "user",
+      content: buildReasoningOnlyToolRetryPrompt(finishReason),
+    },
   );
 }
 
@@ -23736,6 +23758,7 @@ export function App() {
         }
       } else {
         let toolLoopCompleted = false;
+        let reasoningOnlyToolRetryCount = 0;
         for (let toolRound = 0; toolRound < 99; toolRound += 1) {
           setChatStatus({
             status: "loading",
@@ -23872,6 +23895,43 @@ export function App() {
               assistantContent = "";
               assistantReasoning = "";
               streamingRound?.remove();
+              continue;
+            }
+
+            if (
+              shouldRetryReasoningOnlyToolCompletion({
+                content: assistantMessageContent,
+                reasoning: assistantMessageReasoning,
+                toolCallCount: toolCalls.length,
+                includedToolCount: completionResult.includedToolCount,
+                requiresTool:
+                  localToolsEnabled &&
+                  Boolean(localWorkspaceHandle) &&
+                  shouldRequireLocalToolCall(messagesForApi, localWorkspaceHandle),
+                retryCount: reasoningOnlyToolRetryCount,
+                finishReason: completionResult.finishReason,
+              })
+            ) {
+              if (!streamingRound) {
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  "",
+                  [],
+                  assistantMessageReasoning,
+                  assistantSender,
+                );
+              } else {
+                streamingRound.complete("", assistantMessageReasoning);
+              }
+              appendReasoningOnlyToolRetryApiMessages(
+                apiMessages,
+                requestProvider,
+                assistantMessageReasoning,
+                completionResult.finishReason,
+              );
+              reasoningOnlyToolRetryCount += 1;
+              assistantContent = "";
+              assistantReasoning = "";
               continue;
             }
 
@@ -25648,13 +25708,15 @@ export function App() {
             reasoning: streamResult.reasoning,
             toolCalls: streamResult.toolCalls,
             responsesReasoningItems: streamResult.responsesReasoningItems,
+            finishReason: streamResult.finishReason,
+            includedToolCount: requestTools.length,
           };
         }
 
         throwIfChatAborted(abortSignal);
         const payload = (await readChatCompletionPayload(response)) as {
           error?: string | { message?: string };
-          choices?: Array<{ message?: ChatApiMessage }>;
+          choices?: Array<{ message?: ChatApiMessage; finish_reason?: string }>;
           output_text?: string;
         };
         throwIfChatAborted(abortSignal);
@@ -25671,6 +25733,8 @@ export function App() {
           toolCalls: [] as ChatToolCall[],
           responsesReasoningItems:
             payload.choices?.[0]?.message?.responses_reasoning_items ?? [],
+          finishReason: payload.choices?.[0]?.finish_reason ?? "",
+          includedToolCount: requestTools.length,
         };
       };
       const appendStreamingAssistant = (delta: string) => {
@@ -25755,6 +25819,7 @@ export function App() {
         }
       } else {
         const useStreamingToolCompletion = chatStreamEnabled;
+        let reasoningOnlyToolRetryCount = 0;
         for (let toolRound = 0; toolRound < 99; toolRound += 1) {
           setChatStatus({
             status: "loading",
@@ -25847,6 +25912,42 @@ export function App() {
               assistantContent = "";
               assistantReasoning = "";
               streamingRound?.remove();
+              continue;
+            }
+
+            if (
+              shouldRetryReasoningOnlyToolCompletion({
+                content: assistantMessageContent,
+                reasoning: assistantMessageReasoning,
+                toolCallCount: toolCalls.length,
+                includedToolCount: completionResult.includedToolCount,
+                requiresTool:
+                  localToolsEnabled &&
+                  Boolean(localWorkspaceHandle) &&
+                  shouldRequireLocalToolCall(messagesForApi, localWorkspaceHandle),
+                retryCount: reasoningOnlyToolRetryCount,
+                finishReason: completionResult.finishReason,
+              })
+            ) {
+              if (!streamingRound) {
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  "",
+                  [],
+                  assistantMessageReasoning,
+                );
+              } else {
+                streamingRound.complete("", assistantMessageReasoning);
+              }
+              appendReasoningOnlyToolRetryApiMessages(
+                apiMessages,
+                chatProvider,
+                assistantMessageReasoning,
+                completionResult.finishReason,
+              );
+              reasoningOnlyToolRetryCount += 1;
+              assistantContent = "";
+              assistantReasoning = "";
               continue;
             }
 

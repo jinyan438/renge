@@ -5,11 +5,13 @@ import {
   buildProviderReasoningReplay,
   buildProviderReasoningRequest,
   buildProviderReasoningContinuationContent,
+  buildReasoningOnlyToolRetryPrompt,
   getFirstReasoningText,
   hasAssistantTimelinePayload,
   isLocalProviderEndpoint,
   mergeReasoningStreamChunk,
   sanitizeProviderAssistantMessageForReplay,
+  shouldRetryReasoningOnlyToolCompletion,
   splitSseFrames,
 } from "../src/reasoningUtils.ts";
 
@@ -203,6 +205,41 @@ test("keeps local reasoning state across tool loops and later user turns", () =>
       "disabled reasoning",
     ),
     {},
+  );
+});
+
+test("retries a reasoning-only completion when a local task still requires tools", () => {
+  const base = {
+    content: "",
+    reasoning: "completed design and implementation",
+    toolCallCount: 0,
+    includedToolCount: 8,
+    requiresTool: true,
+    retryCount: 0,
+    finishReason: "length",
+  };
+  assert.equal(shouldRetryReasoningOnlyToolCompletion(base), true);
+  assert.match(buildReasoningOnlyToolRetryPrompt("length"), /输出长度限制/);
+  assert.match(buildReasoningOnlyToolRetryPrompt("stop"), /只产生了思维过程/);
+  assert.equal(
+    shouldRetryReasoningOnlyToolCompletion({ ...base, content: "done" }),
+    false,
+  );
+  assert.equal(
+    shouldRetryReasoningOnlyToolCompletion({ ...base, toolCallCount: 1 }),
+    false,
+  );
+  assert.equal(
+    shouldRetryReasoningOnlyToolCompletion({ ...base, retryCount: 2 }),
+    false,
+  );
+  assert.equal(
+    shouldRetryReasoningOnlyToolCompletion({ ...base, requiresTool: false }),
+    false,
+  );
+  assert.equal(
+    shouldRetryReasoningOnlyToolCompletion({ ...base, finishReason: "content_filter" }),
+    false,
   );
 });
 

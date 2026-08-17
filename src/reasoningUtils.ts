@@ -184,6 +184,48 @@ export function buildProviderReasoningContinuationContent(
   ].join("\n\n");
 }
 
+export function shouldRetryReasoningOnlyToolCompletion({
+  content,
+  reasoning,
+  toolCallCount,
+  includedToolCount,
+  requiresTool,
+  retryCount,
+  maxRetries = 2,
+  finishReason,
+}: {
+  content: string;
+  reasoning: string;
+  toolCallCount: number;
+  includedToolCount: number;
+  requiresTool: boolean;
+  retryCount: number;
+  maxRetries?: number;
+  finishReason?: string;
+}) {
+  if (!requiresTool || includedToolCount <= 0 || retryCount >= maxRetries) return false;
+  if (content.trim() || !reasoning.trim() || toolCallCount > 0) return false;
+  const normalizedFinishReason = String(finishReason ?? "").trim().toLowerCase();
+  return (
+    !normalizedFinishReason ||
+    /^(?:stop|length|max_tokens|max_output_tokens|token_limit)$/.test(normalizedFinishReason)
+  );
+}
+
+export function buildReasoningOnlyToolRetryPrompt(finishReason?: string) {
+  const truncated = /^(?:length|max_tokens|max_output_tokens|token_limit)$/i.test(
+    String(finishReason ?? "").trim(),
+  );
+  return [
+    "【内部工具续执行指令：不要向用户复述】",
+    truncated
+      ? "上一轮在思维阶段触及了输出长度限制，没有产生工具调用。"
+      : "上一轮只产生了思维过程，没有产生正文或工具调用。",
+    "上一条 assistant 内部状态已经包含完成的设计和代码。不要重新设计，不要继续扩写思维链，也不要复述代码。",
+    "现在立即调用最合适的可用工具执行下一步。写文件时 path 必须包含具体文件名和扩展名，例如 index.html。只有工具确实不可用时，才用简短正文说明真实阻塞。",
+  ].join("\n\n");
+}
+
 export function sanitizeProviderAssistantMessageForReplay<
   T extends Record<string, unknown>,
 >(provider: ReasoningProviderConfig | undefined, message?: T) {
