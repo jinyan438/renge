@@ -1844,11 +1844,14 @@ summary:focus-visible {
 .provider-list {
   display: grid;
   gap: 8px;
+  min-width: 0;
 }
 
 .provider-item {
   display: block;
   min-height: 62px;
+  min-width: 0;
+  width: 100%;
   padding: 11px;
   border: 1px solid #dfe4ec;
   border-radius: 8px;
