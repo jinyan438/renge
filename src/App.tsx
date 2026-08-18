@@ -501,8 +501,8 @@ type ComposerModelMenuSection = "provider" | "model" | "reasoning";
 type ChatRole = "user" | "assistant";
 type ChatApiRole = "system" | "user" | "assistant" | "tool";
 type ChatSenderKind = "user" | "persona" | "system";
-type RegexScriptScope = "global" | "preset";
-type TavernScriptScope = "global" | "character";
+type RegexScriptScope = "global" | "preset" | "character";
+type TavernScriptScope = "global" | "preset" | "character";
 
 type RegexScriptTarget = {
   key: string;
@@ -512,6 +512,8 @@ type RegexScriptTarget = {
   total: number;
   presetId?: string;
   presetName?: string;
+  characterId?: string;
+  characterName?: string;
 };
 
 type TavernScriptTarget = {
@@ -520,6 +522,8 @@ type TavernScriptTarget = {
   script: TavernScript;
   index: number;
   total: number;
+  presetId?: string;
+  presetName?: string;
   characterId?: string;
   characterName?: string;
 };
@@ -14062,8 +14066,19 @@ export function App() {
           presetName: preset.name,
         })),
       ),
+      ...characterCards.flatMap((card) =>
+        card.regexScripts.map((script, index) => ({
+          key: `character:${card.id}:${script.id}`,
+          scope: "character" as const,
+          script,
+          index,
+          total: card.regexScripts.length,
+          characterId: card.id,
+          characterName: card.name,
+        })),
+      ),
     ],
-    [chatPresets, regexScripts],
+    [characterCards, chatPresets, regexScripts],
   );
   const selectedRegexTarget = useMemo(
     () =>
@@ -14108,19 +14123,37 @@ export function App() {
       );
       return;
     }
-    setChatPresets((current) =>
-      current.map((preset) =>
-        preset.id === target.presetId
+    if (target.scope === "preset") {
+      setChatPresets((current) =>
+        current.map((preset) =>
+          preset.id === target.presetId
+            ? {
+                ...preset,
+                regexScripts: preset.regexScripts.map((script) =>
+                  script.id === target.script.id
+                    ? { ...script, ...patch, updatedAt }
+                    : script,
+                ),
+                updatedAt,
+              }
+            : preset,
+        ),
+      );
+      return;
+    }
+    setCharacterCards((current) =>
+      current.map((card) =>
+        card.id === target.characterId
           ? {
-              ...preset,
-              regexScripts: preset.regexScripts.map((script) =>
+              ...card,
+              regexScripts: card.regexScripts.map((script) =>
                 script.id === target.script.id
                   ? { ...script, ...patch, updatedAt }
                   : script,
               ),
               updatedAt,
             }
-          : preset,
+          : card,
       ),
     );
   };
@@ -14161,7 +14194,7 @@ export function App() {
       setRegexScripts((current) =>
         current.filter((script) => script.id !== target.script.id),
       );
-    } else {
+    } else if (target.scope === "preset") {
       setChatPresets((current) =>
         current.map((preset) =>
           preset.id === target.presetId
@@ -14173,6 +14206,20 @@ export function App() {
                 updatedAt: new Date().toISOString(),
               }
             : preset,
+        ),
+      );
+    } else {
+      setCharacterCards((current) =>
+        current.map((card) =>
+          card.id === target.characterId
+            ? {
+                ...card,
+                regexScripts: card.regexScripts.filter(
+                  (script) => script.id !== target.script.id,
+                ),
+                updatedAt: new Date().toISOString(),
+              }
+            : card,
         ),
       );
     }
