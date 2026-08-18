@@ -2811,11 +2811,42 @@ summary:focus-visible {
   overflow: auto;
 }
 
+.worldbook-list-panel > .resource-source-group {
+  min-width: 0;
+}
+
+.worldbook-list-panel > .global-source-group > .worldbook-list {
+  max-height: min(48dvh, 520px);
+  padding-right: 4px;
+}
+
 .resource-source-group {
   display: grid;
   gap: 8px;
   padding-top: 12px;
   border-top: 1px solid #e2e8f0;
+}
+
+.resource-source-group > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.resource-source-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.resource-source-group > summary::before {
+  display: inline-block;
+  width: 14px;
+  margin-right: 4px;
+  color: #94a3b8;
+  content: "▸";
+  transition: transform 0.16s ease;
+}
+
+.resource-source-group[open] > summary::before {
+  transform: rotate(90deg);
 }
 
 .resource-source-heading {
@@ -3217,9 +3248,22 @@ summary:focus-visible {
   overflow: auto;
 }
 
+.regex-script-list.resource-source-list,
+.tavern-script-list.resource-source-list {
+  max-height: min(62dvh, 720px);
+  padding-right: 6px;
+  scrollbar-gutter: stable;
+}
+
 .resource-source-list {
   display: grid;
   gap: 12px;
+}
+
+.resource-source-items {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
 }
 
 .resource-source-list .resource-source-group {

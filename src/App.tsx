@@ -14124,8 +14124,7 @@ export function App() {
         .map((group) => ({
           ...group,
           targets: regexScriptTargets.filter((target) => target.scope === group.scope),
-        }))
-        .filter((group) => group.targets.length > 0),
+        })),
     [regexScriptTargets],
   );
   const effectiveRegexScripts = useMemo(
@@ -14372,8 +14371,7 @@ export function App() {
         .map((group) => ({
           ...group,
           targets: tavernScriptTargets.filter((target) => target.scope === group.scope),
-        }))
-        .filter((group) => group.targets.length > 0),
+        })),
     [tavernScriptTargets],
   );
 
@@ -31065,12 +31063,6 @@ export function App() {
           {settingsTab === "worldbooks" && (
             <div className="settings-grid worldbook-settings-grid">
               <aside className="worldbook-list-panel section-block">
-                <div className="section-heading compact">
-                  <div>
-                    <h2>全局世界书</h2>
-                    <p>勾选的世界书会共同作用于普通、人格、多 Agent 和角色扮演会话；角色卡内置世界书仍保持私有。</p>
-                  </div>
-                </div>
                 <div className="worldbook-active-summary">
                   <strong>{activeWorldBookIds.length}</strong>
                   <span>本已启用 · {enabledWorldBookEntryCount} 个可用条目</span>
@@ -31078,7 +31070,15 @@ export function App() {
                 {worldBookImportState.status === "error" && (
                   <div className="provider-status error">{worldBookImportState.message}</div>
                 )}
-                <div className="worldbook-list">
+                <details className="resource-source-group global-source-group" open>
+                  <summary className="resource-source-heading">
+                    <div>
+                      <strong>全局世界书</strong>
+                      <span>勾选的世界书会共同作用于普通、人格、多 Agent 和角色扮演会话</span>
+                    </div>
+                    <em>{worldBooks.length}</em>
+                  </summary>
+                  <div className="worldbook-list">
                   {worldBooks.length === 0 ? (
                     <div className="preset-empty-state">
                       尚未添加世界书。可导入酒馆原生 JSON，或新建一本世界书。
@@ -31116,15 +31116,16 @@ export function App() {
                       );
                     })
                   )}
-                </div>
-                <div className="resource-source-group character-source-group">
-                  <div className="resource-source-heading">
+                  </div>
+                </details>
+                <details className="resource-source-group character-source-group" open>
+                  <summary className="resource-source-heading">
                     <div>
                       <strong>角色卡内置世界书</strong>
                       <span>只在对应角色扮演会话加载</span>
                     </div>
                     <em>{characterWorldBookSources.length}</em>
-                  </div>
+                  </summary>
                   {characterWorldBookSources.length === 0 ? (
                     <div className="resource-source-empty">角色卡尚未绑定世界书。</div>
                   ) : (
@@ -31153,7 +31154,7 @@ export function App() {
                       })}
                     </div>
                   )}
-                </div>
+                </details>
               </aside>
 
               {selectedWorldBook ? (
@@ -31551,19 +31552,26 @@ export function App() {
                     </div>
                   )}
                   {regexScriptGroups.map((group) => (
-                        <section
+                        <details
                           className={`resource-source-group ${group.scope}-source-group`}
                           key={group.scope}
+                          open
                         >
-                          <div className="resource-source-heading">
+                          <summary className="resource-source-heading">
                             <div>
                               <strong>{group.title}</strong>
                               <span>{group.description}</span>
                             </div>
                             <em>{group.targets.length}</em>
-                          </div>
-                          <div>
-                            {group.targets.map((target) => {
+                          </summary>
+                          <div className="resource-source-items">
+                            {group.targets.length === 0 ? (
+                              <div className="resource-source-empty">
+                                {group.scope === "preset"
+                                  ? "未启用预设，暂不加载内置正则。"
+                                  : "未进入角色扮演会话，暂不加载角色卡正则。"}
+                              </div>
+                            ) : group.targets.map((target) => {
                               const presetIsActive =
                                 target.scope === "preset" &&
                                 chatPresetEnabled &&
@@ -31624,7 +31632,7 @@ export function App() {
                               );
                             })}
                           </div>
-                        </section>
+                        </details>
                       ),
                     )}
                 </div>
@@ -31896,19 +31904,26 @@ export function App() {
                     </div>
                   )}
                   {tavernScriptGroups.map((group) => (
-                        <section
+                        <details
                           className={`resource-source-group ${group.scope}-source-group`}
                           key={group.scope}
+                          open
                         >
-                          <div className="resource-source-heading">
+                          <summary className="resource-source-heading">
                             <div>
                               <strong>{group.title}</strong>
                               <span>{group.description}</span>
                             </div>
                             <em>{group.targets.length}</em>
-                          </div>
-                          <div>
-                            {group.targets.map((target) => {
+                          </summary>
+                          <div className="resource-source-items">
+                            {group.targets.length === 0 ? (
+                              <div className="resource-source-empty">
+                                {group.scope === "preset"
+                                  ? "未启用预设，暂不加载内置脚本。"
+                                  : "未进入角色扮演会话，暂不加载角色卡脚本。"}
+                              </div>
+                            ) : group.targets.map((target) => {
                               const presetIsActive =
                                 target.scope === "preset" &&
                                 chatPresetEnabled &&
@@ -31968,7 +31983,7 @@ export function App() {
                               );
                             })}
                           </div>
-                        </section>
+                        </details>
                       ),
                     )}
                 </div>
