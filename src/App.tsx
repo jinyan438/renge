@@ -12092,6 +12092,7 @@ export function App() {
     evidence: string;
   } | null>(null);
   const activeChatSessionIdRef = useRef("");
+  const chatModeRef = useRef<ChatMode>(chatMode);
   const tavernScriptRuntimeRef = useRef<TavernScriptRuntime | null>(null);
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const htmlPreviewMessagesCacheRef = useRef<{
@@ -12299,6 +12300,10 @@ export function App() {
     activeChatSessionIdRef.current = activeChatSessionId;
     setChatChoiceDrafts({});
   }, [activeChatSessionId]);
+
+  useEffect(() => {
+    chatModeRef.current = chatMode;
+  }, [chatMode]);
 
   useEffect(() => {
     chatMessagesRef.current = chatMessages;
@@ -13707,8 +13712,7 @@ export function App() {
   );
   const scopedRoleplayCard = useMemo(() => {
     if (chatMode !== "roleplay") return undefined;
-    const session =
-      chatSessions.find((item) => item.id === activeChatSessionId) ?? chatSessions[0];
+    const session = chatSessions.find((item) => item.id === activeChatSessionId);
     if (!session?.roleplayCharacterCardId) return undefined;
     return characterCards.find((card) => card.id === session.roleplayCharacterCardId);
   }, [activeChatSessionId, characterCards, chatMode, chatSessions]);
@@ -13885,8 +13889,7 @@ export function App() {
     [chatChoiceToolsEnabled, selectedSystemPrompts],
   );
   const activeChatPreset = useMemo(
-    () =>
-      chatPresets.find((preset) => preset.id === activeChatPresetId) ?? chatPresets[0],
+    () => chatPresets.find((preset) => preset.id === activeChatPresetId),
     [activeChatPresetId, chatPresets],
   );
   const selectedChatPresetPrompt = useMemo(
@@ -13933,6 +13936,19 @@ export function App() {
           0,
         ),
     [activeWorldBookIds, worldBooks],
+  );
+  const characterWorldBookSources = useMemo(
+    () =>
+      characterCards
+        .map((card) => ({
+          card,
+          worldBook: resolveCharacterWorldBook(card, worldBooks),
+        }))
+        .filter(
+          (source): source is { card: CharacterCard; worldBook: WorldBook } =>
+            Boolean(source.worldBook),
+        ),
+    [characterCards, worldBooks],
   );
 
   useEffect(() => {
@@ -14085,6 +14101,30 @@ export function App() {
       regexScriptTargets.find((target) => target.key === selectedRegexTargetKey) ??
       regexScriptTargets[0],
     [regexScriptTargets, selectedRegexTargetKey],
+  );
+  const regexScriptGroups = useMemo(
+    () =>
+      [
+        {
+          scope: "global" as const,
+          title: "全局正则",
+          description: "所有会话都会加载",
+        },
+        {
+          scope: "preset" as const,
+          title: "预设内置正则",
+          description: "仅启用该预设时加载",
+        },
+        {
+          scope: "character" as const,
+          title: "角色卡内置正则",
+          description: "仅角色扮演会话绑定该角色卡时加载",
+        },
+      ].map((group) => ({
+        ...group,
+        targets: regexScriptTargets.filter((target) => target.scope === group.scope),
+      })),
+    [regexScriptTargets],
   );
   const effectiveRegexScripts = useMemo(
     () => [
@@ -14240,11 +14280,21 @@ export function App() {
       setRegexScripts(move);
       return;
     }
-    setChatPresets((current) =>
-      current.map((preset) =>
-        preset.id === target.presetId
-          ? { ...preset, regexScripts: move(preset.regexScripts), updatedAt: new Date().toISOString() }
-          : preset,
+    if (target.scope === "preset") {
+      setChatPresets((current) =>
+        current.map((preset) =>
+          preset.id === target.presetId
+            ? { ...preset, regexScripts: move(preset.regexScripts), updatedAt: new Date().toISOString() }
+            : preset,
+        ),
+      );
+      return;
+    }
+    setCharacterCards((current) =>
+      current.map((card) =>
+        card.id === target.characterId
+          ? { ...card, regexScripts: move(card.regexScripts), updatedAt: new Date().toISOString() }
+          : card,
       ),
     );
   };
@@ -14267,6 +14317,17 @@ export function App() {
         index,
         total: tavernScripts.length,
       })),
+      ...chatPresets.flatMap((preset) =>
+        preset.tavernScripts.map((script, index) => ({
+          key: `preset:${preset.id}:${script.id}`,
+          scope: "preset" as const,
+          script,
+          index,
+          total: preset.tavernScripts.length,
+          presetId: preset.id,
+          presetName: preset.name,
+        })),
+      ),
       ...characterCards.flatMap((card) =>
         card.tavernScripts.map((script, index) => ({
           key: `character:${card.id}:${script.id}`,
@@ -14279,13 +14340,37 @@ export function App() {
         })),
       ),
     ],
-    [characterCards, tavernScripts],
+    [characterCards, chatPresets, tavernScripts],
   );
   const selectedTavernScriptTarget = useMemo(
     () =>
       tavernScriptTargets.find((target) => target.key === selectedTavernScriptKey) ??
       tavernScriptTargets[0],
     [selectedTavernScriptKey, tavernScriptTargets],
+  );
+  const tavernScriptGroups = useMemo(
+    () =>
+      [
+        {
+          scope: "global" as const,
+          title: "全局脚本",
+          description: "所有会话都会加载",
+        },
+        {
+          scope: "preset" as const,
+          title: "预设内置脚本",
+          description: "仅启用该预设时加载",
+        },
+        {
+          scope: "character" as const,
+          title: "角色卡内置脚本",
+          description: "仅角色扮演会话绑定该角色卡时加载",
+        },
+      ].map((group) => ({
+        ...group,
+        targets: tavernScriptTargets.filter((target) => target.scope === group.scope),
+      })),
+    [tavernScriptTargets],
   );
 
   useEffect(() => {
@@ -14311,6 +14396,24 @@ export function App() {
       setTavernScripts((current) =>
         current.map((script) =>
           script.id === target.script.id ? { ...script, ...patch, updatedAt } : script,
+        ),
+      );
+      return;
+    }
+    if (target.scope === "preset") {
+      setChatPresets((current) =>
+        current.map((preset) =>
+          preset.id === target.presetId
+            ? {
+                ...preset,
+                tavernScripts: preset.tavernScripts.map((script) =>
+                  script.id === target.script.id
+                    ? { ...script, ...patch, updatedAt }
+                    : script,
+                ),
+                updatedAt,
+              }
+            : preset,
         ),
       );
       return;
@@ -14374,6 +14477,20 @@ export function App() {
       setTavernScripts((current) =>
         current.filter((script) => script.id !== target.script.id),
       );
+    } else if (target.scope === "preset") {
+      setChatPresets((current) =>
+        current.map((preset) =>
+          preset.id === target.presetId
+            ? {
+                ...preset,
+                tavernScripts: preset.tavernScripts.filter(
+                  (script) => script.id !== target.script.id,
+                ),
+                updatedAt: new Date().toISOString(),
+              }
+            : preset,
+        ),
+      );
     } else {
       setCharacterCards((current) =>
         current.map((card) =>
@@ -14404,6 +14521,20 @@ export function App() {
     };
     if (target.scope === "global") {
       setTavernScripts(move);
+      return;
+    }
+    if (target.scope === "preset") {
+      setChatPresets((current) =>
+        current.map((preset) =>
+          preset.id === target.presetId
+            ? {
+                ...preset,
+                tavernScripts: move(preset.tavernScripts),
+                updatedAt: new Date().toISOString(),
+              }
+            : preset,
+        ),
+      );
       return;
     }
     setCharacterCards((current) =>
@@ -14719,11 +14850,15 @@ export function App() {
     if (!selectedTavernScriptTarget) return;
     const isActive =
       selectedTavernScriptTarget.scope === "global" ||
-      selectedTavernScriptTarget.characterId === scopedRoleplayCard?.id;
+      (selectedTavernScriptTarget.scope === "preset" &&
+        chatPresetEnabled &&
+        selectedTavernScriptTarget.presetId === activeChatPreset?.id) ||
+      (selectedTavernScriptTarget.scope === "character" &&
+        selectedTavernScriptTarget.characterId === scopedRoleplayCard?.id);
     if (!isActive) {
       setTavernScriptImportState({
         status: "error",
-        message: "角色内置脚本只能在绑定该角色卡的会话中运行。",
+        message: "当前来源的内置脚本尚未在会话中启用。",
       });
       return;
     }
@@ -16119,7 +16254,7 @@ export function App() {
       const session = chatSessionsRef.current.find(
         (item) => item.id === activeChatSessionIdRef.current,
       );
-      const card = session?.roleplayCharacterCardId
+      const card = chatModeRef.current === "roleplay" && session?.roleplayCharacterCardId
         ? characterCardsRef.current.find(
             (item) => item.id === session.roleplayCharacterCardId,
           )
@@ -16166,7 +16301,7 @@ export function App() {
       const session = chatSessionsRef.current.find(
         (item) => item.id === activeChatSessionIdRef.current,
       );
-      const card = session?.roleplayCharacterCardId
+      const card = chatModeRef.current === "roleplay" && session?.roleplayCharacterCardId
         ? characterCardsRef.current.find(
             (item) => item.id === session.roleplayCharacterCardId,
           )
@@ -16321,7 +16456,7 @@ export function App() {
       const session = chatSessionsRef.current.find(
         (item) => item.id === activeChatSessionIdRef.current,
       );
-      const card = session?.roleplayCharacterCardId
+      const card = chatModeRef.current === "roleplay" && session?.roleplayCharacterCardId
         ? characterCardsRef.current.find(
             (item) => item.id === session.roleplayCharacterCardId,
           )
@@ -17088,6 +17223,17 @@ export function App() {
       chatPresetsRef.current = next;
       setChatPresets(next);
     };
+    const getRuntimeRoleplayCard = () => {
+      if (chatModeRef.current !== "roleplay") return undefined;
+      const session = chatSessionsRef.current.find(
+        (candidate) => candidate.id === activeChatSessionIdRef.current,
+      );
+      return session?.roleplayCharacterCardId
+        ? characterCardsRef.current.find(
+            (candidate) => candidate.id === session.roleplayCharacterCardId,
+          )
+        : undefined;
+    };
 
     runtime = new TavernScriptRuntime(activeTavernScripts, {
       getMessages: () => chatMessagesRef.current as TavernRuntimeMessage[],
@@ -17102,9 +17248,7 @@ export function App() {
         const session = chatSessionsRef.current.find(
           (candidate) => candidate.id === activeChatSessionIdRef.current,
         );
-        const card = characterCardsRef.current.find(
-          (candidate) => candidate.id === session?.roleplayCharacterCardId,
-        );
+        const card = getRuntimeRoleplayCard();
         return {
           index: session?.roleplayGreetingIndex ?? 0,
           greetings: card ? getCharacterCardGreetings(card, "{{user}}") : [],
@@ -17132,18 +17276,15 @@ export function App() {
         );
       },
       getCharacterVariables: () => {
-        const session = chatSessionsRef.current.find(
-          (candidate) => candidate.id === activeChatSessionIdRef.current,
-        );
-        const card = characterCardsRef.current.find(
-          (candidate) => candidate.id === session?.roleplayCharacterCardId,
-        );
+        const card = getRuntimeRoleplayCard();
         return normalizeTavernVariables(card?.tavernVariables);
       },
       setCharacterVariables: (variables) => {
-        const session = chatSessionsRef.current.find(
-          (candidate) => candidate.id === activeChatSessionIdRef.current,
-        );
+        const session = chatModeRef.current === "roleplay"
+          ? chatSessionsRef.current.find(
+              (candidate) => candidate.id === activeChatSessionIdRef.current,
+            )
+          : undefined;
         if (!session?.roleplayCharacterCardId) return;
         const updatedAt = new Date().toISOString();
         updateCards((cards) =>
@@ -17235,14 +17376,20 @@ export function App() {
       getScriptData: (scriptId) => {
         const globalScript = tavernScriptsRef.current.find((script) => script.id === scriptId);
         if (globalScript) return normalizeTavernVariables(globalScript.data);
-        for (const preset of chatPresetsRef.current) {
-          const script = preset.tavernScripts.find((candidate) => candidate.id === scriptId);
-          if (script) return normalizeTavernVariables(script.data);
-        }
-        for (const card of characterCardsRef.current) {
-          const script = card.tavernScripts.find((candidate) => candidate.id === scriptId);
-          if (script) return normalizeTavernVariables(script.data);
-        }
+        const activePreset = chatPresetEnabledRef.current
+          ? chatPresetsRef.current.find(
+              (preset) => preset.id === activeChatPresetIdRef.current,
+            )
+          : undefined;
+        const presetScript = activePreset?.tavernScripts.find(
+          (candidate) => candidate.id === scriptId,
+        );
+        if (presetScript) return normalizeTavernVariables(presetScript.data);
+        const activeCard = getRuntimeRoleplayCard();
+        const characterScript = activeCard?.tavernScripts.find(
+          (candidate) => candidate.id === scriptId,
+        );
+        if (characterScript) return normalizeTavernVariables(characterScript.data);
         return {};
       },
       setScriptData: (scriptId, data) => {
@@ -17257,14 +17404,15 @@ export function App() {
           );
           return;
         }
-        if (
-          chatPresetsRef.current.some((preset) =>
-            preset.tavernScripts.some((script) => script.id === scriptId),
-          )
-        ) {
+        const activePreset = chatPresetEnabledRef.current
+          ? chatPresetsRef.current.find(
+              (preset) => preset.id === activeChatPresetIdRef.current,
+            )
+          : undefined;
+        if (activePreset?.tavernScripts.some((script) => script.id === scriptId)) {
           updatePresets((presets) =>
             presets.map((preset) =>
-              preset.tavernScripts.some((script) => script.id === scriptId)
+              preset.id === activePreset.id
                 ? {
                     ...preset,
                     tavernScripts: preset.tavernScripts.map((script) =>
@@ -17279,9 +17427,11 @@ export function App() {
           );
           return;
         }
+        const activeCard = getRuntimeRoleplayCard();
+        if (!activeCard) return;
         updateCards((cards) =>
           cards.map((card) =>
-            card.tavernScripts.some((script) => script.id === scriptId)
+            card.id === activeCard.id && card.tavernScripts.some((script) => script.id === scriptId)
               ? {
                   ...card,
                   tavernScripts: card.tavernScripts.map((script) =>
@@ -17296,12 +17446,7 @@ export function App() {
         );
       },
       getCharacter: () => {
-        const session = chatSessionsRef.current.find(
-          (candidate) => candidate.id === activeChatSessionIdRef.current,
-        );
-        const card = characterCardsRef.current.find(
-          (candidate) => candidate.id === session?.roleplayCharacterCardId,
-        );
+        const card = getRuntimeRoleplayCard();
         if (!card) return null;
         const characterWorldBook = resolveCharacterWorldBook(
           card,
@@ -17346,13 +17491,11 @@ export function App() {
           entries: worldBook.entries,
         });
         if (worldBook.scope === "character") {
-          const session = chatSessionsRef.current.find(
-            (candidate) => candidate.id === activeChatSessionIdRef.current,
-          );
-          if (!session?.roleplayCharacterCardId) return;
+          const activeCard = getRuntimeRoleplayCard();
+          if (!activeCard) return;
           updateCards((cards) =>
             cards.map((card) =>
-              card.id === session.roleplayCharacterCardId
+              card.id === activeCard.id
                 ? {
                     ...card,
                     characterBook: normalized,
@@ -17382,12 +17525,7 @@ export function App() {
         setActiveWorldBookIds(nextActiveIds);
       },
       deleteWorldBook: (identifier) => {
-        const session = chatSessionsRef.current.find(
-          (candidate) => candidate.id === activeChatSessionIdRef.current,
-        );
-        const card = characterCardsRef.current.find(
-          (candidate) => candidate.id === session?.roleplayCharacterCardId,
-        );
+        const card = getRuntimeRoleplayCard();
         if (
           card?.characterBook &&
           (card.characterBook.id === identifier || card.characterBook.name === identifier)
@@ -17431,12 +17569,7 @@ export function App() {
         setActiveWorldBookIds(nextActiveIds);
       },
       getRegexes: () => {
-        const session = chatSessionsRef.current.find(
-          (candidate) => candidate.id === activeChatSessionIdRef.current,
-        );
-        const card = characterCardsRef.current.find(
-          (candidate) => candidate.id === session?.roleplayCharacterCardId,
-        );
+        const card = getRuntimeRoleplayCard();
         const preset = chatPresetEnabledRef.current
           ? chatPresetsRef.current.find(
               (candidate) => candidate.id === activeChatPresetIdRef.current,
@@ -17466,7 +17599,7 @@ export function App() {
         const session = chatSessionsRef.current.find(
           (candidate) => candidate.id === activeChatSessionIdRef.current,
         );
-        if (session?.roleplayCharacterCardId) {
+        if (chatModeRef.current === "roleplay" && session?.roleplayCharacterCardId) {
           const nextCharacterRegexes = normalizeScope("character");
           updateCards((cards) =>
             cards.map((card) =>
@@ -22010,7 +22143,7 @@ export function App() {
       const persona = personas.find((candidate) => candidate.id === personaId);
       return persona ? [persona] : [];
     });
-    const roleplayCard = session?.roleplayCharacterCardId
+    const roleplayCard = chatMode === "roleplay" && session?.roleplayCharacterCardId
       ? characterCards.find((card) => card.id === session.roleplayCharacterCardId) ?? null
       : null;
     const personaContext = [
@@ -30980,6 +31113,43 @@ export function App() {
                     })
                   )}
                 </div>
+                <div className="resource-source-group character-source-group">
+                  <div className="resource-source-heading">
+                    <div>
+                      <strong>角色卡内置世界书</strong>
+                      <span>只在对应角色扮演会话加载</span>
+                    </div>
+                    <em>{characterWorldBookSources.length}</em>
+                  </div>
+                  {characterWorldBookSources.length === 0 ? (
+                    <div className="resource-source-empty">角色卡尚未绑定世界书。</div>
+                  ) : (
+                    <div className="worldbook-list character-worldbook-list">
+                      {characterWorldBookSources.map(({ card, worldBook }) => {
+                        const isActive = scopedRoleplayCard?.id === card.id;
+                        const isEmbedded = card.characterBook?.id === worldBook.id;
+                        return (
+                          <div
+                            className={`worldbook-list-item resource-source-item character-source-item ${
+                              isActive ? "current-source" : ""
+                            }`}
+                            key={`${card.id}:${worldBook.id}`}
+                          >
+                            <span className="resource-source-dot" aria-hidden="true" />
+                            <div>
+                              <strong>{card.name}</strong>
+                              <span>
+                                {worldBook.name} · {worldBook.entries.length} 个条目
+                                {isEmbedded ? " · 内置" : " · 绑定全局"}
+                                {isActive ? " · 当前生效" : " · 未加载"}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               </aside>
 
               {selectedWorldBook ? (
@@ -31370,68 +31540,89 @@ export function App() {
                 {regexImportState.status === "error" && (
                   <div className="provider-status error">{regexImportState.message}</div>
                 )}
-                <div className="regex-script-list">
-                  {regexScriptTargets.length === 0 ? (
+                <div className="regex-script-list resource-source-list">
+                  {regexScriptTargets.length === 0 && (
                     <div className="preset-empty-state">
                       尚未添加正则。可导入酒馆原生 JSON，或新建一条规则。
                     </div>
-                  ) : (
-                    regexScriptTargets.map((target) => {
-                      const presetIsActive =
-                        target.scope === "preset" &&
-                        chatPresetEnabled &&
-                        target.presetId === activeChatPreset?.id;
-                      return (
-                        <div
-                          className={`regex-script-item ${
-                            target.key === selectedRegexTarget?.key ? "selected" : ""
-                          } ${target.script.disabled ? "disabled" : ""}`}
-                          key={target.key}
-                        >
-                          <input
-                            type="checkbox"
-                            aria-label={`启用正则 ${target.script.scriptName}`}
-                            checked={!target.script.disabled}
-                            onChange={(event) =>
-                              updateRegexScriptTarget(target, {
-                                disabled: !event.target.checked,
-                              })
-                            }
-                          />
-                          <button
-                            type="button"
-                            className="regex-script-select"
-                            onClick={() => setSelectedRegexTargetKey(target.key)}
-                          >
-                            <strong>{target.script.scriptName}</strong>
-                            <span>
-                              {target.scope === "global"
-                                ? "全局"
-                                : `预设 · ${target.presetName}${presetIsActive ? " · 当前生效" : ""}`}
-                            </span>
-                          </button>
-                          <div className="regex-script-order-actions">
-                            <button
-                              type="button"
-                              title="上移"
-                              disabled={target.index === 0}
-                              onClick={() => moveRegexScriptTarget(target, -1)}
-                            >
-                              ↑
-                            </button>
-                            <button
-                              type="button"
-                              title="下移"
-                              disabled={target.index === target.total - 1}
-                              onClick={() => moveRegexScriptTarget(target, 1)}
-                            >
-                              ↓
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })
                   )}
+                  {regexScriptGroups.map((group) => (
+                        <section
+                          className={`resource-source-group ${group.scope}-source-group`}
+                          key={group.scope}
+                        >
+                          <div className="resource-source-heading">
+                            <div>
+                              <strong>{group.title}</strong>
+                              <span>{group.description}</span>
+                            </div>
+                            <em>{group.targets.length}</em>
+                          </div>
+                          <div>
+                            {group.targets.map((target) => {
+                              const presetIsActive =
+                                target.scope === "preset" &&
+                                chatPresetEnabled &&
+                                target.presetId === activeChatPreset?.id;
+                              const characterIsActive =
+                                target.scope === "character" &&
+                                target.characterId === scopedRoleplayCard?.id;
+                              const sourceLabel =
+                                target.scope === "global"
+                                  ? "全局"
+                                  : target.scope === "preset"
+                                    ? `预设 · ${target.presetName}${presetIsActive ? " · 当前生效" : " · 未加载"}`
+                                    : `角色卡 · ${target.characterName}${characterIsActive ? " · 当前生效" : " · 未加载"}`;
+                              return (
+                                <div
+                                  className={`regex-script-item ${group.scope}-source-item ${
+                                    target.key === selectedRegexTarget?.key ? "selected" : ""
+                                  } ${target.script.disabled ? "disabled" : ""}`}
+                                  key={target.key}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    aria-label={`启用正则 ${target.script.scriptName}`}
+                                    checked={!target.script.disabled}
+                                    onChange={(event) =>
+                                      updateRegexScriptTarget(target, {
+                                        disabled: !event.target.checked,
+                                      })
+                                    }
+                                  />
+                                  <button
+                                    type="button"
+                                    className="regex-script-select"
+                                    onClick={() => setSelectedRegexTargetKey(target.key)}
+                                  >
+                                    <span className="resource-source-label">{sourceLabel}</span>
+                                    <strong>{target.script.scriptName}</strong>
+                                  </button>
+                                  <div className="regex-script-order-actions">
+                                    <button
+                                      type="button"
+                                      title="上移"
+                                      disabled={target.index === 0}
+                                      onClick={() => moveRegexScriptTarget(target, -1)}
+                                    >
+                                      ↑
+                                    </button>
+                                    <button
+                                      type="button"
+                                      title="下移"
+                                      disabled={target.index === target.total - 1}
+                                      onClick={() => moveRegexScriptTarget(target, 1)}
+                                    >
+                                      ↓
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </section>
+                      ),
+                    )}
                 </div>
               </aside>
 
@@ -31443,7 +31634,9 @@ export function App() {
                       <p>
                         {selectedRegexTarget.scope === "global"
                           ? `全局规则${selectedRegexTarget.script.sourceFileName ? ` · ${selectedRegexTarget.script.sourceFileName}` : ""}`
-                          : `预设规则 · ${selectedRegexTarget.presetName}`}
+                          : selectedRegexTarget.scope === "preset"
+                            ? `预设内置规则 · ${selectedRegexTarget.presetName}`
+                            : `角色卡内置规则 · ${selectedRegexTarget.characterName}`}
                       </p>
                     </div>
                     <button
@@ -31674,7 +31867,10 @@ export function App() {
                 </div>
                 <div className={`tavern-runtime-summary ${tavernRuntimeStatus.state}`}>
                   <span>
-                    全局 {tavernScripts.length} · 角色内置 {characterCards.reduce(
+                    全局 {tavernScripts.length} · 预设内置 {chatPresets.reduce(
+                      (total, preset) => total + preset.tavernScripts.length,
+                      0,
+                    )} · 角色内置 {characterCards.reduce(
                       (total, card) => total + card.tavernScripts.length,
                       0,
                     )}
@@ -31695,68 +31891,88 @@ export function App() {
                 {tavernScriptImportState.status === "error" && (
                   <div className="provider-status error">{tavernScriptImportState.message}</div>
                 )}
-                <div className="tavern-script-list">
-                  {tavernScriptTargets.length === 0 ? (
+                <div className="tavern-script-list resource-source-list">
+                  {tavernScriptTargets.length === 0 && (
                     <div className="preset-empty-state">
                       导入酒馆助手脚本 JSON，或新建一个全局脚本。
                     </div>
-                  ) : (
-                    tavernScriptTargets.map((target) => {
-                      const characterIsActive =
-                        target.scope === "character" &&
-                        target.characterId === scopedRoleplayCard?.id;
-                      return (
-                        <div
-                          className={`tavern-script-item ${
-                            selectedTavernScriptTarget?.key === target.key ? "active" : ""
-                          }`}
-                          key={target.key}
-                        >
-                          <button
-                            type="button"
-                            className="tavern-script-select"
-                            onClick={() => setSelectedTavernScriptKey(target.key)}
-                          >
-                            <strong>{target.script.name || "未命名脚本"}</strong>
-                            <span>
-                              {target.scope === "global"
-                                ? "全局脚本"
-                                : `角色内置 · ${target.characterName}${
-                                    characterIsActive ? " · 当前生效" : ""
-                                  }`}
-                            </span>
-                            <small>
-                              {target.script.enabled ? "已启用" : "已停用"} · {
-                                target.script.runOn === "startup"
-                                  ? "会话启动"
-                                  : target.script.runOn === "message"
-                                    ? "收到消息"
-                                    : "手动运行"
-                              }
-                            </small>
-                          </button>
-                          <div className="tavern-script-order-actions">
-                            <button
-                              type="button"
-                              title="上移"
-                              disabled={target.index === 0}
-                              onClick={() => moveTavernScriptTarget(target, -1)}
-                            >
-                              ↑
-                            </button>
-                            <button
-                              type="button"
-                              title="下移"
-                              disabled={target.index === target.total - 1}
-                              onClick={() => moveTavernScriptTarget(target, 1)}
-                            >
-                              ↓
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })
                   )}
+                  {tavernScriptGroups.map((group) => (
+                        <section
+                          className={`resource-source-group ${group.scope}-source-group`}
+                          key={group.scope}
+                        >
+                          <div className="resource-source-heading">
+                            <div>
+                              <strong>{group.title}</strong>
+                              <span>{group.description}</span>
+                            </div>
+                            <em>{group.targets.length}</em>
+                          </div>
+                          <div>
+                            {group.targets.map((target) => {
+                              const presetIsActive =
+                                target.scope === "preset" &&
+                                chatPresetEnabled &&
+                                target.presetId === activeChatPreset?.id;
+                              const characterIsActive =
+                                target.scope === "character" &&
+                                target.characterId === scopedRoleplayCard?.id;
+                              const sourceLabel =
+                                target.scope === "global"
+                                  ? "全局脚本"
+                                  : target.scope === "preset"
+                                    ? `预设内置 · ${target.presetName}${presetIsActive ? " · 当前生效" : " · 未加载"}`
+                                    : `角色卡内置 · ${target.characterName}${characterIsActive ? " · 当前生效" : " · 未加载"}`;
+                              return (
+                                <div
+                                  className={`tavern-script-item ${group.scope}-source-item ${
+                                    selectedTavernScriptTarget?.key === target.key ? "active" : ""
+                                  }`}
+                                  key={target.key}
+                                >
+                                  <button
+                                    type="button"
+                                    className="tavern-script-select"
+                                    onClick={() => setSelectedTavernScriptKey(target.key)}
+                                  >
+                                    <span className="resource-source-label">{sourceLabel}</span>
+                                    <strong>{target.script.name || "未命名脚本"}</strong>
+                                    <small>
+                                      {target.script.enabled ? "已启用" : "已停用"} · {
+                                        target.script.runOn === "startup"
+                                          ? "会话启动"
+                                          : target.script.runOn === "message"
+                                            ? "收到消息"
+                                            : "手动运行"
+                                      }
+                                    </small>
+                                  </button>
+                                  <div className="tavern-script-order-actions">
+                                    <button
+                                      type="button"
+                                      title="上移"
+                                      disabled={target.index === 0}
+                                      onClick={() => moveTavernScriptTarget(target, -1)}
+                                    >
+                                      ↑
+                                    </button>
+                                    <button
+                                      type="button"
+                                      title="下移"
+                                      disabled={target.index === target.total - 1}
+                                      onClick={() => moveTavernScriptTarget(target, 1)}
+                                    >
+                                      ↓
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </section>
+                      ),
+                    )}
                 </div>
               </aside>
 
@@ -31767,7 +31983,9 @@ export function App() {
                       <span>
                         {selectedTavernScriptTarget.scope === "global"
                           ? "全局酒馆脚本"
-                          : `角色内置脚本 · ${selectedTavernScriptTarget.characterName}`}
+                          : selectedTavernScriptTarget.scope === "preset"
+                            ? `预设内置脚本 · ${selectedTavernScriptTarget.presetName}`
+                            : `角色卡内置脚本 · ${selectedTavernScriptTarget.characterName}`}
                       </span>
                       <h2>{selectedTavernScriptTarget.script.name || "未命名脚本"}</h2>
                     </div>

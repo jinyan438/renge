@@ -2811,6 +2811,90 @@ summary:focus-visible {
   overflow: auto;
 }
 
+.resource-source-group {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.resource-source-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #334155;
+}
+
+.resource-source-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.resource-source-heading strong {
+  font-size: 12px;
+}
+
+.resource-source-heading span,
+.resource-source-empty {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.resource-source-heading em {
+  min-width: 22px;
+  padding: 3px 6px;
+  border-radius: 999px;
+  color: #9a3412;
+  background: #ffedd5;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 750;
+  text-align: center;
+}
+
+.character-worldbook-list {
+  max-height: 260px;
+}
+
+.resource-source-item {
+  grid-template-columns: 10px minmax(0, 1fr);
+  min-height: 54px;
+  border-color: #fed7aa;
+  background: #fffaf5;
+}
+
+.resource-source-item.current-source {
+  border-color: #fb923c;
+  background: #fff1e6;
+}
+
+.resource-source-item > div {
+  min-width: 0;
+}
+
+.resource-source-item strong,
+.resource-source-item span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-source-item span {
+  margin-top: 4px;
+  color: #9a3412;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.resource-source-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f97316;
+}
+
 .worldbook-list-item {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);
@@ -3131,6 +3215,75 @@ summary:focus-visible {
   gap: 7px;
   min-height: 0;
   overflow: auto;
+}
+
+.resource-source-list {
+  display: grid;
+  gap: 12px;
+}
+
+.resource-source-list .resource-source-group {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.resource-source-group.preset-source-group .resource-source-heading em {
+  color: #1d4ed8;
+  background: #dbeafe;
+}
+
+.resource-source-group.character-source-group .resource-source-heading em {
+  color: #9a3412;
+  background: #ffedd5;
+}
+
+.regex-source-item,
+.tavern-source-item {
+  border-left-width: 3px;
+}
+
+.regex-source-item.global-source,
+.tavern-source-item.global-source {
+  border-left-color: #94a3b8;
+}
+
+.regex-source-item.preset-source,
+.tavern-source-item.preset-source {
+  border-left-color: #60a5fa;
+  background: #f8fbff;
+}
+
+.regex-source-item.character-source,
+.tavern-source-item.character-source {
+  border-left-color: #fb923c;
+  background: #fffaf5;
+}
+
+.resource-source-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 4px;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0;
+}
+
+.resource-source-label::before {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+.preset-source-group .resource-source-label {
+  color: #2563eb;
+}
+
+.character-source-group .resource-source-label {
+  color: #ea580c;
 }
 
 .regex-script-item {
