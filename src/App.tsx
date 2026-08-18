@@ -13939,7 +13939,7 @@ export function App() {
   );
   const characterWorldBookSources = useMemo(
     () =>
-      characterCards
+      (scopedRoleplayCard ? [scopedRoleplayCard] : [])
         .map((card) => ({
           card,
           worldBook: resolveCharacterWorldBook(card, worldBooks),
@@ -13948,7 +13948,7 @@ export function App() {
           (source): source is { card: CharacterCard; worldBook: WorldBook } =>
             Boolean(source.worldBook),
         ),
-    [characterCards, worldBooks],
+    [scopedRoleplayCard, worldBooks],
   );
 
   useEffect(() => {
@@ -14071,30 +14071,30 @@ export function App() {
         index,
         total: regexScripts.length,
       })),
-      ...chatPresets.flatMap((preset) =>
-        preset.regexScripts.map((script, index) => ({
-          key: `preset:${preset.id}:${script.id}`,
+      ...(chatPresetEnabled && activeChatPreset
+        ? activeChatPreset.regexScripts.map((script, index) => ({
+          key: `preset:${activeChatPreset.id}:${script.id}`,
           scope: "preset" as const,
           script,
           index,
-          total: preset.regexScripts.length,
-          presetId: preset.id,
-          presetName: preset.name,
-        })),
-      ),
-      ...characterCards.flatMap((card) =>
-        card.regexScripts.map((script, index) => ({
-          key: `character:${card.id}:${script.id}`,
+          total: activeChatPreset.regexScripts.length,
+          presetId: activeChatPreset.id,
+          presetName: activeChatPreset.name,
+        }))
+        : []),
+      ...(scopedRoleplayCard
+        ? scopedRoleplayCard.regexScripts.map((script, index) => ({
+          key: `character:${scopedRoleplayCard.id}:${script.id}`,
           scope: "character" as const,
           script,
           index,
-          total: card.regexScripts.length,
-          characterId: card.id,
-          characterName: card.name,
-        })),
-      ),
+          total: scopedRoleplayCard.regexScripts.length,
+          characterId: scopedRoleplayCard.id,
+          characterName: scopedRoleplayCard.name,
+        }))
+        : []),
     ],
-    [characterCards, chatPresets, regexScripts],
+    [activeChatPreset, chatPresetEnabled, regexScripts, scopedRoleplayCard],
   );
   const selectedRegexTarget = useMemo(
     () =>
@@ -14120,10 +14120,12 @@ export function App() {
           title: "角色卡内置正则",
           description: "仅角色扮演会话绑定该角色卡时加载",
         },
-      ].map((group) => ({
-        ...group,
-        targets: regexScriptTargets.filter((target) => target.scope === group.scope),
-      })),
+      ]
+        .map((group) => ({
+          ...group,
+          targets: regexScriptTargets.filter((target) => target.scope === group.scope),
+        }))
+        .filter((group) => group.targets.length > 0),
     [regexScriptTargets],
   );
   const effectiveRegexScripts = useMemo(
@@ -14317,30 +14319,30 @@ export function App() {
         index,
         total: tavernScripts.length,
       })),
-      ...chatPresets.flatMap((preset) =>
-        preset.tavernScripts.map((script, index) => ({
-          key: `preset:${preset.id}:${script.id}`,
+      ...(chatPresetEnabled && activeChatPreset
+        ? activeChatPreset.tavernScripts.map((script, index) => ({
+          key: `preset:${activeChatPreset.id}:${script.id}`,
           scope: "preset" as const,
           script,
           index,
-          total: preset.tavernScripts.length,
-          presetId: preset.id,
-          presetName: preset.name,
-        })),
-      ),
-      ...characterCards.flatMap((card) =>
-        card.tavernScripts.map((script, index) => ({
-          key: `character:${card.id}:${script.id}`,
+          total: activeChatPreset.tavernScripts.length,
+          presetId: activeChatPreset.id,
+          presetName: activeChatPreset.name,
+        }))
+        : []),
+      ...(scopedRoleplayCard
+        ? scopedRoleplayCard.tavernScripts.map((script, index) => ({
+          key: `character:${scopedRoleplayCard.id}:${script.id}`,
           scope: "character" as const,
           script,
           index,
-          total: card.tavernScripts.length,
-          characterId: card.id,
-          characterName: card.name,
-        })),
-      ),
+          total: scopedRoleplayCard.tavernScripts.length,
+          characterId: scopedRoleplayCard.id,
+          characterName: scopedRoleplayCard.name,
+        }))
+        : []),
     ],
-    [characterCards, chatPresets, tavernScripts],
+    [activeChatPreset, chatPresetEnabled, scopedRoleplayCard, tavernScripts],
   );
   const selectedTavernScriptTarget = useMemo(
     () =>
@@ -14366,10 +14368,12 @@ export function App() {
           title: "角色卡内置脚本",
           description: "仅角色扮演会话绑定该角色卡时加载",
         },
-      ].map((group) => ({
-        ...group,
-        targets: tavernScriptTargets.filter((target) => target.scope === group.scope),
-      })),
+      ]
+        .map((group) => ({
+          ...group,
+          targets: tavernScriptTargets.filter((target) => target.scope === group.scope),
+        }))
+        .filter((group) => group.targets.length > 0),
     [tavernScriptTargets],
   );
 
@@ -31534,7 +31538,7 @@ export function App() {
                     ).length}
                   </strong>
                   <span>
-                    个当前生效 · 全局 {regexScripts.length} · 预设 {chatPresets.reduce((total, preset) => total + preset.regexScripts.length, 0)} · 当前角色私有 {scopedRoleplayCard?.regexScripts.length ?? 0}（不进入全局列表）
+                    个当前生效 · 全局 {regexScripts.length} · 当前预设 {chatPresetEnabled ? activeChatPreset?.regexScripts.length ?? 0 : 0} · 当前角色私有 {scopedRoleplayCard?.regexScripts.length ?? 0}
                   </span>
                 </div>
                 {regexImportState.status === "error" && (
@@ -31867,13 +31871,7 @@ export function App() {
                 </div>
                 <div className={`tavern-runtime-summary ${tavernRuntimeStatus.state}`}>
                   <span>
-                    全局 {tavernScripts.length} · 预设内置 {chatPresets.reduce(
-                      (total, preset) => total + preset.tavernScripts.length,
-                      0,
-                    )} · 角色内置 {characterCards.reduce(
-                      (total, card) => total + card.tavernScripts.length,
-                      0,
-                    )}
+                    全局 {tavernScripts.length} · 当前预设 {chatPresetEnabled ? activeChatPreset?.tavernScripts.length ?? 0 : 0} · 当前角色 {scopedRoleplayCard?.tavernScripts.length ?? 0}
                   </span>
                   <strong>
                     {tavernRuntimeStatus.state === "ready"
