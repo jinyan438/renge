@@ -2850,14 +2850,15 @@ summary:focus-visible {
 }
 
 .resource-source-heading {
-  display: flex;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 4px;
   color: #334155;
 }
 
 .resource-source-heading > div {
+  min-width: 0;
   display: grid;
   gap: 3px;
 }
