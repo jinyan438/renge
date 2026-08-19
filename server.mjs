@@ -12,6 +12,7 @@ import {
   buildResponsesApiRequest,
   normalizeProviderApiType,
 } from "./src/responsesApiUtils.mjs";
+import { createRengePiHost } from "./pi/renge-pi-host.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const distDir = resolve(__dirname, "dist");
@@ -2660,7 +2661,7 @@ async function proxyStream({ url, apiKey, body, response }) {
   }
 }
 
-async function handleApi(request, response, pathname, dataFilePath) {
+async function handleApi(request, response, pathname, dataFilePath, piHost) {
   try {
     if (request.method === "OPTIONS") {
       sendOptions(response);
@@ -2857,6 +2858,22 @@ async function handleApi(request, response, pathname, dataFilePath) {
     }
 
     const body = await readJsonBody(request);
+
+    if (pathname === "/api/pi/chat") {
+      await piHost.handleChat(body, request, response);
+      return;
+    }
+
+    if (pathname === "/api/pi/tool-result") {
+      const result = piHost.handleToolResult(body);
+      sendJson(response, result.status, result.ok ? { ok: true } : { error: result.error });
+      return;
+    }
+
+    if (pathname === "/api/pi/abort") {
+      sendJson(response, 200, await piHost.handleAbort(body));
+      return;
+    }
 
     if (pathname === "/api/skills/import-folder") {
       const skill = await importSkillDirectory(dataFilePath, body.path);
@@ -3380,6 +3397,7 @@ export function startRengeServer(options = {}) {
   const temporaryFilesRoot = options.temporaryFilesRoot
     ? resolve(options.temporaryFilesRoot)
     : "";
+  const piHost = createRengePiHost({ defaultCwd: __dirname });
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     const isHtmlPreviewOrigin = url.hostname.toLowerCase() === "preview.localhost";
@@ -3451,11 +3469,14 @@ export function startRengeServer(options = {}) {
     }
 
     if (url.pathname.startsWith("/api/")) {
-      await handleApi(request, response, url.pathname, dataFilePath);
+      await handleApi(request, response, url.pathname, dataFilePath, piHost);
       return;
     }
 
     await serveStatic(request, response, url.pathname);
+  });
+  server.once("close", () => {
+    void piHost.dispose();
   });
 
   return new Promise((resolveServer, rejectServer) => {
