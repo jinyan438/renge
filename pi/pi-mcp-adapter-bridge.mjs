@@ -21,7 +21,9 @@ function stringMap(value) {
 
 function rawServerEntries(rawConfig) {
   const source = objectRecord(rawConfig);
-  const rawServers = source.mcpServers ?? source.servers ?? source;
+  const rawServers = Array.isArray(rawConfig)
+    ? rawConfig
+    : source.mcpServers ?? source.servers ?? source;
   if (Array.isArray(rawServers)) {
     return rawServers.map((server, index) => {
       const definition = objectRecord(server);

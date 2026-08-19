@@ -85,13 +85,15 @@ test("discovers and calls stdio tools through the adapter server manager", async
       },
     ],
   };
-  const discovered = await discoverPiMcpTools(config);
+  // The HTTP API unwraps `servers` before calling the bridge, so the bridge
+  // must also accept the UI array as its root value.
+  const discovered = await discoverPiMcpTools(config.mcpServers);
   assert.deepEqual(discovered.errors, []);
   assert.equal(discovered.tools.length, 1);
   assert.equal(discovered.tools[0].serverId, "fixture-ui-id");
   assert.equal(discovered.tools[0].function.name, "mcp_fixture_echo");
 
-  const called = await callPiMcpTool(config, "mcp_fixture_echo", { text: "Pi native MCP" });
+  const called = await callPiMcpTool(config.mcpServers, "mcp_fixture_echo", { text: "Pi native MCP" });
   assert.equal(called.result.content[0].text, "Pi native MCP");
 });
 
