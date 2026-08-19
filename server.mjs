@@ -7,7 +7,7 @@ import { homedir, networkInterfaces, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   buildResponsesApiRequest,
   normalizeProviderApiType,
@@ -1383,17 +1383,10 @@ function createServerId(prefix = "skill") {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
-function isMarkdownEntryFile(fileName) {
-  return /^(skill|readme)\.md$/i.test(fileName) || /\.md$/i.test(fileName);
-}
-
 async function findSkillEntryFile(rootPath) {
   const entries = await readdir(rootPath, { withFileTypes: true });
   const files = entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
-  const directMatch =
-    files.find((name) => /^skill\.md$/i.test(name)) ??
-    files.find((name) => /^readme\.md$/i.test(name)) ??
-    files.find((name) => /\.md$/i.test(name));
+  const directMatch = files.find((name) => /^skill\.md$/i.test(name));
 
   if (directMatch) {
     return {
@@ -1407,54 +1400,59 @@ async function findSkillEntryFile(rootPath) {
     if (!entry.isDirectory()) continue;
     if ([".git", "node_modules", "__MACOSX"].includes(entry.name)) continue;
     const childPath = join(rootPath, entry.name);
-    const childEntries = await readdir(childPath, { withFileTypes: true });
-    const childFile = childEntries
-      .filter((childEntry) => childEntry.isFile())
-      .map((childEntry) => childEntry.name)
-      .find(isMarkdownEntryFile);
-    if (childFile) {
-      return {
-        rootPath: childPath,
-        entryFile: childFile,
-        content: await readFile(join(childPath, childFile), "utf8"),
-      };
+    try {
+      return await findSkillEntryFile(childPath);
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "PI_SKILL_ENTRY_NOT_FOUND") throw error;
     }
   }
 
-  throw new Error("没有找到 SKILL.md、README.md 或 Markdown 技能说明文件。");
+  throw new Error("PI_SKILL_ENTRY_NOT_FOUND");
 }
 
-function parseSkillMetadata(content, fallbackName) {
+function parsePiSkillDocument(content) {
   const normalizedContent = String(content ?? "").replace(/\r\n/g, "\n");
-  const lines = normalizedContent.split("\n");
-  const titleLine = lines.find((line) => /^#\s+/.test(line.trim()));
-  const name = (titleLine ? titleLine.replace(/^#\s+/, "") : fallbackName).trim() || fallbackName;
-  const descriptionLines = [];
-  let afterTitle = false;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!afterTitle) {
-      if (titleLine && line === titleLine) afterTitle = true;
-      if (!titleLine && trimmed) afterTitle = true;
-      continue;
-    }
-    if (!trimmed) {
-      if (descriptionLines.length > 0) break;
-      continue;
-    }
-    if (trimmed.startsWith("#")) {
-      if (descriptionLines.length > 0) break;
-      continue;
-    }
-    descriptionLines.push(trimmed);
-    if (descriptionLines.join(" ").length > 220) break;
+  const match = normalizedContent.match(/^\uFEFF?---\n([\s\S]*?)\n---(?:\n|$)/);
+  if (!match) {
+    throw new Error("SKILL.md 缺少 Pi 原生 YAML frontmatter。");
   }
+  let frontmatter;
+  try {
+    frontmatter = parseYaml(match[1]);
+  } catch {
+    throw new Error("SKILL.md 的 Pi 原生 YAML frontmatter 格式无效。");
+  }
+  if (!frontmatter || typeof frontmatter !== "object" || Array.isArray(frontmatter)) {
+    throw new Error("SKILL.md 的 Pi 原生 YAML frontmatter 格式无效。");
+  }
+  return {
+    frontmatter,
+    body: normalizedContent.slice(match[0].length),
+  };
+}
+
+export function parsePiSkillMetadata(content, fallbackName = "skill") {
+  const parsed = parsePiSkillDocument(content);
+  const { frontmatter } = parsed;
+  const name = typeof frontmatter.name === "string" && frontmatter.name.trim()
+    ? frontmatter.name.trim()
+    : String(fallbackName ?? "skill").trim() || "skill";
+  const description = typeof frontmatter.description === "string"
+    ? frontmatter.description.trim()
+    : "";
+  if (!description) throw new Error("SKILL.md 的 Pi 原生 frontmatter 缺少 description。");
 
   return {
     name,
-    description: descriptionLines.join(" ").slice(0, 260),
+    description,
+    frontmatter,
+    body: parsed.body,
   };
+}
+
+function formatPiSkillDocument(frontmatter, body) {
+  const normalizedBody = String(body ?? "").replace(/^\n+/, "");
+  return `---\n${stringifyYaml(frontmatter).trimEnd()}\n---\n\n${normalizedBody}`;
 }
 
 async function importSkillDirectory(dataFilePath, sourcePath) {
@@ -1464,8 +1462,16 @@ async function importSkillDirectory(dataFilePath, sourcePath) {
     throw new Error("导入路径不是文件夹。");
   }
 
-  const found = await findSkillEntryFile(sourceRoot);
-  const metadata = parseSkillMetadata(found.content, basename(found.rootPath));
+  let found;
+  try {
+    found = await findSkillEntryFile(sourceRoot);
+  } catch (error) {
+    if (error instanceof Error && error.message === "PI_SKILL_ENTRY_NOT_FOUND") {
+      throw new Error("没有找到 Pi 原生 SKILL.md。");
+    }
+    throw error;
+  }
+  const metadata = parsePiSkillMetadata(found.content, basename(found.rootPath));
   const id = createServerId("skill");
   const targetPath = join(getSkillsDir(dataFilePath), `${sanitizePathName(metadata.name)}-${id}`);
   await mkdir(dirname(targetPath), { recursive: true });
@@ -1477,6 +1483,13 @@ async function importSkillDirectory(dataFilePath, sourcePath) {
       return !/(^|\/)(\.git|node_modules|dist|build)(\/|$)/.test(normalized);
     },
   });
+  if (typeof metadata.frontmatter.name !== "string" || !metadata.frontmatter.name.trim()) {
+    await writeFile(join(targetPath, found.entryFile), formatPiSkillDocument({
+      ...metadata.frontmatter,
+      name: metadata.name,
+      description: metadata.description,
+    }, metadata.body), "utf8");
+  }
 
   return {
     id,
@@ -1486,6 +1499,8 @@ async function importSkillDirectory(dataFilePath, sourcePath) {
     sourceType: "folder",
     path: targetPath,
     entryFile: found.entryFile,
+    piNativeValid: true,
+    piNativeError: "",
     importedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -1550,8 +1565,16 @@ async function importSkillZip(dataFilePath, body) {
     const extractedDir = join(stagingDir, "extracted");
     await mkdir(extractedDir, { recursive: true });
     await extractZipArchive(zipPath, extractedDir);
-    const found = await findSkillEntryFile(extractedDir);
-    const metadata = parseSkillMetadata(found.content, sanitizePathName(body.name ?? basename(zipPath), "skill"));
+    let found;
+    try {
+      found = await findSkillEntryFile(extractedDir);
+    } catch (error) {
+      if (error instanceof Error && error.message === "PI_SKILL_ENTRY_NOT_FOUND") {
+        throw new Error("ZIP 中没有找到 Pi 原生 SKILL.md。");
+      }
+      throw error;
+    }
+    const metadata = parsePiSkillMetadata(found.content, basename(found.rootPath));
     const targetPath = join(skillsDir, `${sanitizePathName(metadata.name)}-${id}`);
     await cp(found.rootPath, targetPath, {
       recursive: true,
@@ -1561,6 +1584,13 @@ async function importSkillZip(dataFilePath, body) {
         return !/(^|\/)(\.git|node_modules|dist|build|__MACOSX)(\/|$)/.test(normalized);
       },
     });
+    if (typeof metadata.frontmatter.name !== "string" || !metadata.frontmatter.name.trim()) {
+      await writeFile(join(targetPath, found.entryFile), formatPiSkillDocument({
+        ...metadata.frontmatter,
+        name: metadata.name,
+        description: metadata.description,
+      }, metadata.body), "utf8");
+    }
 
     return {
       id,
@@ -1570,6 +1600,8 @@ async function importSkillZip(dataFilePath, body) {
       sourceType: "zip",
       path: targetPath,
       entryFile: found.entryFile,
+      piNativeValid: true,
+      piNativeError: "",
       importedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -1588,9 +1620,67 @@ function normalizeSkillConfig(rawSkill) {
     sourceType: source.sourceType === "zip" ? "zip" : "folder",
     path: String(source.path ?? ""),
     entryFile: String(source.entryFile ?? "SKILL.md"),
+    piNativeValid: source.piNativeValid !== false,
+    piNativeError: String(source.piNativeError ?? ""),
     importedAt: String(source.importedAt ?? new Date().toISOString()),
     updatedAt: String(source.updatedAt ?? new Date().toISOString()),
   };
+}
+
+async function resolveImportedSkillEntry(dataFilePath, skill) {
+  const skillsRoot = await realpath(resolve(getSkillsDir(dataFilePath)));
+  const rootPath = await realpath(resolve(skill.path));
+  const relativeRoot = relative(skillsRoot, rootPath);
+  if (!relativeRoot || relativeRoot.startsWith("..") || isAbsolute(relativeRoot)) {
+    throw new Error("只能访问已导入到 Renge 数据目录的 Skill。");
+  }
+  const entryPath = await realpath(resolve(rootPath, skill.entryFile || "SKILL.md"));
+  const relativeEntry = relative(rootPath, entryPath);
+  if (!relativeEntry || relativeEntry.startsWith("..") || isAbsolute(relativeEntry)) {
+    throw new Error("Skill 入口文件路径无效。");
+  }
+  return entryPath;
+}
+
+async function readPiSkillMetadata(dataFilePath, rawSkill) {
+  const skill = normalizeSkillConfig(rawSkill);
+  const entryPath = await resolveImportedSkillEntry(dataFilePath, skill);
+  const parsed = parsePiSkillMetadata(
+    await readFile(entryPath, "utf8"),
+    basename(dirname(entryPath)),
+  );
+  return {
+    ...skill,
+    name: parsed.name,
+    description: parsed.description,
+    piNativeValid: true,
+    piNativeError: "",
+  };
+}
+
+async function inspectPiSkillMetadata(dataFilePath, rawSkills) {
+  const skills = [];
+  const errors = [];
+  for (const rawSkill of Array.isArray(rawSkills) ? rawSkills : []) {
+    const skill = normalizeSkillConfig(rawSkill);
+    try {
+      skills.push(await readPiSkillMetadata(dataFilePath, skill));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Pi Skill 元数据读取失败。";
+      skills.push({
+        ...skill,
+        enabled: false,
+        piNativeValid: false,
+        piNativeError: message,
+      });
+      errors.push({
+        id: skill.id,
+        name: skill.name,
+        error: message,
+      });
+    }
+  }
+  return { skills, errors };
 }
 
 function buildSkillContextPrompt(skillContexts) {
@@ -1964,6 +2054,38 @@ function getProviderTarget(body) {
   }
 
   return { apiBaseUrl, apiKey, apiType };
+}
+
+async function updatePiSkillMetadata(dataFilePath, rawSkill) {
+  const skill = normalizeSkillConfig(rawSkill);
+  const entryPath = await resolveImportedSkillEntry(dataFilePath, skill);
+  const content = await readFile(entryPath, "utf8");
+  let parsed;
+  try {
+    parsed = parsePiSkillDocument(content);
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("缺少 Pi 原生 YAML frontmatter")) {
+      throw error;
+    }
+    parsed = { frontmatter: {}, body: content };
+  }
+  const name = skill.name.trim() || basename(dirname(entryPath));
+  const description = skill.description.trim();
+  if (!description) throw new Error("Pi Skill 的 description 不能为空。");
+  const updatedAt = new Date().toISOString();
+  await writeFile(entryPath, formatPiSkillDocument({
+    ...parsed.frontmatter,
+    name,
+    description,
+  }, parsed.body), "utf8");
+  return {
+    ...skill,
+    name,
+    description,
+    piNativeValid: true,
+    piNativeError: "",
+    updatedAt,
+  };
 }
 
 const unsafeObjectKeys = new Set(["__proto__", "constructor", "prototype"]);
@@ -2895,6 +3017,17 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
     if (pathname === "/api/skills/import-zip") {
       const skill = await importSkillZip(dataFilePath, body);
       sendJson(response, 200, { skill });
+      return;
+    }
+
+    if (pathname === "/api/skills/update") {
+      const skill = await updatePiSkillMetadata(dataFilePath, body.skill);
+      sendJson(response, 200, { skill });
+      return;
+    }
+
+    if (pathname === "/api/skills/metadata") {
+      sendJson(response, 200, await inspectPiSkillMetadata(dataFilePath, body.skills));
       return;
     }
 

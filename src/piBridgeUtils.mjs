@@ -45,10 +45,20 @@ const EMPTY_USAGE = Object.freeze({
   }),
 });
 
-export function getPiNativeToolNames(workspace) {
-  return workspace?.kind === "electron" && workspace.cwd
-    ? [...PI_NATIVE_TOOL_NAMES]
-    : [];
+export function normalizePiSkillPaths(paths) {
+  if (!Array.isArray(paths)) return [];
+  return Array.from(new Set(paths.map((path) => String(path ?? "").trim()).filter(Boolean)));
+}
+
+export function shouldEnablePiTools(enableTools, skillPaths) {
+  return enableTools !== false || normalizePiSkillPaths(skillPaths).length > 0;
+}
+
+export function getPiNativeToolNames(workspace, options = {}) {
+  if (options.fullToolsEnabled !== false && workspace?.kind === "electron" && workspace.cwd) {
+    return [...PI_NATIVE_TOOL_NAMES];
+  }
+  return options.skillsEnabled === true ? ["read"] : [];
 }
 
 const DEFAULT_PI_COMPACTION = Object.freeze({

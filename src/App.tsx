@@ -822,6 +822,8 @@ type SkillProfile = {
   sourceType: "folder" | "zip";
   path: string;
   entryFile: string;
+  piNativeValid: boolean;
+  piNativeError: string;
   importedAt: string;
   updatedAt: string;
 };
@@ -1434,8 +1436,8 @@ const LLM_CONTEXT_SOURCE_META: Record<
   { label: string; description: string }
 > = {
   skills: {
-    label: "Skills 提示词",
-    description: "注入所有已启用 Skill 的完整说明。",
+    label: "Pi 原生 Skills",
+    description: "由 Pi 匹配已启用 Skill，并通过原生 read 按需读取完整说明。",
   },
   workspaceTools: {
     label: "工作区文件工具",
@@ -1811,6 +1813,8 @@ function normalizeSkillProfile(rawSkill: Partial<SkillProfile> & Record<string, 
     entryFile: typeof rawSkill.entryFile === "string" && rawSkill.entryFile.trim()
       ? rawSkill.entryFile
       : "SKILL.md",
+    piNativeValid: rawSkill.piNativeValid !== false,
+    piNativeError: typeof rawSkill.piNativeError === "string" ? rawSkill.piNativeError : "",
     importedAt: typeof rawSkill.importedAt === "string" ? rawSkill.importedAt : timestamp,
     updatedAt: typeof rawSkill.updatedAt === "string" ? rawSkill.updatedAt : timestamp,
   };
@@ -13520,11 +13524,39 @@ export function App() {
             normalizeMcpServerConfig(server as Partial<McpServerConfig> & Record<string, unknown>, `MCP Server ${index + 1}`),
           )
         : loadMcpServers();
-      const nextSkills = Array.isArray(persistentData?.skills)
+      let nextSkills = Array.isArray(persistentData?.skills)
         ? persistentData.skills.map((skill) =>
             normalizeSkillProfile(skill as Partial<SkillProfile> & Record<string, unknown>),
           )
         : loadSkills();
+      if (nextSkills.length > 0) {
+        try {
+          const skillMetadataResponse = await fetch("/api/skills/metadata", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ skills: nextSkills }),
+          });
+          const skillMetadataPayload = (await skillMetadataResponse.json()) as {
+            skills?: SkillProfile[];
+            errors?: Array<{ name?: string; error?: string }>;
+          };
+          if (skillMetadataResponse.ok && Array.isArray(skillMetadataPayload.skills)) {
+            nextSkills = skillMetadataPayload.skills.map((skill) =>
+              normalizeSkillProfile(skill as Partial<SkillProfile> & Record<string, unknown>),
+            );
+          }
+          if (skillMetadataPayload.errors?.length) {
+            setSkillStatus({
+              status: "error",
+              message: skillMetadataPayload.errors
+                .map((item) => `${item.name ?? "Skill"}：${item.error ?? "元数据无效"}`)
+                .join("；"),
+            });
+          }
+        } catch (error) {
+          console.warn("Pi Skill 元数据同步失败", error);
+        }
+      }
       const nextExtensions = normalizeInstalledExtensions(
         Array.isArray(persistentData?.extensions)
           ? persistentData.extensions
@@ -14120,6 +14152,10 @@ export function App() {
   const enabledSkills = useMemo(
     () => skills.filter((skill) => skill.enabled),
     [skills],
+  );
+  const enabledPiSkillPaths = useMemo(
+    () => enabledSkills.map((skill) => `${skill.path}/${skill.entryFile}`),
+    [enabledSkills],
   );
   const activeSystemPrompt = useMemo(
     () =>
@@ -19122,16 +19158,39 @@ export function App() {
     setSkillStatus({ status: "idle", message: "技能配置已更新，下一次发送消息时生效。" });
   };
 
+  const savePiSkillMetadata = async (skill: SkillProfile) => {
+    setSkillStatus({ status: "loading", message: "正在保存 Pi Skill 元数据..." });
+    try {
+      const response = await fetch("/api/skills/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skill }),
+      });
+      const payload = (await response.json()) as { skill?: SkillProfile; error?: string };
+      if (!response.ok || payload.error || !payload.skill) {
+        throw new Error(payload.error || `Pi Skill 保存失败：${response.status}`);
+      }
+      const savedSkill = normalizeSkillProfile(
+        payload.skill as Partial<SkillProfile> & Record<string, unknown>,
+      );
+      setSkills((current) =>
+        current.map((item) => item.id === savedSkill.id ? savedSkill : item),
+      );
+      setSkillStatus({ status: "success", message: "已同步保存到 SKILL.md frontmatter。" });
+    } catch (error) {
+      setSkillStatus({
+        status: "error",
+        message: error instanceof Error ? error.message : "Pi Skill 元数据保存失败。",
+      });
+    }
+  };
+
   const applyImportedSkill = (skill: SkillProfile) => {
     const normalizedSkill = normalizeSkillProfile(skill as Partial<SkillProfile> & Record<string, unknown>);
     setSkills((current) => {
-      const existingNames = new Set(current.map((item) => item.name));
       const nextSkill = {
         ...normalizedSkill,
         id: normalizedSkill.id || crypto.randomUUID(),
-        name: existingNames.has(normalizedSkill.name)
-          ? `${normalizedSkill.name} ${current.length + 1}`
-          : normalizedSkill.name,
         enabled: true,
         updatedAt: new Date().toISOString(),
       };
@@ -23168,9 +23227,10 @@ export function App() {
         .map((promptProfile) => promptProfile.content.trim())
         .filter(Boolean)
         .join("\n\n");
-      const skillSystemPrompt = requestContextSettings.skills
+      const skillSystemPrompt = requestContextSettings.skills && isImageGenerationRequest
         ? await loadEnabledSkillPrompt()
         : "";
+      const requestPiSkillPaths = requestContextSettings.skills ? enabledPiSkillPaths : [];
       throwIfChatAborted(abortSignal);
       const userProfileSystemPrompt =
         requestSender.kind === "user" &&
@@ -23584,9 +23644,7 @@ export function App() {
                   ) ?? activeChatPreset?.maxContext ?? 128_000,
                   piCompaction: piCompactionSettings,
                   piSessionScope: "main",
-                  piSkillPaths: requestContextSettings.skills
-                    ? enabledSkills.map((skill) => `${skill.path}/${skill.entryFile}`)
-                    : [],
+                  piSkillPaths: requestPiSkillPaths,
                 }
               : {}),
             ...(usePiKernel && options.includeTools && requestContextSettings.workspaceTools &&
@@ -24014,9 +24072,7 @@ export function App() {
               ) ?? activeChatPreset?.maxContext ?? 128_000,
               piCompaction: piCompactionSettings,
               piSessionScope: `sub-${subAgent.id}`,
-              piSkillPaths: requestContextSettings.skills
-                ? enabledSkills.map((skill) => `${skill.path}/${skill.entryFile}`)
-                : [],
+              piSkillPaths: requestPiSkillPaths,
               ...(requestContextSettings.workspaceTools && activeLocalToolsEnabled &&
               activeFileToolsWorkspaceHandle?.kind === "electron"
                 ? {
@@ -26216,9 +26272,10 @@ export function App() {
         .map((promptProfile) => promptProfile.content.trim())
         .filter(Boolean)
         .join("\n\n");
-      const skillSystemPrompt = activeLlmContextSettings.skills
+      const skillSystemPrompt = activeLlmContextSettings.skills && isImageGenerationRequest
         ? await loadEnabledSkillPrompt()
         : "";
+      const requestPiSkillPaths = activeLlmContextSettings.skills ? enabledPiSkillPaths : [];
       throwIfChatAborted(abortSignal);
       const userProfileSystemPrompt =
         currentChatSender.kind === "user" &&
@@ -26524,9 +26581,7 @@ export function App() {
                   ) ?? activeChatPreset?.maxContext ?? 128_000,
                   piCompaction: piCompactionSettings,
                   piSessionScope: "main",
-                  piSkillPaths: activeLlmContextSettings.skills
-                    ? enabledSkills.map((skill) => `${skill.path}/${skill.entryFile}`)
-                    : [],
+                  piSkillPaths: requestPiSkillPaths,
                 }
               : {}),
             ...(usePiKernel && options.includeTools && activeLlmContextSettings.workspaceTools &&
@@ -33493,10 +33548,14 @@ export function App() {
                       }`}
                       key={skill.id}
                     >
-                      <label className="prompt-select-check" title={skill.enabled ? "禁用" : "启用"}>
+                      <label
+                        className="prompt-select-check"
+                        title={!skill.piNativeValid ? "请先保存并转换为 Pi 原生格式" : skill.enabled ? "禁用" : "启用"}
+                      >
                         <input
                           type="checkbox"
                           checked={skill.enabled}
+                          disabled={!skill.piNativeValid}
                           onChange={(event) => updateSkill(skill.id, { enabled: event.target.checked })}
                         />
                       </label>
@@ -33517,17 +33576,29 @@ export function App() {
                 <div className="section-heading compact">
                   <div>
                     <h2>Skill 设置</h2>
-                    <p>启用后，聊天发送时会自动读取技能说明并注入给 AI 进行匹配和使用。</p>
+                    <p>保留 Renge 管理界面；运行时由 Pi 原生匹配，并通过 read 按需读取完整说明。</p>
                   </div>
-                  <button
-                    type="button"
-                    className="icon-button danger"
-                    title="移除技能"
-                    disabled={!activeSkill}
-                    onClick={deleteSkill}
-                  >
-                    <Trash2 size={16} />
-                  </button>
+                  <div className="mcp-editor-actions">
+                    <button
+                      type="button"
+                      className="ghost-action"
+                      title="保存 Pi Skill 元数据"
+                      disabled={!activeSkill || skillStatus.status === "loading"}
+                      onClick={() => activeSkill && void savePiSkillMetadata(activeSkill)}
+                    >
+                      <Save size={16} />
+                      保存
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button danger"
+                      title="移除技能"
+                      disabled={!activeSkill}
+                      onClick={deleteSkill}
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="provider-form skill-form">
@@ -33557,6 +33628,7 @@ export function App() {
                         <input
                           type="checkbox"
                           checked={activeSkill.enabled}
+                          disabled={!activeSkill.piNativeValid}
                           onChange={(event) =>
                             updateSkill(activeSkill.id, { enabled: event.target.checked })
                           }
@@ -33589,9 +33661,7 @@ export function App() {
                         <input
                           value={activeSkill.entryFile}
                           placeholder="SKILL.md"
-                          onChange={(event) =>
-                            updateSkill(activeSkill.id, { entryFile: event.target.value })
-                          }
+                          readOnly
                         />
                       </label>
 
@@ -33602,9 +33672,17 @@ export function App() {
 
                       <div className="skill-meta-row">
                         <span>{activeSkill.sourceType === "zip" ? "ZIP 导入" : "文件夹导入"}</span>
-                        <span>{activeSkill.enabled ? "已启用" : "已禁用"}</span>
+                        <span>{activeSkill.piNativeValid
+                          ? activeSkill.enabled ? "已启用" : "已禁用"
+                          : "待转换为 Pi 原生"}</span>
                         <span>{new Date(activeSkill.importedAt).toLocaleString("zh-CN")}</span>
                       </div>
+                      {!activeSkill.piNativeValid && (
+                        <p className="provider-status error">
+                          {activeSkill.piNativeError || "此 Skill 不是有效的 Pi 原生格式。"}
+                          {" 确认名称和描述后点击保存即可转换。"}
+                        </p>
+                      )}
                     </>
                   )}
 
@@ -33614,7 +33692,7 @@ export function App() {
 
                   {skills.length > 0 && (
                     <p className="provider-status idle">
-                      当前启用 {enabledSkills.length} 个 Skill；发送消息时会自动读取并交给 AI 判断是否使用。
+                      当前启用 {enabledSkills.length} 个 Pi Skill；发送消息时只注入名称、描述和路径，匹配后再按需读取完整内容。
                     </p>
                   )}
                 </div>

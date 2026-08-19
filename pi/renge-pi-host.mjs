@@ -17,8 +17,10 @@ import {
   getPiNativeToolNames,
   getPiSamplingParams,
   normalizePiCompactionConfig,
+  normalizePiSkillPaths,
   normalizePiProviderConfig,
   serializePiToolResult,
+  shouldEnablePiTools,
 } from "../src/piBridgeUtils.mjs";
 
 const TOOL_RESULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -232,12 +234,18 @@ export function createRengePiHost({
       requestedSessionId || (sessionScope === "main" ? ownerSessionId : `${ownerSessionId}-${sessionScope}`),
     );
     const compaction = normalizePiCompactionConfig(body?.piCompaction);
-    const toolsEnabled = body?.enableTools !== false;
+    const additionalSkillPaths = normalizePiSkillPaths(body?.piSkillPaths)
+      .map((skillPath) => resolve(skillPath));
+    const requestedToolsEnabled = body?.enableTools !== false;
+    const toolsEnabled = shouldEnablePiTools(body?.enableTools, additionalSkillPaths);
     const requestedToolDefinitions = Array.isArray(requestBody.tools)
       ? requestBody.tools
       : [];
     const nativeTools = toolsEnabled
-      ? getPiNativeToolNames(workspace)
+      ? getPiNativeToolNames(workspace, {
+          fullToolsEnabled: requestedToolsEnabled,
+          skillsEnabled: additionalSkillPaths.length > 0,
+        })
       : [];
     let customToolNames = new Set();
 
@@ -315,12 +323,6 @@ export function createRengePiHost({
         apiType: provider.apiType,
         modelId: provider.modelId,
       });
-      const additionalSkillPaths = Array.isArray(body?.piSkillPaths)
-        ? body.piSkillPaths
-            .map((skillPath) => String(skillPath ?? "").trim())
-            .filter(Boolean)
-            .map((skillPath) => resolve(skillPath))
-        : [];
       const settingsManager = SettingsManager.create(cwd, agentDir);
       settingsManager.applyOverrides({ compaction });
       const resourceLoader = new DefaultResourceLoader({
@@ -339,7 +341,7 @@ export function createRengePiHost({
         .getExtensions()
         .extensions
         .flatMap((extension) => Array.from(extension.tools.keys()));
-      const customDefinitionsForRun = toolsEnabled ? filterPiCustomToolDefinitions(
+      const customDefinitionsForRun = requestedToolsEnabled ? filterPiCustomToolDefinitions(
         requestedToolDefinitions,
         workspace,
         new Set([...nativeTools, ...extensionToolNames]),
@@ -365,7 +367,11 @@ export function createRengePiHost({
         model,
         thinkingLevel,
         tools: toolsEnabled
-          ? [...nativeTools, ...extensionToolNames, ...customTools.map((tool) => tool.name)]
+          ? [
+              ...nativeTools,
+              ...(requestedToolsEnabled ? extensionToolNames : []),
+              ...customTools.map((tool) => tool.name),
+            ]
           : [],
         customTools,
         resourceLoader,

@@ -5,7 +5,9 @@ import {
   filterPiCustomToolDefinitions,
   getPiNativeToolNames,
   normalizePiCompactionConfig,
+  normalizePiSkillPaths,
   normalizePiProviderConfig,
+  shouldEnablePiTools,
 } from "../src/piBridgeUtils.mjs";
 
 const tool = (name) => ({
@@ -40,6 +42,24 @@ test("non-Node workspaces retain Renge file tools", () => {
   const tools = [tool("local_read_file"), tool("phone_tap")];
   assert.deepEqual(getPiNativeToolNames({ kind: "android" }), []);
   assert.deepEqual(filterPiCustomToolDefinitions(tools, { kind: "android" }), tools);
+});
+
+test("Pi Skills keep the native read tool available without a project workspace", () => {
+  const skillPaths = normalizePiSkillPaths([
+    " E:/skills/example/SKILL.md ",
+    "E:/skills/example/SKILL.md",
+    "",
+  ]);
+
+  assert.deepEqual(skillPaths, ["E:/skills/example/SKILL.md"]);
+  assert.equal(shouldEnablePiTools(false, skillPaths), true);
+  assert.deepEqual(getPiNativeToolNames(null, { skillsEnabled: true }), ["read"]);
+  assert.deepEqual(getPiNativeToolNames(
+    { kind: "electron", cwd: "E:/project" },
+    { fullToolsEnabled: false, skillsEnabled: true },
+  ), ["read"]);
+  assert.equal(shouldEnablePiTools(false, []), false);
+  assert.deepEqual(getPiNativeToolNames(null), []);
 });
 
 test("Pi extension tools take precedence over same-named Renge tools", () => {

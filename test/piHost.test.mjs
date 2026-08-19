@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -248,6 +248,90 @@ test("Pi Host executes Pi native read directly for an Electron workspace", async
     await close(renge.server);
     await close(upstream);
     await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Pi Host exposes native Skill metadata and read without other tools", async () => {
+  const upstreamRequests = [];
+  const upstream = createServer(async (request, response) => {
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    upstreamRequests.push(JSON.parse(raw));
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    sendChunk(response, {
+      id: "native-skill-1",
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: "test-model",
+      choices: [{
+        index: 0,
+        delta: { role: "assistant", content: "Skill ready" },
+        finish_reason: null,
+      }],
+    });
+    sendChunk(response, {
+      id: "native-skill-1",
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: "test-model",
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    });
+    response.end("data: [DONE]\n\n");
+  });
+
+  const root = await mkdtemp(join(tmpdir(), "renge-pi-native-skill-test-"));
+  const skillDir = join(root, "skills", "native-test");
+  await mkdir(skillDir, { recursive: true });
+  const skillPath = join(skillDir, "SKILL.md");
+  await writeFile(skillPath, [
+    "---",
+    "name: native-test-skill",
+    "description: Use this native Skill for the Pi host integration test.",
+    "---",
+    "",
+    "# Native test",
+  ].join("\n"), "utf8");
+  const upstreamPort = await listen(upstream);
+  const renge = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir: join(root, "data") });
+  try {
+    const response = await fetch(`${renge.url}/api/pi/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runId: "native-skill-run",
+        apiBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+        apiKey: "test-key",
+        apiType: "chat-completions",
+        enableTools: false,
+        piSkillPaths: [skillPath],
+        request: {
+          model: "test-model",
+          messages: [{ role: "user", content: "Use the matching skill" }],
+          stream: true,
+        },
+      }),
+    });
+    assert.equal(response.status, 200);
+    const streamText = await response.text();
+    assert.match(streamText, /Skill ready/);
+    assert.equal(upstreamRequests.length, 1);
+    const upstreamRequest = upstreamRequests[0];
+    assert.deepEqual(
+      upstreamRequest.tools.map((tool) => tool.function.name),
+      ["read"],
+    );
+    const systemPrompt = upstreamRequest.messages
+      .filter((message) => message.role === "system")
+      .map((message) => message.content)
+      .join("\n");
+    assert.match(systemPrompt, /<available_skills>/);
+    assert.match(systemPrompt, /native-test-skill/);
+    assert.match(systemPrompt, /Use the read tool to load a skill/);
+    assert.doesNotMatch(systemPrompt, /# Native test/);
+  } finally {
+    await close(renge.server);
+    await close(upstream);
+    await rm(root, { recursive: true, force: true });
   }
 });
 
