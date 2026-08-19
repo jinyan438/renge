@@ -10372,28 +10372,81 @@ function createStreamingWordWriter(
   };
 }
 
+const CONTEXT_METER_REFRESH_INTERVAL_MS = 160;
+
+function useThrottledValue<T>(value: T, intervalMs: number): T {
+  const latestValueRef = useRef(value);
+  const lastUpdatedAtRef = useRef(0);
+  const timerRef = useRef<number | null>(null);
+  const [throttledValue, setThrottledValue] = useState(value);
+
+  latestValueRef.current = value;
+
+  useEffect(() => {
+    const now = performance.now();
+    const elapsed = now - lastUpdatedAtRef.current;
+    if (lastUpdatedAtRef.current === 0 || elapsed >= intervalMs) {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+      lastUpdatedAtRef.current = now;
+      setThrottledValue(value);
+      return;
+    }
+    if (timerRef.current !== null) return;
+
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null;
+      lastUpdatedAtRef.current = performance.now();
+      setThrottledValue(latestValueRef.current);
+    }, intervalMs - elapsed);
+  }, [intervalMs, value]);
+
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  return throttledValue;
+}
+
 function createStreamingAssistantMessage(
   setChatMessages: Dispatch<SetStateAction<ChatMessage[]>>,
   signal?: AbortSignal,
   sender?: ChatSenderIdentity,
 ) {
   const messageId = crypto.randomUUID();
+  const updateMessage = (
+    current: ChatMessage[],
+    updater: (message: ChatMessage) => ChatMessage,
+  ) => {
+    const lastIndex = current.length - 1;
+    if (lastIndex >= 0 && current[lastIndex]?.id === messageId) {
+      const next = current.slice();
+      next[lastIndex] = updater(current[lastIndex]);
+      return next;
+    }
+    const index = current.findIndex((message) => message.id === messageId);
+    if (index < 0) return current;
+    const next = current.slice();
+    next[index] = updater(current[index]);
+    return next;
+  };
   const appendContent = (delta: string) => {
     setChatMessages((current) =>
-      current.map((message) =>
-        message.id === messageId
-          ? { ...message, content: `${message.content}${delta}` }
-          : message,
-      ),
+      updateMessage(current, (message) => ({
+        ...message,
+        content: `${message.content}${delta}`,
+      })),
     );
   };
   const appendReasoning = (delta: string) => {
     setChatMessages((current) =>
-      current.map((message) =>
-        message.id === messageId
-          ? { ...message, reasoning: `${message.reasoning ?? ""}${delta}` }
-          : message,
-      ),
+      updateMessage(current, (message) => ({
+        ...message,
+        reasoning: `${message.reasoning ?? ""}${delta}`,
+      })),
     );
   };
   const contentWriter = createStreamingWordWriter(appendContent, signal);
@@ -12001,6 +12054,10 @@ export function App() {
   } | null>(null);
   const [chatChoiceDrafts, setChatChoiceDrafts] = useState<Record<string, string>>({});
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const contextMeterChatMessages = useThrottledValue(
+    chatMessages,
+    CONTEXT_METER_REFRESH_INTERVAL_MS,
+  );
   const [chatSessions, setChatSessions] = useState<ChatSession[]>(loadChatSessions);
   const [activeChatSessionId, setActiveChatSessionId] = useState("");
   const [appDataLoaded, setAppDataLoaded] = useState(false);
@@ -21333,7 +21390,7 @@ export function App() {
     const sendImageAttachmentsToProvider = meterProvider
       ? canProviderReceiveImageUrl(meterProvider, meterModelId)
       : false;
-    const baseMessages = chatMessages.map((message) =>
+    const baseMessages = contextMeterChatMessages.map((message) =>
       buildChatMessageForApi(message, personas, userProfile, meterPersona, {
         sendImageAttachmentsToProvider,
         hasImageRecognitionMcp: false,
@@ -21341,7 +21398,7 @@ export function App() {
         reasoningReplayProvider: meterProvider,
       }),
     );
-    const meterHistory = chatMessages.map((message) => ({
+    const meterHistory = contextMeterChatMessages.map((message) => ({
       role: message.role,
       content: message.content,
     }));
@@ -21379,7 +21436,7 @@ export function App() {
         )
       : "";
     const chatSenderContextPrompt = buildChatSenderContextPrompt(
-      chatMessages,
+      contextMeterChatMessages,
       personas,
       meterPersona,
     );
@@ -21482,7 +21539,9 @@ export function App() {
       contextRuntimeUsageByKey[
         getContextRuntimeUsageKey(activeChatSession?.id ?? activeChatSessionId, meterModelId)
       ];
-    const currentChatMessageSignatures = chatMessages.map(getChatMessageContextSignature);
+    const currentChatMessageSignatures = contextMeterChatMessages.map(
+      getChatMessageContextSignature,
+    );
     const runtimeUsageMatchesCurrentHistory = Boolean(
       runtimeUsage &&
         runtimeUsage.compressionEnabled === contextCompressionSettings.enabled &&
@@ -21491,13 +21550,13 @@ export function App() {
         runtimeUsage.chatMessageSignatures.every(
           (signature, index) =>
             index === runtimeUsage.mutableChatMessageIndex
-              ? chatMessages[index]?.id === runtimeUsage.mutableChatMessageId
+              ? contextMeterChatMessages[index]?.id === runtimeUsage.mutableChatMessageId
               : signature === currentChatMessageSignatures[index],
         ),
     );
     const trackedChatMessageCount = runtimeUsage?.chatMessageSignatures.length ?? 0;
     const appendedMessageCount = runtimeUsageMatchesCurrentHistory
-      ? chatMessages.length - trackedChatMessageCount
+      ? contextMeterChatMessages.length - trackedChatMessageCount
       : 0;
     const appendedMessages = runtimeUsageMatchesCurrentHistory
       ? baseMessages.slice(trackedChatMessageCount)
@@ -21508,7 +21567,7 @@ export function App() {
         : 0;
     const mutableChatMessage =
       runtimeUsageMatchesCurrentHistory && runtimeUsage?.mutableChatMessageIndex !== undefined
-        ? chatMessages[runtimeUsage.mutableChatMessageIndex]
+        ? contextMeterChatMessages[runtimeUsage.mutableChatMessageIndex]
         : undefined;
     const mutableMessageDeltaTokens = mutableChatMessage
       ? Math.max(
@@ -21562,13 +21621,13 @@ export function App() {
     activeWorldBookIds,
     appDataLoaded,
     chatChoiceToolsEnabled,
-    chatMessages,
     chatMode,
     chatPersona,
     chatPresetEnabled,
     chatProvider,
     chatSessions,
     configuredMultiAgentPersonas,
+    contextMeterChatMessages,
     contextCompressionSettings,
     contextRuntimeUsageByKey,
     currentChatSender.kind,
