@@ -19,14 +19,39 @@ function stringMap(value) {
   );
 }
 
+function rawServerEntries(rawConfig) {
+  const source = objectRecord(rawConfig);
+  const rawServers = source.mcpServers ?? source.servers ?? source;
+  if (Array.isArray(rawServers)) {
+    return rawServers.map((server, index) => {
+      const definition = objectRecord(server);
+      const name = String(definition.name ?? `server_${index + 1}`).trim() || `server_${index + 1}`;
+      return [name, definition];
+    });
+  }
+  return Object.entries(objectRecord(rawServers))
+    .filter(([name]) => name !== "settings" && name !== "imports" && name !== "$schema")
+    .map(([name, server]) => [name, objectRecord(server)]);
+}
+
+function serverIdMap(rawConfig) {
+  return new Map(rawServerEntries(rawConfig).map(([name, server]) => [
+    name,
+    String(server.id ?? name).trim() || name,
+  ]));
+}
+
 function normalizeServer(raw, fallbackName = "mcp") {
   const source = objectRecord(raw);
   const url = String(source.url ?? source.baseUrl ?? "").trim();
   const command = String(source.command ?? "").trim();
+  const socket = String(source.socket ?? "").trim();
+  const declaredTransport = String(source.transport ?? source.type ?? "").trim().toLowerCase();
   const normalized = {
     ...source,
     ...(command ? { command } : {}),
     ...(url ? { url } : {}),
+    ...(socket ? { socket } : {}),
     ...(Array.isArray(source.args) ? { args: source.args.map(String) } : {}),
     ...(source.env !== undefined ? { env: stringMap(source.env) } : {}),
     ...(source.headers !== undefined ? { headers: stringMap(source.headers) } : {}),
@@ -38,6 +63,29 @@ function normalizeServer(raw, fallbackName = "mcp") {
   delete normalized.type;
   delete normalized.baseUrl;
   delete normalized.updatedAt;
+  if (!command) delete normalized.command;
+  if (!url) delete normalized.url;
+  if (!socket) delete normalized.socket;
+
+  // Renge keeps both transport form fields in UI state. Pi treats a present
+  // `url` as an HTTP server even when it is empty, so only pass the transport
+  // selected by the user to the adapter.
+  if (declaredTransport === "stdio") {
+    delete normalized.url;
+    delete normalized.socket;
+    delete normalized.headers;
+  } else if (
+    declaredTransport === "http" ||
+    declaredTransport === "sse" ||
+    declaredTransport === "streamablehttp" ||
+    declaredTransport === "streamable_http"
+  ) {
+    delete normalized.command;
+    delete normalized.args;
+    delete normalized.cwd;
+    delete normalized.env;
+    delete normalized.socket;
+  }
   if (source.enabled === false || source.disabled === true) normalized.disabled = true;
   else delete normalized.disabled;
   if (!normalized.command && !normalized.url && !normalized.socket) {
@@ -48,19 +96,9 @@ function normalizeServer(raw, fallbackName = "mcp") {
 
 export function normalizePiMcpConfig(rawConfig) {
   const source = objectRecord(rawConfig);
-  const rawServers = source.mcpServers ?? source.servers ?? source;
   const mcpServers = {};
-  if (Array.isArray(rawServers)) {
-    rawServers.forEach((server, index) => {
-      const sourceServer = objectRecord(server);
-      const name = String(sourceServer.name ?? `server_${index + 1}`).trim() || `server_${index + 1}`;
-      mcpServers[name] = normalizeServer(sourceServer, name).definition;
-    });
-  } else {
-    for (const [name, server] of Object.entries(objectRecord(rawServers))) {
-      if (name === "settings" || name === "imports" || name === "$schema") continue;
-      mcpServers[name] = normalizeServer(server, name).definition;
-    }
+  for (const [name, server] of rawServerEntries(rawConfig)) {
+    mcpServers[name] = normalizeServer(server, name).definition;
   }
   const settings = objectRecord(source.settings);
   return {
@@ -88,7 +126,7 @@ export async function createPiMcpAdapter(config) {
   return module.createMcpAdapter({ config: normalizePiMcpConfig(config) });
 }
 
-function toToolDefinition(serverName, tool) {
+function toToolDefinition(serverName, serverId, tool) {
   const originalName = String(tool?.name ?? "").trim();
   if (!originalName) return null;
   return {
@@ -100,7 +138,7 @@ function toToolDefinition(serverName, tool) {
         ? tool.inputSchema
         : { type: "object", properties: {} },
     },
-    serverId: serverName,
+    serverId,
     serverName,
     originalName,
   };
@@ -108,6 +146,7 @@ function toToolDefinition(serverName, tool) {
 
 export async function discoverPiMcpTools(rawConfig, { cwd = process.cwd(), signal } = {}) {
   const config = normalizePiMcpConfig(rawConfig);
+  const serverIds = serverIdMap(rawConfig);
   const { McpServerManager } = await loadManagerModule();
   const manager = new McpServerManager(cwd);
   const tools = [];
@@ -118,11 +157,15 @@ export async function discoverPiMcpTools(rawConfig, { cwd = process.cwd(), signa
       try {
         const connection = await manager.connect(serverName, definition, signal);
         for (const tool of connection.tools ?? []) {
-          const normalized = toToolDefinition(serverName, tool);
+          const normalized = toToolDefinition(serverName, serverIds.get(serverName) ?? serverName, tool);
           if (normalized) tools.push(normalized);
         }
       } catch (error) {
-        errors.push({ serverId: serverName, serverName, error: error instanceof Error ? error.message : String(error) });
+        errors.push({
+          serverId: serverIds.get(serverName) ?? serverName,
+          serverName,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
     return { tools, errors };

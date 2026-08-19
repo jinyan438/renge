@@ -42,22 +42,146 @@ test("normalizes Renge MCP servers without dropping Pi adapter fields", () => {
   });
 });
 
-test("discovers and calls stdio tools through the adapter server manager", async () => {
-  const config = {
+test("removes inactive UI transport fields before loading the Pi adapter", () => {
+  const config = normalizePiMcpConfig({
+    mcpServers: [{
+      id: "ui-server-id",
+      name: "stdio-fixture",
+      enabled: true,
+      transport: "stdio",
+      command: process.execPath,
+      args: ["server.mjs"],
+      cwd: process.cwd(),
+      env: {},
+      url: "",
+      headers: {},
+    }],
+  });
+
+  assert.deepEqual(config, {
     mcpServers: {
-      fixture: {
+      "stdio-fixture": {
         command: process.execPath,
-        args: [join(process.cwd(), "test", "fixtures", "mcp-stdio-server.mjs")],
+        args: ["server.mjs"],
+        cwd: process.cwd(),
+        env: {},
       },
     },
+  });
+});
+
+test("discovers and calls stdio tools through the adapter server manager", async () => {
+  const config = {
+    mcpServers: [
+      {
+        id: "fixture-ui-id",
+        name: "fixture",
+        enabled: true,
+        transport: "stdio",
+        command: process.execPath,
+        args: [join(process.cwd(), "test", "fixtures", "mcp-stdio-server.mjs")],
+        url: "",
+        headers: {},
+      },
+    ],
   };
   const discovered = await discoverPiMcpTools(config);
   assert.deepEqual(discovered.errors, []);
   assert.equal(discovered.tools.length, 1);
+  assert.equal(discovered.tools[0].serverId, "fixture-ui-id");
   assert.equal(discovered.tools[0].function.name, "mcp_fixture_echo");
 
   const called = await callPiMcpTool(config, "mcp_fixture_echo", { text: "Pi native MCP" });
   assert.equal(called.result.content[0].text, "Pi native MCP");
+});
+
+test("discovers tools through a Windows batch stdio entrypoint", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const config = {
+    mcpServers: [{
+      id: "batch-ui-id",
+      name: "batch-fixture",
+      enabled: true,
+      transport: "stdio",
+      command: join(process.cwd(), "test", "fixtures", "mcp-stdio-server.bat"),
+      args: ["--client"],
+      url: "",
+      headers: {},
+    }],
+  };
+
+  const discovered = await discoverPiMcpTools(config);
+  assert.deepEqual(discovered.errors, []);
+  assert.equal(discovered.tools.length, 1);
+  assert.equal(discovered.tools[0].serverId, "batch-ui-id");
+  assert.equal(discovered.tools[0].function.name, "mcp_batch-fixture_echo");
+});
+
+test("connects a UI-shaped stdio server through Pi's native mcp tool", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "renge-pi-native-mcp-"));
+  let extension;
+  const context = {
+    cwd: process.cwd(),
+    hasUI: false,
+    signal: undefined,
+    model: undefined,
+    modelRegistry: undefined,
+  };
+  try {
+    const factory = await createPiMcpAdapter({
+      mcpServers: [{
+        id: "native-ui-id",
+        name: "native-fixture",
+        enabled: true,
+        transport: "stdio",
+        command: process.execPath,
+        args: [join(process.cwd(), "test", "fixtures", "mcp-stdio-server.mjs")],
+        url: "",
+        headers: {},
+        lifecycle: "lazy",
+      }],
+    });
+    const settingsManager = SettingsManager.create(process.cwd(), agentDir);
+    const resourceLoader = new DefaultResourceLoader({
+      cwd: process.cwd(),
+      agentDir,
+      settingsManager,
+      extensionFactories: [factory],
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+    });
+
+    await resourceLoader.reload();
+    extension = resourceLoader.getExtensions().extensions[0];
+    await extension.handlers.get("session_start")[0]({}, context);
+    const mcpTool = extension.tools.get("mcp").definition;
+    const connected = await mcpTool.execute(
+      "connect-call",
+      { connect: "native-fixture" },
+      undefined,
+      undefined,
+      context,
+    );
+    assert.equal(connected.details.count, 1);
+    assert.deepEqual(connected.details.tools, ["native-fixture_echo"]);
+
+    const called = await mcpTool.execute(
+      "tool-call",
+      { tool: "native-fixture_echo", args: { text: "Pi native gateway" } },
+      undefined,
+      undefined,
+      context,
+    );
+    assert.equal(called.content[0].text, "Pi native gateway");
+  } finally {
+    if (extension) {
+      await extension.handlers.get("session_shutdown")[0]({}, context);
+    }
+    await rm(agentDir, { recursive: true, force: true });
+  }
 });
 
 test("loads pi-mcp-adapter as a native Pi extension", async () => {

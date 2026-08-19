@@ -16,7 +16,6 @@ import { createRengePiHost } from "./pi/renge-pi-host.mjs";
 import {
   callPiMcpTool,
   discoverPiMcpTools,
-  normalizePiMcpConfig,
 } from "./pi/pi-mcp-adapter-bridge.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -344,11 +343,11 @@ function shortHash(value) {
 }
 
 async function listMcpTools(rawServers) {
-  return discoverPiMcpTools(normalizePiMcpConfig(rawServers), { cwd: process.cwd() });
+  return discoverPiMcpTools(rawServers, { cwd: process.cwd() });
 }
 
 async function callMcpTool(rawServers, toolName, args) {
-  return callPiMcpTool(normalizePiMcpConfig(rawServers), toolName, args, { cwd: process.cwd() });
+  return callPiMcpTool(rawServers, toolName, args, { cwd: process.cwd() });
 }
 
 function getDefaultDataDir() {
