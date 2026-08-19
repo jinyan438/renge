@@ -233,11 +233,13 @@ import {
   getFirstReasoningText,
   getReasoningTextFromValue,
   hasAssistantTimelinePayload,
+  isLocalQwen38Provider,
   isLocalProviderEndpoint,
   mergeReasoningStreamChunk,
   normalizeProviderReasoningEffort,
   providerRequiresReasoningContentReplay,
   sanitizeProviderAssistantMessageForReplay,
+  shouldUseResponsesApiForLocalQwen,
   shouldRetryReasoningOnlyToolCompletion,
   splitSseFrames,
   type ProviderReasoningEffort,
@@ -1495,9 +1497,21 @@ function stampPersona(persona: AgentPersona): AgentPersona {
   return { ...persona, updatedAt: new Date().toISOString() };
 }
 
-function getProviderReasoningEffortLabel(effort: ProviderReasoningEffort) {
+function getProviderReasoningEffortOptions(provider?: ModelProviderChannel) {
+  if (provider && isLocalQwen38Provider(provider) && provider.reasoningEffort !== "high") {
+    return providerReasoningEffortOptions.filter((option) => option.value !== "high");
+  }
+  return providerReasoningEffortOptions;
+}
+
+function getProviderReasoningEffortLabel(
+  effort: ProviderReasoningEffort,
+  provider?: ModelProviderChannel,
+) {
+  const effectiveEffort =
+    provider && isLocalQwen38Provider(provider) && effort === "high" ? "xhigh" : effort;
   return (
-    providerReasoningEffortOptions.find((option) => option.value === effort)?.label ?? "中"
+    providerReasoningEffortOptions.find((option) => option.value === effectiveEffort)?.label ?? "中"
   );
 }
 
@@ -9540,7 +9554,11 @@ function buildProviderApiTarget(provider: ModelProviderChannel) {
   return {
     apiBaseUrl: trimTrailingSlash(provider.apiBaseUrl),
     apiKey: provider.apiKey,
-    apiType: provider.apiType,
+    // LM Studio's Chat Completions endpoint currently ignores per-request
+    // reasoning_effort for Qwen3.8; its Responses endpoint applies it.
+    apiType: shouldUseResponsesApiForLocalQwen(provider)
+      ? "responses"
+      : provider.apiType,
   };
 }
 
@@ -18546,7 +18564,7 @@ export function App() {
   const selectedModelValue = getEffectiveProviderModelId(chatProvider);
   const selectedModelOption = modelOptions.find((option) => option.value === selectedModelValue);
   const selectedReasoningEffortLabel = chatProvider
-    ? getProviderReasoningEffortLabel(chatProvider.reasoningEffort)
+    ? getProviderReasoningEffortLabel(chatProvider.reasoningEffort, chatProvider)
     : "中";
   const contextCompressionModelOptions = useMemo(
     () =>
@@ -25428,7 +25446,11 @@ export function App() {
       );
       const requestApiType: ProviderApiType = hasCustomApi
         ? "chat-completions"
-        : chatProvider?.apiType ?? "chat-completions";
+        : chatProvider
+          ? shouldUseResponsesApiForLocalQwen(chatProvider)
+            ? "responses"
+            : chatProvider.apiType
+          : "chat-completions";
       const requestMessages = await prepareContextCompressedMessages({
         messages: substituteUserNicknameInApiMessages(apiMessages, userProfile.nickname),
         provider: {
@@ -30368,7 +30390,7 @@ export function App() {
                         getEffectiveProviderModelId(provider) || "未设置模型",
                         provider.apiType === "responses" ? "Responses" : "Chat Completions",
                         provider.reasoningEnabled
-                          ? `思考${getProviderReasoningEffortLabel(provider.reasoningEffort)}`
+                          ? `思考${getProviderReasoningEffortLabel(provider.reasoningEffort, provider)}`
                           : "",
                       ]
                         .filter(Boolean)
@@ -30559,7 +30581,7 @@ export function App() {
                           })
                         }
                       >
-                        {providerReasoningEffortOptions.map((option) => (
+                        {getProviderReasoningEffortOptions(activeProvider).map((option) => (
                           <option key={option.value} value={option.value}>
                             {option.label}
                           </option>
@@ -34953,7 +34975,7 @@ export function App() {
                                   </button>
                                 )
                               ) : (
-                                providerReasoningEffortOptions.map((option) => (
+                                getProviderReasoningEffortOptions(chatProvider).map((option) => (
                                   <button
                                     type="button"
                                     className={

@@ -82,6 +82,15 @@ export function isLocalProviderEndpoint(provider?: ReasoningProviderConfig) {
   return isLocalApiBaseUrl(provider?.apiBaseUrl);
 }
 
+export function isLocalQwen38Provider(provider?: ReasoningProviderConfig) {
+  const modelId = normalizeProviderText(provider?.modelId);
+  return isLocalApiBaseUrl(provider?.apiBaseUrl) && isQwen38Model(modelId);
+}
+
+export function shouldUseResponsesApiForLocalQwen(provider?: ReasoningProviderConfig) {
+  return provider?.reasoningEnabled === true && isLocalQwen38Provider(provider);
+}
+
 function getModelSlug(modelId: string) {
   return modelId.split("/").pop() ?? modelId;
 }
@@ -106,6 +115,10 @@ function isDeepSeekV4Model(modelId: string) {
   );
 }
 
+function isQwen38Model(modelId: string) {
+  return /(?:^|[/_-])qwen[-_.]?3[._-]?8(?:$|[-_.:/])/.test(modelId);
+}
+
 function isGlm52Model(modelId: string) {
   return /(?:^|[/_-])glm[-_.]?5[-_.]?2(?:$|[-_.:/])/.test(modelId);
 }
@@ -116,6 +129,7 @@ function mapReasoningEffort(
   effort: ProviderReasoningEffort,
 ) {
   const modelId = normalizeProviderText(provider.modelId);
+  if (isQwen38Model(modelId)) return effort === "high" ? "xhigh" : effort;
   if (
     isDeepSeekV4Model(modelId) &&
     (format === "deepseek" || format === "openrouter" || format === "opencode")

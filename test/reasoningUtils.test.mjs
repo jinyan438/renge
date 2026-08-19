@@ -8,9 +8,11 @@ import {
   buildReasoningOnlyToolRetryPrompt,
   getFirstReasoningText,
   hasAssistantTimelinePayload,
+  isLocalQwen38Provider,
   isLocalProviderEndpoint,
   mergeReasoningStreamChunk,
   sanitizeProviderAssistantMessageForReplay,
+  shouldUseResponsesApiForLocalQwen,
   shouldRetryReasoningOnlyToolCompletion,
   splitSseFrames,
 } from "../src/reasoningUtils.ts";
@@ -22,6 +24,62 @@ const deepSeekV4Provider = {
   reasoningEnabled: true,
   reasoningEffort: "high",
 };
+
+const localQwen38Provider = {
+  name: "LM Studio",
+  apiBaseUrl: "http://127.0.0.1:1234/v1",
+  modelId: "Qwen3.8-27B-Uncensored-GGUF",
+  reasoningEnabled: true,
+  reasoningEffort: "medium",
+};
+
+test("routes local Qwen3.8 reasoning through Responses and preserves supported levels", () => {
+  assert.equal(isLocalQwen38Provider(localQwen38Provider), true);
+  assert.equal(shouldUseResponsesApiForLocalQwen(localQwen38Provider), true);
+  assert.equal(
+    shouldUseResponsesApiForLocalQwen({
+      ...localQwen38Provider,
+      reasoningEnabled: false,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldUseResponsesApiForLocalQwen({
+      ...localQwen38Provider,
+      apiBaseUrl: "https://api.example.com/v1",
+    }),
+    false,
+  );
+
+  assert.equal(
+    buildProviderReasoningRequest({
+      ...localQwen38Provider,
+      reasoningEffort: "low",
+    }).reasoning_effort,
+    "low",
+  );
+  assert.equal(
+    buildProviderReasoningRequest({
+      ...localQwen38Provider,
+      reasoningEffort: "medium",
+    }).reasoning_effort,
+    "medium",
+  );
+  assert.equal(
+    buildProviderReasoningRequest({
+      ...localQwen38Provider,
+      reasoningEffort: "high",
+    }).reasoning_effort,
+    "xhigh",
+  );
+  assert.equal(
+    buildProviderReasoningRequest({
+      ...localQwen38Provider,
+      reasoningEffort: "xhigh",
+    }).reasoning_effort,
+    "xhigh",
+  );
+});
 
 test("builds the Liyuan-compatible DeepSeek V4 reasoning request", () => {
   assert.deepEqual(
