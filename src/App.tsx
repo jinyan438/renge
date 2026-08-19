@@ -18807,6 +18807,11 @@ export function App() {
     { ...contextCompressionSettings, enabled: true },
     selectedModelValue,
   );
+  const piCompactionSettings = {
+    enabled: contextCompressionSettings.enabled,
+    reserveTokens: 16_384,
+    keepRecentTokens: 20_000,
+  };
   const editedLlmContextSettings = llmContextSettings[llmContextSettingsMode];
   const enabledLlmContextSourceCount = LLM_CONTEXT_SOURCES.filter(
     (source) => editedLlmContextSettings[source],
@@ -23548,7 +23553,11 @@ export function App() {
             ...(usePiKernel
               ? {
                   enableTools: options.includeTools,
-                  contextWindow: selectedModelContextLimit ?? activeChatPreset?.maxContext ?? 128_000,
+                  contextWindow: resolveContextCompressionLimit(
+                    { ...contextCompressionSettings, enabled: true },
+                    requestModelId,
+                  ) ?? activeChatPreset?.maxContext ?? 128_000,
+                  piCompaction: piCompactionSettings,
                   piSessionScope: "main",
                   piSkillPaths: requestContextSettings.skills
                     ? enabledSkills.map((skill) => `${skill.path}/${skill.entryFile}`)
@@ -23963,7 +23972,11 @@ export function App() {
               ...buildProviderApiTarget(subAgentProvider),
               runId: subPiRunId,
               enableTools: subAgentToolDefinitions.length > 0,
-              contextWindow: selectedModelContextLimit ?? activeChatPreset?.maxContext ?? 128_000,
+              contextWindow: resolveContextCompressionLimit(
+                { ...contextCompressionSettings, enabled: true },
+                subAgentModelId,
+              ) ?? activeChatPreset?.maxContext ?? 128_000,
+              piCompaction: piCompactionSettings,
               piSessionScope: `sub-${subAgent.id}`,
               piSkillPaths: requestContextSettings.skills
                 ? enabledSkills.map((skill) => `${skill.path}/${skill.entryFile}`)
@@ -26436,7 +26449,11 @@ export function App() {
             ...(usePiKernel
               ? {
                   enableTools: options.includeTools,
-                  contextWindow: selectedModelContextLimit ?? activeChatPreset?.maxContext ?? 128_000,
+                  contextWindow: resolveContextCompressionLimit(
+                    { ...contextCompressionSettings, enabled: true },
+                    requestModelId,
+                  ) ?? activeChatPreset?.maxContext ?? 128_000,
+                  piCompaction: piCompactionSettings,
                   piSessionScope: "main",
                   piSkillPaths: activeLlmContextSettings.skills
                     ? enabledSkills.map((skill) => `${skill.path}/${skill.entryFile}`)
@@ -30615,10 +30632,10 @@ export function App() {
               </article>
               <article className="llm-setting-card context-compression-card">
                 <div className="llm-setting-copy">
-                  <h3>自动上下文压缩</h3>
+                  <h3>Pi 原生上下文压缩</h3>
                   <p>
-                    请求接近模型上限时，优先将工具输出、日志和冗余机器文本压缩 90% 以上，再摘要较早对话。
-                    源代码默认原样保留，压缩过程不会改写聊天记录。
+                    普通聊天和代码任务由 Pi 会话内核监控上下文；接近模型上限时，Pi 会原生摘要较早历史，
+                    保留最近上下文并继续当前任务。图片生成等非 Pi 请求仍使用兼容压缩路径。
                   </p>
                 </div>
                 <label className="tool-toggle llm-feature-toggle">
@@ -30635,7 +30652,7 @@ export function App() {
                       contextSummaryCacheRef.current.clear();
                     }}
                   />
-                  <span>开启上下文压缩</span>
+                  <span>开启 Pi 原生压缩</span>
                 </label>
                 <div
                   className={`llm-setting-status ${
@@ -30647,11 +30664,11 @@ export function App() {
                   </strong>
                   <span>
                     {!contextCompressionSettings.enabled
-                      ? "所有请求仍发送完整上下文。"
+                      ? "Pi 自动压缩已关闭；请求仍由 Pi 内核运行，但不会主动压缩会话。"
                       : selectedModelValue && selectedModelContextLimit
-                        ? `当前模型 ${selectedModelValue} 的上限为 ${selectedModelContextLimit.toLocaleString()} Token；达到安全阈值后自动压缩。`
+                        ? `当前模型 ${selectedModelValue} 的上限为 ${selectedModelContextLimit.toLocaleString()} Token；Pi 将按原生阈值自动压缩。`
                         : selectedModelValue
-                          ? `当前模型 ${selectedModelValue} 尚未配置上限，因此不会自动压缩。`
+                          ? `当前模型 ${selectedModelValue} 尚未单独配置，将使用预设或默认上下文上限。`
                           : "请先配置模型 ID 和上下文上限。"}
                   </span>
                 </div>
@@ -30661,32 +30678,17 @@ export function App() {
                   }`}
                 >
                   <div>
-                    <strong>AST 代码剪枝</strong>
+                    <strong>Pi 原生保留策略</strong>
                     <span>
-                      可选。使用语法树保留声明、类型和函数签名，仅剪除 JavaScript、TypeScript、JSX、TSX
-                      的函数体；其他语言继续原样保留。
+                      压缩时预留 16,384 Token 输出空间，并保留最近约 20,000 Token 上下文；摘要和会话续接均由
+                      Pi 内核完成。
                     </span>
                   </div>
-                  <label className="tool-toggle llm-feature-toggle">
-                    <input
-                      type="checkbox"
-                      disabled={!contextCompressionSettings.enabled}
-                      checked={contextCompressionSettings.astPruningEnabled}
-                      onChange={(event) => {
-                        setContextCompressionSettings((current) => ({
-                          ...current,
-                          astPruningEnabled: event.target.checked,
-                        }));
-                        contextSummaryCacheRef.current.clear();
-                      }}
-                    />
-                    <span>开启 AST 剪枝</span>
-                  </label>
                 </div>
                 <div className="context-compression-limits">
                   <div className="context-compression-limits-heading">
                     <div>
-                      <strong>模型上下文上限</strong>
+                      <strong>Pi 模型上下文上限</strong>
                       <span>
                         按模型 ID 精确匹配（忽略大小写），已配置 {configuredContextCompressionLimits.length} 项。
                       </span>
@@ -30775,8 +30777,8 @@ export function App() {
                     </div>
                   )}
                   <p className="context-compression-note">
-                    Token 数为兼容不同供应商的安全估算；系统会预留输出空间，并在约 90% 输入预算处开始压缩。
-                    代码保护优先级高于工具输出压缩；包含源码的工具结果不会被文本摘要破坏。
+                    这里的上限会作为 Pi 模型的 contextWindow。Pi 根据上下文用量、16,384 Token 输出预留和
+                    20,000 Token 最近历史保留量决定压缩时机；压缩结果写入 Pi 会话树，不会改写 Renge 聊天记录。
                   </p>
                 </div>
               </article>

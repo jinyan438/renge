@@ -51,6 +51,32 @@ export function getPiNativeToolNames(workspace) {
     : [];
 }
 
+const DEFAULT_PI_COMPACTION = Object.freeze({
+  enabled: true,
+  reserveTokens: 16_384,
+  keepRecentTokens: 20_000,
+});
+
+function normalizePositiveInteger(value, fallback) {
+  const parsed = Math.floor(Number(value));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function normalizePiCompactionConfig(value) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  return {
+    enabled: source.enabled === undefined ? DEFAULT_PI_COMPACTION.enabled : source.enabled === true,
+    reserveTokens: normalizePositiveInteger(
+      source.reserveTokens ?? source.reserve_tokens,
+      DEFAULT_PI_COMPACTION.reserveTokens,
+    ),
+    keepRecentTokens: normalizePositiveInteger(
+      source.keepRecentTokens ?? source.keep_recent_tokens,
+      DEFAULT_PI_COMPACTION.keepRecentTokens,
+    ),
+  };
+}
+
 export function filterPiCustomToolDefinitions(tools, workspace, reservedNames = new Set()) {
   const source = Array.isArray(tools) ? tools : [];
   return source.filter((tool) => {

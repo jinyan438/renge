@@ -4,6 +4,7 @@ import {
   convertOpenAiMessagesToPi,
   filterPiCustomToolDefinitions,
   getPiNativeToolNames,
+  normalizePiCompactionConfig,
   normalizePiProviderConfig,
 } from "../src/piBridgeUtils.mjs";
 
@@ -50,6 +51,23 @@ test("Pi extension tools take precedence over same-named Renge tools", () => {
     ).map((entry) => entry.function.name),
     ["phone_tap"],
   );
+});
+
+test("Pi compaction settings use native defaults and honor Renge UI overrides", () => {
+  assert.deepEqual(normalizePiCompactionConfig(), {
+    enabled: true,
+    reserveTokens: 16_384,
+    keepRecentTokens: 20_000,
+  });
+  assert.deepEqual(normalizePiCompactionConfig({
+    enabled: false,
+    reserveTokens: 8_192,
+    keep_recent_tokens: 12_000,
+  }), {
+    enabled: false,
+    reserveTokens: 8_192,
+    keepRecentTokens: 12_000,
+  });
 });
 
 test("OpenAI history converts to Pi transcript without duplicating the last user prompt", () => {

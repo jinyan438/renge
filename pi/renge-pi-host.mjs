@@ -16,6 +16,7 @@ import {
   filterPiCustomToolDefinitions,
   getPiNativeToolNames,
   getPiSamplingParams,
+  normalizePiCompactionConfig,
   normalizePiProviderConfig,
   serializePiToolResult,
 } from "../src/piBridgeUtils.mjs";
@@ -230,6 +231,7 @@ export function createRengePiHost({
     const piSessionId = normalizeSessionId(
       requestedSessionId || (sessionScope === "main" ? ownerSessionId : `${ownerSessionId}-${sessionScope}`),
     );
+    const compaction = normalizePiCompactionConfig(body?.piCompaction);
     const toolsEnabled = body?.enableTools !== false;
     const requestedToolDefinitions = Array.isArray(requestBody.tools)
       ? requestBody.tools
@@ -259,7 +261,7 @@ export function createRengePiHost({
       sessionId: piSessionId,
       kernel: "@earendil-works/pi-coding-agent@0.84.2",
       kernelMode: "full",
-      compaction: "pi",
+      compaction: { engine: "pi", ...compaction },
       nativeTools,
     }));
 
@@ -320,6 +322,7 @@ export function createRengePiHost({
             .map((skillPath) => resolve(skillPath))
         : [];
       const settingsManager = SettingsManager.create(cwd, agentDir);
+      settingsManager.applyOverrides({ compaction });
       const resourceLoader = new DefaultResourceLoader({
         cwd,
         agentDir,

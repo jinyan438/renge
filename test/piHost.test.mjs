@@ -88,6 +88,11 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
         apiBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
         apiKey: "test-key",
         apiType: "chat-completions",
+        piCompaction: {
+          enabled: true,
+          reserveTokens: 8_192,
+          keepRecentTokens: 12_000,
+        },
         request: {
           model: "test-model",
           messages: [
@@ -136,7 +141,12 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
     }
     assert.equal(bridged, true);
     assert.equal(runStart?.kernelMode, "full");
-    assert.equal(runStart?.compaction, "pi");
+    assert.deepEqual(runStart?.compaction, {
+      engine: "pi",
+      enabled: true,
+      reserveTokens: 8_192,
+      keepRecentTokens: 12_000,
+    });
     assert.equal(output, "Pi completed");
     assert.equal(upstreamRequests.length, 2);
     assert.equal(
