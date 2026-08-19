@@ -293,7 +293,10 @@ export function createRengePiHost({
       providerUsers.set(providerId, (providerUsers.get(providerId) ?? 0) + 1);
       const samplingParams = getPiSamplingParams(requestBody);
       const requestedMaxTokens = Number(
-        requestBody.max_tokens ?? requestBody.max_completion_tokens ?? 16384,
+        requestBody.max_tokens ??
+          requestBody.max_completion_tokens ??
+          requestBody.max_output_tokens ??
+          16384,
       );
       modelRuntime.registerProvider(providerId, {
         name: "Renge OpenAI Compatible",

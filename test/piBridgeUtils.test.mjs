@@ -4,6 +4,7 @@ import {
   convertOpenAiMessagesToPi,
   filterPiCustomToolDefinitions,
   getPiNativeToolNames,
+  getPiSamplingParams,
   normalizePiCompactionConfig,
   normalizePiSkillPaths,
   normalizePiProviderConfig,
@@ -13,6 +14,23 @@ import {
 const tool = (name) => ({
   type: "function",
   function: { name, description: name, parameters: { type: "object", properties: {} } },
+});
+
+test("Pi sampling params leave token-limit field selection to the provider adapter", () => {
+  assert.deepEqual(getPiSamplingParams({
+    model: "test-model",
+    messages: [],
+    max_tokens: 4_096,
+    max_completion_tokens: 8_192,
+    max_output_tokens: 16_384,
+    temperature: 0.7,
+    top_p: 0.9,
+    top_k: 40,
+  }), {
+    temperature: 0.7,
+    top_p: 0.9,
+    top_k: 40,
+  });
 });
 
 test("Electron workspaces use all Pi native coding tools and remove Renge duplicates", () => {

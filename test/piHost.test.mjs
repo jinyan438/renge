@@ -100,6 +100,7 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
             { role: "user", content: "Read the page" },
           ],
           tools: [toolDefinition("browser_read_page")],
+          max_tokens: 4_096,
           stream: true,
         },
       }),
@@ -149,6 +150,10 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
     });
     assert.equal(output, "Pi completed");
     assert.equal(upstreamRequests.length, 2);
+    for (const upstreamRequest of upstreamRequests) {
+      assert.equal(upstreamRequest.max_tokens, undefined);
+      assert.equal(upstreamRequest.max_completion_tokens, 4_096);
+    }
     assert.equal(
       upstreamRequests[1].messages.some((message) => message.role === "tool"),
       true,

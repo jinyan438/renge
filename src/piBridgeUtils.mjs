@@ -238,6 +238,11 @@ export function getPiSamplingParams(request) {
     "tool_choice",
     "stream",
     "n",
+    // Pi owns the output-token limit through model.maxTokens and emits the
+    // single field required by the selected provider compatibility profile.
+    "max_tokens",
+    "max_completion_tokens",
+    "max_output_tokens",
   ]);
   return Object.fromEntries(
     Object.entries(request).filter(([key, value]) => !omitted.has(key) && value !== undefined),
