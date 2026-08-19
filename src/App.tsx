@@ -224,6 +224,7 @@ import {
   waitForToolProgressPaint,
   type ChatToolProgressBlock,
 } from "./chatToolProgressUtils";
+import { createPiStreamingTimeline } from "./piStreamingTimeline";
 import {
   buildProviderReasoningDisableRequest,
   buildProviderReasoningReplay,
@@ -10456,8 +10457,8 @@ function createStreamingAssistantMessage(
   setChatMessages: Dispatch<SetStateAction<ChatMessage[]>>,
   signal?: AbortSignal,
   sender?: ChatSenderIdentity,
+  messageId: string = crypto.randomUUID(),
 ) {
-  const messageId = crypto.randomUUID();
   const updateMessage = (
     current: ChatMessage[],
     updater: (message: ChatMessage) => ChatMessage,
@@ -10769,6 +10770,26 @@ function piToolCallFromEvent(event: PiStreamEvent): ChatToolCall {
       arguments: JSON.stringify(event.arguments ?? {}),
     },
   };
+}
+
+function createPiStreamingAssistantTimeline(
+  setChatMessages: Dispatch<SetStateAction<ChatMessage[]>>,
+  signal?: AbortSignal,
+  sender?: ChatSenderIdentity,
+  initialMessageId?: string,
+  onSegmentStarted?: (messageId: string) => void,
+) {
+  return createPiStreamingTimeline({
+    initialMessageId,
+    onSegmentStarted,
+    createSegment: (messageId) =>
+      createStreamingAssistantMessage(
+        setChatMessages,
+        signal,
+        sender,
+        messageId,
+      ),
+  });
 }
 
 function formatPiNativeToolAction(event: PiStreamEvent) {
@@ -23059,6 +23080,7 @@ export function App() {
     const abortSignal = abortController.signal;
     let assistantMessageId = "";
     let streamingAssistantInserted = false;
+    let piTimelineHasMultipleTextSegments = false;
 
     try {
       const generationPrompt =
@@ -23411,6 +23433,7 @@ export function App() {
         toolChoice?: "auto";
         onDelta?: (delta: string) => void;
         onReasoningDelta?: (delta: string) => void;
+        beforePiToolMessage?: () => void;
       }) => {
         throwIfChatAborted(abortSignal);
         const usePiKernel = !isImageGenerationRequest;
@@ -23442,6 +23465,7 @@ export function App() {
             return;
           }
           if (event.type === "tool_start") {
+            options.beforePiToolMessage?.();
             appendAssistantTimelineMessage(
               commitChatMessages,
               formatPiNativeToolAction(event),
@@ -23479,6 +23503,7 @@ export function App() {
           const silentControl = isSilentChatControlTool(toolCall.function.name);
           const isDelegationTool = toolCall.function.name === "multi_agent_delegate_task";
           if (!silentControl) {
+            options.beforePiToolMessage?.();
             appendAssistantTimelineMessage(
               commitChatMessages,
               formatToolActionMessage(
@@ -23889,6 +23914,15 @@ export function App() {
             kernel: "pi",
           });
           const subPiRunId = crypto.randomUUID();
+          const subAgentSender: ChatSenderIdentity = {
+            kind: "persona",
+            personaId: subAgent.id,
+          };
+          const subStreamingTimeline = createPiStreamingAssistantTimeline(
+            commitChatMessages,
+            abortSignal,
+            subAgentSender,
+          );
           const handleSubAgentPiEvent = async (event: PiStreamEvent) => {
             const runtimeStatus = formatPiRuntimeStatus(event);
             if (runtimeStatus) {
@@ -23896,12 +23930,13 @@ export function App() {
               return;
             }
             if (event.type === "tool_start") {
+              subStreamingTimeline.beforeTool();
               appendAssistantTimelineMessage(
                 commitChatMessages,
                 formatPiNativeToolAction(event),
                 [],
                 "",
-                { kind: "persona", personaId: subAgent.id },
+                subAgentSender,
               );
               await waitForToolProgressPaint();
               return;
@@ -23912,7 +23947,7 @@ export function App() {
                 formatPiNativeToolResult(event),
                 [],
                 "",
-                { kind: "persona", personaId: subAgent.id },
+                subAgentSender,
               );
               return;
             }
@@ -23920,6 +23955,7 @@ export function App() {
             const subToolCall = piToolCallFromEvent(event);
             const silentControl = isSilentChatControlTool(subToolCall.function.name);
             if (!silentControl) {
+              subStreamingTimeline.beforeTool();
               appendAssistantTimelineMessage(
                 commitChatMessages,
                 formatToolActionMessage(
@@ -23929,7 +23965,7 @@ export function App() {
                 ),
                 [],
                 "",
-                { kind: "persona", personaId: subAgent.id },
+                subAgentSender,
               );
               await waitForToolProgressPaint();
             }
@@ -23946,7 +23982,7 @@ export function App() {
                   formatToolResultMessage(subToolCall, result),
                   getToolResultAttachments(result),
                   "",
-                  { kind: "persona", personaId: subAgent.id },
+                  subAgentSender,
                 );
               }
               await submitPiToolResult(event, result, null, abortSignal);
@@ -23957,7 +23993,7 @@ export function App() {
                   formatToolErrorMessage(subToolCall, toolError),
                   [],
                   "",
-                  { kind: "persona", personaId: subAgent.id },
+                  subAgentSender,
                 );
               }
               await submitPiToolResult(event, null, toolError, abortSignal);
@@ -24021,11 +24057,16 @@ export function App() {
           try {
             streamResult = await readChatStream(
               response,
-              () => undefined,
-              () => undefined,
+              subStreamingTimeline.pushContent,
+              subStreamingTimeline.pushReasoning,
               abortSignal,
               handleSubAgentPiEvent,
             );
+            await subStreamingTimeline.finish();
+            subStreamingTimeline.complete(streamResult.content, streamResult.reasoning);
+          } catch (error) {
+            subStreamingTimeline.cancel();
+            throw error;
           } finally {
             abortSignal.removeEventListener("abort", abortSubPiRun);
           }
@@ -24379,38 +24420,30 @@ export function App() {
         chatStreamEnabled &&
         (availableChatTools.length === 0 || hasOnlyChatChoiceTools(availableChatTools))
       ) {
-        commitChatMessages((current) => [
-          ...current,
-          {
-            id: assistantMessageId,
-            role: "assistant",
-            content: "",
-            renderAsPlainText: true,
-            ...(assistantSender ? { sender: assistantSender } : {}),
-            createdAt: new Date().toISOString(),
-          },
-        ]);
-        streamingAssistantInserted = true;
         setChatStatus({
           status: "loading",
           message: options.streamingStatusMessage ?? "正在流式生成回复...",
         });
-        const assistantWriter = createStreamingWordWriter(
-          appendStreamingAssistant,
+        const streamingTimeline = createPiStreamingAssistantTimeline(
+          commitChatMessages,
           abortSignal,
+          assistantSender,
+          assistantMessageId,
+          (messageId) => {
+            assistantMessageId = messageId;
+            streamingAssistantInserted = true;
+          },
         );
-        const reasoningWriter = createStreamingWordWriter(
-          appendStreamingAssistantReasoning,
-          abortSignal,
-        );
+        assistantMessageId = streamingTimeline.messageId ?? assistantMessageId;
         try {
           const streamResult = await requestChatCompletion(apiMessages, {
             includeTools: availableChatTools.length > 0,
             stream: true,
-            onDelta: assistantWriter.push,
-            onReasoningDelta: reasoningWriter.push,
+            onDelta: streamingTimeline.pushContent,
+            onReasoningDelta: streamingTimeline.pushReasoning,
+            beforePiToolMessage: streamingTimeline.beforeTool,
           });
-          await Promise.all([assistantWriter.finish(), reasoningWriter.finish()]);
+          await streamingTimeline.finish();
           throwIfChatAborted(abortSignal);
           assistantContent = streamResult.content;
           assistantReasoning = streamResult.reasoning || assistantReasoning;
@@ -24424,9 +24457,12 @@ export function App() {
             assistantChoiceRequest = presentedChoice.choiceRequest;
             assistantContent = streamResult.content.trim() || presentedChoice.prompt;
           }
+          streamingTimeline.complete(assistantContent, assistantReasoning);
+          if (streamingTimeline.segmentCount > 1) {
+            piTimelineHasMultipleTextSegments = true;
+          }
         } finally {
-          assistantWriter.cancel();
-          reasoningWriter.cancel();
+          streamingTimeline.cancel();
         }
       } else {
         let toolLoopCompleted = false;
@@ -24444,15 +24480,19 @@ export function App() {
             pendingMcpObservationPromptSent = true;
           }
           const streamingRound = chatStreamEnabled
-            ? createStreamingAssistantMessage(
+            ? createPiStreamingAssistantTimeline(
                 commitChatMessages,
                 abortSignal,
                 assistantSender,
+                crypto.randomUUID(),
+                (messageId) => {
+                  assistantMessageId = messageId;
+                  streamingAssistantInserted = true;
+                },
               )
             : null;
           if (streamingRound) {
-            assistantMessageId = streamingRound.messageId;
-            streamingAssistantInserted = true;
+            assistantMessageId = streamingRound.messageId ?? assistantMessageId;
           }
           let completionResult;
           try {
@@ -24462,8 +24502,12 @@ export function App() {
               toolChoice: "auto",
               onDelta: streamingRound?.pushContent,
               onReasoningDelta: streamingRound?.pushReasoning,
+              beforePiToolMessage: streamingRound?.beforeTool,
             });
             await streamingRound?.finish();
+            if ((streamingRound?.segmentCount ?? 0) > 1) {
+              piTimelineHasMultipleTextSegments = true;
+            }
           } catch (error) {
             streamingRound?.cancel();
             throw error;
@@ -24506,7 +24550,14 @@ export function App() {
               includeTools: availableChatTools.length > 0,
               stream: true,
               toolChoice: "auto",
+              onDelta: streamingRound?.pushContent,
+              onReasoningDelta: streamingRound?.pushReasoning,
+              beforePiToolMessage: streamingRound?.beforeTool,
             });
+            await streamingRound?.finish();
+            if ((streamingRound?.segmentCount ?? 0) > 1) {
+              piTimelineHasMultipleTextSegments = true;
+            }
             throwIfChatAborted(abortSignal);
             assistantMessage = completionResult.payload?.choices?.[0]?.message;
             toolCalls = (
@@ -24984,14 +25035,28 @@ export function App() {
       }
 
       if (streamingAssistantInserted) {
+        const {
+          id: _finalMessageId,
+          content: _finalMessageContent,
+          reasoning: _finalMessageReasoning,
+          createdAt: _finalMessageCreatedAt,
+          renderAsPlainText: _finalMessagePlainText,
+          ...finalMessageMetadata
+        } = finalAssistantMessage;
         commitChatMessages((current) =>
           current.map((message) =>
             message.id === assistantMessageId
-              ? {
-                  ...message,
-                  ...finalAssistantMessage,
-                  renderAsPlainText: false,
-                }
+              ? piTimelineHasMultipleTextSegments
+                ? {
+                    ...message,
+                    ...finalMessageMetadata,
+                    renderAsPlainText: false,
+                  }
+                : {
+                    ...message,
+                    ...finalAssistantMessage,
+                    renderAsPlainText: false,
+                  }
               : message,
           ),
         );
@@ -26076,6 +26141,7 @@ export function App() {
     let abortSignal: AbortSignal | undefined;
     let assistantMessageId = "";
     let streamingAssistantInserted = false;
+    let piTimelineHasMultipleTextSegments = false;
     let nextMessages = initialMessages;
     let effectiveContent = content;
 
@@ -26335,6 +26401,7 @@ export function App() {
         toolChoice?: "auto";
         onDelta?: (delta: string) => void;
         onReasoningDelta?: (delta: string) => void;
+        beforePiToolMessage?: () => void;
       }) => {
         throwIfChatAborted(abortSignal);
         const usePiKernel = !isImageGenerationRequest;
@@ -26360,6 +26427,7 @@ export function App() {
             return;
           }
           if (event.type === "tool_start") {
+            options.beforePiToolMessage?.();
             appendAssistantTimelineMessage(
               commitChatMessages,
               formatPiNativeToolAction(event),
@@ -26389,6 +26457,7 @@ export function App() {
 
           const silentControl = isSilentChatControlTool(toolCall.function.name);
           if (!silentControl) {
+            options.beforePiToolMessage?.();
             appendAssistantTimelineMessage(
               commitChatMessages,
               formatToolActionMessage(toolCall, localWorkspaceHandle, requestMcpTools),
@@ -26618,34 +26687,27 @@ export function App() {
         chatStreamEnabled &&
         (availableChatTools.length === 0 || hasOnlyChatChoiceTools(availableChatTools))
       ) {
-        commitChatMessages((current) => [
-          ...current,
-          {
-            id: assistantMessageId,
-            role: "assistant",
-            content: "",
-            renderAsPlainText: true,
-            createdAt: new Date().toISOString(),
-          },
-        ]);
-        streamingAssistantInserted = true;
         setChatStatus({ status: "loading", message: "正在流式生成回复..." });
-        const assistantWriter = createStreamingWordWriter(
-          appendStreamingAssistant,
+        const streamingTimeline = createPiStreamingAssistantTimeline(
+          commitChatMessages,
           abortSignal,
+          undefined,
+          assistantMessageId,
+          (messageId) => {
+            assistantMessageId = messageId;
+            streamingAssistantInserted = true;
+          },
         );
-        const reasoningWriter = createStreamingWordWriter(
-          appendStreamingAssistantReasoning,
-          abortSignal,
-        );
+        assistantMessageId = streamingTimeline.messageId ?? assistantMessageId;
         try {
           const streamResult = await requestChatCompletion(apiMessages, {
             includeTools: availableChatTools.length > 0,
             stream: true,
-            onDelta: assistantWriter.push,
-            onReasoningDelta: reasoningWriter.push,
+            onDelta: streamingTimeline.pushContent,
+            onReasoningDelta: streamingTimeline.pushReasoning,
+            beforePiToolMessage: streamingTimeline.beforeTool,
           });
-          await Promise.all([assistantWriter.finish(), reasoningWriter.finish()]);
+          await streamingTimeline.finish();
           throwIfChatAborted(abortSignal);
           assistantContent = streamResult.content;
           assistantReasoning = streamResult.reasoning || assistantReasoning;
@@ -26659,9 +26721,12 @@ export function App() {
             assistantChoiceRequest = presentedChoice.choiceRequest;
             assistantContent = streamResult.content.trim() || presentedChoice.prompt;
           }
+          streamingTimeline.complete(assistantContent, assistantReasoning);
+          if (streamingTimeline.segmentCount > 1) {
+            piTimelineHasMultipleTextSegments = true;
+          }
         } finally {
-          assistantWriter.cancel();
-          reasoningWriter.cancel();
+          streamingTimeline.cancel();
         }
       } else {
         const useStreamingToolCompletion = chatStreamEnabled;
@@ -26679,11 +26744,19 @@ export function App() {
             pendingMcpObservationPromptSent = true;
           }
           const streamingRound = chatStreamEnabled
-            ? createStreamingAssistantMessage(commitChatMessages, abortSignal)
+            ? createPiStreamingAssistantTimeline(
+                commitChatMessages,
+                abortSignal,
+                undefined,
+                crypto.randomUUID(),
+                (messageId) => {
+                  assistantMessageId = messageId;
+                  streamingAssistantInserted = true;
+                },
+              )
             : null;
           if (streamingRound) {
-            assistantMessageId = streamingRound.messageId;
-            streamingAssistantInserted = true;
+            assistantMessageId = streamingRound.messageId ?? assistantMessageId;
           }
           let completionResult;
           try {
@@ -26693,8 +26766,12 @@ export function App() {
               toolChoice: "auto",
               onDelta: streamingRound?.pushContent,
               onReasoningDelta: streamingRound?.pushReasoning,
+              beforePiToolMessage: streamingRound?.beforeTool,
             });
             await streamingRound?.finish();
+            if ((streamingRound?.segmentCount ?? 0) > 1) {
+              piTimelineHasMultipleTextSegments = true;
+            }
           } catch (error) {
             streamingRound?.cancel();
             throw error;
@@ -26994,12 +27071,18 @@ export function App() {
             message.id === assistantMessageId
               ? {
                   ...message,
-                  content: assistantContent,
+                  ...(piTimelineHasMultipleTextSegments
+                    ? {}
+                    : {
+                        content: assistantContent,
+                        ...(assistantReasoning.trim()
+                          ? { reasoning: assistantReasoning.trim() }
+                          : {}),
+                      }),
                   renderAsPlainText: false,
                   ...(Object.keys(assistantMessageVariables).length > 0
                     ? { variables: assistantMessageVariables }
                     : {}),
-                  ...(assistantReasoning.trim() ? { reasoning: assistantReasoning.trim() } : {}),
                   ...(assistantChoiceRequest ? { choiceRequest: assistantChoiceRequest } : {}),
                   ...(dialoguePlaceholderCount > 0
                     ? {
@@ -27050,7 +27133,9 @@ export function App() {
         assistantMessageId,
         sourceMessageIds: [userMessage.id],
         latestUser: effectiveContent,
-        finalAssistant: finalAssistantForStatus,
+        finalAssistant: piTimelineHasMultipleTextSegments
+          ? assistantContent
+          : finalAssistantForStatus,
         signal: abortSignal,
       });
       if (activeChatSessionIdRef.current === requestSessionId) {

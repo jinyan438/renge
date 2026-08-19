@@ -1,0 +1,137 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createPiStreamingTimeline } from "../src/piStreamingTimeline.ts";
+
+function createTimelineFixture(sender = "main") {
+  const rendered = [];
+  let nextId = 0;
+  const timeline = createPiStreamingTimeline({
+    initialMessageId: `${sender}-initial`,
+    createSegment(messageId) {
+      const item = {
+        kind: "text",
+        id: messageId ?? `${sender}-${nextId += 1}`,
+        sender,
+        content: "",
+        reasoning: "",
+      };
+      rendered.push(item);
+      return {
+        messageId: item.id,
+        pushContent(delta) {
+          item.content += delta;
+        },
+        pushReasoning(delta) {
+          item.reasoning += delta;
+        },
+        async finish() {},
+        complete(content, reasoning = "") {
+          item.content = content;
+          item.reasoning = reasoning;
+          return Boolean(content.trim() || reasoning.trim());
+        },
+        cancel() {},
+        remove() {
+          rendered.splice(rendered.indexOf(item), 1);
+        },
+      };
+    },
+  });
+  return { rendered, timeline };
+}
+
+function appendTool(rendered, name, status = "success") {
+  rendered.push({ kind: "tool", name, status });
+}
+
+test("preserves Pi tool and text event order without merging text segments", async () => {
+  const { rendered, timeline } = createTimelineFixture();
+
+  timeline.beforeTool();
+  appendTool(rendered, "tool-a");
+  timeline.pushContent("文本 A");
+  timeline.beforeTool();
+  appendTool(rendered, "tool-b");
+  timeline.pushContent("文本 B");
+  await timeline.finish();
+  timeline.complete("文本 A文本 B");
+
+  assert.deepEqual(
+    rendered.map((item) => item.kind === "tool" ? item.name : item.content),
+    ["tool-a", "文本 A", "tool-b", "文本 B"],
+  );
+  assert.equal(timeline.segmentCount, 2);
+});
+
+test("keeps text emitted before a tool ahead of that tool", async () => {
+  const { rendered, timeline } = createTimelineFixture();
+
+  timeline.pushContent("先说明");
+  timeline.beforeTool();
+  appendTool(rendered, "read");
+  timeline.pushContent("再总结");
+  await timeline.finish();
+  timeline.complete("先说明再总结");
+
+  assert.deepEqual(
+    rendered.map((item) => item.kind === "tool" ? item.name : item.content),
+    ["先说明", "read", "再总结"],
+  );
+});
+
+test("does not create empty bubbles around consecutive or trailing tools", async () => {
+  const { rendered, timeline } = createTimelineFixture();
+
+  timeline.beforeTool();
+  appendTool(rendered, "read");
+  timeline.beforeTool();
+  appendTool(rendered, "write");
+  await timeline.finish();
+  timeline.complete("", "");
+
+  assert.deepEqual(rendered.map((item) => item.name), ["read", "write"]);
+  assert.equal(timeline.segmentCount, 0);
+});
+
+test("preserves failed tools and reasoning boundaries", async () => {
+  const { rendered, timeline } = createTimelineFixture();
+
+  timeline.pushReasoning("分析 A");
+  timeline.beforeTool();
+  appendTool(rendered, "bash", "error");
+  timeline.pushReasoning("分析 B");
+  timeline.pushContent("结论");
+  await timeline.finish();
+  timeline.complete("结论", "分析 A分析 B");
+
+  assert.deepEqual(rendered, [
+    {
+      kind: "text",
+      id: "main-initial",
+      sender: "main",
+      content: "",
+      reasoning: "分析 A",
+    },
+    { kind: "tool", name: "bash", status: "error" },
+    {
+      kind: "text",
+      id: "main-1",
+      sender: "main",
+      content: "结论",
+      reasoning: "分析 B",
+    },
+  ]);
+});
+
+test("uses the same ordered timeline for sub-agent messages", async () => {
+  const { rendered, timeline } = createTimelineFixture("sub-agent");
+
+  timeline.beforeTool();
+  appendTool(rendered, "grep");
+  timeline.pushContent("子 Agent 结果");
+  await timeline.finish();
+  timeline.complete("子 Agent 结果");
+
+  assert.equal(rendered[1].sender, "sub-agent");
+  assert.deepEqual(rendered.map((item) => item.kind), ["tool", "text"]);
+});
