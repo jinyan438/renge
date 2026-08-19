@@ -1,8 +1,11 @@
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import {
   createAgentSession,
   DefaultResourceLoader,
+  getAgentDir,
   ModelRuntime,
   SessionManager,
   SettingsManager,
@@ -90,12 +93,68 @@ function resolvePrompt(promptMessage) {
   return { text: text.join("\n") || "Inspect the attached image.", images };
 }
 
-export function createRengePiHost({ defaultCwd = process.cwd() } = {}) {
+function stableProviderId(provider) {
+  const key = [provider.apiType, provider.apiBaseUrl, provider.modelId, provider.apiKey].join("\u0000");
+  return `renge-${createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
+}
+
+function normalizeSessionId(value) {
+  const normalized = String(value ?? "")
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, "")
+    .slice(0, 80);
+  return normalized || `renge-${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+}
+
+function sessionFilePath(sessionDir, ownerSessionId, sessionScope, cwd) {
+  const owner = normalizeSessionId(ownerSessionId);
+  const ownerHash = createHash("sha256").update(owner).digest("hex").slice(0, 24);
+  const fingerprint = createHash("sha256")
+    .update(`${resolve(cwd)}\u0000${owner}\u0000${sessionScope}`)
+    .digest("hex")
+    .slice(0, 24);
+  return join(sessionDir, ownerHash, `${fingerprint}.jsonl`);
+}
+
+async function ensureSessionFile(filePath, sessionId, cwd) {
+  if (existsSync(filePath)) return;
+  await mkdir(resolve(filePath, ".."), { recursive: true });
+  const header = {
+    type: "session",
+    version: 3,
+    id: normalizeSessionId(sessionId),
+    timestamp: new Date().toISOString(),
+    cwd: resolve(cwd),
+  };
+  try {
+    await writeFile(filePath, `${JSON.stringify(header)}\n`, { encoding: "utf8", flag: "wx" });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+  }
+}
+
+function appendPromptToSystemPrompt(prompt) {
+  const normalized = String(prompt ?? "").trim();
+  if (!normalized) return "";
+  return normalized;
+}
+
+export function createRengePiHost({
+  defaultCwd = process.cwd(),
+  dataDir = process.cwd(),
+  agentDir = getAgentDir(),
+} = {}) {
   const runs = new Map();
+  const sessionDir = join(resolve(dataDir), ".pi", "sessions");
+  const providerUsers = new Map();
   let modelRuntimePromise;
 
   const getModelRuntime = () => {
-    modelRuntimePromise ??= ModelRuntime.create();
+    modelRuntimePromise ??= ModelRuntime.create({
+      authPath: join(resolve(agentDir), "auth.json"),
+      modelsPath: join(resolve(agentDir), "models.json"),
+    });
     return modelRuntimePromise;
   };
 
@@ -155,7 +214,7 @@ export function createRengePiHost({ defaultCwd = process.cwd() } = {}) {
   };
 
   const handleChat = async (body, request, response) => {
-    const runId = String(body?.runId ?? "").trim() || crypto.randomUUID();
+    const runId = String(body?.runId ?? "").trim() || randomUUID();
     if (runs.has(runId)) throw new Error("重复的 Pi runId");
     const provider = normalizePiProviderConfig(body);
     const requestBody = body?.request && typeof body.request === "object"
@@ -165,16 +224,20 @@ export function createRengePiHost({ defaultCwd = process.cwd() } = {}) {
     const cwd = workspace?.kind === "electron" && workspace.cwd
       ? resolve(String(workspace.cwd))
       : resolve(defaultCwd);
+    const ownerSessionId = normalizeSessionId(body?.sessionId || runId);
+    const sessionScope = normalizeSessionId(body?.piSessionScope || "main");
+    const requestedSessionId = String(body?.piSessionId ?? "").trim();
+    const piSessionId = normalizeSessionId(
+      requestedSessionId || (sessionScope === "main" ? ownerSessionId : `${ownerSessionId}-${sessionScope}`),
+    );
+    const toolsEnabled = body?.enableTools !== false;
     const requestedToolDefinitions = Array.isArray(requestBody.tools)
       ? requestBody.tools
       : [];
-    const nativeTools = requestedToolDefinitions.length > 0
+    const nativeTools = toolsEnabled
       ? getPiNativeToolNames(workspace)
       : [];
-    const customDefinitions = filterPiCustomToolDefinitions(requestedToolDefinitions, workspace);
-    const customToolNames = new Set(
-      customDefinitions.map((tool) => String(tool?.function?.name ?? "")).filter(Boolean),
-    );
+    let customToolNames = new Set();
 
     response.writeHead(200, {
       "Content-Type": "text/event-stream;charset=utf-8",
@@ -193,7 +256,10 @@ export function createRengePiHost({ defaultCwd = process.cwd() } = {}) {
     runs.set(runId, run);
     writeSse(response, piEvent("run_start", {
       runId,
+      sessionId: piSessionId,
       kernel: "@earendil-works/pi-coding-agent@0.84.2",
+      kernelMode: "full",
+      compaction: "pi",
       nativeTools,
     }));
 
@@ -208,8 +274,9 @@ export function createRengePiHost({ defaultCwd = process.cwd() } = {}) {
     let providerId = "";
     let modelRuntime;
     try {
-      providerId = `renge-${runId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 48)}`;
+      providerId = stableProviderId({ ...provider, apiKey: provider.apiKey });
       modelRuntime = await getModelRuntime();
+      providerUsers.set(providerId, (providerUsers.get(providerId) ?? 0) + 1);
       const samplingParams = getPiSamplingParams(requestBody);
       const requestedMaxTokens = Number(
         requestBody.max_tokens ?? requestBody.max_completion_tokens ?? 16384,
@@ -246,19 +313,45 @@ export function createRengePiHost({ defaultCwd = process.cwd() } = {}) {
         apiType: provider.apiType,
         modelId: provider.modelId,
       });
-      const settingsManager = SettingsManager.inMemory({
-        compaction: { enabled: false },
-        retry: { enabled: true },
-      });
+      const additionalSkillPaths = Array.isArray(body?.piSkillPaths)
+        ? body.piSkillPaths
+            .map((skillPath) => String(skillPath ?? "").trim())
+            .filter(Boolean)
+            .map((skillPath) => resolve(skillPath))
+        : [];
+      const settingsManager = SettingsManager.create(cwd, agentDir);
       const resourceLoader = new DefaultResourceLoader({
         cwd,
-        agentDir: join(tmpdir(), "renge-pi-agent"),
+        agentDir,
         settingsManager,
-        systemPromptOverride: () => converted.systemPrompt,
-        appendSystemPromptOverride: () => [],
+        // Reuse enabled Renge skills through Pi's native Skill loader.
+        additionalSkillPaths,
+        appendSystemPromptOverride: (base) => [
+          ...base,
+          ...(converted.systemPrompt ? [appendPromptToSystemPrompt(converted.systemPrompt)] : []),
+        ],
       });
       await resourceLoader.reload();
-      const customTools = customDefinitions.map((definition) => createCustomTool(definition, run));
+      const extensionToolNames = resourceLoader
+        .getExtensions()
+        .extensions
+        .flatMap((extension) => Array.from(extension.tools.keys()));
+      const customDefinitionsForRun = toolsEnabled ? filterPiCustomToolDefinitions(
+        requestedToolDefinitions,
+        workspace,
+        new Set([...nativeTools, ...extensionToolNames]),
+      ) : [];
+      const customTools = customDefinitionsForRun.map((definition) => createCustomTool(definition, run));
+      customToolNames = new Set(customTools.map((tool) => tool.name));
+      const sessionFile = sessionFilePath(sessionDir, ownerSessionId, sessionScope, cwd);
+      await ensureSessionFile(sessionFile, piSessionId, cwd);
+      const sessionManager = SessionManager.open(sessionFile, sessionDir, cwd);
+      if (sessionManager.buildSessionContext().messages.length === 0) {
+        if (converted.history.length > 0) {
+          sessionManager.appendModelChange(providerId, provider.modelId);
+        }
+        for (const message of converted.history) sessionManager.appendMessage(message);
+      }
       const reasoningLevel = String(requestBody.reasoning_effort ?? "").trim();
       const thinkingLevel = ["minimal", "low", "medium", "high", "xhigh", "max"].includes(reasoningLevel)
         ? reasoningLevel
@@ -268,14 +361,29 @@ export function createRengePiHost({ defaultCwd = process.cwd() } = {}) {
         modelRuntime,
         model,
         thinkingLevel,
-        tools: [...nativeTools, ...customToolNames],
+        tools: toolsEnabled
+          ? [...nativeTools, ...extensionToolNames, ...customTools.map((tool) => tool.name)]
+          : [],
         customTools,
         resourceLoader,
         settingsManager,
-        sessionManager: SessionManager.inMemory(cwd),
+        sessionManager,
       });
       run.session = session;
-      session.agent.state.messages = converted.history;
+      await session.bindExtensions({
+        mode: "json",
+        commandContextActions: {
+          waitForIdle: () => session.waitForIdle(),
+          newSession: async () => ({ cancelled: true }),
+          fork: async () => ({ cancelled: true }),
+          navigateTree: async (targetId, options) => {
+            const result = await session.navigateTree(targetId, options);
+            return { cancelled: result.cancelled };
+          },
+          switchSession: async () => ({ cancelled: true }),
+          reload: async () => session.reload(),
+        },
+      });
 
       unsubscribe = session.subscribe((event) => {
         if (event.type === "message_update") {
@@ -311,6 +419,11 @@ export function createRengePiHost({ defaultCwd = process.cwd() } = {}) {
             isError: event.isError,
             result: event.result,
           }));
+          return;
+        }
+        if (event.type === "compaction_start" || event.type === "compaction_end" ||
+          event.type === "auto_retry_start" || event.type === "auto_retry_end") {
+          writeSse(response, piEvent(event.type, { runId, ...event }));
         }
       });
 
@@ -331,7 +444,14 @@ export function createRengePiHost({ defaultCwd = process.cwd() } = {}) {
       unsubscribe();
       settlePendingTools(run, new Error("Pi 会话已结束"));
       run.session?.dispose();
-      if (providerId && modelRuntime) modelRuntime.unregisterProvider(providerId);
+      if (providerId && modelRuntime) {
+        const remaining = (providerUsers.get(providerId) ?? 1) - 1;
+        if (remaining > 0) providerUsers.set(providerId, remaining);
+        else {
+          providerUsers.delete(providerId);
+          modelRuntime.unregisterProvider(providerId);
+        }
+      }
       runs.delete(runId);
       if (!response.destroyed && !response.writableEnded) response.end();
     }
@@ -358,6 +478,15 @@ export function createRengePiHost({ defaultCwd = process.cwd() } = {}) {
     return { ok: true, aborted: true };
   };
 
+  const handleDeleteSession = async (body) => {
+    const requestedSessionId = String(body?.sessionId ?? "").trim();
+    if (!requestedSessionId) return { ok: false, status: 400, error: "缺少 sessionId" };
+    const ownerSessionId = normalizeSessionId(requestedSessionId);
+    const ownerHash = createHash("sha256").update(ownerSessionId).digest("hex").slice(0, 24);
+    await rm(join(sessionDir, ownerHash), { recursive: true, force: true });
+    return { ok: true, status: 200 };
+  };
+
   const dispose = async () => {
     await Promise.all(Array.from(runs.values()).map(async (run) => {
       settlePendingTools(run, new Error("Pi Host 已关闭"));
@@ -367,5 +496,5 @@ export function createRengePiHost({ defaultCwd = process.cwd() } = {}) {
     runs.clear();
   };
 
-  return { handleChat, handleToolResult, handleAbort, dispose };
+  return { handleChat, handleToolResult, handleAbort, handleDeleteSession, dispose };
 }

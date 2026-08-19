@@ -1309,7 +1309,15 @@ type ChatApiMessage = {
 };
 
 type PiStreamEvent = {
-  type: "run_start" | "tool_request" | "tool_start" | "tool_end";
+  type:
+    | "run_start"
+    | "tool_request"
+    | "tool_start"
+    | "tool_end"
+    | "compaction_start"
+    | "compaction_end"
+    | "auto_retry_start"
+    | "auto_retry_end";
   runId?: string;
   kernel?: string;
   nativeTools?: string[];
@@ -1318,6 +1326,10 @@ type PiStreamEvent = {
   arguments?: Record<string, unknown>;
   result?: unknown;
   isError?: boolean;
+  reason?: string;
+  attempt?: number;
+  maxAttempts?: number;
+  delayMs?: number;
 };
 
 const PROVIDER_STORAGE_KEY = "renge_provider_channels";
@@ -10797,6 +10809,16 @@ function formatPiNativeToolResult(event: PiStreamEvent) {
   return content ? `${title}\n${trimBlock(content, 900)}` : title;
 }
 
+function formatPiRuntimeStatus(event: PiStreamEvent) {
+  if (event.type === "compaction_start") return "Pi 正在压缩会话上下文...";
+  if (event.type === "compaction_end") return "Pi 已完成上下文压缩，正在继续生成...";
+  if (event.type === "auto_retry_start") {
+    return `Pi 正在重试模型请求（${event.attempt ?? 1}/${event.maxAttempts ?? "?"}）...`;
+  }
+  if (event.type === "auto_retry_end") return "Pi 已完成模型请求重试，正在继续生成...";
+  return "";
+}
+
 async function submitPiToolResult(
   event: PiStreamEvent,
   result: unknown,
@@ -12270,6 +12292,7 @@ export function App() {
   const htmlPreviewFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const activeUserRequestTextRef = useRef("");
   const activeChatAbortControllerRef = useRef<AbortController | null>(null);
+  const piSessionResetPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
   const restoredWorkspacePathRef = useRef("");
   const restoredPcWorkspaceRef = useRef(false);
   const workspaceAutoRestoreDisabledRef = useRef(false);
@@ -12309,6 +12332,28 @@ export function App() {
       }
     >;
   }>({ context: null, entries: new Map() });
+  const resetPiSession = (sessionId: string) => {
+    if (!sessionId) return Promise.resolve();
+    const pending = fetch("/api/pi/session", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+    })
+      .then(async (response) => {
+        if (response.ok) return;
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error || `Pi 会话重置失败：${response.status}`);
+      })
+      .finally(() => {
+        if (piSessionResetPromisesRef.current.get(sessionId) === pending) {
+          piSessionResetPromisesRef.current.delete(sessionId);
+        }
+      });
+    piSessionResetPromisesRef.current.set(sessionId, pending);
+    return pending;
+  };
+  const waitForPiSessionReset = (sessionId: string) =>
+    piSessionResetPromisesRef.current.get(sessionId) ?? Promise.resolve();
   const chatSessionsRef = useRef<ChatSession[]>([]);
   const characterCardsRef = useRef<CharacterCard[]>([]);
   const personasRef = useRef<AgentPersona[]>([]);
@@ -15529,6 +15574,7 @@ export function App() {
     quiet = false,
     trackUsage = false,
     mutableChatMessageId,
+    kernel = "renge",
   }: {
     messages: ChatApiMessage[];
     provider: ModelProviderChannel;
@@ -15540,7 +15586,11 @@ export function App() {
     quiet?: boolean;
     trackUsage?: boolean;
     mutableChatMessageId?: string;
+    kernel?: "pi" | "renge";
   }): Promise<ChatApiMessage[]> => {
+    // Pi owns session history and auto-compaction for Pi-backed requests. Keep
+    // Renge's compression path only for legacy/image requests.
+    if (kernel === "pi") return messages;
     const additionalTokens = estimateContextValueTokens(tools);
     const recordPreparedContextUsage = (
       preparedMessages: ChatApiMessage[],
@@ -19276,6 +19326,7 @@ export function App() {
     commitActiveSessionMessagesAndStatusBar(sessionId, nextMessages, (current) =>
       rebuildStatusBarStateFromMessages(current, nextMessages),
     );
+    void resetPiSession(sessionId).catch(() => undefined);
     if (editingChatMessage?.messageId === messageId) {
       setEditingChatMessage(null);
     }
@@ -19576,6 +19627,8 @@ export function App() {
     const deletedSession = chatSessions.find((session) => session.id === sessionId);
     // 后端清理该会话目录下持久化的生成图片，fire-and-forget
     void fetch(`/api/session-images/${encodeURIComponent(sessionId)}`, { method: "DELETE" }).catch(() => undefined);
+    // Keep Pi's persisted session tree aligned with Renge session deletion.
+    void resetPiSession(sessionId).catch(() => undefined);
     const remaining = deleteChatSessionsWithMemoryCleanup(
       chatSessions,
       (session) => session.id === sessionId,
@@ -23355,6 +23408,7 @@ export function App() {
         onReasoningDelta?: (delta: string) => void;
       }) => {
         throwIfChatAborted(abortSignal);
+        const usePiKernel = !isImageGenerationRequest;
         const chatToolsForRequest = options.includeTools
           ? availableChatTools.filter(
               (tool) =>
@@ -23372,11 +23426,16 @@ export function App() {
           sessionId: requestSessionId,
           trackUsage: true,
           mutableChatMessageId: assistantMessageId,
+          kernel: usePiKernel ? "pi" : "renge",
         });
-        const usePiKernel = !isImageGenerationRequest;
         const piRunId = usePiKernel ? crypto.randomUUID() : "";
         const piReturnedToolCalls: ChatToolCall[] = [];
         const handlePiEvent = async (event: PiStreamEvent) => {
+          const runtimeStatus = formatPiRuntimeStatus(event);
+          if (runtimeStatus) {
+            setChatStatus({ status: "loading", message: runtimeStatus });
+            return;
+          }
           if (event.type === "tool_start") {
             appendAssistantTimelineMessage(
               commitChatMessages,
@@ -23476,6 +23535,7 @@ export function App() {
             await submitPiToolResult(event, null, toolError, abortSignal);
           }
         };
+        if (usePiKernel) await waitForPiSessionReset(requestSessionId);
         const response = await fetch(usePiKernel ? "/api/pi/chat" : "/api/chat/completions", {
           method: "POST",
           headers: {
@@ -23485,6 +23545,16 @@ export function App() {
           body: JSON.stringify({
             ...buildProviderApiTarget(requestProvider),
             ...(usePiKernel ? { runId: piRunId } : {}),
+            ...(usePiKernel
+              ? {
+                  enableTools: options.includeTools,
+                  contextWindow: selectedModelContextLimit ?? activeChatPreset?.maxContext ?? 128_000,
+                  piSessionScope: "main",
+                  piSkillPaths: requestContextSettings.skills
+                    ? enabledSkills.map((skill) => `${skill.path}/${skill.entryFile}`)
+                    : [],
+                }
+              : {}),
             ...(usePiKernel && options.includeTools && requestContextSettings.workspaceTools &&
             activeLocalToolsEnabled && activeFileToolsWorkspaceHandle?.kind === "electron"
               ? {
@@ -23494,7 +23564,7 @@ export function App() {
                   },
                 }
               : {}),
-            sessionId: activeChatSessionId,
+            sessionId: requestSessionId,
             request: {
               model: requestModelId,
               messages: requestMessages,
@@ -23807,9 +23877,15 @@ export function App() {
             requestedOutputTokens: activeChatPresetRequestParameters?.max_tokens ?? 0,
             signal: abortSignal,
             sessionId: requestSessionId,
+            kernel: "pi",
           });
           const subPiRunId = crypto.randomUUID();
           const handleSubAgentPiEvent = async (event: PiStreamEvent) => {
+            const runtimeStatus = formatPiRuntimeStatus(event);
+            if (runtimeStatus) {
+              setChatStatus({ status: "loading", message: `${subAgent.name}：${runtimeStatus}` });
+              return;
+            }
             if (event.type === "tool_start") {
               appendAssistantTimelineMessage(
                 commitChatMessages,
@@ -23878,6 +23954,7 @@ export function App() {
               await submitPiToolResult(event, null, toolError, abortSignal);
             }
           };
+          await waitForPiSessionReset(requestSessionId);
           const response = await fetch("/api/pi/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -23885,6 +23962,12 @@ export function App() {
             body: JSON.stringify({
               ...buildProviderApiTarget(subAgentProvider),
               runId: subPiRunId,
+              enableTools: subAgentToolDefinitions.length > 0,
+              contextWindow: selectedModelContextLimit ?? activeChatPreset?.maxContext ?? 128_000,
+              piSessionScope: `sub-${subAgent.id}`,
+              piSkillPaths: requestContextSettings.skills
+                ? enabledSkills.map((skill) => `${skill.path}/${skill.entryFile}`)
+                : [],
               ...(requestContextSettings.workspaceTools && activeLocalToolsEnabled &&
               activeFileToolsWorkspaceHandle?.kind === "electron"
                 ? {
@@ -23894,7 +23977,7 @@ export function App() {
                     },
                   }
                 : {}),
-              sessionId: activeChatSessionId,
+              sessionId: requestSessionId,
               request: {
                 model: subAgentModelId,
                 messages: subAgentRequestMessages,
@@ -26241,6 +26324,7 @@ export function App() {
         onReasoningDelta?: (delta: string) => void;
       }) => {
         throwIfChatAborted(abortSignal);
+        const usePiKernel = !isImageGenerationRequest;
         const requestTools = options.includeTools ? availableChatTools : [];
         const requestMessages = await prepareContextCompressedMessages({
           messages: substituteUserNicknameInApiMessages(messages, userProfile.nickname),
@@ -26252,11 +26336,16 @@ export function App() {
           sessionId: requestSessionId,
           trackUsage: true,
           mutableChatMessageId: assistantMessageId,
+          kernel: usePiKernel ? "pi" : "renge",
         });
-        const usePiKernel = !isImageGenerationRequest;
         const piRunId = usePiKernel ? crypto.randomUUID() : "";
         const piReturnedToolCalls: ChatToolCall[] = [];
         const handlePiEvent = async (event: PiStreamEvent) => {
+          const runtimeStatus = formatPiRuntimeStatus(event);
+          if (runtimeStatus) {
+            setChatStatus({ status: "loading", message: runtimeStatus });
+            return;
+          }
           if (event.type === "tool_start") {
             appendAssistantTimelineMessage(
               commitChatMessages,
@@ -26334,6 +26423,7 @@ export function App() {
             await submitPiToolResult(event, null, toolError, abortSignal);
           }
         };
+        if (usePiKernel) await waitForPiSessionReset(requestSessionId);
         const response = await fetch(usePiKernel ? "/api/pi/chat" : "/api/chat/completions", {
           method: "POST",
           headers: {
@@ -26343,6 +26433,16 @@ export function App() {
           body: JSON.stringify({
             ...buildProviderApiTarget(chatProvider),
             ...(usePiKernel ? { runId: piRunId } : {}),
+            ...(usePiKernel
+              ? {
+                  enableTools: options.includeTools,
+                  contextWindow: selectedModelContextLimit ?? activeChatPreset?.maxContext ?? 128_000,
+                  piSessionScope: "main",
+                  piSkillPaths: activeLlmContextSettings.skills
+                    ? enabledSkills.map((skill) => `${skill.path}/${skill.entryFile}`)
+                    : [],
+                }
+              : {}),
             ...(usePiKernel && options.includeTools && activeLlmContextSettings.workspaceTools &&
             activeLocalToolsEnabled && activeFileToolsWorkspaceHandle?.kind === "electron"
               ? {
@@ -26352,7 +26452,7 @@ export function App() {
                   },
                 }
               : {}),
-            sessionId: activeChatSessionId,
+            sessionId: requestSessionId,
             request: {
               model: requestModelId,
               messages: requestMessages,
@@ -27653,7 +27753,7 @@ export function App() {
         ? getMultiAgentRequestConfig(responderPersona.id)
         : undefined;
 
-    await generateAssistantForMessages(messagesForContinuation, requestSender, {
+    const result = await generateAssistantForMessages(messagesForContinuation, requestSender, {
       responseMode,
       ...(responderPersona ? { responderPersona } : {}),
       ...(multiAgentRequestConfig
@@ -27667,6 +27767,7 @@ export function App() {
       streamingStatusMessage: "正在续写当前回复...",
       successMessage: "续写已完成。",
     });
+    if (result) await resetPiSession(activeChatSessionIdRef.current);
   };
 
   const rewriteAssistantDialogues = async (messageId: string) => {
@@ -27707,7 +27808,7 @@ export function App() {
         ? getMultiAgentRequestConfig(responderPersona.id)
         : undefined;
 
-    await generateAssistantForMessages(messagesForRewrite, requestSender, {
+    const result = await generateAssistantForMessages(messagesForRewrite, requestSender, {
       responseMode,
       ...(responderPersona ? { responderPersona } : {}),
       ...(multiAgentRequestConfig
@@ -27721,6 +27822,7 @@ export function App() {
       streamingStatusMessage: "正在根据上下文重写对白...",
       successMessage: "对白重写已完成。",
     });
+    if (result) await resetPiSession(activeChatSessionIdRef.current);
   };
 
   const rewriteAssistantLocally = async (messageId: string) => {
@@ -27761,7 +27863,7 @@ export function App() {
         ? getMultiAgentRequestConfig(responderPersona.id)
         : undefined;
 
-    await generateAssistantForMessages(messagesForRewrite, requestSender, {
+    const result = await generateAssistantForMessages(messagesForRewrite, requestSender, {
       responseMode,
       ...(responderPersona ? { responderPersona } : {}),
       ...(multiAgentRequestConfig
@@ -27775,6 +27877,7 @@ export function App() {
       streamingStatusMessage: "正在根据上下文局部重写...",
       successMessage: "局部重写已完成。",
     });
+    if (result) await resetPiSession(activeChatSessionIdRef.current);
   };
 
   const saveEditedAssistantMessage = () => {
@@ -27810,6 +27913,7 @@ export function App() {
       nextMessages,
       (current) => rebuildStatusBarStateFromMessages(current, nextMessages),
     );
+    void resetPiSession(activeChatSessionIdRef.current).catch(() => undefined);
     renderedEditingDraftRef.current = null;
     setEditingChatMessage(null);
     setChatStatus({ status: "success", message: "AI 消息已保存。" });
@@ -27846,6 +27950,7 @@ export function App() {
       nextMessages,
       (current) => rebuildStatusBarStateFromMessages(current, nextMessages),
     );
+    void resetPiSession(activeChatSessionIdRef.current).catch(() => undefined);
     renderedEditingDraftRef.current = null;
     setEditingChatMessage(null);
     setChatStatus({ status: "success", message: "用户消息已保存，关联状态已重新计算。" });
@@ -27899,6 +28004,7 @@ export function App() {
       activeChatSessionIdRef.current,
     );
     try {
+      await resetPiSession(requestSessionId);
       if (chatMode === "multi") {
         const result = await runMultiAgentResponses(
           nextMessages,

@@ -997,7 +997,7 @@ async function clearAppData(dataFilePath) {
         ownedFiles.map((filePath) => rm(filePath, { force: true })),
       );
       await Promise.all(
-        ["extensions", "generated-images", "session-images", "skills"].map((name) =>
+        [".pi", "extensions", "generated-images", "session-images", "skills"].map((name) =>
           rm(join(dataDirectory, name), { recursive: true, force: true }),
         ),
       );
@@ -2852,6 +2852,17 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
       return;
     }
 
+    if (pathname === "/api/pi/session") {
+      if (request.method !== "DELETE") {
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+      }
+      const body = await readJsonBody(request);
+      const result = await piHost.handleDeleteSession(body);
+      sendJson(response, result.status, result.ok ? { ok: true } : { error: result.error });
+      return;
+    }
+
     if (request.method !== "POST") {
       sendJson(response, 405, { error: "Method not allowed" });
       return;
@@ -3397,7 +3408,7 @@ export function startRengeServer(options = {}) {
   const temporaryFilesRoot = options.temporaryFilesRoot
     ? resolve(options.temporaryFilesRoot)
     : "";
-  const piHost = createRengePiHost({ defaultCwd: __dirname });
+  const piHost = createRengePiHost({ defaultCwd: __dirname, dataDir });
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     const isHtmlPreviewOrigin = url.hostname.toLowerCase() === "preview.localhost";

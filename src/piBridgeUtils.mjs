@@ -51,12 +51,12 @@ export function getPiNativeToolNames(workspace) {
     : [];
 }
 
-export function filterPiCustomToolDefinitions(tools, workspace) {
+export function filterPiCustomToolDefinitions(tools, workspace, reservedNames = new Set()) {
   const source = Array.isArray(tools) ? tools : [];
-  if (workspace?.kind !== "electron" || !workspace.cwd) return source;
   return source.filter((tool) => {
     const name = String(tool?.function?.name ?? "");
-    return name && !PI_REPLACED_RENGE_TOOLS.has(name);
+    if (!name || reservedNames.has(name)) return false;
+    return workspace?.kind !== "electron" || !workspace.cwd || !PI_REPLACED_RENGE_TOOLS.has(name);
   });
 }
 
@@ -185,13 +185,7 @@ export function convertOpenAiMessagesToPi(messages, options = {}) {
     }
   });
 
-  let promptIndex = -1;
-  for (let index = transcript.length - 1; index >= 0; index -= 1) {
-    if (transcript[index].role === "user") {
-      promptIndex = index;
-      break;
-    }
-  }
+  const promptIndex = transcript.at(-1)?.role === "user" ? transcript.length - 1 : -1;
   const promptMessage = promptIndex >= 0 ? transcript[promptIndex] : null;
   const history = promptIndex >= 0
     ? transcript.filter((_, index) => index !== promptIndex)

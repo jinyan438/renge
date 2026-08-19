@@ -41,6 +41,17 @@ test("non-Node workspaces retain Renge file tools", () => {
   assert.deepEqual(filterPiCustomToolDefinitions(tools, { kind: "android" }), tools);
 });
 
+test("Pi extension tools take precedence over same-named Renge tools", () => {
+  assert.deepEqual(
+    filterPiCustomToolDefinitions(
+      [tool("extension_search"), tool("phone_tap")],
+      { kind: "android" },
+      new Set(["extension_search"]),
+    ).map((entry) => entry.function.name),
+    ["phone_tap"],
+  );
+});
+
 test("OpenAI history converts to Pi transcript without duplicating the last user prompt", () => {
   const result = convertOpenAiMessagesToPi([
     { role: "system", content: "System rules" },
@@ -66,6 +77,17 @@ test("OpenAI history converts to Pi transcript without duplicating the last user
   assert.equal(result.history.length, 3);
   assert.equal(result.history[1].content[1].name, "browser_read_page");
   assert.equal(result.history[2].toolName, "browser_read_page");
+});
+
+test("trailing assistant history stays in context for Pi continuation requests", () => {
+  const result = convertOpenAiMessagesToPi([
+    { role: "user", content: "write a story" },
+    { role: "assistant", content: "chapter one" },
+  ]);
+
+  assert.equal(result.promptMessage, null);
+  assert.equal(result.history.length, 2);
+  assert.equal(result.history[1].role, "assistant");
 });
 
 test("provider normalization selects the matching Pi OpenAI adapter", () => {

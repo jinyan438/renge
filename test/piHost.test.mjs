@@ -105,6 +105,7 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
     let buffer = "";
     let output = "";
     let bridged = false;
+    let runStart;
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -116,6 +117,7 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
         const data = line?.slice(5).trim();
         if (!data || data === "[DONE]") continue;
         const payload = JSON.parse(data);
+        if (payload.pi?.type === "run_start") runStart = payload.pi;
         if (payload.pi?.type === "tool_request") {
           bridged = true;
           const toolResponse = await fetch(`${renge.url}/api/pi/tool-result`, {
@@ -133,6 +135,8 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
       }
     }
     assert.equal(bridged, true);
+    assert.equal(runStart?.kernelMode, "full");
+    assert.equal(runStart?.compaction, "pi");
     assert.equal(output, "Pi completed");
     assert.equal(upstreamRequests.length, 2);
     assert.equal(
@@ -230,6 +234,73 @@ test("Pi Host executes Pi native read directly for an Electron workspace", async
       upstreamRequests[0].tools.some((entry) => entry.function?.name === "read"),
       true,
     );
+  } finally {
+    await close(renge.server);
+    await close(upstream);
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Pi Host resumes the persisted Pi session for the next Renge turn", async () => {
+  const upstreamRequests = [];
+  const upstream = createServer(async (request, response) => {
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    upstreamRequests.push(JSON.parse(raw));
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    const base = {
+      id: `persist-${upstreamRequests.length}`,
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: "test-model",
+    };
+    sendChunk(response, {
+      ...base,
+      choices: [{
+        index: 0,
+        delta: { role: "assistant", content: `reply-${upstreamRequests.length}` },
+        finish_reason: null,
+      }],
+    });
+    sendChunk(response, {
+      ...base,
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    });
+    response.end("data: [DONE]\n\n");
+  });
+
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-pi-persist-test-"));
+  const upstreamPort = await listen(upstream);
+  const renge = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  try {
+    const request = (content) => fetch(`${renge.url}/api/pi/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "persisted-session",
+        apiBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+        apiKey: "test-key",
+        apiType: "chat-completions",
+        request: { model: "test-model", messages: [{ role: "user", content }], stream: true },
+      }),
+    });
+    assert.equal((await (await request("first turn")).text()).includes("reply-1"), true);
+    assert.equal((await (await request("second turn")).text()).includes("reply-2"), true);
+    assert.equal(upstreamRequests.length, 2);
+    const resumedMessages = upstreamRequests[1].messages;
+    assert.equal(resumedMessages.filter((message) => message.role === "user").length, 2);
+    assert.match(JSON.stringify(resumedMessages), /first turn/);
+    assert.match(JSON.stringify(resumedMessages), /second turn/);
+
+    const resetResponse = await fetch(`${renge.url}/api/pi/session`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: "persisted-session" }),
+    });
+    assert.equal(resetResponse.status, 200);
+    assert.equal((await (await request("fresh turn")).text()).includes("reply-3"), true);
+    assert.equal(upstreamRequests[2].messages.filter((message) => message.role === "user").length, 1);
+    assert.doesNotMatch(JSON.stringify(upstreamRequests[2].messages), /first turn/);
   } finally {
     await close(renge.server);
     await close(upstream);
