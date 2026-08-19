@@ -801,6 +801,7 @@ type PcConnectionData = {
 type McpServerTransport = "stdio" | "http";
 
 type McpServerConfig = {
+  [key: string]: unknown;
   id: string;
   name: string;
   enabled: boolean;
@@ -811,6 +812,16 @@ type McpServerConfig = {
   env: Record<string, string>;
   url: string;
   headers: Record<string, string>;
+  lifecycle?: "lazy" | "eager" | "keep-alive";
+  idleTimeout?: number;
+  requestTimeoutMs?: number;
+  directTools?: boolean | string[];
+  includeTools?: string[];
+  excludeTools?: string[];
+  searchKeywords?: string[];
+  toolPrefix?: "server" | "none" | "short" | "mcp";
+  bearerToken?: string;
+  bearerTokenEnv?: string;
   updatedAt: string;
 };
 
@@ -1453,7 +1464,7 @@ const LLM_CONTEXT_SOURCE_META: Record<
   },
   mcpTools: {
     label: "MCP 工具",
-    description: "发现并注入所有已启用 MCP 服务器的工具。",
+    description: "启用 Pi MCP Adapter 原生代理工具，并按需连接已启用的服务器。",
   },
   phoneTools: {
     label: "手机工具",
@@ -1652,6 +1663,7 @@ function createMcpServerConfig(name = "MCP Server"): McpServerConfig {
     env: {},
     url: "",
     headers: {},
+    lifecycle: "lazy",
     updatedAt: timestamp,
   };
 }
@@ -1686,6 +1698,7 @@ function normalizeMcpServerConfig(
       ? "http"
       : "stdio";
   return {
+    ...rawServer,
     id: typeof rawServer.id === "string" ? rawServer.id : crypto.randomUUID(),
     name: typeof rawServer.name === "string" && rawServer.name.trim()
       ? rawServer.name
@@ -1698,6 +1711,22 @@ function normalizeMcpServerConfig(
     env: normalizeStringRecord(rawServer.env),
     url,
     headers: normalizeStringRecord(rawServer.headers),
+    ...(rawServer.lifecycle === "eager" || rawServer.lifecycle === "keep-alive" || rawServer.lifecycle === "lazy"
+      ? { lifecycle: rawServer.lifecycle }
+      : {}),
+    ...(Number.isFinite(Number(rawServer.idleTimeout)) ? { idleTimeout: Number(rawServer.idleTimeout) } : {}),
+    ...(Number.isFinite(Number(rawServer.requestTimeoutMs)) ? { requestTimeoutMs: Number(rawServer.requestTimeoutMs) } : {}),
+    ...(typeof rawServer.directTools === "boolean" || Array.isArray(rawServer.directTools)
+      ? { directTools: rawServer.directTools }
+      : {}),
+    ...(Array.isArray(rawServer.includeTools) ? { includeTools: rawServer.includeTools.map(String) } : {}),
+    ...(Array.isArray(rawServer.excludeTools) ? { excludeTools: rawServer.excludeTools.map(String) } : {}),
+    ...(Array.isArray(rawServer.searchKeywords) ? { searchKeywords: rawServer.searchKeywords.map(String) } : {}),
+    ...(rawServer.toolPrefix === "server" || rawServer.toolPrefix === "none" || rawServer.toolPrefix === "short" || rawServer.toolPrefix === "mcp"
+      ? { toolPrefix: rawServer.toolPrefix }
+      : {}),
+    ...(typeof rawServer.bearerToken === "string" ? { bearerToken: rawServer.bearerToken } : {}),
+    ...(typeof rawServer.bearerTokenEnv === "string" ? { bearerTokenEnv: rawServer.bearerTokenEnv } : {}),
     updatedAt: typeof rawServer.updatedAt === "string" ? rawServer.updatedAt : new Date().toISOString(),
   };
 }
@@ -1774,18 +1803,39 @@ function buildMcpServerExportJson(servers: McpServerConfig[]) {
       }
       usedNames.add(name);
 
+      const adapterFields: Record<string, unknown> = { ...server };
+      for (const key of ["id", "name", "enabled", "transport", "updatedAt", "type", "baseUrl"]) {
+        delete adapterFields[key];
+      }
+      if (server.enabled === false) adapterFields.disabled = true;
+      else delete adapterFields.disabled;
+      if (!server.lifecycle || server.lifecycle === "lazy") delete adapterFields.lifecycle;
+      if (!server.includeTools?.length) delete adapterFields.includeTools;
+      if (!server.excludeTools?.length) delete adapterFields.excludeTools;
+      if (!server.searchKeywords?.length) delete adapterFields.searchKeywords;
       const exportedServer: Record<string, unknown> =
         server.transport === "http"
           ? {
+              ...adapterFields,
               url: server.url,
               ...(Object.keys(server.headers).length > 0 ? { headers: server.headers } : {}),
             }
           : {
+              ...adapterFields,
               command: server.command,
               ...(server.args.length > 0 ? { args: server.args } : {}),
               ...(server.cwd.trim() ? { cwd: server.cwd } : {}),
               ...(Object.keys(server.env).length > 0 ? { env: server.env } : {}),
             };
+      if (server.transport === "http") {
+        delete exportedServer.command;
+        delete exportedServer.args;
+        delete exportedServer.cwd;
+        delete exportedServer.env;
+      } else {
+        delete exportedServer.url;
+        delete exportedServer.headers;
+      }
 
       return [name, exportedServer];
     }),
@@ -23165,7 +23215,9 @@ export function App() {
         false,
       );
       setChatStatus({ status: "loading", message: options.statusMessage ?? "正在重新生成回复..." });
+      const piMcpEnabled = requestContextSettings.mcpTools && enabledMcpServers.length > 0;
       const requestMcpTools =
+        isImageGenerationRequest &&
         !isContinuation &&
         !isDialogueRewrite &&
         !isLocalRewrite &&
@@ -23500,8 +23552,8 @@ export function App() {
         const chatToolsForRequest = options.includeTools
           ? availableChatTools.filter(
               (tool) =>
-                !multiAgentDelegationDisabled ||
-                tool.function.name !== "multi_agent_delegate_task",
+                (!usePiKernel || !isMcpToolName(tool.function.name)) &&
+                (!multiAgentDelegationDisabled || tool.function.name !== "multi_agent_delegate_task"),
             )
           : [];
         const requestMessages = await prepareContextCompressedMessages({
@@ -23645,6 +23697,11 @@ export function App() {
                   piCompaction: piCompactionSettings,
                   piSessionScope: "main",
                   piSkillPaths: requestPiSkillPaths,
+                  mcpConfig: {
+                    mcpServers: requestContextSettings.mcpTools
+                      ? mcpServers.filter((server) => server.enabled)
+                      : [],
+                  },
                 }
               : {}),
             ...(usePiKernel && options.includeTools && requestContextSettings.workspaceTools &&
@@ -24065,7 +24122,7 @@ export function App() {
             body: JSON.stringify({
               ...buildProviderApiTarget(subAgentProvider),
               runId: subPiRunId,
-              enableTools: subAgentToolDefinitions.length > 0,
+              enableTools: subAgentToolDefinitions.length > 0 || piMcpEnabled,
               contextWindow: resolveContextCompressionLimit(
                 { ...contextCompressionSettings, enabled: true },
                 subAgentModelId,
@@ -24073,6 +24130,11 @@ export function App() {
               piCompaction: piCompactionSettings,
               piSessionScope: `sub-${subAgent.id}`,
               piSkillPaths: requestPiSkillPaths,
+              mcpConfig: {
+                mcpServers: piMcpEnabled
+                  ? mcpServers.filter((server) => server.enabled)
+                  : [],
+              },
               ...(requestContextSettings.workspaceTools && activeLocalToolsEnabled &&
               activeFileToolsWorkspaceHandle?.kind === "electron"
                 ? {
@@ -24493,7 +24555,7 @@ export function App() {
         assistantMessageId = streamingTimeline.messageId ?? assistantMessageId;
         try {
           const streamResult = await requestChatCompletion(apiMessages, {
-            includeTools: availableChatTools.length > 0,
+            includeTools: availableChatTools.length > 0 || piMcpEnabled,
             stream: true,
             onDelta: streamingTimeline.pushContent,
             onReasoningDelta: streamingTimeline.pushReasoning,
@@ -24553,7 +24615,7 @@ export function App() {
           let completionResult;
           try {
             completionResult = await requestChatCompletion(apiMessages, {
-              includeTools: availableChatTools.length > 0,
+              includeTools: availableChatTools.length > 0 || piMcpEnabled,
               stream: preferStreamingSupervisorToolCalls,
               toolChoice: "auto",
               onDelta: streamingRound?.pushContent,
@@ -24603,7 +24665,7 @@ export function App() {
               message: "主 Agent 正在切换兼容的流式工具调用...",
             });
             completionResult = await requestChatCompletion(apiMessages, {
-              includeTools: availableChatTools.length > 0,
+              includeTools: availableChatTools.length > 0 || piMcpEnabled,
               stream: true,
               toolChoice: "auto",
               onDelta: streamingRound?.pushContent,
@@ -26222,7 +26284,9 @@ export function App() {
       );
       throwIfChatAborted(abortSignal);
       setChatStatus({ status: "loading", message: "正在生成回复..." });
+      const piMcpEnabled = activeLlmContextSettings.mcpTools && enabledMcpServers.length > 0;
       const requestMcpTools =
+        isImageGenerationRequest &&
         activeLlmContextSettings.mcpTools && enabledMcpServers.length > 0
           ? await refreshMcpTools({ silent: true })
           : [];
@@ -26462,7 +26526,9 @@ export function App() {
       }) => {
         throwIfChatAborted(abortSignal);
         const usePiKernel = !isImageGenerationRequest;
-        const requestTools = options.includeTools ? availableChatTools : [];
+        const requestTools = options.includeTools
+          ? availableChatTools.filter((tool) => !usePiKernel || !isMcpToolName(tool.function.name))
+          : [];
         const requestMessages = await prepareContextCompressedMessages({
           messages: substituteUserNicknameInApiMessages(messages, userProfile.nickname),
           provider: chatProvider,
@@ -26582,6 +26648,11 @@ export function App() {
                   piCompaction: piCompactionSettings,
                   piSessionScope: "main",
                   piSkillPaths: requestPiSkillPaths,
+                  mcpConfig: {
+                    mcpServers: activeLlmContextSettings.mcpTools
+                      ? mcpServers.filter((server) => server.enabled)
+                      : [],
+                  },
                 }
               : {}),
             ...(usePiKernel && options.includeTools && activeLlmContextSettings.workspaceTools &&
@@ -26756,7 +26827,7 @@ export function App() {
         assistantMessageId = streamingTimeline.messageId ?? assistantMessageId;
         try {
           const streamResult = await requestChatCompletion(apiMessages, {
-            includeTools: availableChatTools.length > 0,
+            includeTools: availableChatTools.length > 0 || piMcpEnabled,
             stream: true,
             onDelta: streamingTimeline.pushContent,
             onReasoningDelta: streamingTimeline.pushReasoning,
@@ -26816,7 +26887,7 @@ export function App() {
           let completionResult;
           try {
             completionResult = await requestChatCompletion(apiMessages, {
-              includeTools: availableChatTools.length > 0,
+              includeTools: availableChatTools.length > 0 || piMcpEnabled,
               stream: useStreamingToolCompletion,
               toolChoice: "auto",
               onDelta: streamingRound?.pushContent,
@@ -33312,7 +33383,7 @@ export function App() {
                 <div className="section-heading compact">
                   <div>
                     <h2>MCP 工具</h2>
-                    <p>启用后，聊天发送时会自动发现工具并交给模型按需调用。</p>
+                    <p>聊天由 Pi MCP Adapter 原生代理工具按需发现、连接和调用服务器。</p>
                   </div>
                   <div className="mcp-editor-actions">
                     <button
@@ -33506,6 +33577,78 @@ export function App() {
                               </label>
                             </>
                           )}
+
+                          <div className="section-heading compact mcp-adapter-policy-heading">
+                            <div>
+                              <h3>Pi MCP Adapter 策略</h3>
+                              <p>连接生命周期和工具暴露策略由 Pi 原生扩展处理。</p>
+                            </div>
+                          </div>
+                          <label className="field">
+                            <span>连接生命周期</span>
+                            <select
+                              value={activeMcpServer.lifecycle ?? "lazy"}
+                              onChange={(event) =>
+                                updateMcpServer(activeMcpServer.id, {
+                                  lifecycle: event.target.value as McpServerConfig["lifecycle"],
+                                })
+                              }
+                            >
+                              <option value="lazy">lazy：首次使用时连接</option>
+                              <option value="eager">eager：会话启动时连接</option>
+                              <option value="keep-alive">keep-alive：保持连接</option>
+                            </select>
+                          </label>
+                          <label className="tool-toggle mcp-enable-toggle">
+                            <input
+                              type="checkbox"
+                              checked={activeMcpServer.directTools === true}
+                              onChange={(event) =>
+                                updateMcpServer(activeMcpServer.id, { directTools: event.target.checked })
+                              }
+                            />
+                            <span>将 MCP 工具注册为 Pi 原生 direct tools</span>
+                          </label>
+                          <label className="field">
+                            <span>工具前缀</span>
+                            <select
+                              value={activeMcpServer.toolPrefix ?? "server"}
+                              onChange={(event) =>
+                                updateMcpServer(activeMcpServer.id, {
+                                  toolPrefix: event.target.value as McpServerConfig["toolPrefix"],
+                                })
+                              }
+                            >
+                              <option value="server">server</option>
+                              <option value="short">short</option>
+                              <option value="mcp">mcp__server_tool</option>
+                              <option value="none">none</option>
+                            </select>
+                          </label>
+                          <label className="field">
+                            <span>包含工具（每行一个，可选）</span>
+                            <textarea
+                              value={(activeMcpServer.includeTools ?? []).join("\n")}
+                              placeholder="例如：search\nread_file"
+                              onChange={(event) =>
+                                updateMcpServer(activeMcpServer.id, {
+                                  includeTools: event.target.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+                                })
+                              }
+                            />
+                          </label>
+                          <label className="field">
+                            <span>排除工具（每行一个，可选）</span>
+                            <textarea
+                              value={(activeMcpServer.excludeTools ?? []).join("\n")}
+                              placeholder="例如：delete_*"
+                              onChange={(event) =>
+                                updateMcpServer(activeMcpServer.id, {
+                                  excludeTools: event.target.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+                                })
+                              }
+                            />
+                          </label>
                         </>
                       )}
                     </>

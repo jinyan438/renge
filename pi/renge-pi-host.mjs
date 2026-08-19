@@ -11,6 +11,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { createPiMcpAdapter, normalizePiMcpConfig } from "./pi-mcp-adapter-bridge.mjs";
 import {
   convertOpenAiMessagesToPi,
   filterPiCustomToolDefinitions,
@@ -237,6 +238,8 @@ export function createRengePiHost({
     const additionalSkillPaths = normalizePiSkillPaths(body?.piSkillPaths)
       .map((skillPath) => resolve(skillPath));
     const requestedToolsEnabled = body?.enableTools !== false;
+    const mcpConfig = normalizePiMcpConfig(body?.mcpConfig ?? body?.mcpServers ?? {});
+    const hasMcpServers = requestedToolsEnabled && Object.keys(mcpConfig.mcpServers).length > 0;
     const toolsEnabled = shouldEnablePiTools(body?.enableTools, additionalSkillPaths);
     const requestedToolDefinitions = Array.isArray(requestBody.tools)
       ? requestBody.tools
@@ -271,6 +274,7 @@ export function createRengePiHost({
       kernelMode: "full",
       compaction: { engine: "pi", ...compaction },
       nativeTools,
+      mcp: hasMcpServers ? { engine: "pi-mcp-adapter", mode: "native" } : { enabled: false },
     }));
 
     const abortRun = () => {
@@ -325,10 +329,14 @@ export function createRengePiHost({
       });
       const settingsManager = SettingsManager.create(cwd, agentDir);
       settingsManager.applyOverrides({ compaction });
+      const extensionFactories = hasMcpServers
+        ? [await createPiMcpAdapter(mcpConfig)]
+        : [];
       const resourceLoader = new DefaultResourceLoader({
         cwd,
         agentDir,
         settingsManager,
+        extensionFactories,
         // Reuse enabled Renge skills through Pi's native Skill loader.
         additionalSkillPaths,
         appendSystemPromptOverride: (base) => [
