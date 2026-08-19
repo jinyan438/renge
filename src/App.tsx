@@ -24030,7 +24030,7 @@ export function App() {
       } else {
         let toolLoopCompleted = false;
         let reasoningOnlyToolRetryCount = 0;
-        for (let toolRound = 0; toolRound < 99; toolRound += 1) {
+        for (let toolRound = 0; toolRound < 999; toolRound += 1) {
           setChatStatus({
             status: "loading",
             message: `正在推进工具任务，第 ${toolRound + 1} 轮...`,
@@ -24148,7 +24148,7 @@ export function App() {
           }
 
           if (toolCalls.length === 0) {
-            if (pendingMcpObservationPrompt && pendingMcpObservationRetries < 2 && toolRound < 98) {
+            if (pendingMcpObservationPrompt && pendingMcpObservationRetries < 2 && toolRound < 998) {
               apiMessages.push({
                 role: "assistant",
                 content: assistantContent || "",
@@ -24209,7 +24209,7 @@ export function App() {
             if (
               localToolsEnabled &&
               localWorkspaceHandle &&
-              toolRound < 98 &&
+              toolRound < 998 &&
               shouldAutoContinueLocalTask(assistantContent)
             ) {
               if (!streamingRound) {
@@ -24411,7 +24411,7 @@ export function App() {
         }
         if (!toolLoopCompleted) {
           throw new Error(
-            "主 Agent 连续推进了 99 轮工具任务，仍未形成可验收的最终答复。",
+            "主 Agent 连续推进了 999 轮工具任务，仍未形成可验收的最终答复。",
           );
         }
       }
@@ -26102,7 +26102,7 @@ export function App() {
       } else {
         const useStreamingToolCompletion = chatStreamEnabled;
         let reasoningOnlyToolRetryCount = 0;
-        for (let toolRound = 0; toolRound < 99; toolRound += 1) {
+        for (let toolRound = 0; toolRound < 999; toolRound += 1) {
           setChatStatus({
             status: "loading",
             message: `正在推进工具任务，第 ${toolRound + 1} 轮...`,
@@ -26176,7 +26176,7 @@ export function App() {
           }
 
           if (toolCalls.length === 0) {
-            if (pendingMcpObservationPrompt && pendingMcpObservationRetries < 2 && toolRound < 98) {
+            if (pendingMcpObservationPrompt && pendingMcpObservationRetries < 2 && toolRound < 998) {
               apiMessages.push({
                 role: "assistant",
                 content: assistantContent || "",
@@ -26236,7 +26236,7 @@ export function App() {
             if (
               localToolsEnabled &&
               localWorkspaceHandle &&
-              toolRound < 98 &&
+              toolRound < 998 &&
               shouldAutoContinueLocalTask(assistantContent)
             ) {
               if (!streamingRound) {
