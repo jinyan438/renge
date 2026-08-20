@@ -18951,9 +18951,6 @@ export function App() {
       }),
     [chatMessages],
   );
-  const activeSessionMemoryEnabled = Boolean(
-    activePersona && activeChatSession?.memoryPersonaIds.includes(activePersona.id),
-  );
   const workspaceGroups = useMemo(() => {
     const groups = new Map<string, { key: string; name: string; sessions: ChatSession[] }>();
 
@@ -19515,26 +19512,6 @@ export function App() {
     setActiveSystemPromptId(remainingPrompts[0]?.id ?? "");
     setActiveSystemPromptIds((current) =>
       current.filter((promptId) => promptId !== activeSystemPrompt.id),
-    );
-  };
-
-  const toggleActiveSessionMemory = () => {
-    if (!activePersona || !activeChatSession) return;
-
-    setChatSessions((current) =>
-      current.map((session) => {
-        if (session.id !== activeChatSession.id) return session;
-
-        const memoryPersonaIds = session.memoryPersonaIds.includes(activePersona.id)
-          ? session.memoryPersonaIds.filter((personaId) => personaId !== activePersona.id)
-          : [...session.memoryPersonaIds, activePersona.id];
-
-        return {
-          ...session,
-          memoryPersonaIds,
-          updatedAt: new Date().toISOString(),
-        };
-      }),
     );
   };
 
@@ -22103,6 +22080,17 @@ export function App() {
       : "当前尚无可复用的实际请求记录，使用发送前估算";
     return `当前上下文约 ${current} Token；${modelNote}，安全阈值 ${threshold} Token；${compressionNote}；${usageNote}。点击打开 LLM 设置。`;
   })();
+  const contextUsagePercent =
+    contextTokenMeter.usageRatio === null
+      ? null
+      : Math.round(Math.max(0, contextTokenMeter.usageRatio) * 100);
+  const contextRingProgress =
+    contextTokenMeter.usageRatio === null
+      ? 0
+      : Math.min(1, Math.max(0, contextTokenMeter.usageRatio)) * 100;
+  const contextTokenRingStyle = {
+    "--context-progress": `${contextRingProgress}%`,
+  } as CSSProperties;
 
   const executeChatCommandBlock = async (content: string) => {
     if (!localWorkspaceHandle || !localToolsEnabled) {
@@ -34785,40 +34773,6 @@ export function App() {
                           : "选择角色卡开始角色扮演"
                       : "AI Direct")}
               </h1>
-              <button
-                type="button"
-                className={`chat-context-token-meter ${
-                  contextCompressionSettings.enabled ? "compression-enabled" : "compression-disabled"
-                } ${
-                  contextTokenMeter.usageRatio !== null && contextTokenMeter.usageRatio >= 1
-                    ? "over-threshold"
-                    : contextTokenMeter.usageRatio !== null && contextTokenMeter.usageRatio >= 0.8
-                      ? "near-threshold"
-                      : ""
-                }`}
-                title={contextTokenMeterTitle}
-                aria-label={contextTokenMeterTitle}
-                onClick={() => {
-                  setLlmContextSettingsMode(chatMode);
-                  setSettingsTab("llm");
-                  openWindow("settings");
-                }}
-              >
-                <span className="chat-context-token-part current">
-                  <span className="chat-context-token-label">Token</span>
-                  <span aria-hidden="true">≈</span>
-                  <strong>{contextTokenMeter.currentTokens.toLocaleString("zh-CN")}</strong>
-                </span>
-                <span className="chat-context-token-separator" aria-hidden="true">
-                  /
-                </span>
-                <span className="chat-context-token-part threshold">
-                  <span className="chat-context-token-label">安全阈值</span>
-                  <strong>
-                    {contextTokenMeter.thresholdTokens?.toLocaleString("zh-CN") ?? "未配置"}
-                  </strong>
-                </span>
-              </button>
             </div>
             <div className="chat-header-actions">
               <button
@@ -34840,30 +34794,36 @@ export function App() {
                 )}
                 <span>右侧栏</span>
               </button>
-              <label
-                className={`heartbeat-toggle ${activeHeartbeat.enabled ? "active" : ""}`}
-                title={activeHeartbeat.event.trim() ? "开启/关闭当前会话心跳" : "先填写心跳事件"}
-              >
-                <input
-                  type="checkbox"
-                  checked={activeHeartbeat.enabled}
-                  disabled={!activeChatSession || !activeHeartbeat.event.trim()}
-                  onChange={(event) =>
-                    updateActiveHeartbeat({
-                      enabled: event.target.checked,
-                      resetRunCount: true,
-                    })
-                  }
-                />
-                <RefreshCw size={15} />
-                <span>心跳</span>
-              </label>
               <details className="heartbeat-menu">
                 <summary className="ghost-action" title="心跳设置">
                   <Settings2 size={16} />
-                  设置
+                  心跳
                 </summary>
                 <div className="heartbeat-panel">
+                  <div className="heartbeat-panel-heading">
+                    <div>
+                      <strong>会话心跳</strong>
+                      <small>{activeHeartbeat.event.trim() ? "按间隔自动检查待执行事件" : "先填写待执行事件"}</small>
+                    </div>
+                    <label
+                      className={`heartbeat-toggle ${activeHeartbeat.enabled ? "active" : ""}`}
+                      title={activeHeartbeat.event.trim() ? "开启/关闭当前会话心跳" : "先填写心跳事件"}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={activeHeartbeat.enabled}
+                        disabled={!activeChatSession || !activeHeartbeat.event.trim()}
+                        onChange={(event) =>
+                          updateActiveHeartbeat({
+                            enabled: event.target.checked,
+                            resetRunCount: true,
+                          })
+                        }
+                      />
+                      <RefreshCw size={15} />
+                      <span>{activeHeartbeat.enabled ? "已开启" : "已关闭"}</span>
+                    </label>
+                  </div>
                   <label className="heartbeat-field compact">
                     <span>间隔</span>
                     <input
@@ -34942,20 +34902,6 @@ export function App() {
                   </div>
                 </div>
               </details>
-              <button
-                type="button"
-                className={`ghost-action ${activeSessionMemoryEnabled ? "active-memory" : ""}`}
-                disabled={chatMode !== "persona" || !activePersona || !activeChatSession}
-                title={
-                  activePersona
-                    ? `${activeSessionMemoryEnabled ? "取消" : "设为"} ${activePersona.name} 的记忆`
-                    : "需要先选择人格 Agent"
-                }
-                onClick={toggleActiveSessionMemory}
-              >
-                <Bookmark size={16} />
-                {activeSessionMemoryEnabled ? "取消记忆" : "设为记忆"}
-              </button>
               <button
                 type="button"
                 className="ghost-action"
@@ -36022,6 +35968,95 @@ export function App() {
                           </button>
                         ))
                       )}
+                    </div>
+                  </details>
+                  <details
+                    className={`context-token-menu ${
+                      contextCompressionSettings.enabled ? "compression-enabled" : "compression-disabled"
+                    } ${
+                      contextTokenMeter.usageRatio !== null && contextTokenMeter.usageRatio >= 1
+                        ? "over-threshold"
+                        : contextTokenMeter.usageRatio !== null && contextTokenMeter.usageRatio >= 0.8
+                          ? "near-threshold"
+                          : ""
+                    }`}
+                  >
+                    <summary
+                      className="context-token-trigger"
+                      title={contextTokenMeterTitle}
+                      aria-label={contextTokenMeterTitle}
+                    >
+                      <span className="context-token-ring" style={contextTokenRingStyle}>
+                        <span>{contextUsagePercent === null ? "--" : `${contextUsagePercent}%`}</span>
+                      </span>
+                    </summary>
+                    <div className="context-token-panel">
+                      <header>
+                        <strong>上下文用量</strong>
+                        <span>
+                          {contextTokenMeter.currentTokens.toLocaleString("zh-CN")} / {contextTokenMeter.thresholdTokens?.toLocaleString("zh-CN") ?? "未配置"} Token
+                        </span>
+                      </header>
+                      <div className="context-token-progress" aria-hidden="true">
+                        <span style={contextTokenRingStyle} />
+                      </div>
+                      <dl>
+                        <div>
+                          <dt>模型</dt>
+                          <dd>{contextTokenMeter.limitingModelId || "未配置"}</dd>
+                        </div>
+                        <div>
+                          <dt>压缩</dt>
+                          <dd>{contextCompressionSettings.enabled ? "自动压缩已开启" : "自动压缩已关闭"}</dd>
+                        </div>
+                        <div>
+                          <dt>计数方式</dt>
+                          <dd>{contextTokenMeter.usesActualRequestTokens ? "按最近一次请求" : "发送前估算"}</dd>
+                        </div>
+                        {contextTokenMeter.compressed && (
+                          <div>
+                            <dt>最近压缩</dt>
+                            <dd>
+                              移除 {contextTokenMeter.removedMessageCount} 条消息
+                              {contextTokenMeter.appendedMessageCount > 0
+                                ? `，新增 ${contextTokenMeter.appendedMessageCount} 条`
+                                : ""}
+                            </dd>
+                          </div>
+                        )}
+                      </dl>
+                      {contextTokenMeter.missingModelIds.length > 0 && (
+                        <p className="context-token-note">模型 {contextTokenMeter.missingModelIds.join("、")} 尚未配置上下文上限。</p>
+                      )}
+                      <div className="context-token-panel-actions">
+                        <label className="context-token-compression-toggle">
+                          <span>自动压缩</span>
+                          <input
+                            type="checkbox"
+                            checked={contextCompressionSettings.enabled}
+                            onChange={(event) => {
+                              setContextCompressionSettings((current) => ({
+                                ...current,
+                                enabled: event.target.checked,
+                              }));
+                              setContextRuntimeUsageByKey({});
+                            }}
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          className="ghost-action"
+                          onClick={(event) => {
+                            setLlmContextSettingsMode(chatMode);
+                            setSettingsTab("llm");
+                            openWindow("settings");
+                            event.currentTarget.closest("details")?.removeAttribute("open");
+                          }}
+                        >
+                          <Settings2 size={14} />
+                          上下文设置
+                        </button>
+                      </div>
                     </div>
                   </details>
                   {chatMode !== "multi" && (
