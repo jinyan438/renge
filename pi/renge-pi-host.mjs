@@ -4,6 +4,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import {
   createAgentSession,
+  createBashToolDefinition,
+  createLocalBashOperations,
   DefaultResourceLoader,
   getAgentDir,
   ModelRuntime,
@@ -12,6 +14,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { createPiMcpAdapter, normalizePiMcpConfig } from "./pi-mcp-adapter-bridge.mjs";
+import { createCommandOutputDecoder } from "../src/piCommandOutputUtils.mjs";
 import {
   convertOpenAiMessagesToPi,
   filterPiCustomToolDefinitions,
@@ -142,6 +145,42 @@ function appendPromptToSystemPrompt(prompt) {
   const normalized = String(prompt ?? "").trim();
   if (!normalized) return "";
   return normalized;
+}
+
+function createWindowsBashOperations() {
+  const local = createLocalBashOperations();
+  return {
+    exec(command, cwd, options) {
+      let decoder;
+      const sink = typeof options?.onData === "function" ? options.onData : () => {};
+      const finish = () => decoder?.finish();
+      const onData = (data) => {
+        decoder ??= createCommandOutputDecoder(sink);
+        decoder.push(data);
+      };
+      return local.exec(command, cwd, { ...options, onData }).then(
+        (result) => {
+          finish();
+          return result;
+        },
+        (error) => {
+          finish();
+          throw error;
+        },
+      );
+    },
+  };
+}
+
+function createWindowsBashExtension(cwd, settingsManager, enabled) {
+  return async (pi) => {
+    if (!enabled || process.platform !== "win32") return;
+    pi.registerTool(createBashToolDefinition(cwd, {
+      operations: createWindowsBashOperations(),
+      shellPath: settingsManager.getShellPath(),
+      commandPrefix: settingsManager.getShellCommandPrefix(),
+    }));
+  };
 }
 
 export function createRengePiHost({
@@ -332,9 +371,12 @@ export function createRengePiHost({
       });
       const settingsManager = SettingsManager.create(cwd, agentDir);
       settingsManager.applyOverrides({ compaction });
-      const extensionFactories = hasMcpServers
-        ? [await createPiMcpAdapter(mcpConfig)]
-        : [];
+      const extensionFactories = [createWindowsBashExtension(
+        cwd,
+        settingsManager,
+        workspace?.kind === "electron" && Boolean(workspace.cwd),
+      )];
+      if (hasMcpServers) extensionFactories.push(await createPiMcpAdapter(mcpConfig));
       const resourceLoader = new DefaultResourceLoader({
         cwd,
         agentDir,
