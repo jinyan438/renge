@@ -17,6 +17,8 @@ import {
   ExternalLink,
   Eye,
   EyeOff,
+  FileCode2,
+  FilePenLine,
   FileJson,
   FolderOpen,
   Globe,
@@ -46,6 +48,7 @@ import {
   Square,
   Send,
   Tags,
+  Terminal,
   Trash2,
   Upload,
   UserRound,
@@ -587,6 +590,16 @@ type ChatChoiceRequest = {
   response?: ChatChoiceResponse;
 };
 
+type ToolVisualization = {
+  toolCallId?: string;
+  name: string;
+  args?: Record<string, unknown>;
+  result?: unknown;
+  status: "running" | "done" | "error";
+  startedAt?: string;
+  endedAt?: string;
+};
+
 type ChatMessage = {
   id: string;
   role: ChatRole;
@@ -598,6 +611,7 @@ type ChatMessage = {
   attachments?: ChatAttachment[];
   source?: "heartbeat" | "roleplay-greeting" | "wechat";
   choiceRequest?: ChatChoiceRequest;
+  toolVisualization?: ToolVisualization;
   dialogueRewritePending?: boolean;
   dialoguePlaceholderCount?: number;
   variables?: Record<string, unknown>;
@@ -635,6 +649,15 @@ function getChatMessageContextSignature(message: ChatMessage) {
     sender: message.sender ?? null,
     source: message.source ?? null,
     choiceRequest: message.choiceRequest ?? null,
+    toolVisualization: message.toolVisualization
+      ? {
+          toolCallId: message.toolVisualization.toolCallId ?? "",
+          name: message.toolVisualization.name,
+          status: message.toolVisualization.status,
+          args: message.toolVisualization.args ?? null,
+          result: message.toolVisualization.result ?? null,
+        }
+      : null,
     attachments: (message.attachments ?? []).map((attachment) => ({
       id: attachment.id,
       name: attachment.name,
@@ -2366,6 +2389,35 @@ function normalizeChatMessage(rawValue: unknown): ChatMessage {
     Number(rawMessage.dialoguePlaceholderCount) > 0
       ? countDialoguePlaceholders(content)
       : 0;
+  const rawToolVisualization = isObjectRecord(rawMessage.toolVisualization)
+    ? rawMessage.toolVisualization
+    : null;
+  const toolVisualization =
+    rawToolVisualization &&
+    typeof rawToolVisualization.name === "string" &&
+    (rawToolVisualization.status === "running" ||
+      rawToolVisualization.status === "done" ||
+      rawToolVisualization.status === "error")
+      ? {
+          name: rawToolVisualization.name,
+          status: rawToolVisualization.status as ToolVisualization["status"],
+          ...(typeof rawToolVisualization.toolCallId === "string"
+            ? { toolCallId: rawToolVisualization.toolCallId }
+            : {}),
+          ...(isObjectRecord(rawToolVisualization.args)
+            ? { args: rawToolVisualization.args }
+            : {}),
+          ...("result" in rawToolVisualization
+            ? { result: rawToolVisualization.result }
+            : {}),
+          ...(typeof rawToolVisualization.startedAt === "string"
+            ? { startedAt: rawToolVisualization.startedAt }
+            : {}),
+          ...(typeof rawToolVisualization.endedAt === "string"
+            ? { endedAt: rawToolVisualization.endedAt }
+            : {}),
+        }
+      : undefined;
 
   return {
     id:
@@ -2394,6 +2446,7 @@ function normalizeChatMessage(rawValue: unknown): ChatMessage {
       ? { source: rawMessage.source }
       : {}),
     ...(role === "assistant" && choiceRequest ? { choiceRequest } : {}),
+    ...(toolVisualization ? { toolVisualization } : {}),
     ...(dialoguePlaceholderCount > 0
       ? {
           dialogueRewritePending: true,
@@ -3613,6 +3666,7 @@ type RenderedChatItem =
       message: ChatMessage;
       segments: RenderedChatSegment[];
       blocks: ChatToolProgressBlock[];
+      visualizations: ToolVisualization[];
       showTime: boolean;
       startedAt: string;
       endedAt: string;
@@ -4824,12 +4878,15 @@ function getRenderedChatItems(
   };
 
   for (const segment of segments) {
+    const toolVisualization =
+      segment.message.role === "assistant" ? segment.message.toolVisualization : undefined;
     const toolBlock =
+      !toolVisualization &&
       segment.message.role === "assistant" && segment.message.renderAsPlainText !== true
         ? parseToolProgressContent(segment.segment)
         : null;
 
-    if (!toolBlock) {
+    if (!toolBlock && !toolVisualization) {
       flushToolGroup();
       items.push({ kind: "segment", ...segment });
       continue;
@@ -4841,7 +4898,8 @@ function getRenderedChatItems(
         id: `tool-group-${segment.id}`,
         message: segment.message,
         segments: [segment],
-        blocks: [toolBlock],
+        blocks: toolBlock ? [toolBlock] : [],
+        visualizations: toolVisualization ? [toolVisualization] : [],
         showTime: segment.showTime,
         startedAt: segment.message.createdAt,
         endedAt: segment.message.createdAt,
@@ -4850,7 +4908,8 @@ function getRenderedChatItems(
     }
 
     toolGroup.segments.push(segment);
-    toolGroup.blocks.push(toolBlock);
+    if (toolBlock) toolGroup.blocks.push(toolBlock);
+    if (toolVisualization) toolGroup.visualizations.push(toolVisualization);
     toolGroup.endedAt = segment.message.createdAt;
   }
 
@@ -8842,6 +8901,7 @@ function appendAssistantTimelineMessage(
   attachments: ChatAttachment[] = [],
   reasoning = "",
   sender?: ChatSenderIdentity,
+  toolVisualization?: ToolVisualization,
 ) {
   const trimmedContent = content.trim();
   const trimmedReasoning = reasoning.trim();
@@ -8855,6 +8915,7 @@ function appendAssistantTimelineMessage(
       content: trimmedContent,
       ...(trimmedReasoning ? { reasoning: trimmedReasoning } : {}),
       ...(sender ? { sender } : {}),
+      ...(toolVisualization ? { toolVisualization } : {}),
       createdAt: new Date().toISOString(),
       ...(attachments.length > 0 ? { attachments } : {}),
     },
@@ -9568,6 +9629,65 @@ function formatToolResultForApi(result: unknown, toolName?: string) {
     });
   }
   return JSON.stringify(sanitizeToolResultForApiValue(result));
+}
+
+function toolVisualizationResultText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(toolVisualizationResultText).filter(Boolean).join("\n");
+  if (!isObjectRecord(value)) return value == null ? "" : String(value);
+  if (Array.isArray(value.content)) {
+    const content = value.content
+      .map((part) => (isObjectRecord(part) ? part.text : ""))
+      .filter((part): part is string => typeof part === "string")
+      .join("\n");
+    if (content) return content;
+  }
+  for (const key of ["output", "stdout", "text", "message", "result", "error"]) {
+    if (key in value) {
+      const text = toolVisualizationResultText(value[key]);
+      if (text) return text;
+    }
+  }
+  try {
+    return JSON.stringify(value, null, 2) ?? "";
+  } catch {
+    return String(value);
+  }
+}
+
+function toolVisualizationDiff(meta: ToolVisualization): string {
+  const args = meta.args ?? {};
+  const result = isObjectRecord(meta.result) ? meta.result : {};
+  const details = isObjectRecord(result.details) ? result.details : result;
+  for (const key of ["patch", "diff"]) {
+    if (typeof details[key] === "string" && details[key].trim()) return details[key];
+  }
+  const edits = args.edits;
+  if (Array.isArray(edits)) {
+    return edits
+      .map((edit) => {
+        const record = isObjectRecord(edit) ? edit : {};
+        const oldText = typeof record.oldText === "string" ? record.oldText : String(record.old_text ?? "");
+        const newText = typeof record.newText === "string" ? record.newText : String(record.new_text ?? "");
+        return [
+          ...oldText.split("\n").map((line) => `-${line}`),
+          ...newText.split("\n").map((line) => `+${line}`),
+        ].join("\n");
+      })
+      .join("\n");
+  }
+  if (typeof args.oldText === "string" || typeof args.old_text === "string") {
+    const oldText = String(args.oldText ?? args.old_text ?? "");
+    const newText = String(args.newText ?? args.new_text ?? "");
+    return [
+      ...oldText.split("\n").map((line) => `-${line}`),
+      ...newText.split("\n").map((line) => `+${line}`),
+    ].join("\n");
+  }
+  if (typeof args.content === "string") {
+    return args.content.split("\n").map((line) => `+${line}`).join("\n");
+  }
+  return "";
 }
 
 function formatSilentChatToolErrorForApi(toolName: string, error: unknown) {
@@ -22041,6 +22161,73 @@ export function App() {
     setChatStatus({ status: "success", message: "命令块执行完成。" });
   };
 
+  const renderPiToolVisualization = (meta: ToolVisualization, key: string) => {
+    const normalizedName = meta.name.trim().toLocaleLowerCase().replace(/[\s.-]+/g, "_");
+    const args = meta.args ?? {};
+    const path = String(args.path ?? args.filePath ?? args.file_path ?? "");
+    const command = String(args.command ?? args.cmd ?? args.script ?? "");
+    const isRead =
+      ["read", "read_file", "file_read"].includes(normalizedName) ||
+      normalizedName.includes("read_file");
+    const isShell =
+      ["bash", "shell", "exec", "exec_command", "command"].includes(normalizedName) ||
+      normalizedName.includes("run_command");
+    const isMutation =
+      ["write", "edit", "write_file", "apply_patch"].includes(normalizedName) ||
+      normalizedName.includes("write_file") ||
+      normalizedName.includes("edit_file");
+    const resultText = toolVisualizationResultText(meta.result);
+    const diff = toolVisualizationDiff(meta);
+    const lines = resultText.split("\n").slice(0, 400);
+    const statusLabel = meta.status === "running" ? "执行中" : meta.status === "error" ? "失败" : "完成";
+    const title = isRead ? "读取文件" : isShell ? "运行命令" : isMutation ? (normalizedName.includes("write") ? "写入文件" : "修改文件") : meta.name;
+    const Icon = isRead ? FileCode2 : isShell ? Terminal : isMutation ? FilePenLine : Wrench;
+    const additions = diff.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++"));
+    const deletions = diff.split("\n").filter((line) => line.startsWith("-") && !line.startsWith("---"));
+    return (
+      <details
+        className={`pi-tool-visualization ${meta.status} ${isMutation ? "mutation" : ""}`}
+        key={key}
+        open={meta.status === "running" || isMutation}
+      >
+        <summary className="pi-tool-visualization-header">
+          <span className="pi-tool-visualization-icon"><Icon size={14} /></span>
+          <strong>{title}</strong>
+          <span className="pi-tool-visualization-summary" title={path || command || meta.name}>
+            {path || command || meta.name}
+          </span>
+          <span className="pi-tool-visualization-status">{statusLabel}</span>
+          <ChevronDown className="pi-tool-visualization-chevron" size={15} />
+        </summary>
+        <div className="pi-tool-visualization-body">
+          {path && <div className="pi-tool-visualization-path"><FileCode2 size={13} /> <code>{path}</code></div>}
+          {isMutation && diff ? (
+            <div className="pi-tool-diff">
+              <div className="pi-tool-diff-toolbar">
+                <span>{path || "文件变更"}</span>
+                <span><b className="additions">+{additions.length}</b> <b className="deletions">-{deletions.length}</b></span>
+              </div>
+              <pre>{diff.split("\n").slice(0, 600).map((line, index) => {
+                const addition = line.startsWith("+") && !line.startsWith("+++");
+                const deletion = line.startsWith("-") && !line.startsWith("---");
+                return <span key={`${key}-line-${index}`} className={addition ? "addition" : deletion ? "deletion" : "context"}>{line || " "}</span>;
+              })}</pre>
+            </div>
+          ) : isRead && resultText ? (
+            <div className="pi-tool-code-preview"><pre>{lines.map((line, index) => <span key={`${key}-read-${index}`}><i>{index + 1}</i>{line || " "}</span>)}</pre></div>
+          ) : isShell ? (
+            <div className="pi-tool-terminal-preview">
+              {command && <div className="command"><b>$</b>{command}</div>}
+              <pre>{resultText || (meta.status === "running" ? "等待输出…" : "无输出")}</pre>
+            </div>
+          ) : resultText ? (
+            <pre className="pi-tool-result-preview">{resultText}</pre>
+          ) : null}
+        </div>
+      </details>
+    );
+  };
+
   const renderToolProgressBlock = (block: ChatToolProgressBlock, messageId: string) => {
     const linkLabels = new Set(block.links.map((link) => stripMarkdownLinks(link.label).trim()));
     const summaryPath = block.links[0]?.label;
@@ -22113,28 +22300,52 @@ export function App() {
     item: Extract<RenderedChatItem, { kind: "toolGroup" }>,
     messageId: string,
   ) => {
-    const firstPath = item.blocks.find((block) => block.links.length > 0)?.links[0]?.label ?? "";
-    const hasError = item.blocks.some((block) => block.variant === "error");
+    const firstVisualization = item.visualizations.find((visualization) => {
+      const args = visualization.args ?? {};
+      return Boolean(args.path ?? args.filePath ?? args.file_path);
+    });
+    const firstPath = firstVisualization
+      ? String(firstVisualization.args?.path ?? firstVisualization.args?.filePath ?? firstVisualization.args?.file_path ?? "")
+      : item.blocks.find((block) => block.links.length > 0)?.links[0]?.label ?? "";
+    const hasError =
+      item.blocks.some((block) => block.variant === "error") ||
+      item.visualizations.some((visualization) => visualization.status === "error");
     const duration = formatProcessingDuration(item.startedAt, item.endedAt);
     const groupedAttachments = item.segments.flatMap(
       (segment) => segment.message.attachments ?? [],
     );
+    const visualizations = Array.from(
+      new Map(
+        item.visualizations.map((visualization, index) => [
+          visualization.toolCallId || `${visualization.name}-${index}`,
+          visualization,
+        ]),
+      ).values(),
+    );
+    const stepCount = visualizations.length > 0 ? visualizations.length : item.blocks.length;
+    const autoOpen = visualizations.some((visualization) =>
+      /(?:write|edit|patch)/i.test(visualization.name),
+    ) || visualizations.some((visualization) => visualization.status === "running");
 
     return (
-      <details className={`chat-tool-run ${hasError ? "error" : ""}`}>
+      <details className={`chat-tool-run ${hasError ? "error" : ""}`} open={autoOpen || undefined}>
         <summary className="chat-tool-run-header">
           <span className="chat-tool-run-icon">
             {hasError ? <X size={15} /> : <Wrench size={15} />}
           </span>
           <strong>已处理 {duration}</strong>
           {firstPath && <span className="chat-tool-run-path">{firstPath}</span>}
-          <span className="chat-tool-run-badge">{item.blocks.length} 步</span>
+          <span className="chat-tool-run-badge">{stepCount} 步</span>
           <ChevronDown className="chat-tool-run-chevron" size={16} />
         </summary>
         <div className="chat-tool-run-body">
-          {item.blocks.map((block, index) =>
-            renderToolProgressBlock(block, `${messageId}-tool-run-${index}`),
-          )}
+          {visualizations.length > 0
+            ? visualizations.map((visualization, index) =>
+                renderPiToolVisualization(visualization, `${messageId}-pi-tool-${index}`),
+              )
+            : item.blocks.map((block, index) =>
+                renderToolProgressBlock(block, `${messageId}-tool-run-${index}`),
+              )}
           {groupedAttachments.length > 0 && renderChatAttachments(groupedAttachments)}
         </div>
       </details>
@@ -23570,6 +23781,7 @@ export function App() {
         });
         const piRunId = usePiKernel ? crypto.randomUUID() : "";
         const piReturnedToolCalls: ChatToolCall[] = [];
+        const piToolVisualizations = new Map<string, ToolVisualization>();
         const handlePiEvent = async (event: PiStreamEvent) => {
           const runtimeStatus = formatPiRuntimeStatus(event);
           if (runtimeStatus) {
@@ -23578,23 +23790,45 @@ export function App() {
           }
           if (event.type === "tool_start") {
             options.beforePiToolMessage?.();
+            const startedAt = new Date().toISOString();
+            const visualization: ToolVisualization = {
+              toolCallId: event.toolCallId,
+              name: event.toolName || "unknown_tool",
+              args: event.arguments ?? {},
+              status: "running",
+              startedAt,
+            };
+            if (event.toolCallId) piToolVisualizations.set(event.toolCallId, visualization);
             appendAssistantTimelineMessage(
               commitChatMessages,
               formatPiNativeToolAction(event),
               [],
               "",
               assistantSender,
+              visualization,
             );
             await waitForToolProgressPaint();
             return;
           }
           if (event.type === "tool_end") {
+            const previous = event.toolCallId ? piToolVisualizations.get(event.toolCallId) : undefined;
+            const visualization: ToolVisualization = {
+              ...(previous ?? {}),
+              toolCallId: event.toolCallId ?? previous?.toolCallId,
+              name: event.toolName || previous?.name || "unknown_tool",
+              args: previous?.args ?? {},
+              result: event.result,
+              status: event.isError ? "error" : "done",
+              startedAt: previous?.startedAt,
+              endedAt: new Date().toISOString(),
+            };
             appendAssistantTimelineMessage(
               commitChatMessages,
               formatPiNativeToolResult(event),
               [],
               "",
               assistantSender,
+              visualization,
             );
             hasVisibleToolResult = true;
             if (!event.isError) hasSuccessfulVisibleToolResult = true;
@@ -23616,6 +23850,14 @@ export function App() {
           const isDelegationTool = toolCall.function.name === "multi_agent_delegate_task";
           if (!silentControl) {
             options.beforePiToolMessage?.();
+            const visualization: ToolVisualization = {
+              toolCallId: toolCall.id,
+              name: toolCall.function.name,
+              args: parseToolCallArgs(toolCall),
+              status: "running",
+              startedAt: new Date().toISOString(),
+            };
+            piToolVisualizations.set(toolCall.id, visualization);
             appendAssistantTimelineMessage(
               commitChatMessages,
               formatToolActionMessage(
@@ -23627,6 +23869,7 @@ export function App() {
               [],
               "",
               assistantSender,
+              visualization,
             );
             await waitForToolProgressPaint();
           }
@@ -23648,6 +23891,7 @@ export function App() {
             if (!silentControl) {
               const resultMessage = formatToolResultMessage(toolCall, result);
               const resultAttachments = getToolResultAttachments(result);
+              const previous = piToolVisualizations.get(toolCall.id);
               appendAssistantTimelineMessage(
                 commitChatMessages,
                 resultMessage,
@@ -23656,6 +23900,16 @@ export function App() {
                 isDelegationTool && isObjectRecord(result)
                   ? { kind: "persona", personaId: String(result.agentId ?? "") }
                   : assistantSender,
+                {
+                  ...(previous ?? {}),
+                  toolCallId: toolCall.id,
+                  name: toolCall.function.name,
+                  args: previous?.args ?? parseToolCallArgs(toolCall),
+                  result,
+                  status: "done",
+                  startedAt: previous?.startedAt,
+                  endedAt: new Date().toISOString(),
+                },
               );
               if (resultMessage.trim() || resultAttachments.length > 0) {
                 hasVisibleToolResult = true;
@@ -23665,12 +23919,23 @@ export function App() {
             await submitPiToolResult(event, result, null, abortSignal);
           } catch (toolError) {
             if (!silentControl && !isChatAbortError(toolError)) {
+              const previous = piToolVisualizations.get(toolCall.id);
               appendAssistantTimelineMessage(
                 commitChatMessages,
                 formatToolErrorMessage(toolCall, toolError),
                 [],
                 "",
                 assistantSender,
+                {
+                  ...(previous ?? {}),
+                  toolCallId: toolCall.id,
+                  name: toolCall.function.name,
+                  args: previous?.args ?? parseToolCallArgs(toolCall),
+                  result: toolError instanceof Error ? toolError.message : String(toolError),
+                  status: "error",
+                  startedAt: previous?.startedAt,
+                  endedAt: new Date().toISOString(),
+                },
               );
               hasVisibleToolResult = true;
             }
@@ -26543,6 +26808,7 @@ export function App() {
         });
         const piRunId = usePiKernel ? crypto.randomUUID() : "";
         const piReturnedToolCalls: ChatToolCall[] = [];
+        const piToolVisualizations = new Map<string, ToolVisualization>();
         const handlePiEvent = async (event: PiStreamEvent) => {
           const runtimeStatus = formatPiRuntimeStatus(event);
           if (runtimeStatus) {
@@ -26551,17 +26817,43 @@ export function App() {
           }
           if (event.type === "tool_start") {
             options.beforePiToolMessage?.();
+            const visualization: ToolVisualization = {
+              toolCallId: event.toolCallId,
+              name: event.toolName || "unknown_tool",
+              args: event.arguments ?? {},
+              status: "running",
+              startedAt: new Date().toISOString(),
+            };
+            if (event.toolCallId) piToolVisualizations.set(event.toolCallId, visualization);
             appendAssistantTimelineMessage(
               commitChatMessages,
               formatPiNativeToolAction(event),
+              [],
+              "",
+              undefined,
+              visualization,
             );
             await waitForToolProgressPaint();
             return;
           }
           if (event.type === "tool_end") {
+            const previous = event.toolCallId ? piToolVisualizations.get(event.toolCallId) : undefined;
             appendAssistantTimelineMessage(
               commitChatMessages,
               formatPiNativeToolResult(event),
+              [],
+              "",
+              undefined,
+              {
+                ...(previous ?? {}),
+                toolCallId: event.toolCallId ?? previous?.toolCallId,
+                name: event.toolName || previous?.name || "unknown_tool",
+                args: previous?.args ?? {},
+                result: event.result,
+                status: event.isError ? "error" : "done",
+                startedAt: previous?.startedAt,
+                endedAt: new Date().toISOString(),
+              },
             );
             hasVisibleToolResult = true;
             return;
@@ -26581,9 +26873,21 @@ export function App() {
           const silentControl = isSilentChatControlTool(toolCall.function.name);
           if (!silentControl) {
             options.beforePiToolMessage?.();
+            const visualization: ToolVisualization = {
+              toolCallId: toolCall.id,
+              name: toolCall.function.name,
+              args: parseToolCallArgs(toolCall),
+              status: "running",
+              startedAt: new Date().toISOString(),
+            };
+            piToolVisualizations.set(toolCall.id, visualization);
             appendAssistantTimelineMessage(
               commitChatMessages,
               formatToolActionMessage(toolCall, localWorkspaceHandle, requestMcpTools),
+              [],
+              "",
+              undefined,
+              visualization,
             );
             await waitForToolProgressPaint();
           }
@@ -26607,10 +26911,23 @@ export function App() {
             if (!silentControl) {
               const resultMessage = formatToolResultMessage(toolCall, result);
               const resultAttachments = getToolResultAttachments(result);
+              const previous = piToolVisualizations.get(toolCall.id);
               appendAssistantTimelineMessage(
                 commitChatMessages,
                 resultMessage,
                 resultAttachments,
+                "",
+                undefined,
+                {
+                  ...(previous ?? {}),
+                  toolCallId: toolCall.id,
+                  name: toolCall.function.name,
+                  args: previous?.args ?? parseToolCallArgs(toolCall),
+                  result,
+                  status: "done",
+                  startedAt: previous?.startedAt,
+                  endedAt: new Date().toISOString(),
+                },
               );
               if (resultMessage.trim() || resultAttachments.length > 0) {
                 hasVisibleToolResult = true;
@@ -26619,9 +26936,23 @@ export function App() {
             await submitPiToolResult(event, result, null, abortSignal);
           } catch (toolError) {
             if (!silentControl && !isChatAbortError(toolError)) {
+              const previous = piToolVisualizations.get(toolCall.id);
               appendAssistantTimelineMessage(
                 commitChatMessages,
                 formatToolErrorMessage(toolCall, toolError),
+                [],
+                "",
+                undefined,
+                {
+                  ...(previous ?? {}),
+                  toolCallId: toolCall.id,
+                  name: toolCall.function.name,
+                  args: previous?.args ?? parseToolCallArgs(toolCall),
+                  result: toolError instanceof Error ? toolError.message : String(toolError),
+                  status: "error",
+                  startedAt: previous?.startedAt,
+                  endedAt: new Date().toISOString(),
+                },
               );
               hasVisibleToolResult = true;
             }
