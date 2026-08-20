@@ -25417,7 +25417,7 @@ export function App() {
           assistantMessageVariables = summaryTemplateResult.messageVariables;
         }
       }
-      if (!assistantContent) {
+      if (!hasAssistantTimelinePayload(assistantContent, assistantReasoning)) {
         if (hasSuccessfulVisibleToolResult && options.multiAgentSupervisorMode) {
           throw new Error(
             "主 Agent 已收到子任务结果，但未能生成最终验收答复。",
@@ -27590,7 +27590,7 @@ export function App() {
         assistantContent = maskedDialogues.content;
         dialoguePlaceholderCount = maskedDialogues.count;
       }
-      if (!assistantContent) {
+      if (!hasAssistantTimelinePayload(assistantContent, assistantReasoning)) {
         if (hasVisibleToolResult) {
           setChatStatus({ status: "success", message: "工具执行完成。" });
           return;
