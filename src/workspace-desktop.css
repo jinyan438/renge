@@ -613,6 +613,72 @@ button.portfolio-window-light.close:hover {
   background: rgba(255, 255, 255, 0.56);
 }
 
+.portfolio-window-body .chat-workspace-picker {
+  padding: 2px 0 8px;
+}
+
+.portfolio-window-body .chat-workspace-picker-header {
+  min-height: 30px;
+  padding: 0 7px;
+  color: #77777d;
+  font-size: 13px;
+}
+
+.portfolio-window-body .chat-workspace-picker-header .session-icon-button,
+.portfolio-window-body .chat-recent-session-group .chat-session-group-header .session-icon-button {
+  color: #77777d;
+}
+
+.portfolio-window-body .chat-workspace-picker-header .session-icon-button:hover,
+.portfolio-window-body .chat-recent-session-group .chat-session-group-header .session-icon-button:hover {
+  color: #075bbd;
+  background: #eaf3ff;
+}
+
+.portfolio-window-body .chat-workspace-list {
+  gap: 3px;
+  padding: 0 4px;
+}
+
+.portfolio-window-body .chat-workspace-item {
+  min-height: 36px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: #4f4f55;
+  background: transparent;
+  font-size: 13px;
+}
+
+.portfolio-window-body .chat-workspace-item > svg {
+  color: #73737a;
+}
+
+.portfolio-window-body .chat-workspace-item > i {
+  background: #20c76a;
+}
+
+.portfolio-window-body .chat-workspace-item:hover {
+  border-color: #e1e1e6;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.portfolio-window-body .chat-workspace-item.active {
+  border-color: rgba(0, 102, 221, 0.16);
+  color: #075bbd;
+  background: #eaf3ff;
+  box-shadow: inset 3px 0 0 rgb(0, 102, 221);
+}
+
+.portfolio-window-body .chat-workspace-item.active > svg {
+  color: #075bbd;
+}
+
+.portfolio-window-body .chat-recent-session-group {
+  margin-top: 4px;
+  padding: 12px 4px 0;
+  border-top-color: #d7d7dd;
+}
+
 .portfolio-window-body .chat-session-item > button:first-child {
   color: #4f4f55;
 }
