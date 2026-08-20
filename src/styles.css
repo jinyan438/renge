@@ -4524,6 +4524,54 @@ summary:focus-visible {
   background: #64748b;
 }
 
+.context-token-breakdown {
+  display: grid;
+  gap: 7px;
+  padding: 10px 0 2px;
+  border-top: 1px solid #edf0f4;
+}
+
+.context-token-breakdown > header {
+  color: #7a8495;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.context-token-breakdown dl {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.context-token-breakdown dl > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.context-token-breakdown dt {
+  min-width: 0;
+  overflow: hidden;
+  color: #667085;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-token-breakdown dd {
+  margin: 0;
+  color: #27344b;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.context-token-breakdown p {
+  margin: 0;
+  color: #8a94a6;
+  font-size: 11px;
+}
+
 .context-token-menu.near-threshold .context-token-progress > span {
   background: #d18b21;
 }

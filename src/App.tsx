@@ -21724,6 +21724,7 @@ export function App() {
         astPrunedMessageCount: 0,
         assistantWindowedMessageCount: 0,
         appendedMessageCount: 0,
+        contextBreakdown: [],
       };
     }
     const modelEntries =
@@ -21986,6 +21987,50 @@ export function App() {
         ? runtimeUsage.currentTokens + appendedTokens + mutableMessageDeltaTokens
         : estimatedCurrentTokens;
     const thresholdTokens = limitingBudget?.budget.safetyThresholdTokens ?? null;
+    const estimateMessageCollectionTokens = (messages: ChatApiMessage[]) =>
+      messages.length > 0 ? Math.max(0, estimateContextMessagesTokens(messages) - 2) : 0;
+    const systemPromptTokens = estimateMessageCollectionTokens(
+      messagesWithStatus.filter((message) => message.role === "system"),
+    );
+    const userPromptTokens = estimateMessageCollectionTokens(
+      baseMessages.filter((message) => message.role === "user"),
+    );
+    const assistantMessageTokens = estimateMessageCollectionTokens(
+      baseMessages.filter(
+        (message, index) =>
+          message.role === "assistant" && !contextMeterChatMessages[index]?.toolVisualization,
+      ),
+    );
+    const toolResultTokens = estimateMessageCollectionTokens(
+      baseMessages.filter(
+        (message, index) =>
+          message.role === "assistant" && Boolean(contextMeterChatMessages[index]?.toolVisualization),
+      ),
+    );
+    const toolDefinitionTokens = estimateContextValueTokens(availableTools);
+    const knownBreakdownTokens =
+      systemPromptTokens +
+      toolDefinitionTokens +
+      userPromptTokens +
+      assistantMessageTokens +
+      toolResultTokens;
+    const breakdownScale =
+      knownBreakdownTokens > 0 && currentTokens < knownBreakdownTokens
+        ? currentTokens / knownBreakdownTokens
+        : 1;
+    const contextBreakdown = [
+      { label: "系统提示词", tokens: Math.round(systemPromptTokens * breakdownScale) },
+      { label: "工具定义", tokens: Math.round(toolDefinitionTokens * breakdownScale) },
+      { label: "用户提示词", tokens: Math.round(userPromptTokens * breakdownScale) },
+      { label: "助手消息", tokens: Math.round(assistantMessageTokens * breakdownScale) },
+      { label: "工具结果", tokens: Math.round(toolResultTokens * breakdownScale) },
+      { label: "摘要", tokens: 0 },
+    ];
+    const breakdownTotal = contextBreakdown.reduce((total, item) => total + item.tokens, 0);
+    contextBreakdown.push({
+      label: "其他 / 协议开销",
+      tokens: Math.max(0, Math.round(currentTokens - breakdownTotal)),
+    });
 
     return {
       currentTokens,
@@ -22015,6 +22060,7 @@ export function App() {
           ? runtimeUsage.assistantWindowedMessageCount
           : 0,
       appendedMessageCount,
+      contextBreakdown,
     };
   }, [
     activeChatPreset,
@@ -36000,6 +36046,18 @@ export function App() {
                       <div className="context-token-progress" aria-hidden="true">
                         <span style={contextTokenRingStyle} />
                       </div>
+                      <section className="context-token-breakdown">
+                        <header>估算构成</header>
+                        <dl>
+                          {contextTokenMeter.contextBreakdown.map((item) => (
+                            <div key={item.label}>
+                              <dt>{item.label}</dt>
+                              <dd>~{item.tokens.toLocaleString("zh-CN")}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                        <p>各项为估算值，总量由模型服务提供。</p>
+                      </section>
                       <dl>
                         <div>
                           <dt>模型</dt>
