@@ -12393,6 +12393,7 @@ export function App() {
   );
   const [chatSessions, setChatSessions] = useState<ChatSession[]>(loadChatSessions);
   const [activeChatSessionId, setActiveChatSessionId] = useState("");
+  const [selectedChatWorkspaceKey, setSelectedChatWorkspaceKey] = useState("");
   const [appDataLoaded, setAppDataLoaded] = useState(false);
   const [chatStatus, setChatStatus] = useState<{
     status: ChatStatusState;
@@ -18964,8 +18965,39 @@ export function App() {
       groups.set(session.workspaceKey, group);
     }
 
-    return Array.from(groups.values());
+    return Array.from(groups.values()).map((group) => ({
+      ...group,
+      sessions: [...group.sessions].sort(
+        (left, right) =>
+          (Date.parse(right.updatedAt) || 0) - (Date.parse(left.updatedAt) || 0),
+      ),
+    }));
   }, [chatSessions]);
+  const selectedWorkspaceGroup =
+    workspaceGroups.find((group) => group.key === selectedChatWorkspaceKey) ??
+    workspaceGroups.find((group) => group.key === activeChatSession?.workspaceKey) ??
+    workspaceGroups[0] ??
+    null;
+
+  useEffect(() => {
+    const activeWorkspace = activeChatSession?.workspaceKey;
+    if (activeWorkspace && workspaceGroups.some((group) => group.key === activeWorkspace)) {
+      setSelectedChatWorkspaceKey(activeWorkspace);
+      return;
+    }
+    if (!selectedChatWorkspaceKey && workspaceGroups[0]) {
+      setSelectedChatWorkspaceKey(workspaceGroups[0].key);
+    }
+  }, [activeChatSession?.workspaceKey, selectedChatWorkspaceKey, workspaceGroups]);
+
+  const selectChatWorkspace = (group: (typeof workspaceGroups)[number]) => {
+    if (activeSessionChangeIsBlocked()) return;
+    setSelectedChatWorkspaceKey(group.key);
+    const nextSession = group.sessions[0];
+    if (nextSession && nextSession.id !== activeChatSessionId) {
+      void openChatSession(nextSession.id);
+    }
+  };
 
   const updateHeartbeatForSession = (sessionId: string, patch: ChatHeartbeatPatch) => {
     const targetSession = chatSessions.find((session) => session.id === sessionId);
@@ -34673,10 +34705,6 @@ export function App() {
           </div>
 
           <div className="local-tools-panel">
-            <button type="button" className="local-workspace-button" onClick={authorizeLocalWorkspace}>
-              <FolderOpen size={16} />
-              {localWorkspaceHandle ? localWorkspaceHandle.name : "选择文件夹"}
-            </button>
             <button type="button" className="local-workspace-button" onClick={openPcBrowser}>
               <Server size={16} />
               连接电脑
@@ -34709,32 +34737,68 @@ export function App() {
           )}
 
           <div className="chat-session-area">
-            {workspaceGroups.map((group) => (
-              <section
-                className="chat-session-group"
-                key={group.key}
-                title="右键删除该工作区的所有会话"
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  deleteWorkspaceSessions(group.key, group.name);
-                }}
-              >
-                <div className="chat-session-group-header">
-                  <span title={group.name}>
-                    <FolderOpen size={14} />
-                    {group.name}
-                  </span>
+            <section className="chat-workspace-picker" aria-label="工作区选择">
+              <header className="chat-workspace-picker-header">
+                <strong>工作区</strong>
+                <button
+                  type="button"
+                  className="session-icon-button"
+                  title="添加工作区"
+                  aria-label="添加工作区"
+                  onClick={() => void authorizeLocalWorkspace()}
+                >
+                  <Plus size={16} />
+                </button>
+              </header>
+              <div className="chat-workspace-list">
+                {workspaceGroups.map((group) => (
                   <button
                     type="button"
-                    className="session-icon-button"
-                    title="新建会话"
-                    onClick={() => addChatSession(group.key, group.name)}
+                    className={`chat-workspace-item ${
+                      group.key === selectedWorkspaceGroup?.key ? "active" : ""
+                    }`}
+                    key={group.key}
+                    title={`${group.name} · ${group.sessions.length} 个会话`}
+                    onClick={() => selectChatWorkspace(group)}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      deleteWorkspaceSessions(group.key, group.name);
+                    }}
                   >
-                    <Plus size={13} />
+                    <FolderOpen size={17} />
+                    <span>{group.name}</span>
+                    {group.key === activeChatSession?.workspaceKey && (
+                      <i aria-label="当前工作区" />
+                    )}
                   </button>
-                </div>
-                <div className="chat-session-list">
-                  {group.sessions.map((session) => (
+                ))}
+              </div>
+            </section>
+
+            <section className="chat-session-group chat-recent-session-group">
+              <div className="chat-session-group-header">
+                <span>
+                  <MessageSquare size={14} />
+                  最近对话
+                </span>
+                <button
+                  type="button"
+                  className="session-icon-button"
+                  title={selectedWorkspaceGroup ? `在 ${selectedWorkspaceGroup.name} 新建会话` : "新建会话"}
+                  aria-label="新建会话"
+                  onClick={() =>
+                    addChatSession(
+                      selectedWorkspaceGroup?.key,
+                      selectedWorkspaceGroup?.name,
+                    )
+                  }
+                >
+                  <Plus size={15} />
+                </button>
+              </div>
+              <div className="chat-session-list">
+                {selectedWorkspaceGroup?.sessions.length ? (
+                  selectedWorkspaceGroup.sessions.map((session) => (
                     <div
                       className={`chat-session-item ${
                         session.id === activeChatSessionId ? "active" : ""
@@ -34760,10 +34824,12 @@ export function App() {
                         <Trash2 size={13} />
                       </button>
                     </div>
-                  ))}
-                </div>
-              </section>
-            ))}
+                  ))
+                ) : (
+                  <p className="chat-session-empty">该工作区暂无会话</p>
+                )}
+              </div>
+            </section>
           </div>
         </aside>
         <button

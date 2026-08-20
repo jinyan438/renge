@@ -4047,6 +4047,92 @@ summary:focus-visible {
   padding-top: 2px;
 }
 
+.chat-workspace-picker {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 7px;
+}
+
+.chat-workspace-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 30px;
+  padding: 0 2px;
+  color: #a7b0c3;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.chat-workspace-picker-header .session-icon-button,
+.chat-recent-session-group .chat-session-group-header .session-icon-button {
+  width: 28px;
+  height: 28px;
+}
+
+.chat-workspace-list {
+  display: grid;
+  gap: 4px;
+}
+
+.chat-workspace-item {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 8px;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 9px;
+  color: #d9e3f2;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.chat-workspace-item > svg {
+  color: #a7b0c3;
+}
+
+.chat-workspace-item > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-workspace-item > i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #38d47d;
+}
+
+.chat-workspace-item:hover,
+.chat-workspace-item.active {
+  color: #f8fafc;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.chat-workspace-item.active > svg {
+  color: #38d47d;
+}
+
+.chat-recent-session-group {
+  flex: 0 0 auto;
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.chat-session-empty {
+  margin: 3px 7px 0;
+  color: #7d8797;
+  font-size: 12px;
+}
+
 .chat-session-group {
   display: grid;
   gap: 6px;
@@ -9574,6 +9660,16 @@ input[type="range"] {
   .chat-session-group-header,
   .chat-session-item > button:first-child {
     font-size: 13px;
+  }
+
+  .chat-workspace-picker-header {
+    min-height: 38px;
+    font-size: 15px;
+  }
+
+  .chat-workspace-item {
+    min-height: 44px;
+    font-size: 14px;
   }
 
   .chat-session-item > button:first-child {
