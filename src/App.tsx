@@ -12502,6 +12502,7 @@ export function App() {
     evidence: string;
   } | null>(null);
   const activeChatSessionIdRef = useRef("");
+  const pendingSessionSelectionRef = useRef<string | null>(null);
   const chatModeRef = useRef<ChatMode>(chatMode);
   const tavernScriptRuntimeRef = useRef<TavernScriptRuntime | null>(null);
   const chatMessagesRef = useRef<ChatMessage[]>([]);
@@ -13379,6 +13380,7 @@ export function App() {
   };
 
   const showChatSession = (session: Pick<ChatSession, "id" | "messages">) => {
+    pendingSessionSelectionRef.current = session.id;
     activeChatSessionIdRef.current = session.id;
     chatMessagesRef.current = session.messages;
     setActiveChatSessionId(session.id);
@@ -14143,6 +14145,14 @@ export function App() {
   useEffect(() => {
     if (!appDataLoaded) return;
     if (!activeChatSessionId) return;
+
+    // Loading a session also replaces chatMessages. Do not treat that selection
+    // as a new message and refresh updatedAt, or the selected session jumps to
+    // the top of the recent-session list.
+    if (pendingSessionSelectionRef.current === activeChatSessionId) {
+      pendingSessionSelectionRef.current = null;
+      return;
+    }
 
     setChatSessions((current) =>
       current.map((session) =>
