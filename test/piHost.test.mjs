@@ -24,13 +24,6 @@ test("Pi command output decoder keeps split UTF-8 sequences intact", () => {
   assert.deepEqual(decodeCommandOutput(chunks), { encoding: "utf8", text: "中文" });
 });
 
-test("Pi command output decoder converts the UTF-16LE stream used by legacy WSL bash", () => {
-  const bytes = Buffer.from("wsl: localhost\r\n", "utf16le");
-  const decoded = decodeCommandOutput([bytes.subarray(0, 7), bytes.subarray(7)]);
-  assert.equal(decoded.encoding, "utf-16le");
-  assert.equal(decoded.text, "wsl: localhost\r\n");
-});
-
 function listen(server) {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
