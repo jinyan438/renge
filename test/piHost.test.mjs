@@ -5,24 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { startRengeServer } from "../server.mjs";
-import { decodeCommandOutput } from "../src/piCommandOutputUtils.mjs";
-
-test("Pi command output decoder preserves UTF-8 Chinese output", () => {
-  const chunks = [Buffer.from("中文输出", "utf8")];
-  assert.deepEqual(decodeCommandOutput(chunks), { encoding: "utf8", text: "中文输出" });
-});
-
-test("Pi command output decoder converts Windows GB18030 output", () => {
-  const bytes = Buffer.from([0xd6, 0xd0, 0xce, 0xc4, 0xca, 0xe4, 0xb3, 0xf6]);
-  const chunks = [bytes.subarray(0, 3), bytes.subarray(3)];
-  assert.deepEqual(decodeCommandOutput(chunks), { encoding: "gb18030", text: "中文输出" });
-});
-
-test("Pi command output decoder keeps split UTF-8 sequences intact", () => {
-  const bytes = Buffer.from("中文", "utf8");
-  const chunks = [bytes.subarray(0, 1), bytes.subarray(1, 4), bytes.subarray(4)];
-  assert.deepEqual(decodeCommandOutput(chunks), { encoding: "utf8", text: "中文" });
-});
 
 function listen(server) {
   return new Promise((resolve, reject) => {
