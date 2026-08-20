@@ -25,30 +25,8 @@ function hasIncompleteUtf8Tail(buffer) {
   return false;
 }
 
-function detectUtf16Encoding(buffer) {
-  if (buffer.length < 2) return null;
-  if (buffer[0] === 0xff && buffer[1] === 0xfe) return "utf-16le";
-  if (buffer[0] === 0xfe && buffer[1] === 0xff) return "utf-16be";
-  if (buffer.length < 4) return null;
-
-  const sampleLength = Math.min(buffer.length, 512);
-  let evenZeroes = 0;
-  let oddZeroes = 0;
-  for (let index = 0; index < sampleLength; index += 1) {
-    if (buffer[index] !== 0) continue;
-    if (index % 2 === 0) evenZeroes += 1;
-    else oddZeroes += 1;
-  }
-  const threshold = Math.max(2, Math.floor(sampleLength / 8));
-  if (oddZeroes >= threshold && oddZeroes > evenZeroes * 2) return "utf-16le";
-  if (evenZeroes >= threshold && evenZeroes > oddZeroes * 2) return "utf-16be";
-  return null;
-}
-
 function chooseEncoding(buffer) {
   if (buffer.length === 0) return null;
-  const utf16Encoding = detectUtf16Encoding(buffer);
-  if (utf16Encoding) return utf16Encoding;
   if (!buffer.some((byte) => byte >= 0x80)) return null;
   if (hasIncompleteUtf8Tail(buffer)) return null;
   if (isUtf8(buffer)) return "utf8";
