@@ -540,7 +540,6 @@ export function createRengePiHost({
               toolCallId: current.toolCallId,
               contentIndex: toolCall.contentIndex,
               delta: toolCall.delta,
-              argumentsText: current.argumentsText,
             }));
           } else if (event.assistantMessageEvent.type === "toolcall_end") {
             const toolCall = event.assistantMessageEvent;
