@@ -259,6 +259,10 @@ import {
   type ProviderApiType,
 } from "./responsesApiUtils.mjs";
 import {
+  shouldAutoContinueLocalTask,
+  shouldRequireLocalToolCall,
+} from "./localTaskUtils";
+import {
   applyContextCompressionSummary,
   buildFallbackContextSummary,
   compactOversizedAssistantContextMessages,
@@ -8814,49 +8818,6 @@ function buildChromeDevtoolsObservationPrompt(tools: McpToolDefinition[]) {
     "如果这是回复、发帖、提交表单或发送消息任务，必须确认用户要求发送的文本已经出现在页面、输入框已清空并提交成功，或页面明确显示成功状态。",
     "如果无法确认，不要告诉用户已经完成；继续用工具排查或说明真实阻塞。",
   ].join("\n");
-}
-
-function shouldRequireLocalToolCall(
-  messages: ChatMessage[],
-  handle: LocalDirectoryHandle | ElectronWorkspaceHandle | AndroidWorkspaceHandle | PcWorkspaceHandle | null,
-  toolsAvailable = false,
-) {
-  if (!handle && !toolsAvailable) return false;
-
-  const recentText = messages
-    .slice(-4)
-    .map((message) =>
-      [
-        message.content,
-        ...(message.attachments ?? []).map((attachment) => attachment.name),
-      ].join("\n"),
-    )
-    .join("\n")
-    .toLowerCase();
-
-  if (!recentText.trim()) return false;
-
-  const operationPattern =
-    /(安装|部署|启动|运行|构建|打包|验证|检查|创建|新建|写|编写|撰写|实现|开发|写入|生成|保存|存进|存入|存到|放到|放进|放入|放至|加到|拷贝|传输|上传|下载|发给我|发送|复制|还原|导出|导入|重命名|改名|名字改|文件夹名|移动|挪到|mkdir|删除|删掉|移除|读取|阅读|预览|查看|搜索|查找|筛选|比较|覆盖|编辑|替换|执行|代码|项目|html|npm run|build|test|lint|install|deploy|setup|start|serve|rename|move|create|delete|remove|read|preview|search|write|edit|replace|save|transfer|upload|download|send|copy|export|import)/i;
-  const fileContextPattern =
-    /(项目|依赖|脚本|附件|二进制|base64|zip|apk|图片|音频|视频|bat|cmd|文件|文件夹|目录|工作区|路径|package\.json|\.tsx|\.ts|\.js|\.json|\.md|\.txt|\.zip|\.apk|\.png|\.jpg|\.jpeg|\.webp|folder|directory|file|path|script|project|attachment|binary)/i;
-  const shortExecutionPattern = /^(执行|执行吧|开始|开始吧|可以|确认|继续|run|go|ok|yes)$/i;
-  const latestUserMessage = [...messages].reverse().find((message) => message.role === "user");
-  const latestText = latestUserMessage?.content.trim().toLowerCase() ?? "";
-
-  return (
-    (operationPattern.test(recentText) && fileContextPattern.test(recentText)) ||
-    (shortExecutionPattern.test(latestText) && operationPattern.test(recentText))
-  );
-}
-
-function shouldAutoContinueLocalTask(content: string) {
-  const normalizedContent = content.trim();
-  if (!normalizedContent) return false;
-
-  return /(还没有完成|尚未完成|需要继续|继续执行|下一步|还需要|待完成|未完成|没有完成|需要安装|需要创建|需要构建|need to continue|not complete|next step|still need)/i.test(
-    normalizedContent,
-  );
 }
 
 function buildPiNativeToolsSystemPrompt(
@@ -24534,8 +24495,8 @@ export function App() {
           const subAgentContent = streamResult.content.trim();
           const subAgentReasoning = streamResult.reasoning;
           if (
-            localToolsEnabled &&
-            localWorkspaceHandle &&
+            activeLocalToolsEnabled &&
+            activeFileToolsWorkspaceHandle &&
             subToolRound < MAX_SUB_AGENT_TOOL_ROUNDS - 1 &&
             shouldAutoContinueLocalTask(subAgentContent)
           ) {
@@ -25091,7 +25052,7 @@ export function App() {
                   completionResult.includedToolCount > 0 &&
                   shouldRequireLocalToolCall(
                     messagesForApi,
-                    localWorkspaceHandle,
+                    Boolean(activeFileToolsWorkspaceHandle),
                     completionResult.includedToolCount > 0,
                   ),
                 retryCount: reasoningOnlyToolRetryCount,
@@ -25122,8 +25083,8 @@ export function App() {
             }
 
             if (
-              localToolsEnabled &&
-              localWorkspaceHandle &&
+              activeLocalToolsEnabled &&
+              activeFileToolsWorkspaceHandle &&
               toolRound < 998 &&
               shouldAutoContinueLocalTask(assistantContent)
             ) {
@@ -27385,7 +27346,7 @@ export function App() {
                   completionResult.includedToolCount > 0 &&
                   shouldRequireLocalToolCall(
                     messagesForApi,
-                    localWorkspaceHandle,
+                    Boolean(activeFileToolsWorkspaceHandle),
                     completionResult.includedToolCount > 0,
                   ),
                 retryCount: reasoningOnlyToolRetryCount,
@@ -27415,8 +27376,8 @@ export function App() {
             }
 
             if (
-              localToolsEnabled &&
-              localWorkspaceHandle &&
+              activeLocalToolsEnabled &&
+              activeFileToolsWorkspaceHandle &&
               toolRound < 998 &&
               shouldAutoContinueLocalTask(assistantContent)
             ) {

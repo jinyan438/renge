@@ -239,6 +239,10 @@ test("Pi Host executes Pi native read directly for an Electron workspace", async
     assert.match(text, /Native read completed/);
     assert.match(text, /"toolName":"read"/);
     assert.equal(upstreamRequests.length, 2);
+    for (const upstreamRequest of upstreamRequests) {
+      assert.equal(upstreamRequest.max_tokens, undefined);
+      assert.equal(upstreamRequest.max_completion_tokens, 65_536);
+    }
     const toolMessage = upstreamRequests[1].messages.find((message) => message.role === "tool");
     assert.match(String(toolMessage?.content ?? ""), /native fixture content/);
     assert.equal(
