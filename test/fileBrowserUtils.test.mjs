@@ -15,6 +15,10 @@ import {
   normalizeTextFileWritePath,
   scopeWorkspaceHandleToSession,
 } from "../src/fileBrowserUtils.ts";
+import {
+  isDefaultWorkspaceKey,
+  normalizeWorkspaceSessionPath,
+} from "../src/workspaceSessionUtils.ts";
 
 test("classifies source, markdown, image, and unsupported files", () => {
   assert.equal(getFileBrowserPreviewKind("src/App.tsx"), "text");
@@ -22,6 +26,17 @@ test("classifies source, markdown, image, and unsupported files", () => {
   assert.equal(getFileBrowserPreviewKind("assets/photo.webp"), "image");
   assert.equal(getFileBrowserPreviewKind("release/app.apk"), "unsupported");
   assert.equal(getFileBrowserMimeType("photo.JPG"), "image/jpeg");
+});
+
+test("keeps the default workspace isolated from persisted project paths", () => {
+  assert.equal(normalizeWorkspaceSessionPath("default", "E:\\AI\\project\\renge"), undefined);
+  assert.equal(normalizeWorkspaceSessionPath("default", "public/game.html"), undefined);
+  assert.equal(isDefaultWorkspaceKey("default"), true);
+  assert.equal(isDefaultWorkspaceKey("E:\\AI\\project\\renge"), false);
+  assert.equal(
+    normalizeWorkspaceSessionPath("E:\\AI\\project\\renge", ""),
+    "E:\\AI\\project\\renge",
+  );
 });
 
 test("normalizes and sorts directory listing payloads", () => {

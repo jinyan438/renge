@@ -326,6 +326,10 @@ import {
   scopeWorkspaceHandleToSession,
 } from "./fileBrowserUtils";
 import {
+  isDefaultWorkspaceKey,
+  normalizeWorkspaceSessionPath,
+} from "./workspaceSessionUtils";
+import {
   buildBrowserToolsSystemPrompt,
   executeBrowserTool,
   getAvailableBrowserToolDefinitions,
@@ -2573,9 +2577,7 @@ function applyHeartbeatPatch(
 function createChatSession(
   workspaceKey = DEFAULT_WORKSPACE_KEY,
   workspaceName = DEFAULT_WORKSPACE_NAME,
-  workspacePath = workspaceKey !== DEFAULT_WORKSPACE_KEY && !workspaceKey.startsWith("browser:")
-    ? workspaceKey
-    : undefined,
+  workspacePath = normalizeWorkspaceSessionPath(workspaceKey, undefined),
   roleplay?: { characterCardId: string; greetingIndex?: number },
 ): ChatSession {
   const timestamp = new Date().toISOString();
@@ -2605,7 +2607,9 @@ function createChatSession(
     id: crypto.randomUUID(),
     workspaceKey,
     workspaceName,
-    ...(workspacePath ? { workspacePath } : {}),
+    ...(normalizeWorkspaceSessionPath(workspaceKey, workspacePath)
+      ? { workspacePath: normalizeWorkspaceSessionPath(workspaceKey, workspacePath) }
+      : {}),
     title: "新会话",
     messages: [],
     heartbeat: createDefaultHeartbeatConfig(),
@@ -2651,11 +2655,9 @@ function normalizeChatSession(rawValue: unknown): ChatSession {
       typeof rawSession.workspaceName === "string" && rawSession.workspaceName.trim()
         ? rawSession.workspaceName
         : DEFAULT_WORKSPACE_NAME,
-    workspacePath:
-      (typeof rawSession.workspacePath === "string" && rawSession.workspacePath) ||
-      (workspaceKey !== DEFAULT_WORKSPACE_KEY && !workspaceKey.startsWith("browser:")
-        ? workspaceKey
-        : undefined),
+    ...(normalizeWorkspaceSessionPath(workspaceKey, rawSession.workspacePath)
+      ? { workspacePath: normalizeWorkspaceSessionPath(workspaceKey, rawSession.workspacePath) }
+      : {}),
     title,
     messages,
     heartbeat: normalizeHeartbeatConfig(
@@ -12534,6 +12536,7 @@ export function App() {
     const session =
       chatSessionsRef.current.find((candidate) => candidate.id === sessionId) ??
       chatSessions.find((candidate) => candidate.id === sessionId);
+    if (!session || isDefaultWorkspaceKey(session.workspaceKey)) return undefined;
     const cwd =
       session?.workspacePath ??
       (localWorkspaceHandle?.kind === "electron" ? localWorkspaceHandle.path : "");
@@ -16341,8 +16344,10 @@ export function App() {
     && typeof window.rengeDesktop.searchFiles === "function",
   );
   const activeFileToolsWorkspaceHandle: LocalToolsWorkspaceHandle | null =
-    activeWorkspaceKey === DEFAULT_WORKSPACE_KEY && temporaryFileToolsAvailable
-      ? TEMPORARY_WORKSPACE_HANDLE
+    activeWorkspaceKey === DEFAULT_WORKSPACE_KEY
+      ? temporaryFileToolsAvailable
+        ? TEMPORARY_WORKSPACE_HANDLE
+        : null
       : activeLocalWorkspaceHandle && (localToolsEnabled || activeLocalWorkspaceHandle.kind !== "electron")
         ? activeLocalWorkspaceHandle
         : desktopSystemFileToolsAvailable
@@ -16467,7 +16472,9 @@ export function App() {
   useEffect(() => {
     setTerminalWorkspaceContext({
       workspaceKey: activeChatSession?.workspaceKey ?? DEFAULT_WORKSPACE_KEY,
-      ...(activeChatSession?.workspacePath ? { cwd: activeChatSession.workspacePath } : {}),
+      ...(!isDefaultWorkspaceKey(activeChatSession?.workspaceKey) && activeChatSession?.workspacePath
+        ? { cwd: activeChatSession.workspacePath }
+        : {}),
     });
   }, [activeChatSession?.workspaceKey, activeChatSession?.workspacePath]);
   const activeStatusBarState = useMemo(
@@ -19813,6 +19820,14 @@ export function App() {
       setActiveCharacterCardId(session.roleplayCharacterCardId);
     }
 
+    if (isDefaultWorkspaceKey(session.workspaceKey)) {
+      setLocalWorkspaceHandle(null);
+      setLocalToolsEnabled(false);
+      restoredWorkspacePathRef.current = "";
+      setChatStatus({ status: "idle", message: "" });
+      return;
+    }
+
     if (session.workspacePath && window.rengeDesktop?.isElectron) {
       setChatStatus({ status: "loading", message: `正在恢复工作区：${session.workspaceName}` });
       try {
@@ -19832,14 +19847,6 @@ export function App() {
           message: error instanceof Error ? error.message : "工作区恢复失败，请重新选择文件夹。",
         });
       }
-      return;
-    }
-
-    if (session.workspaceKey === DEFAULT_WORKSPACE_KEY) {
-      setLocalWorkspaceHandle(null);
-      setLocalToolsEnabled(false);
-      restoredWorkspacePathRef.current = "";
-      setChatStatus({ status: "idle", message: "" });
       return;
     }
 
@@ -19941,7 +19948,11 @@ export function App() {
 
   useEffect(() => {
     if (!appDataLoaded) return;
-    if (!activeChatSession?.workspacePath || !window.rengeDesktop?.isElectron) return;
+    if (
+      isDefaultWorkspaceKey(activeChatSession?.workspaceKey) ||
+      !activeChatSession?.workspacePath ||
+      !window.rengeDesktop?.isElectron
+    ) return;
     if (restoredWorkspacePathRef.current === activeChatSession.workspacePath) return;
 
     let cancelled = false;
