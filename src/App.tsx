@@ -21903,7 +21903,7 @@ export function App() {
       )
       .sort(
         (left, right) =>
-          left.budget.safetyThresholdTokens - right.budget.safetyThresholdTokens,
+          left.budget.maxContextTokens - right.budget.maxContextTokens,
       );
     const limitingBudget =
       missingModelIds.length === 0 ? configuredBudgets[0] ?? null : null;
@@ -22129,7 +22129,7 @@ export function App() {
       : estimatedRuntimeTokens;
     const thresholdTokens = nativePiUsage
       ? nativePiUsage.contextWindow
-      : limitingBudget?.budget.safetyThresholdTokens ?? null;
+      : limitingBudget?.budget.maxContextTokens ?? null;
     const estimateMessageCollectionTokens = (messages: ChatApiMessage[]) =>
       messages.length > 0 ? Math.max(0, estimateContextMessagesTokens(messages) - 2) : 0;
     const systemPromptTokens = estimateMessageCollectionTokens(
@@ -22282,7 +22282,7 @@ export function App() {
           }`
         : "按最后一次实际发送的上下文计数"
       : "当前尚无可复用的实际请求记录，使用发送前估算";
-    return `当前上下文约 ${current} Token；${modelNote}，安全阈值 ${threshold} Token；${compressionNote}；${usageNote}。点击打开 LLM 设置。`;
+    return `当前上下文约 ${current} Token；${modelNote}，上下文上限 ${threshold} Token；${compressionNote}；${usageNote}。点击打开 LLM 设置。`;
   })();
   const contextUsagePercent =
     contextTokenMeter.usageRatio === null
