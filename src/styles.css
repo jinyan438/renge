@@ -4486,8 +4486,25 @@ summary:focus-visible {
 }
 
 .context-token-menu {
+  --context-usage-color: #7b8798;
   position: relative;
   flex: 0 0 auto;
+}
+
+.context-token-menu.usage-low {
+  --context-usage-color: #168a53;
+}
+
+.context-token-menu.usage-medium {
+  --context-usage-color: #c28a16;
+}
+
+.context-token-menu.usage-high {
+  --context-usage-color: #d96828;
+}
+
+.context-token-menu.usage-critical {
+  --context-usage-color: #c43f46;
 }
 
 .context-token-menu > summary {
@@ -4531,7 +4548,7 @@ summary:focus-visible {
   place-items: center;
   border: 2px solid #d8dee9;
   border-radius: 50%;
-  color: #667085;
+  color: var(--context-usage-color);
   background: conic-gradient(currentColor var(--context-progress), transparent 0);
   font-size: 9px;
   font-variant-numeric: tabular-nums;
@@ -4549,18 +4566,6 @@ summary:focus-visible {
 .context-token-ring > span {
   position: relative;
   z-index: 1;
-}
-
-.context-token-menu.near-threshold .context-token-ring {
-  color: #d18b21;
-}
-
-.context-token-menu.over-threshold .context-token-ring {
-  color: #c94b4b;
-}
-
-.context-token-menu.compression-disabled .context-token-ring {
-  color: #8a94a6;
 }
 
 .context-token-panel {
@@ -4607,7 +4612,7 @@ summary:focus-visible {
   width: var(--context-progress);
   height: 100%;
   border-radius: inherit;
-  background: #64748b;
+  background: var(--context-usage-color);
 }
 
 .context-token-breakdown {
@@ -4656,14 +4661,6 @@ summary:focus-visible {
   margin: 0;
   color: #8a94a6;
   font-size: 11px;
-}
-
-.context-token-menu.near-threshold .context-token-progress > span {
-  background: #d18b21;
-}
-
-.context-token-menu.over-threshold .context-token-progress > span {
-  background: #c94b4b;
 }
 
 .context-token-panel dl {

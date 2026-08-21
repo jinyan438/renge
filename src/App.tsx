@@ -22295,6 +22295,16 @@ export function App() {
   const contextTokenRingStyle = {
     "--context-progress": `${contextRingProgress}%`,
   } as CSSProperties;
+  const contextUsageTone =
+    contextTokenMeter.usageRatio === null
+      ? "usage-unknown"
+      : contextTokenMeter.usageRatio >= 0.9
+        ? "usage-critical"
+        : contextTokenMeter.usageRatio >= 0.75
+          ? "usage-high"
+          : contextTokenMeter.usageRatio >= 0.5
+            ? "usage-medium"
+            : "usage-low";
 
   const executeChatCommandBlock = async (content: string) => {
     if (!localWorkspaceHandle || !localToolsEnabled) {
@@ -36220,13 +36230,7 @@ export function App() {
                   <details
                     className={`context-token-menu ${
                       contextCompressionSettings.enabled ? "compression-enabled" : "compression-disabled"
-                    } ${
-                      contextTokenMeter.usageRatio !== null && contextTokenMeter.usageRatio >= 1
-                        ? "over-threshold"
-                        : contextTokenMeter.usageRatio !== null && contextTokenMeter.usageRatio >= 0.8
-                          ? "near-threshold"
-                          : ""
-                    }`}
+                    } ${contextUsageTone}`}
                   >
                     <summary
                       className="context-token-trigger"
