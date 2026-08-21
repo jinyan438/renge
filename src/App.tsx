@@ -22178,7 +22178,12 @@ export function App() {
     return {
       currentTokens,
       thresholdTokens,
-      usageRatio: thresholdTokens ? currentTokens / thresholdTokens : null,
+      usageRatio:
+        nativePiUsage?.tokens === null
+          ? null
+          : thresholdTokens
+            ? currentTokens / thresholdTokens
+            : null,
       limitingModelId: nativePiUsage?.contextWindow ? meterModelId : limitingBudget?.modelId ?? "",
       modelIds: distinctModelIds,
       missingModelIds: nativePiUsage?.contextWindow ? [] : missingModelIds,
