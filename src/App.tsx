@@ -602,6 +602,7 @@ type ToolVisualization = {
   toolCallId?: string;
   name: string;
   args?: Record<string, unknown>;
+  partialArguments?: string;
   result?: unknown;
   status: "running" | "done" | "error";
   startedAt?: string;
@@ -1366,6 +1367,10 @@ type PiStreamEvent = {
     | "tool_request"
     | "tool_start"
     | "tool_end"
+    | "tool_call_start"
+    | "tool_call_delta"
+    | "tool_call_end"
+    | "tool_call_incomplete"
     | "compaction_start"
     | "compaction_end"
     | "context_usage"
@@ -1376,6 +1381,10 @@ type PiStreamEvent = {
   nativeTools?: string[];
   toolCallId?: string;
   toolName?: string;
+  contentIndex?: number;
+  delta?: string;
+  argumentsText?: string;
+  toolCall?: unknown;
   arguments?: Record<string, unknown>;
   result?: unknown;
   isError?: boolean;
@@ -2427,6 +2436,9 @@ function normalizeChatMessage(rawValue: unknown): ChatMessage {
             : {}),
           ...(isObjectRecord(rawToolVisualization.args)
             ? { args: rawToolVisualization.args }
+            : {}),
+          ...(typeof rawToolVisualization.partialArguments === "string"
+            ? { partialArguments: rawToolVisualization.partialArguments }
             : {}),
           ...("result" in rawToolVisualization
             ? { result: rawToolVisualization.result }
@@ -8899,6 +8911,20 @@ function appendAssistantTimelineMessage(
   ]);
 }
 
+function updateAssistantToolVisualization(
+  setChatMessages: Dispatch<SetStateAction<ChatMessage[]>>,
+  toolCallId: string,
+  update: (visualization: ToolVisualization) => ToolVisualization,
+) {
+  setChatMessages((current) => current.map((message) => {
+    if (message.toolVisualization?.toolCallId !== toolCallId) return message;
+    return {
+      ...message,
+      toolVisualization: update(message.toolVisualization),
+    };
+  }));
+}
+
 function parseToolCallArgs(toolCall: ChatToolCall) {
   try {
     const parsed = JSON.parse(toolCall.function.arguments) as unknown;
@@ -8907,6 +8933,65 @@ function parseToolCallArgs(toolCall: ChatToolCall) {
       : {};
   } catch {
     return {};
+  }
+}
+
+function decodePartialJsonString(value: string) {
+  try {
+    return JSON.parse(`"${value}"`) as string;
+  } catch {
+    return value
+      .replace(/\\n/g, "\n")
+      .replace(/\\r/g, "\r")
+      .replace(/\\t/g, "\t")
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, "\\");
+  }
+}
+
+function extractPartialJsonStringField(source: string, key: string) {
+  const marker = `"${key}"`;
+  const markerIndex = source.indexOf(marker);
+  if (markerIndex < 0) return undefined;
+  const colonIndex = source.indexOf(":", markerIndex + marker.length);
+  if (colonIndex < 0) return undefined;
+  let quoteIndex = colonIndex + 1;
+  while (/\s/.test(source[quoteIndex] ?? "")) quoteIndex += 1;
+  if (source[quoteIndex] !== '"') return undefined;
+
+  let escaped = false;
+  let value = "";
+  for (let index = quoteIndex + 1; index < source.length; index += 1) {
+    const character = source[index];
+    if (escaped) {
+      value += `\\${character}`;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      value += character;
+      escaped = true;
+      continue;
+    }
+    if (character === '"') return decodePartialJsonString(value);
+    value += character;
+  }
+  return decodePartialJsonString(value);
+}
+
+function parsePartialToolCallArguments(argumentsText: string | undefined) {
+  const source = String(argumentsText ?? "");
+  if (!source.trim()) return {};
+  try {
+    const parsed = JSON.parse(source) as unknown;
+    return isObjectRecord(parsed) ? parsed : {};
+  } catch {
+    const partial: Record<string, unknown> = {};
+    for (const key of ["path", "filePath", "file_path", "content", "command", "script"]) {
+      const value = extractPartialJsonStringField(source, key);
+      if (value !== undefined) partial[key] = value;
+    }
+    return partial;
   }
 }
 
@@ -9663,6 +9748,10 @@ function toolVisualizationDiff(meta: ToolVisualization): string {
   }
   if (typeof args.content === "string") {
     return args.content.split("\n").map((line) => `+${line}`).join("\n");
+  }
+  const partialContent = extractPartialJsonStringField(meta.partialArguments ?? "", "content");
+  if (partialContent) {
+    return partialContent.split("\n").map((line) => `+${line}`).join("\n");
   }
   return "";
 }
@@ -24006,6 +24095,7 @@ export function App() {
             : 0) +
           (usePiKernel && requestPiSkillPaths.length > 0 ? 1 : 0);
         const piReturnedToolCalls: ChatToolCall[] = [];
+        const piIncompleteToolCalls = new Map<string, ChatToolCall>();
         const piToolVisualizations = new Map<string, ToolVisualization>();
         const handlePiEvent = async (event: PiStreamEvent) => {
           const runtimeStatus = formatPiRuntimeStatus(event);
@@ -24017,17 +24107,117 @@ export function App() {
             recordPiContextUsage(requestSessionId, requestModelId, event.usage);
             return;
           }
+          if (event.type === "tool_call_start") {
+            const toolCallId = event.toolCallId || crypto.randomUUID();
+            const visualization: ToolVisualization = {
+              toolCallId,
+              name: event.toolName || "unknown_tool",
+              args: {},
+              partialArguments: "",
+              status: "running",
+              startedAt: new Date().toISOString(),
+            };
+            piToolVisualizations.set(toolCallId, visualization);
+            options.beforePiToolMessage?.();
+            const toolCall: ChatToolCall = {
+              id: toolCallId,
+              type: "function",
+              function: { name: visualization.name, arguments: "{}" },
+            };
+            const action = getMcpToolInfo(requestMcpTools, visualization.name) || visualization.name.startsWith("local_")
+              ? formatToolActionMessage(toolCall, localWorkspaceHandle, requestMcpTools, delegationRoster)
+              : formatPiNativeToolAction({ ...event, toolCallId, arguments: {} });
+            appendAssistantTimelineMessage(
+              commitChatMessages,
+              action,
+              [],
+              "",
+              assistantSender,
+              visualization,
+            );
+            await waitForToolProgressPaint();
+            return;
+          }
+          if (event.type === "tool_call_delta") {
+            const toolCallId = event.toolCallId || "";
+            if (!toolCallId) return;
+            const previous = piToolVisualizations.get(toolCallId);
+            const partialArguments = event.argumentsText ?? `${previous?.partialArguments ?? ""}${event.delta ?? ""}`;
+            const nextArgs = parsePartialToolCallArguments(partialArguments);
+            const visualization: ToolVisualization = {
+              ...(previous ?? { name: event.toolName || "unknown_tool", status: "running" as const }),
+              toolCallId,
+              name: event.toolName || previous?.name || "unknown_tool",
+              args: { ...(previous?.args ?? {}), ...nextArgs },
+              partialArguments,
+              status: "running",
+            };
+            piToolVisualizations.set(toolCallId, visualization);
+            updateAssistantToolVisualization(commitChatMessages, toolCallId, () => visualization);
+            return;
+          }
+          if (event.type === "tool_call_end") {
+            const toolCallId = event.toolCallId || "";
+            if (!toolCallId) return;
+            const previous = piToolVisualizations.get(toolCallId);
+            const rawToolCall = isObjectRecord(event.toolCall) ? event.toolCall : {};
+            const rawFunction = isObjectRecord(rawToolCall.function) ? rawToolCall.function : {};
+            const argumentsText = typeof rawFunction.arguments === "string"
+              ? rawFunction.arguments
+              : event.argumentsText ?? previous?.partialArguments ?? "";
+            const visualization: ToolVisualization = {
+              ...(previous ?? { name: event.toolName || String(rawFunction.name ?? "unknown_tool"), status: "running" as const }),
+              toolCallId,
+              name: event.toolName || previous?.name || String(rawFunction.name ?? "unknown_tool"),
+              args: { ...(previous?.args ?? {}), ...parsePartialToolCallArguments(argumentsText) },
+              partialArguments: argumentsText,
+              status: "running",
+            };
+            piToolVisualizations.set(toolCallId, visualization);
+            updateAssistantToolVisualization(commitChatMessages, toolCallId, () => visualization);
+            return;
+          }
+          if (event.type === "tool_call_incomplete") {
+            const toolCallId = event.toolCallId || crypto.randomUUID();
+            const previous = piToolVisualizations.get(toolCallId);
+            const argumentsText = event.argumentsText ?? previous?.partialArguments ?? "";
+            const name = event.toolName || previous?.name || "unknown_tool";
+            const incompleteToolCall: ChatToolCall = {
+              id: toolCallId,
+              type: "function",
+              function: { name, arguments: argumentsText },
+            };
+            piIncompleteToolCalls.set(toolCallId, incompleteToolCall);
+            const visualization: ToolVisualization = {
+              ...(previous ?? {}),
+              toolCallId,
+              name,
+              args: { ...(previous?.args ?? {}), ...parsePartialToolCallArguments(argumentsText) },
+              partialArguments: argumentsText,
+              result: "工具参数未生成完整，尚未执行，正在等待继续补全。",
+              status: "running",
+            };
+            piToolVisualizations.set(toolCallId, visualization);
+            updateAssistantToolVisualization(commitChatMessages, toolCallId, () => visualization);
+            return;
+          }
           if (event.type === "tool_start") {
             options.beforePiToolMessage?.();
-            const startedAt = new Date().toISOString();
+            const previous = event.toolCallId ? piToolVisualizations.get(event.toolCallId) : undefined;
             const visualization: ToolVisualization = {
+              ...(previous ?? {}),
               toolCallId: event.toolCallId,
-              name: event.toolName || "unknown_tool",
-              args: event.arguments ?? {},
+              name: event.toolName || previous?.name || "unknown_tool",
+              args: event.arguments ?? previous?.args ?? {},
               status: "running",
-              startedAt,
+              startedAt: previous?.startedAt ?? new Date().toISOString(),
             };
             if (event.toolCallId) piToolVisualizations.set(event.toolCallId, visualization);
+            if (event.toolCallId && previous) {
+              updateAssistantToolVisualization(commitChatMessages, event.toolCallId, () => visualization);
+              await waitForToolProgressPaint();
+              return;
+            }
             appendAssistantTimelineMessage(
               commitChatMessages,
               formatPiNativeToolAction(event),
@@ -24051,14 +24241,18 @@ export function App() {
               startedAt: previous?.startedAt,
               endedAt: new Date().toISOString(),
             };
-            appendAssistantTimelineMessage(
-              commitChatMessages,
-              formatPiNativeToolResult(event),
-              [],
-              "",
-              assistantSender,
-              visualization,
-            );
+            if (event.toolCallId && previous) {
+              updateAssistantToolVisualization(commitChatMessages, event.toolCallId, () => visualization);
+            } else {
+              appendAssistantTimelineMessage(
+                commitChatMessages,
+                formatPiNativeToolResult(event),
+                [],
+                "",
+                assistantSender,
+                visualization,
+              );
+            }
             hasVisibleToolResult = true;
             if (!event.isError) hasSuccessfulVisibleToolResult = true;
             return;
@@ -24079,27 +24273,33 @@ export function App() {
           const isDelegationTool = toolCall.function.name === "multi_agent_delegate_task";
           if (!silentControl) {
             options.beforePiToolMessage?.();
+            const previous = piToolVisualizations.get(toolCall.id);
             const visualization: ToolVisualization = {
+              ...(previous ?? {}),
               toolCallId: toolCall.id,
               name: toolCall.function.name,
               args: parseToolCallArgs(toolCall),
               status: "running",
-              startedAt: new Date().toISOString(),
+              startedAt: previous?.startedAt ?? new Date().toISOString(),
             };
             piToolVisualizations.set(toolCall.id, visualization);
-            appendAssistantTimelineMessage(
-              commitChatMessages,
-              formatToolActionMessage(
-                toolCall,
-                localWorkspaceHandle,
-                requestMcpTools,
-                delegationRoster,
-              ),
-              [],
-              "",
-              assistantSender,
-              visualization,
-            );
+            if (previous) {
+              updateAssistantToolVisualization(commitChatMessages, toolCall.id, () => visualization);
+            } else {
+              appendAssistantTimelineMessage(
+                commitChatMessages,
+                formatToolActionMessage(
+                  toolCall,
+                  localWorkspaceHandle,
+                  requestMcpTools,
+                  delegationRoster,
+                ),
+                [],
+                "",
+                assistantSender,
+                visualization,
+              );
+            }
             await waitForToolProgressPaint();
           }
           try {
@@ -24121,25 +24321,30 @@ export function App() {
               const resultMessage = formatToolResultMessage(toolCall, result);
               const resultAttachments = getToolResultAttachments(result);
               const previous = piToolVisualizations.get(toolCall.id);
-              appendAssistantTimelineMessage(
-                commitChatMessages,
-                resultMessage,
-                resultAttachments,
-                "",
-                isDelegationTool && isObjectRecord(result)
-                  ? { kind: "persona", personaId: String(result.agentId ?? "") }
-                  : assistantSender,
-                {
-                  ...(previous ?? {}),
-                  toolCallId: toolCall.id,
-                  name: toolCall.function.name,
-                  args: previous?.args ?? parseToolCallArgs(toolCall),
-                  result,
-                  status: "done",
-                  startedAt: previous?.startedAt,
-                  endedAt: new Date().toISOString(),
-                },
-              );
+              const completedVisualization: ToolVisualization = {
+                ...(previous ?? {}),
+                toolCallId: toolCall.id,
+                name: toolCall.function.name,
+                args: previous?.args ?? parseToolCallArgs(toolCall),
+                result,
+                status: "done",
+                startedAt: previous?.startedAt,
+                endedAt: new Date().toISOString(),
+              };
+              if (previous) {
+                updateAssistantToolVisualization(commitChatMessages, toolCall.id, () => completedVisualization);
+              } else {
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  resultMessage,
+                  resultAttachments,
+                  "",
+                  isDelegationTool && isObjectRecord(result)
+                    ? { kind: "persona", personaId: String(result.agentId ?? "") }
+                    : assistantSender,
+                  completedVisualization,
+                );
+              }
               if (resultMessage.trim() || resultAttachments.length > 0) {
                 hasVisibleToolResult = true;
                 hasSuccessfulVisibleToolResult = true;
@@ -24149,23 +24354,28 @@ export function App() {
           } catch (toolError) {
             if (!silentControl && !isChatAbortError(toolError)) {
               const previous = piToolVisualizations.get(toolCall.id);
-              appendAssistantTimelineMessage(
-                commitChatMessages,
-                formatToolErrorMessage(toolCall, toolError),
-                [],
-                "",
-                assistantSender,
-                {
-                  ...(previous ?? {}),
-                  toolCallId: toolCall.id,
-                  name: toolCall.function.name,
-                  args: previous?.args ?? parseToolCallArgs(toolCall),
-                  result: toolError instanceof Error ? toolError.message : String(toolError),
-                  status: "error",
-                  startedAt: previous?.startedAt,
-                  endedAt: new Date().toISOString(),
-                },
-              );
+              const errorVisualization: ToolVisualization = {
+                ...(previous ?? {}),
+                toolCallId: toolCall.id,
+                name: toolCall.function.name,
+                args: previous?.args ?? parseToolCallArgs(toolCall),
+                result: toolError instanceof Error ? toolError.message : String(toolError),
+                status: "error",
+                startedAt: previous?.startedAt,
+                endedAt: new Date().toISOString(),
+              };
+              if (previous) {
+                updateAssistantToolVisualization(commitChatMessages, toolCall.id, () => errorVisualization);
+              } else {
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  formatToolErrorMessage(toolCall, toolError),
+                  [],
+                  "",
+                  assistantSender,
+                  errorVisualization,
+                );
+              }
               hasVisibleToolResult = true;
             }
             await submitPiToolResult(event, null, toolError, abortSignal);
@@ -24269,7 +24479,10 @@ export function App() {
               payload,
               content: streamResult.content,
               reasoning: streamResult.reasoning,
-              toolCalls: [...streamResult.toolCalls, ...piReturnedToolCalls],
+              toolCalls: [...streamResult.toolCalls, ...piReturnedToolCalls].filter(
+                (toolCall) => !piIncompleteToolCalls.has(toolCall.id),
+              ),
+              incompleteToolCalls: Array.from(piIncompleteToolCalls.values()),
               responsesReasoningItems: streamResult.responsesReasoningItems,
               finishReason: streamResult.finishReason,
               includedToolCount: effectiveToolCount,
@@ -24291,6 +24504,7 @@ export function App() {
             content: streamResult.content,
             reasoning: streamResult.reasoning,
             toolCalls: streamResult.toolCalls,
+            incompleteToolCalls: [],
             responsesReasoningItems: streamResult.responsesReasoningItems,
             finishReason: streamResult.finishReason,
             includedToolCount: effectiveToolCount,
@@ -24315,6 +24529,7 @@ export function App() {
           content: "",
           reasoning: getChatCompletionPayloadReasoning(payload),
           toolCalls: [] as ChatToolCall[],
+          incompleteToolCalls: [],
           responsesReasoningItems:
             payload.choices?.[0]?.message?.responses_reasoning_items ?? [],
           finishReason: payload.choices?.[0]?.finish_reason ?? "",
@@ -25079,6 +25294,7 @@ export function App() {
       } else {
         let toolLoopCompleted = false;
         let reasoningOnlyToolRetryCount = 0;
+        let incompleteToolRetryCount = 0;
         for (let toolRound = 0; toolRound < 999; toolRound += 1) {
           setChatStatus({
             status: "loading",
@@ -25212,6 +25428,40 @@ export function App() {
           }
 
           if (toolCalls.length === 0) {
+            if (completionResult.incompleteToolCalls.length > 0) {
+              if (incompleteToolRetryCount >= 2) {
+                throw new Error("工具调用参数连续被输出长度截断，已停止重复重做；请减少单次文件内容或继续当前任务。");
+              }
+              if (!streamingRound) {
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  "工具调用参数尚未生成完整，正在从当前断点继续。",
+                  [],
+                  assistantMessageReasoning,
+                  assistantSender,
+                );
+              } else {
+                streamingRound.complete("", assistantMessageReasoning);
+              }
+              const partialTool = completionResult.incompleteToolCalls[0];
+              apiMessages.push({
+                role: "assistant",
+                content: assistantContent || "",
+                ...buildProviderReasoningReplay(requestProvider, assistantMessageReasoning),
+              });
+              apiMessages.push({
+                role: "user",
+                content: [
+                  "上一轮正在生成工具调用，但工具参数在 JSON 完成前被输出长度限制截断。",
+                  `工具名称：${partialTool.function.name}`,
+                  "不要重新设计、解释或从头开始；只从当前会话断点继续补全同一个工具调用，直到参数完整后再执行。",
+                ].join("\n"),
+              });
+              incompleteToolRetryCount += 1;
+              assistantContent = "";
+              assistantReasoning = "";
+              continue;
+            }
             if (pendingMcpObservationPrompt && pendingMcpObservationRetries < 2 && toolRound < 998) {
               apiMessages.push({
                 role: "assistant",
@@ -27050,6 +27300,7 @@ export function App() {
             : 0) +
           (usePiKernel && requestPiSkillPaths.length > 0 ? 1 : 0);
         const piReturnedToolCalls: ChatToolCall[] = [];
+        const piIncompleteToolCalls = new Map<string, ChatToolCall>();
         const piToolVisualizations = new Map<string, ToolVisualization>();
         const handlePiEvent = async (event: PiStreamEvent) => {
           const runtimeStatus = formatPiRuntimeStatus(event);
@@ -27061,46 +27312,128 @@ export function App() {
             recordPiContextUsage(requestSessionId, requestModelId, event.usage);
             return;
           }
-          if (event.type === "tool_start") {
-            options.beforePiToolMessage?.();
+          if (event.type === "tool_call_start") {
+            const toolCallId = event.toolCallId || crypto.randomUUID();
             const visualization: ToolVisualization = {
-              toolCallId: event.toolCallId,
+              toolCallId,
               name: event.toolName || "unknown_tool",
-              args: event.arguments ?? {},
+              args: {},
+              partialArguments: "",
               status: "running",
               startedAt: new Date().toISOString(),
             };
+            piToolVisualizations.set(toolCallId, visualization);
+            options.beforePiToolMessage?.();
+            const toolCall: ChatToolCall = {
+              id: toolCallId,
+              type: "function",
+              function: { name: visualization.name, arguments: "{}" },
+            };
+            const action = getMcpToolInfo(requestMcpTools, visualization.name) || visualization.name.startsWith("local_")
+              ? formatToolActionMessage(toolCall, localWorkspaceHandle, requestMcpTools)
+              : formatPiNativeToolAction({ ...event, toolCallId, arguments: {} });
+            appendAssistantTimelineMessage(commitChatMessages, action, [], "", undefined, visualization);
+            await waitForToolProgressPaint();
+            return;
+          }
+          if (event.type === "tool_call_delta") {
+            const toolCallId = event.toolCallId || "";
+            if (!toolCallId) return;
+            const previous = piToolVisualizations.get(toolCallId);
+            const partialArguments = event.argumentsText ?? `${previous?.partialArguments ?? ""}${event.delta ?? ""}`;
+            const visualization: ToolVisualization = {
+              ...(previous ?? { name: event.toolName || "unknown_tool", status: "running" as const }),
+              toolCallId,
+              name: event.toolName || previous?.name || "unknown_tool",
+              args: { ...(previous?.args ?? {}), ...parsePartialToolCallArguments(partialArguments) },
+              partialArguments,
+              status: "running",
+            };
+            piToolVisualizations.set(toolCallId, visualization);
+            updateAssistantToolVisualization(commitChatMessages, toolCallId, () => visualization);
+            return;
+          }
+          if (event.type === "tool_call_end") {
+            const toolCallId = event.toolCallId || "";
+            if (!toolCallId) return;
+            const previous = piToolVisualizations.get(toolCallId);
+            const rawToolCall = isObjectRecord(event.toolCall) ? event.toolCall : {};
+            const rawFunction = isObjectRecord(rawToolCall.function) ? rawToolCall.function : {};
+            const argumentsText = typeof rawFunction.arguments === "string"
+              ? rawFunction.arguments
+              : event.argumentsText ?? previous?.partialArguments ?? "";
+            const visualization: ToolVisualization = {
+              ...(previous ?? { name: event.toolName || String(rawFunction.name ?? "unknown_tool"), status: "running" as const }),
+              toolCallId,
+              name: event.toolName || previous?.name || String(rawFunction.name ?? "unknown_tool"),
+              args: { ...(previous?.args ?? {}), ...parsePartialToolCallArguments(argumentsText) },
+              partialArguments: argumentsText,
+              status: "running",
+            };
+            piToolVisualizations.set(toolCallId, visualization);
+            updateAssistantToolVisualization(commitChatMessages, toolCallId, () => visualization);
+            return;
+          }
+          if (event.type === "tool_call_incomplete") {
+            const toolCallId = event.toolCallId || crypto.randomUUID();
+            const previous = piToolVisualizations.get(toolCallId);
+            const argumentsText = event.argumentsText ?? previous?.partialArguments ?? "";
+            const name = event.toolName || previous?.name || "unknown_tool";
+            piIncompleteToolCalls.set(toolCallId, {
+              id: toolCallId,
+              type: "function",
+              function: { name, arguments: argumentsText },
+            });
+            const visualization: ToolVisualization = {
+              ...(previous ?? {}),
+              toolCallId,
+              name,
+              args: { ...(previous?.args ?? {}), ...parsePartialToolCallArguments(argumentsText) },
+              partialArguments: argumentsText,
+              result: "工具参数未生成完整，尚未执行，正在等待继续补全。",
+              status: "running",
+            };
+            piToolVisualizations.set(toolCallId, visualization);
+            updateAssistantToolVisualization(commitChatMessages, toolCallId, () => visualization);
+            return;
+          }
+          if (event.type === "tool_start") {
+            options.beforePiToolMessage?.();
+            const previous = event.toolCallId ? piToolVisualizations.get(event.toolCallId) : undefined;
+            const visualization: ToolVisualization = {
+              ...(previous ?? {}),
+              toolCallId: event.toolCallId,
+              name: event.toolName || previous?.name || "unknown_tool",
+              args: event.arguments ?? previous?.args ?? {},
+              status: "running",
+              startedAt: previous?.startedAt ?? new Date().toISOString(),
+            };
             if (event.toolCallId) piToolVisualizations.set(event.toolCallId, visualization);
-            appendAssistantTimelineMessage(
-              commitChatMessages,
-              formatPiNativeToolAction(event),
-              [],
-              "",
-              undefined,
-              visualization,
-            );
+            if (event.toolCallId && previous) {
+              updateAssistantToolVisualization(commitChatMessages, event.toolCallId, () => visualization);
+            } else {
+              appendAssistantTimelineMessage(commitChatMessages, formatPiNativeToolAction(event), [], "", undefined, visualization);
+            }
             await waitForToolProgressPaint();
             return;
           }
           if (event.type === "tool_end") {
             const previous = event.toolCallId ? piToolVisualizations.get(event.toolCallId) : undefined;
-            appendAssistantTimelineMessage(
-              commitChatMessages,
-              formatPiNativeToolResult(event),
-              [],
-              "",
-              undefined,
-              {
-                ...(previous ?? {}),
-                toolCallId: event.toolCallId ?? previous?.toolCallId,
-                name: event.toolName || previous?.name || "unknown_tool",
-                args: previous?.args ?? {},
-                result: event.result,
-                status: event.isError ? "error" : "done",
-                startedAt: previous?.startedAt,
-                endedAt: new Date().toISOString(),
-              },
-            );
+            const visualization: ToolVisualization = {
+              ...(previous ?? {}),
+              toolCallId: event.toolCallId ?? previous?.toolCallId,
+              name: event.toolName || previous?.name || "unknown_tool",
+              args: previous?.args ?? {},
+              result: event.result,
+              status: event.isError ? "error" : "done",
+              startedAt: previous?.startedAt,
+              endedAt: new Date().toISOString(),
+            };
+            if (event.toolCallId && previous) {
+              updateAssistantToolVisualization(commitChatMessages, event.toolCallId, () => visualization);
+            } else {
+              appendAssistantTimelineMessage(commitChatMessages, formatPiNativeToolResult(event), [], "", undefined, visualization);
+            }
             hasVisibleToolResult = true;
             return;
           }
@@ -27127,14 +27460,18 @@ export function App() {
               startedAt: new Date().toISOString(),
             };
             piToolVisualizations.set(toolCall.id, visualization);
-            appendAssistantTimelineMessage(
-              commitChatMessages,
-              formatToolActionMessage(toolCall, localWorkspaceHandle, requestMcpTools),
-              [],
-              "",
-              undefined,
-              visualization,
-            );
+            if (piToolVisualizations.has(toolCall.id)) {
+              updateAssistantToolVisualization(commitChatMessages, toolCall.id, () => visualization);
+            } else {
+              appendAssistantTimelineMessage(
+                commitChatMessages,
+                formatToolActionMessage(toolCall, localWorkspaceHandle, requestMcpTools),
+                [],
+                "",
+                undefined,
+                visualization,
+              );
+            }
             await waitForToolProgressPaint();
           }
           try {
@@ -27158,23 +27495,21 @@ export function App() {
               const resultMessage = formatToolResultMessage(toolCall, result);
               const resultAttachments = getToolResultAttachments(result);
               const previous = piToolVisualizations.get(toolCall.id);
-              appendAssistantTimelineMessage(
-                commitChatMessages,
-                resultMessage,
-                resultAttachments,
-                "",
-                undefined,
-                {
-                  ...(previous ?? {}),
-                  toolCallId: toolCall.id,
-                  name: toolCall.function.name,
-                  args: previous?.args ?? parseToolCallArgs(toolCall),
-                  result,
-                  status: "done",
-                  startedAt: previous?.startedAt,
-                  endedAt: new Date().toISOString(),
-                },
-              );
+              const visualization: ToolVisualization = {
+                ...(previous ?? {}),
+                toolCallId: toolCall.id,
+                name: toolCall.function.name,
+                args: previous?.args ?? parseToolCallArgs(toolCall),
+                result,
+                status: "done",
+                startedAt: previous?.startedAt,
+                endedAt: new Date().toISOString(),
+              };
+              if (previous) {
+                updateAssistantToolVisualization(commitChatMessages, toolCall.id, () => visualization);
+              } else {
+                appendAssistantTimelineMessage(commitChatMessages, resultMessage, resultAttachments, "", undefined, visualization);
+              }
               if (resultMessage.trim() || resultAttachments.length > 0) {
                 hasVisibleToolResult = true;
               }
@@ -27183,23 +27518,21 @@ export function App() {
           } catch (toolError) {
             if (!silentControl && !isChatAbortError(toolError)) {
               const previous = piToolVisualizations.get(toolCall.id);
-              appendAssistantTimelineMessage(
-                commitChatMessages,
-                formatToolErrorMessage(toolCall, toolError),
-                [],
-                "",
-                undefined,
-                {
-                  ...(previous ?? {}),
-                  toolCallId: toolCall.id,
-                  name: toolCall.function.name,
-                  args: previous?.args ?? parseToolCallArgs(toolCall),
-                  result: toolError instanceof Error ? toolError.message : String(toolError),
-                  status: "error",
-                  startedAt: previous?.startedAt,
-                  endedAt: new Date().toISOString(),
-                },
-              );
+              const visualization: ToolVisualization = {
+                ...(previous ?? {}),
+                toolCallId: toolCall.id,
+                name: toolCall.function.name,
+                args: previous?.args ?? parseToolCallArgs(toolCall),
+                result: toolError instanceof Error ? toolError.message : String(toolError),
+                status: "error",
+                startedAt: previous?.startedAt,
+                endedAt: new Date().toISOString(),
+              };
+              if (previous) {
+                updateAssistantToolVisualization(commitChatMessages, toolCall.id, () => visualization);
+              } else {
+                appendAssistantTimelineMessage(commitChatMessages, formatToolErrorMessage(toolCall, toolError), [], "", undefined, visualization);
+              }
               hasVisibleToolResult = true;
             }
             await submitPiToolResult(event, null, toolError, abortSignal);
@@ -27303,7 +27636,10 @@ export function App() {
               payload,
               content: streamResult.content,
               reasoning: streamResult.reasoning,
-              toolCalls: [...streamResult.toolCalls, ...piReturnedToolCalls],
+              toolCalls: [...streamResult.toolCalls, ...piReturnedToolCalls].filter(
+                (toolCall) => !piIncompleteToolCalls.has(toolCall.id),
+              ),
+              incompleteToolCalls: Array.from(piIncompleteToolCalls.values()),
               responsesReasoningItems: streamResult.responsesReasoningItems,
               finishReason: streamResult.finishReason,
               includedToolCount: effectiveToolCount,
@@ -27325,6 +27661,7 @@ export function App() {
             content: streamResult.content,
             reasoning: streamResult.reasoning,
             toolCalls: streamResult.toolCalls,
+            incompleteToolCalls: [],
             responsesReasoningItems: streamResult.responsesReasoningItems,
             finishReason: streamResult.finishReason,
             includedToolCount: effectiveToolCount,
@@ -27349,6 +27686,7 @@ export function App() {
           content: "",
           reasoning: getChatCompletionPayloadReasoning(payload),
           toolCalls: [] as ChatToolCall[],
+          incompleteToolCalls: [],
           responsesReasoningItems:
             payload.choices?.[0]?.message?.responses_reasoning_items ?? [],
           finishReason: payload.choices?.[0]?.finish_reason ?? "",
@@ -27434,6 +27772,7 @@ export function App() {
       } else {
         const useStreamingToolCompletion = chatStreamEnabled;
         let reasoningOnlyToolRetryCount = 0;
+        let incompleteToolRetryCount = 0;
         for (let toolRound = 0; toolRound < 999; toolRound += 1) {
           setChatStatus({
             status: "loading",
@@ -27520,6 +27859,30 @@ export function App() {
           }
 
           if (toolCalls.length === 0) {
+            if (completionResult.incompleteToolCalls.length > 0) {
+              if (incompleteToolRetryCount >= 2) {
+                throw new Error("工具调用参数连续被输出长度截断，已停止重复重做；请减少单次文件内容或继续当前任务。");
+              }
+              streamingRound?.complete("", assistantMessageReasoning);
+              const partialTool = completionResult.incompleteToolCalls[0];
+              apiMessages.push({
+                role: "assistant",
+                content: assistantContent || "",
+                ...buildProviderReasoningReplay(chatProvider, assistantMessageReasoning),
+              });
+              apiMessages.push({
+                role: "user",
+                content: [
+                  "上一轮正在生成工具调用，但工具参数在 JSON 完成前被输出长度限制截断。",
+                  `工具名称：${partialTool.function.name}`,
+                  "不要重新设计、解释或从头开始；只从当前会话断点继续补全同一个工具调用，直到参数完整后再执行。",
+                ].join("\n"),
+              });
+              incompleteToolRetryCount += 1;
+              assistantContent = "";
+              assistantReasoning = "";
+              continue;
+            }
             if (pendingMcpObservationPrompt && pendingMcpObservationRetries < 2 && toolRound < 998) {
               apiMessages.push({
                 role: "assistant",

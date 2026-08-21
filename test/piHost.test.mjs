@@ -113,6 +113,8 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
     let bridged = false;
     let runStart;
     let contextUsage;
+    const piEventTypes = [];
+    const piToolCallIds = [];
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -124,6 +126,8 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
         const data = line?.slice(5).trim();
         if (!data || data === "[DONE]") continue;
         const payload = JSON.parse(data);
+        if (payload.pi?.type) piEventTypes.push(payload.pi.type);
+        if (payload.pi?.type?.startsWith("tool_call_")) piToolCallIds.push(payload.pi.toolCallId);
         if (payload.pi?.type === "run_start") runStart = payload.pi;
         if (payload.pi?.type === "context_usage") contextUsage = payload.pi.usage;
         if (payload.pi?.type === "tool_request") {
@@ -143,6 +147,11 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
       }
     }
     assert.equal(bridged, true);
+    assert.equal(piEventTypes.includes("tool_call_start"), true);
+    assert.equal(piEventTypes.includes("tool_call_delta"), true);
+    assert.equal(piEventTypes.includes("tool_call_end"), true);
+    assert.equal(piToolCallIds.every((id) => typeof id === "string" && id.length > 0), true);
+    assert.equal(new Set(piToolCallIds).size, 1);
     assert.equal(runStart?.kernelMode, "full");
     assert.deepEqual(runStart?.compaction, {
       engine: "pi",

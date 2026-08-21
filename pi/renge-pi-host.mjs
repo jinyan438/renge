@@ -355,6 +355,7 @@ export function createRengePiHost({
       id: runId,
       response,
       pendingTools: new Map(),
+      streamingToolCalls: new Map(),
       session: null,
       settingsManager: null,
       sessionKey,
@@ -508,6 +509,51 @@ export function createRengePiHost({
             writeSse(response, completionChunk(runId, {
               reasoning_content: event.assistantMessageEvent.delta,
             }));
+          } else if (event.assistantMessageEvent.type === "toolcall_start") {
+            const toolCall = event.assistantMessageEvent;
+            const partialToolCall = toolCall.partial?.content?.[toolCall.contentIndex];
+            const toolCallId = String(toolCall.id ?? partialToolCall?.id ?? `stream-tool-call-${toolCall.contentIndex}`);
+            const toolName = String(toolCall.name ?? partialToolCall?.name ?? "unknown_tool");
+            run.streamingToolCalls.set(String(toolCall.contentIndex), {
+              toolCallId,
+              toolName,
+              argumentsText: "",
+            });
+            writeSse(response, piEvent("tool_call_start", {
+              runId,
+              toolCallId,
+              toolName,
+              contentIndex: toolCall.contentIndex,
+            }));
+          } else if (event.assistantMessageEvent.type === "toolcall_delta") {
+            const toolCall = event.assistantMessageEvent;
+            const key = String(toolCall.contentIndex);
+            const current = run.streamingToolCalls.get(key) ?? {
+              toolCallId: `stream-tool-call-${toolCall.contentIndex}`,
+              toolName: "unknown_tool",
+              argumentsText: "",
+            };
+            current.argumentsText += toolCall.delta;
+            run.streamingToolCalls.set(key, current);
+            writeSse(response, piEvent("tool_call_delta", {
+              runId,
+              toolCallId: current.toolCallId,
+              contentIndex: toolCall.contentIndex,
+              delta: toolCall.delta,
+              argumentsText: current.argumentsText,
+            }));
+          } else if (event.assistantMessageEvent.type === "toolcall_end") {
+            const toolCall = event.assistantMessageEvent;
+            const key = String(toolCall.contentIndex);
+            const current = run.streamingToolCalls.get(key);
+            run.streamingToolCalls.delete(key);
+            writeSse(response, piEvent("tool_call_end", {
+              runId,
+              toolCallId: current?.toolCallId ?? `stream-tool-call-${toolCall.contentIndex}`,
+              contentIndex: toolCall.contentIndex,
+              toolCall: toolCall.toolCall,
+              ...(current?.argumentsText ? { argumentsText: current.argumentsText } : {}),
+            }));
           }
           return;
         }
@@ -551,6 +597,16 @@ export function createRengePiHost({
       const errorMessage = session.agent.state.errorMessage;
       if (errorMessage) throw new Error(errorMessage);
       const finishReason = getSessionFinishReason(session);
+      for (const pendingToolCall of run.streamingToolCalls.values()) {
+        writeSse(response, piEvent("tool_call_incomplete", {
+          runId,
+          toolCallId: pendingToolCall.toolCallId,
+          toolName: pendingToolCall.toolName,
+          argumentsText: pendingToolCall.argumentsText,
+          finishReason,
+        }));
+      }
+      run.streamingToolCalls.clear();
       // Some local gateways report zero usage, so the SDK cannot run its
       // post-turn threshold check. Re-check Pi's own message estimator here.
       await maybeAutoCompact(session, compaction);
