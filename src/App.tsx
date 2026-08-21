@@ -12550,6 +12550,10 @@ export function App() {
     const contextWindow = Number(usage.contextWindow);
     if (!Number.isFinite(contextWindow) || contextWindow <= 0) return;
     const tokens = usage.tokens === null ? null : Number(usage.tokens);
+    // Local gateways can return an all-zero usage object even though Pi has a
+    // complete session history. Keep the meter on its local estimate instead
+    // of persisting zero and making the context appear empty.
+    if (tokens !== null && (!Number.isFinite(tokens) || tokens <= 0)) return;
     const percent = usage.percent === null ? null : Number(usage.percent);
     const normalizedUsage: PiContextUsage = {
       tokens: Number.isFinite(tokens) ? tokens : null,
@@ -22083,6 +22087,14 @@ export function App() {
       piContextUsageByKey[
         getContextRuntimeUsageKey(activeChatSession?.id ?? activeChatSessionId, meterModelId)
       ];
+    const usableNativePiTokens =
+      nativePiUsage?.tokens !== null &&
+      Number.isFinite(nativePiUsage?.tokens) &&
+      Number(nativePiUsage?.tokens) > 0
+        ? Number(nativePiUsage?.tokens)
+        : undefined;
+    const usableNativePiUsage =
+      usableNativePiTokens === undefined ? undefined : nativePiUsage;
     const currentChatMessageSignatures = contextMeterChatMessages.map(
       getChatMessageContextSignature,
     );
@@ -22124,11 +22136,9 @@ export function App() {
       runtimeUsage && runtimeUsageMatchesCurrentHistory
         ? runtimeUsage.currentTokens + appendedTokens + mutableMessageDeltaTokens
         : estimatedCurrentTokens;
-    const currentTokens = nativePiUsage
-      ? nativePiUsage.tokens ?? 0
-      : estimatedRuntimeTokens;
-    const thresholdTokens = nativePiUsage
-      ? nativePiUsage.contextWindow
+    const currentTokens = usableNativePiTokens ?? estimatedRuntimeTokens;
+    const thresholdTokens = usableNativePiUsage
+      ? usableNativePiUsage.contextWindow
       : limitingBudget?.budget.maxContextTokens ?? null;
     const estimateMessageCollectionTokens = (messages: ChatApiMessage[]) =>
       messages.length > 0 ? Math.max(0, estimateContextMessagesTokens(messages) - 2) : 0;
@@ -22178,19 +22188,14 @@ export function App() {
     return {
       currentTokens,
       thresholdTokens,
-      usageRatio:
-        nativePiUsage?.tokens === null
-          ? null
-          : thresholdTokens
-            ? currentTokens / thresholdTokens
-            : null,
-      limitingModelId: nativePiUsage?.contextWindow ? meterModelId : limitingBudget?.modelId ?? "",
+      usageRatio: thresholdTokens ? currentTokens / thresholdTokens : null,
+      limitingModelId: usableNativePiUsage?.contextWindow ? meterModelId : limitingBudget?.modelId ?? "",
       modelIds: distinctModelIds,
-      missingModelIds: nativePiUsage?.contextWindow ? [] : missingModelIds,
+      missingModelIds: usableNativePiUsage?.contextWindow ? [] : missingModelIds,
       usesActualRequestTokens: Boolean(
-        nativePiUsage || (runtimeUsage && runtimeUsageMatchesCurrentHistory),
+        usableNativePiUsage || (runtimeUsage && runtimeUsageMatchesCurrentHistory),
       ),
-      nativePiContext: Boolean(nativePiUsage),
+      nativePiContext: Boolean(usableNativePiUsage),
       compressed: Boolean(
         runtimeUsage && runtimeUsageMatchesCurrentHistory && runtimeUsage.compressed,
       ),
@@ -23982,6 +23987,13 @@ export function App() {
           kernel: usePiKernel ? "pi" : "renge",
         });
         const piRunId = usePiKernel ? crypto.randomUUID() : "";
+        const effectiveToolCount =
+          chatToolsForRequest.length +
+          (usePiKernel && options.includeTools && requestContextSettings.workspaceTools &&
+          activeLocalToolsEnabled && activeFileToolsWorkspaceHandle?.kind === "electron"
+            ? 1
+            : 0) +
+          (usePiKernel && requestPiSkillPaths.length > 0 ? 1 : 0);
         const piReturnedToolCalls: ChatToolCall[] = [];
         const piToolVisualizations = new Map<string, ToolVisualization>();
         const handlePiEvent = async (event: PiStreamEvent) => {
@@ -24249,7 +24261,7 @@ export function App() {
               toolCalls: [...streamResult.toolCalls, ...piReturnedToolCalls],
               responsesReasoningItems: streamResult.responsesReasoningItems,
               finishReason: streamResult.finishReason,
-              includedToolCount: chatToolsForRequest.length,
+              includedToolCount: effectiveToolCount,
             };
           } finally {
             abortSignal.removeEventListener("abort", abortPiRun);
@@ -24270,7 +24282,7 @@ export function App() {
             toolCalls: streamResult.toolCalls,
             responsesReasoningItems: streamResult.responsesReasoningItems,
             finishReason: streamResult.finishReason,
-            includedToolCount: chatToolsForRequest.length,
+            includedToolCount: effectiveToolCount,
           };
         }
 
@@ -24295,7 +24307,7 @@ export function App() {
           responsesReasoningItems:
             payload.choices?.[0]?.message?.responses_reasoning_items ?? [],
           finishReason: payload.choices?.[0]?.finish_reason ?? "",
-          includedToolCount: chatToolsForRequest.length,
+          includedToolCount: effectiveToolCount,
         };
       };
       const subAgentToolDefinitions = getAvailableChatToolDefinitions(
@@ -25224,6 +25236,7 @@ export function App() {
                     completionResult.includedToolCount > 0,
                   ),
                 retryCount: reasoningOnlyToolRetryCount,
+                maxRetries: 6,
                 finishReason: completionResult.finishReason,
               })
             ) {
@@ -25254,7 +25267,8 @@ export function App() {
               activeLocalToolsEnabled &&
               activeFileToolsWorkspaceHandle &&
               toolRound < 998 &&
-              shouldAutoContinueLocalTask(assistantContent)
+              (isTruncatedChatFinishReason(completionResult.finishReason) ||
+                shouldAutoContinueLocalTask(assistantContent))
             ) {
               if (!streamingRound) {
                 appendAssistantTimelineMessage(
@@ -25277,8 +25291,9 @@ export function App() {
               });
               apiMessages.push({
                 role: "user",
-                content:
-                  "继续执行上面的任务，直接调用可用工具推进，直到任务完成、遇到真实阻塞或需要用户授权。不要只说明计划。",
+                content: isTruncatedChatFinishReason(completionResult.finishReason)
+                  ? "上一轮因输出长度限制被截断。紧接已有进度继续执行任务，优先调用可用工具完成尚未完成的步骤，不要重做已完成内容，直到任务完成、遇到真实阻塞或需要用户授权。"
+                  : "继续执行上面的任务，直接调用可用工具推进，直到任务完成、遇到真实阻塞或需要用户授权。不要只说明计划。",
               });
               assistantContent = "";
               assistantReasoning = "";
@@ -27016,6 +27031,13 @@ export function App() {
           kernel: usePiKernel ? "pi" : "renge",
         });
         const piRunId = usePiKernel ? crypto.randomUUID() : "";
+        const effectiveToolCount =
+          requestTools.length +
+          (usePiKernel && options.includeTools && activeLlmContextSettings.workspaceTools &&
+          activeLocalToolsEnabled && activeFileToolsWorkspaceHandle?.kind === "electron"
+            ? 1
+            : 0) +
+          (usePiKernel && requestPiSkillPaths.length > 0 ? 1 : 0);
         const piReturnedToolCalls: ChatToolCall[] = [];
         const piToolVisualizations = new Map<string, ToolVisualization>();
         const handlePiEvent = async (event: PiStreamEvent) => {
@@ -27273,7 +27295,7 @@ export function App() {
               toolCalls: [...streamResult.toolCalls, ...piReturnedToolCalls],
               responsesReasoningItems: streamResult.responsesReasoningItems,
               finishReason: streamResult.finishReason,
-              includedToolCount: requestTools.length,
+              includedToolCount: effectiveToolCount,
             };
           } finally {
             abortSignal?.removeEventListener("abort", abortPiRun);
@@ -27294,7 +27316,7 @@ export function App() {
             toolCalls: streamResult.toolCalls,
             responsesReasoningItems: streamResult.responsesReasoningItems,
             finishReason: streamResult.finishReason,
-            includedToolCount: requestTools.length,
+            includedToolCount: effectiveToolCount,
           };
         }
 
@@ -27319,7 +27341,7 @@ export function App() {
           responsesReasoningItems:
             payload.choices?.[0]?.message?.responses_reasoning_items ?? [],
           finishReason: payload.choices?.[0]?.finish_reason ?? "",
-          includedToolCount: requestTools.length,
+          includedToolCount: effectiveToolCount,
         };
       };
       const appendStreamingAssistant = (delta: string) => {
@@ -27522,6 +27544,7 @@ export function App() {
                     completionResult.includedToolCount > 0,
                   ),
                 retryCount: reasoningOnlyToolRetryCount,
+                maxRetries: 6,
                 finishReason: completionResult.finishReason,
               })
             ) {
@@ -27551,7 +27574,8 @@ export function App() {
               activeLocalToolsEnabled &&
               activeFileToolsWorkspaceHandle &&
               toolRound < 998 &&
-              shouldAutoContinueLocalTask(assistantContent)
+              (isTruncatedChatFinishReason(completionResult.finishReason) ||
+                shouldAutoContinueLocalTask(assistantContent))
             ) {
               if (!streamingRound) {
                 appendAssistantTimelineMessage(
@@ -27573,8 +27597,9 @@ export function App() {
               });
               apiMessages.push({
                 role: "user",
-                content:
-                  "继续执行上面的任务，直接调用可用工具推进，直到任务完成、遇到真实阻塞或需要用户授权。不要只说明计划。",
+                content: isTruncatedChatFinishReason(completionResult.finishReason)
+                  ? "上一轮因输出长度限制被截断。紧接已有进度继续执行任务，优先调用可用工具完成尚未完成的步骤，不要重做已完成内容，直到任务完成、遇到真实阻塞或需要用户授权。"
+                  : "继续执行上面的任务，直接调用可用工具推进，直到任务完成、遇到真实阻塞或需要用户授权。不要只说明计划。",
               });
               assistantContent = "";
               assistantReasoning = "";

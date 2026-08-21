@@ -46,7 +46,7 @@ export function shouldAutoContinueLocalTask(content: string) {
     /(还没有完成|尚未完成|需要继续|继续执行|下一步|还需要|待完成|未完成|没有完成|需要安装|需要创建|需要构建|need to continue|not complete|next step|still need)/i.test(
       normalizedContent,
     ) ||
-    /(直接(?:开始|开)?写|开始(?:写|编写|撰写|创建)|现在(?:开始)?(?:写|编写|创建)|准备(?:写|编写|创建)|我(?:来|将|会|先)(?:为你)?(?:写|编写|撰写|创建)|let me write|writing now|start writing|begin writing|write it out|i(?:'ll| will) write)/i.test(
+    /(直接(?:开始|开)?写|开始(?:写|编写|撰写|创建)|现在(?:开始)?(?:写|编写|创建)|准备(?:写|编写|创建)|我(?:来|将|会|先)(?:为你)?(?:写|编写|撰写|创建|修改|测试|验证)|let me (?:write|apply|test|verify|start)|writing now|start writing|begin writing|write it out|i(?:'ll| will) (?:write|apply|test|verify|start))/i.test(
       normalizedContent,
     )
   );

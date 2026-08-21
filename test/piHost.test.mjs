@@ -112,6 +112,7 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
     let output = "";
     let bridged = false;
     let runStart;
+    let contextUsage;
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -124,6 +125,7 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
         if (!data || data === "[DONE]") continue;
         const payload = JSON.parse(data);
         if (payload.pi?.type === "run_start") runStart = payload.pi;
+        if (payload.pi?.type === "context_usage") contextUsage = payload.pi.usage;
         if (payload.pi?.type === "tool_request") {
           bridged = true;
           const toolResponse = await fetch(`${renge.url}/api/pi/tool-result`, {
@@ -149,6 +151,8 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
       keepRecentTokens: 12_000,
     });
     assert.equal(output, "Pi completed");
+    assert.equal(Number(contextUsage?.tokens) > 0, true);
+    assert.equal(Number(contextUsage?.percent) > 0, true);
     assert.equal(upstreamRequests.length, 2);
     for (const upstreamRequest of upstreamRequests) {
       assert.equal(upstreamRequest.max_tokens, undefined);
@@ -404,6 +408,56 @@ test("Pi Host resumes the persisted Pi session for the next Renge turn", async (
     assert.equal((await (await request("fresh turn")).text()).includes("reply-3"), true);
     assert.equal(upstreamRequests[2].messages.filter((message) => message.role === "user").length, 1);
     assert.doesNotMatch(JSON.stringify(upstreamRequests[2].messages), /first turn/);
+  } finally {
+    await close(renge.server);
+    await close(upstream);
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Pi Host preserves an upstream length stop reason", async () => {
+  const upstream = createServer(async (_request, response) => {
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    const base = {
+      id: "length-stop",
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: "test-model",
+    };
+    sendChunk(response, {
+      ...base,
+      choices: [{ index: 0, delta: { role: "assistant", content: "partial" }, finish_reason: null }],
+    });
+    sendChunk(response, {
+      ...base,
+      choices: [{ index: 0, delta: {}, finish_reason: "length" }],
+    });
+    response.end("data: [DONE]\n\n");
+  });
+
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-pi-length-test-"));
+  const upstreamPort = await listen(upstream);
+  const renge = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  try {
+    const response = await fetch(`${renge.url}/api/pi/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        apiBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+        apiKey: "test-key",
+        apiType: "chat-completions",
+        piCompaction: { enabled: false },
+        request: {
+          model: "test-model",
+          messages: [{ role: "user", content: "Write a long answer" }],
+          stream: true,
+        },
+      }),
+    });
+    assert.equal(response.status, 200);
+    const streamText = await response.text();
+    assert.match(streamText, /"finish_reason":"length"/);
+    assert.doesNotMatch(streamText, /"finish_reason":"stop"/);
   } finally {
     await close(renge.server);
     await close(upstream);

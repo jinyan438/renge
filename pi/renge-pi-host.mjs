@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import {
   createAgentSession,
   DefaultResourceLoader,
+  estimateTokens,
   getAgentDir,
   ModelRuntime,
   SessionManager,
@@ -28,6 +29,45 @@ const TOOL_RESULT_TIMEOUT_MS = 10 * 60 * 1000;
 // Match PiDeck's default model budget. Reasoning-heavy local models such as
 // Qwen3.8 can consume 16k tokens before they reach the first tool call.
 const DEFAULT_PI_MODEL_MAX_TOKENS = 65_536;
+
+function estimateSessionContextTokens(session) {
+  const messageTokens = Array.isArray(session?.messages)
+    ? session.messages.reduce((total, message) => total + estimateTokens(message), 0)
+    : 0;
+  const systemPromptTokens = Math.ceil(String(session?.systemPrompt ?? "").length / 4);
+  let toolDefinitionTokens = 0;
+  try {
+    toolDefinitionTokens = Math.ceil(JSON.stringify(session?.getAllTools?.() ?? []).length / 4);
+  } catch {
+    // Tool schemas are best-effort accounting data and must not break a run.
+  }
+  return Math.max(0, messageTokens + systemPromptTokens + toolDefinitionTokens);
+}
+
+function getReliableContextUsage(session) {
+  const usage = session?.getContextUsage?.() ?? null;
+  const contextWindow = Number(usage?.contextWindow ?? session?.model?.contextWindow ?? 0);
+  const reportedTokens = usage?.tokens === null ? null : Number(usage?.tokens);
+  if (Number.isFinite(reportedTokens) && reportedTokens > 0) return usage;
+
+  const estimatedTokens = estimateSessionContextTokens(session);
+  if (estimatedTokens <= 0) return usage;
+  return {
+    tokens: estimatedTokens,
+    contextWindow,
+    percent: contextWindow > 0 ? (estimatedTokens / contextWindow) * 100 : null,
+  };
+}
+
+function getSessionFinishReason(session) {
+  const lastAssistant = [...(session?.messages ?? [])]
+    .reverse()
+    .find((message) => message?.role === "assistant");
+  const stopReason = String(lastAssistant?.stopReason ?? "").trim();
+  return /^(?:length|max_tokens|max_output_tokens|token_limit)$/i.test(stopReason)
+    ? "length"
+    : "stop";
+}
 
 function writeSse(response, payload) {
   if (response.destroyed || response.writableEnded) return;
@@ -189,7 +229,7 @@ export function createRengePiHost({
 
   const maybeAutoCompact = async (session, compaction) => {
     if (!compaction.enabled || typeof session?.getContextUsage !== "function") return false;
-    const usage = session.getContextUsage();
+    const usage = getReliableContextUsage(session);
     const contextWindow = Number(usage?.contextWindow ?? 0);
     const contextTokens = Number(usage?.tokens ?? NaN);
     const triggerTokens = contextWindow - compaction.reserveTokens;
@@ -510,14 +550,15 @@ export function createRengePiHost({
       await session.prompt(prompt.text, prompt.images.length > 0 ? { images: prompt.images } : undefined);
       const errorMessage = session.agent.state.errorMessage;
       if (errorMessage) throw new Error(errorMessage);
+      const finishReason = getSessionFinishReason(session);
       // Some local gateways report zero usage, so the SDK cannot run its
       // post-turn threshold check. Re-check Pi's own message estimator here.
       await maybeAutoCompact(session, compaction);
       writeSse(response, piEvent("context_usage", {
         runId,
-        usage: session.getContextUsage?.() ?? null,
+        usage: getReliableContextUsage(session),
       }));
-      writeSse(response, completionChunk(runId, {}, "stop"));
+      writeSse(response, completionChunk(runId, {}, finishReason));
       writeSse(response, "[DONE]");
     } catch (error) {
       if (!response.destroyed && !response.writableEnded) {
@@ -583,7 +624,7 @@ export function createRengePiHost({
         ok: true,
         status: 200,
         result,
-        contextUsage: entry.session.getContextUsage?.() ?? null,
+        contextUsage: getReliableContextUsage(entry.session),
       };
     } catch (error) {
       return { ok: false, status: 500, error: error instanceof Error ? error.message : String(error) };

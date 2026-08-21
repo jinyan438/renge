@@ -21,6 +21,8 @@ test("keeps executing when the assistant announces a write but calls no tool", (
     true,
   );
   assert.equal(shouldAutoContinueLocalTask("Let me write the complete file now."), true);
+  assert.equal(shouldAutoContinueLocalTask("I think this is good. Let me apply the edits."), true);
+  assert.equal(shouldAutoContinueLocalTask("Alright, I'll start a local HTTP server and test it."), true);
   assert.equal(
     shouldAutoContinueLocalTask("已完成，文件位于 public/neon-breaker.html。"),
     false,
