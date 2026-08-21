@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createPiStreamEventQueue } from "../src/piStreamEventQueue.ts";
 import { createPiStreamingTimeline } from "../src/piStreamingTimeline.ts";
 
 function createTimelineFixture(sender = "main") {
@@ -134,4 +135,63 @@ test("uses the same ordered timeline for sub-agent messages", async () => {
 
   assert.equal(rendered[1].sender, "sub-agent");
   assert.deepEqual(rendered.map((item) => item.kind), ["tool", "text"]);
+});
+
+test("serializes Pi events and paints coalesced tool deltas before execution", async () => {
+  const applied = [];
+  const queue = createPiStreamEventQueue({
+    async dispatch(event) {
+      applied.push(event.type);
+      await Promise.resolve();
+    },
+    shouldPaintAfter: (event) => event.type === "tool_call_delta",
+    async waitForPaint() {
+      applied.push("paint");
+    },
+  });
+
+  queue.enqueue({ type: "tool_call_start" });
+  queue.enqueue({ type: "tool_call_delta" });
+  queue.enqueue({ type: "tool_call_delta" });
+  queue.enqueue({ type: "tool_call_end" });
+  queue.enqueue({ type: "tool_request" });
+  await queue.waitForIdle();
+
+  assert.deepEqual(applied, [
+    "tool_call_start",
+    "tool_call_delta",
+    "tool_call_delta",
+    "paint",
+    "tool_call_end",
+    "tool_request",
+  ]);
+});
+
+test("paints newly arrived Pi deltas on the next drain frame", async () => {
+  const applied = [];
+  let releaseFirstPaint;
+  const firstPaint = new Promise((resolve) => {
+    releaseFirstPaint = resolve;
+  });
+  let paintCount = 0;
+  const queue = createPiStreamEventQueue({
+    dispatch(event) {
+      applied.push(event.value);
+    },
+    shouldPaintAfter: (event) => event.type === "tool_call_delta",
+    async waitForPaint() {
+      paintCount += 1;
+      applied.push(`paint-${paintCount}`);
+      if (paintCount === 1) await firstPaint;
+    },
+  });
+
+  queue.enqueue({ type: "tool_call_delta", value: "a" });
+  await Promise.resolve();
+  queue.enqueue({ type: "tool_call_delta", value: "b" });
+  queue.enqueue({ type: "tool_call_end", value: "end" });
+  releaseFirstPaint();
+  await queue.waitForIdle();
+
+  assert.deepEqual(applied, ["a", "paint-1", "b", "paint-2", "end"]);
 });

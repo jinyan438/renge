@@ -52,7 +52,20 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
               index: 0,
               id: "call-browser",
               type: "function",
-              function: { name: "browser_read_page", arguments: "{\"mode\":\"text\"}" },
+              function: { name: "browser_read_page", arguments: "{\"mode\":\"" },
+            }],
+          },
+          finish_reason: null,
+        }],
+      });
+      sendChunk(response, {
+        ...base,
+        choices: [{
+          index: 0,
+          delta: {
+            tool_calls: [{
+              index: 0,
+              function: { arguments: "text\"}" },
             }],
           },
           finish_reason: null,
@@ -115,6 +128,7 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
     let contextUsage;
     const piEventTypes = [];
     const piToolCallIds = [];
+    const piToolCallDeltas = [];
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -128,6 +142,7 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
         const payload = JSON.parse(data);
         if (payload.pi?.type) piEventTypes.push(payload.pi.type);
         if (payload.pi?.type?.startsWith("tool_call_")) piToolCallIds.push(payload.pi.toolCallId);
+        if (payload.pi?.type === "tool_call_delta") piToolCallDeltas.push(payload.pi);
         if (payload.pi?.type === "run_start") runStart = payload.pi;
         if (payload.pi?.type === "context_usage") contextUsage = payload.pi.usage;
         if (payload.pi?.type === "tool_request") {
@@ -152,6 +167,9 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
     assert.equal(piEventTypes.includes("tool_call_end"), true);
     assert.equal(piToolCallIds.every((id) => typeof id === "string" && id.length > 0), true);
     assert.equal(new Set(piToolCallIds).size, 1);
+    assert.equal(piToolCallDeltas.length >= 2, true);
+    assert.equal(piToolCallDeltas.map((event) => event.delta).join(""), "{\"mode\":\"text\"}");
+    assert.equal(piToolCallDeltas.every((event) => !("argumentsText" in event)), true);
     assert.equal(runStart?.kernelMode, "full");
     assert.deepEqual(runStart?.compaction, {
       engine: "pi",

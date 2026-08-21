@@ -228,6 +228,7 @@ import {
   type ChatToolProgressBlock,
 } from "./chatToolProgressUtils";
 import { createPiStreamingTimeline } from "./piStreamingTimeline";
+import { createPiStreamEventQueue } from "./piStreamEventQueue";
 import {
   buildProviderReasoningDisableRequest,
   buildProviderReasoningReplay,
@@ -10852,8 +10853,11 @@ async function readChatStream(
   let finishReason = "";
   const toolCallsByIndex = new Map<number, ChatToolCall>();
   const responsesReasoningItemsById = new Map<string, unknown>();
-  const piEventTasks: Promise<void>[] = [];
-  let piEventError: unknown;
+  const piEventQueue = createPiStreamEventQueue<PiStreamEvent>({
+    dispatch: onPiEvent,
+    shouldPaintAfter: (event) => event.type === "tool_call_delta",
+    waitForPaint: waitForToolProgressPaint,
+  });
 
   const applyToolCallDeltas = (deltas: ChatToolCallDelta[]) => {
     deltas.forEach((delta, fallbackIndex) => {
@@ -10909,10 +10913,7 @@ async function readChatStream(
 
     if (isObjectRecord(payload) && isObjectRecord(payload.pi)) {
       const event = payload.pi as unknown as PiStreamEvent;
-      const task = Promise.resolve(onPiEvent(event)).catch((error) => {
-        piEventError = error;
-      });
-      piEventTasks.push(task);
+      piEventQueue.enqueue(event);
       return true;
     }
 
@@ -10986,8 +10987,7 @@ async function readChatStream(
 
   buffer += decoder.decode();
   splitSseFrames(buffer, true).frames.forEach(applySseFrame);
-  await Promise.all(piEventTasks);
-  if (piEventError) throw piEventError;
+  await piEventQueue.waitForIdle();
 
   return {
     content: fullContent,
@@ -27452,15 +27452,17 @@ export function App() {
           const silentControl = isSilentChatControlTool(toolCall.function.name);
           if (!silentControl) {
             options.beforePiToolMessage?.();
+            const previous = piToolVisualizations.get(toolCall.id);
             const visualization: ToolVisualization = {
+              ...(previous ?? {}),
               toolCallId: toolCall.id,
               name: toolCall.function.name,
               args: parseToolCallArgs(toolCall),
               status: "running",
-              startedAt: new Date().toISOString(),
+              startedAt: previous?.startedAt ?? new Date().toISOString(),
             };
             piToolVisualizations.set(toolCall.id, visualization);
-            if (piToolVisualizations.has(toolCall.id)) {
+            if (previous) {
               updateAssistantToolVisualization(commitChatMessages, toolCall.id, () => visualization);
             } else {
               appendAssistantTimelineMessage(
