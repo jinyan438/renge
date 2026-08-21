@@ -25,6 +25,9 @@ import {
 } from "../src/piBridgeUtils.mjs";
 
 const TOOL_RESULT_TIMEOUT_MS = 10 * 60 * 1000;
+// Match PiDeck's default model budget. Reasoning-heavy local models such as
+// Qwen3.8 can consume 16k tokens before they reach the first tool call.
+const DEFAULT_PI_MODEL_MAX_TOKENS = 65_536;
 
 function writeSse(response, payload) {
   if (response.destroyed || response.writableEnded) return;
@@ -296,7 +299,7 @@ export function createRengePiHost({
         requestBody.max_tokens ??
           requestBody.max_completion_tokens ??
           requestBody.max_output_tokens ??
-          16384,
+          DEFAULT_PI_MODEL_MAX_TOKENS,
       );
       modelRuntime.registerProvider(providerId, {
         name: "Renge OpenAI Compatible",
@@ -318,7 +321,7 @@ export function createRengePiHost({
           contextWindow: Number(body.contextWindow ?? 128000),
           maxTokens: Number.isFinite(requestedMaxTokens) && requestedMaxTokens > 0
             ? requestedMaxTokens
-            : 16384,
+            : DEFAULT_PI_MODEL_MAX_TOKENS,
           samplingParams,
         }],
       });
