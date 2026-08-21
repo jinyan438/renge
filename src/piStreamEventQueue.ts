@@ -14,8 +14,8 @@ type ToolCallDeltaEvent = {
 
 export function splitLargePiToolCallDelta<Event extends ToolCallDeltaEvent>(
   event: Event,
-  minimumChunkCharacters = 96,
-  maximumChunks = 120,
+  minimumChunkCharacters = 48,
+  maximumChunks = 240,
 ): Event[] {
   const delta = event.type === "tool_call_delta" ? event.delta ?? "" : "";
   if (delta.length <= minimumChunkCharacters) return [event];

@@ -229,7 +229,7 @@ test("renders a buffered write across frames before processing tool end", async 
     },
     shouldPaintAfter: (event) => event.type === "tool_call_delta",
     paintWeight: (event) => event.delta?.length ?? 0,
-    maxPaintWeight: 96,
+    maxPaintWeight: 48,
     async waitForPaint() {
       applied.push({ type: "paint", length: partial.length });
     },
@@ -244,7 +244,7 @@ test("renders a buffered write across frames before processing tool end", async 
   await queue.waitForIdle();
 
   const paints = applied.filter((event) => event.type === "paint");
-  assert.equal(paints.length > 1, true);
+  assert.equal(paints.length > 5, true);
   assert.equal(paints.at(-1).length, argumentsText.length);
   assert.deepEqual(applied.slice(-2).map((event) => event.type), ["tool_call_end", "tool_request"]);
 });

@@ -71,7 +71,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { strFromU8, strToU8, unzip, zip } from "fflate";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
@@ -8920,13 +8920,15 @@ function updateAssistantToolVisualization(
   toolCallId: string,
   update: (visualization: ToolVisualization) => ToolVisualization,
 ) {
-  setChatMessages((current) => current.map((message) => {
-    if (message.toolVisualization?.toolCallId !== toolCallId) return message;
-    return {
-      ...message,
-      toolVisualization: update(message.toolVisualization),
-    };
-  }));
+  flushSync(() => {
+    setChatMessages((current) => current.map((message) => {
+      if (message.toolVisualization?.toolCallId !== toolCallId) return message;
+      return {
+        ...message,
+        toolVisualization: update(message.toolVisualization),
+      };
+    }));
+  });
 }
 
 function parseToolCallArgs(toolCall: ChatToolCall) {
@@ -10861,7 +10863,7 @@ async function readChatStream(
     shouldPaintAfter: (event) => event.type === "tool_call_delta",
     waitForPaint: waitForToolProgressPaint,
     paintWeight: (event) => event.delta?.length ?? 0,
-    maxPaintWeight: 96,
+    maxPaintWeight: 48,
   });
 
   const applyToolCallDeltas = (deltas: ChatToolCallDelta[]) => {
