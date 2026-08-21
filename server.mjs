@@ -2485,6 +2485,22 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
       return;
     }
 
+    if (pathname === "/api/pi/compact") {
+      const result = await piHost.handleCompact(body);
+      sendJson(response, result.status, result.ok
+        ? { ok: true, result: result.result, contextUsage: result.contextUsage }
+        : { error: result.error });
+      return;
+    }
+
+    if (pathname === "/api/pi/set-auto-compaction") {
+      const result = piHost.handleSetAutoCompaction(body);
+      sendJson(response, result.status, result.ok
+        ? { ok: true, enabled: result.enabled }
+        : { error: result.error });
+      return;
+    }
+
     if (pathname === "/api/pi/abort") {
       sendJson(response, 200, await piHost.handleAbort(body));
       return;

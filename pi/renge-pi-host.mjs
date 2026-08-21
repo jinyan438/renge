@@ -153,6 +153,10 @@ export function createRengePiHost({
   agentDir = getAgentDir(),
 } = {}) {
   const runs = new Map();
+  // Keep the last idle AgentSession available for PiDeck-compatible manual
+  // compaction. The next chat request replaces it, while the session file
+  // remains the source of truth for normal persistence.
+  const idleSessions = new Map();
   const sessionDir = join(resolve(dataDir), ".pi", "sessions");
   const providerUsers = new Map();
   let modelRuntimePromise;
@@ -168,6 +172,45 @@ export function createRengePiHost({
   const settlePendingTools = (run, error) => {
     for (const pending of run.pendingTools.values()) pending.reject(error);
     run.pendingTools.clear();
+  };
+
+  const releaseSessionResource = (entry) => {
+    if (!entry) return;
+    entry.session?.dispose();
+    if (entry.providerId && entry.modelRuntime) {
+      const remaining = (providerUsers.get(entry.providerId) ?? 1) - 1;
+      if (remaining > 0) providerUsers.set(entry.providerId, remaining);
+      else {
+        providerUsers.delete(entry.providerId);
+        entry.modelRuntime.unregisterProvider(entry.providerId);
+      }
+    }
+  };
+
+  const maybeAutoCompact = async (session, compaction) => {
+    if (!compaction.enabled || typeof session?.getContextUsage !== "function") return false;
+    const usage = session.getContextUsage();
+    const contextWindow = Number(usage?.contextWindow ?? 0);
+    const contextTokens = Number(usage?.tokens ?? NaN);
+    const triggerTokens = contextWindow - compaction.reserveTokens;
+    if (
+      !Number.isFinite(contextTokens) ||
+      !Number.isFinite(contextWindow) ||
+      contextWindow <= 0 ||
+      triggerTokens <= 0 ||
+      contextTokens <= triggerTokens
+    ) {
+      return false;
+    }
+    try {
+      await session.compact();
+      return true;
+    } catch (error) {
+      // Pi already emits a compaction_end event with the failure. Preserve the
+      // completed response and let the next request retry the same operation.
+      console.warn("[pi] automatic compaction skipped:", error instanceof Error ? error.message : String(error));
+      return false;
+    }
   };
 
   const createCustomTool = (definition, run) => {
@@ -237,6 +280,12 @@ export function createRengePiHost({
     const piSessionId = normalizeSessionId(
       requestedSessionId || (sessionScope === "main" ? ownerSessionId : `${ownerSessionId}-${sessionScope}`),
     );
+    const sessionKey = sessionFilePath(sessionDir, ownerSessionId, sessionScope, cwd);
+    const previousIdleSession = idleSessions.get(sessionKey);
+    if (previousIdleSession) {
+      idleSessions.delete(sessionKey);
+      releaseSessionResource(previousIdleSession);
+    }
     const compaction = normalizePiCompactionConfig(body?.piCompaction);
     const additionalSkillPaths = normalizePiSkillPaths(body?.piSkillPaths)
       .map((skillPath) => resolve(skillPath));
@@ -267,6 +316,8 @@ export function createRengePiHost({
       response,
       pendingTools: new Map(),
       session: null,
+      settingsManager: null,
+      sessionKey,
       completed: false,
     };
     runs.set(runId, run);
@@ -335,6 +386,7 @@ export function createRengePiHost({
       });
       const settingsManager = SettingsManager.create(cwd, agentDir);
       settingsManager.applyOverrides({ compaction });
+      run.settingsManager = settingsManager;
       const extensionFactories = hasMcpServers
         ? [await createPiMcpAdapter(mcpConfig)]
         : [];
@@ -362,7 +414,7 @@ export function createRengePiHost({
       ) : [];
       const customTools = customDefinitionsForRun.map((definition) => createCustomTool(definition, run));
       customToolNames = new Set(customTools.map((tool) => tool.name));
-      const sessionFile = sessionFilePath(sessionDir, ownerSessionId, sessionScope, cwd);
+      const sessionFile = sessionKey;
       await ensureSessionFile(sessionFile, piSessionId, cwd);
       const sessionManager = SessionManager.open(sessionFile, sessionDir, cwd);
       if (sessionManager.buildSessionContext().messages.length === 0) {
@@ -451,9 +503,16 @@ export function createRengePiHost({
       });
 
       const prompt = resolvePrompt(converted.promptMessage);
+      // PiDeck performs native auto-compaction before a prompt when the
+      // context is over the reserve threshold. Keep that behavior even when
+      // a local OpenAI-compatible gateway omits usage metadata.
+      await maybeAutoCompact(session, compaction);
       await session.prompt(prompt.text, prompt.images.length > 0 ? { images: prompt.images } : undefined);
       const errorMessage = session.agent.state.errorMessage;
       if (errorMessage) throw new Error(errorMessage);
+      // Some local gateways report zero usage, so the SDK cannot run its
+      // post-turn threshold check. Re-check Pi's own message estimator here.
+      await maybeAutoCompact(session, compaction);
       writeSse(response, completionChunk(runId, {}, "stop"));
       writeSse(response, "[DONE]");
     } catch (error) {
@@ -466,18 +525,58 @@ export function createRengePiHost({
       response.off("close", abortRun);
       unsubscribe();
       settlePendingTools(run, new Error("Pi 会话已结束"));
-      run.session?.dispose();
-      if (providerId && modelRuntime) {
-        const remaining = (providerUsers.get(providerId) ?? 1) - 1;
-        if (remaining > 0) providerUsers.set(providerId, remaining);
-        else {
-          providerUsers.delete(providerId);
-          modelRuntime.unregisterProvider(providerId);
-        }
+      if (run.session && run.sessionKey) {
+        idleSessions.set(run.sessionKey, {
+          session: run.session,
+          providerId,
+          modelRuntime,
+          settingsManager: run.settingsManager,
+        });
+      } else {
+        releaseSessionResource({ session: run.session, providerId, modelRuntime });
       }
       runs.delete(runId);
       if (!response.destroyed && !response.writableEnded) response.end();
     }
+  };
+
+  const resolveSessionKeyFromBody = (body) => {
+    const ownerSessionId = normalizeSessionId(body?.sessionId);
+    const sessionScope = normalizeSessionId(body?.piSessionScope || "main");
+    const workspace = body?.workspace && typeof body.workspace === "object" ? body.workspace : null;
+    const cwd = workspace?.kind === "electron" && workspace.cwd
+      ? resolve(String(workspace.cwd))
+      : resolve(defaultCwd);
+    return sessionFilePath(sessionDir, ownerSessionId, sessionScope, cwd);
+  };
+
+  const handleCompact = async (body) => {
+    const sessionKey = resolveSessionKeyFromBody(body);
+    const entry = idleSessions.get(sessionKey);
+    if (!entry) return { ok: false, status: 404, error: "Pi 会话尚未建立或已被新的请求替换" };
+    if (!entry.session?.isIdle) return { ok: false, status: 409, error: "Pi 会话正在运行" };
+    const compaction = normalizePiCompactionConfig(body?.piCompaction);
+    entry.settingsManager?.applyOverrides({ compaction });
+    try {
+      const result = await entry.session.compact(String(body?.instructions ?? "").trim() || undefined);
+      return {
+        ok: true,
+        status: 200,
+        result,
+        contextUsage: entry.session.getContextUsage?.() ?? null,
+      };
+    } catch (error) {
+      return { ok: false, status: 500, error: error instanceof Error ? error.message : String(error) };
+    }
+  };
+
+  const handleSetAutoCompaction = (body) => {
+    const sessionKey = resolveSessionKeyFromBody(body);
+    const entry = idleSessions.get(sessionKey);
+    if (!entry) return { ok: false, status: 404, error: "Pi 会话尚未建立或已被新的请求替换" };
+    const enabled = body?.enabled === true;
+    entry.session?.setAutoCompactionEnabled(enabled);
+    return { ok: true, status: 200, enabled };
   };
 
   const handleToolResult = (body) => {
@@ -507,6 +606,12 @@ export function createRengePiHost({
     const ownerSessionId = normalizeSessionId(requestedSessionId);
     const ownerHash = createHash("sha256").update(ownerSessionId).digest("hex").slice(0, 24);
     await rm(join(sessionDir, ownerHash), { recursive: true, force: true });
+    for (const [key, entry] of idleSessions) {
+      if (key.includes(`${ownerHash}`)) {
+        idleSessions.delete(key);
+        releaseSessionResource(entry);
+      }
+    }
     return { ok: true, status: 200 };
   };
 
@@ -516,8 +621,18 @@ export function createRengePiHost({
       await run.session?.abort();
       run.session?.dispose();
     }));
+    for (const entry of idleSessions.values()) releaseSessionResource(entry);
+    idleSessions.clear();
     runs.clear();
   };
 
-  return { handleChat, handleToolResult, handleAbort, handleDeleteSession, dispose };
+  return {
+    handleChat,
+    handleToolResult,
+    handleAbort,
+    handleCompact,
+    handleSetAutoCompaction,
+    handleDeleteSession,
+    dispose,
+  };
 }
