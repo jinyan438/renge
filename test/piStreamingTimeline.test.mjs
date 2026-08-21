@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createPiStreamEventQueue } from "../src/piStreamEventQueue.ts";
+import {
+  createPiStreamEventQueue,
+  splitLargePiToolCallDelta,
+} from "../src/piStreamEventQueue.ts";
 import { createPiStreamingTimeline } from "../src/piStreamingTimeline.ts";
 
 function createTimelineFixture(sender = "main") {
@@ -145,6 +148,8 @@ test("serializes Pi events and paints coalesced tool deltas before execution", a
       await Promise.resolve();
     },
     shouldPaintAfter: (event) => event.type === "tool_call_delta",
+    paintWeight: () => 1,
+    maxPaintWeight: 2,
     async waitForPaint() {
       applied.push("paint");
     },
@@ -179,6 +184,8 @@ test("paints newly arrived Pi deltas on the next drain frame", async () => {
       applied.push(event.value);
     },
     shouldPaintAfter: (event) => event.type === "tool_call_delta",
+    paintWeight: () => 1,
+    maxPaintWeight: 1,
     async waitForPaint() {
       paintCount += 1;
       applied.push(`paint-${paintCount}`);
@@ -194,4 +201,50 @@ test("paints newly arrived Pi deltas on the next drain frame", async () => {
   await queue.waitForIdle();
 
   assert.deepEqual(applied, ["a", "paint-1", "b", "paint-2", "end"]);
+});
+
+test("splits one buffered Pi tool delta into bounded Unicode-safe visual chunks", () => {
+  const source = `${"a".repeat(250)}\u{1f680}${"b".repeat(250)}`;
+  const chunks = splitLargePiToolCallDelta({
+    type: "tool_call_delta",
+    toolCallId: "call-1",
+    delta: source,
+    argumentsText: source,
+  }, 96, 120);
+
+  assert.equal(chunks.length, 6);
+  assert.equal(chunks.map((event) => event.delta).join(""), source);
+  assert.equal(chunks.every((event) => !("argumentsText" in event)), true);
+  assert.equal(chunks.every((event) => event.toolCallId === "call-1"), true);
+  assert.equal(chunks.some((event) => event.delta.includes("\ud83d") && !event.delta.includes("\ude80")), false);
+});
+
+test("renders a buffered write across frames before processing tool end", async () => {
+  const applied = [];
+  let partial = "";
+  const queue = createPiStreamEventQueue({
+    dispatch(event) {
+      if (event.type === "tool_call_delta") partial += event.delta;
+      applied.push({ type: event.type, length: partial.length });
+    },
+    shouldPaintAfter: (event) => event.type === "tool_call_delta",
+    paintWeight: (event) => event.delta?.length ?? 0,
+    maxPaintWeight: 96,
+    async waitForPaint() {
+      applied.push({ type: "paint", length: partial.length });
+    },
+  });
+  const argumentsText = JSON.stringify({ path: "index.html", content: "x".repeat(420) });
+
+  queue.enqueue({ type: "tool_call_start" });
+  splitLargePiToolCallDelta({ type: "tool_call_delta", delta: argumentsText })
+    .forEach(queue.enqueue);
+  queue.enqueue({ type: "tool_call_end" });
+  queue.enqueue({ type: "tool_request" });
+  await queue.waitForIdle();
+
+  const paints = applied.filter((event) => event.type === "paint");
+  assert.equal(paints.length > 1, true);
+  assert.equal(paints.at(-1).length, argumentsText.length);
+  assert.deepEqual(applied.slice(-2).map((event) => event.type), ["tool_call_end", "tool_request"]);
 });

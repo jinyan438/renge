@@ -228,7 +228,10 @@ import {
   type ChatToolProgressBlock,
 } from "./chatToolProgressUtils";
 import { createPiStreamingTimeline } from "./piStreamingTimeline";
-import { createPiStreamEventQueue } from "./piStreamEventQueue";
+import {
+  createPiStreamEventQueue,
+  splitLargePiToolCallDelta,
+} from "./piStreamEventQueue";
 import {
   buildProviderReasoningDisableRequest,
   buildProviderReasoningReplay,
@@ -10857,6 +10860,8 @@ async function readChatStream(
     dispatch: onPiEvent,
     shouldPaintAfter: (event) => event.type === "tool_call_delta",
     waitForPaint: waitForToolProgressPaint,
+    paintWeight: (event) => event.delta?.length ?? 0,
+    maxPaintWeight: 96,
   });
 
   const applyToolCallDeltas = (deltas: ChatToolCallDelta[]) => {
@@ -10913,7 +10918,7 @@ async function readChatStream(
 
     if (isObjectRecord(payload) && isObjectRecord(payload.pi)) {
       const event = payload.pi as unknown as PiStreamEvent;
-      piEventQueue.enqueue(event);
+      splitLargePiToolCallDelta(event).forEach(piEventQueue.enqueue);
       return true;
     }
 
