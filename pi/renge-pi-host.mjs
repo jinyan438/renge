@@ -513,6 +513,10 @@ export function createRengePiHost({
       // Some local gateways report zero usage, so the SDK cannot run its
       // post-turn threshold check. Re-check Pi's own message estimator here.
       await maybeAutoCompact(session, compaction);
+      writeSse(response, piEvent("context_usage", {
+        runId,
+        usage: session.getContextUsage?.() ?? null,
+      }));
       writeSse(response, completionChunk(runId, {}, "stop"));
       writeSse(response, "[DONE]");
     } catch (error) {
@@ -531,6 +535,9 @@ export function createRengePiHost({
           providerId,
           modelRuntime,
           settingsManager: run.settingsManager,
+          ownerSessionId,
+          sessionScope,
+          cwd,
         });
       } else {
         releaseSessionResource({ session: run.session, providerId, modelRuntime });
@@ -550,9 +557,22 @@ export function createRengePiHost({
     return sessionFilePath(sessionDir, ownerSessionId, sessionScope, cwd);
   };
 
-  const handleCompact = async (body) => {
+  const resolveIdleSession = (body) => {
     const sessionKey = resolveSessionKeyFromBody(body);
-    const entry = idleSessions.get(sessionKey);
+    const exact = idleSessions.get(sessionKey);
+    if (exact) return { sessionKey, entry: exact };
+    const ownerSessionId = normalizeSessionId(body?.sessionId);
+    const sessionScope = normalizeSessionId(body?.piSessionScope || "main");
+    for (const [key, entry] of idleSessions) {
+      if (entry.ownerSessionId === ownerSessionId && entry.sessionScope === sessionScope) {
+        return { sessionKey: key, entry };
+      }
+    }
+    return { sessionKey, entry: null };
+  };
+
+  const handleCompact = async (body) => {
+    const { entry } = resolveIdleSession(body);
     if (!entry) return { ok: false, status: 404, error: "Pi 会话尚未建立或已被新的请求替换" };
     if (!entry.session?.isIdle) return { ok: false, status: 409, error: "Pi 会话正在运行" };
     const compaction = normalizePiCompactionConfig(body?.piCompaction);
@@ -571,8 +591,7 @@ export function createRengePiHost({
   };
 
   const handleSetAutoCompaction = (body) => {
-    const sessionKey = resolveSessionKeyFromBody(body);
-    const entry = idleSessions.get(sessionKey);
+    const { entry } = resolveIdleSession(body);
     if (!entry) return { ok: false, status: 404, error: "Pi 会话尚未建立或已被新的请求替换" };
     const enabled = body?.enabled === true;
     entry.session?.setAutoCompactionEnabled(enabled);

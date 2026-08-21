@@ -411,6 +411,89 @@ test("Pi Host resumes the persisted Pi session for the next Renge turn", async (
   }
 });
 
+test("Pi Host exposes PiDeck-compatible manual compaction controls for an idle session", async () => {
+  const upstreamRequests = [];
+  const upstream = createServer(async (request, response) => {
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    upstreamRequests.push(JSON.parse(raw));
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    const base = {
+      id: `compact-${upstreamRequests.length}`,
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: "test-model",
+    };
+    sendChunk(response, {
+      ...base,
+      choices: [{ index: 0, delta: { role: "assistant", content: "ready" }, finish_reason: null }],
+    });
+    sendChunk(response, {
+      ...base,
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    });
+    response.end("data: [DONE]\n\n");
+  });
+
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-pi-compact-test-"));
+  const upstreamPort = await listen(upstream);
+  const renge = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  try {
+    const chatResponse = await fetch(`${renge.url}/api/pi/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "manual-compact-session",
+        apiBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+        apiKey: "test-key",
+        apiType: "chat-completions",
+        contextWindow: 2_048,
+        piCompaction: { enabled: false, reserveTokens: 256, keepRecentTokens: 512 },
+        request: {
+          model: "test-model",
+          messages: [
+            ...Array.from({ length: 8 }, (_, index) => [
+              { role: "user", content: `old user ${index} ${"hello ".repeat(300)}` },
+              { role: "assistant", content: `old assistant ${index} ${"reply ".repeat(300)}` },
+            ]).flat(),
+            { role: "user", content: "final question" },
+          ],
+          stream: true,
+        },
+      }),
+    });
+    assert.equal(chatResponse.status, 200);
+    await chatResponse.text();
+
+    const toggleResponse = await fetch(`${renge.url}/api/pi/set-auto-compaction`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: "manual-compact-session", enabled: false }),
+    });
+    assert.equal(toggleResponse.status, 200);
+    assert.deepEqual(await toggleResponse.json(), { ok: true, enabled: false });
+
+    const compactResponse = await fetch(`${renge.url}/api/pi/compact`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "manual-compact-session",
+        contextWindow: 2_048,
+        piCompaction: { enabled: true, reserveTokens: 256, keepRecentTokens: 512 },
+      }),
+    });
+    const compactPayload = await compactResponse.json();
+    assert.equal(compactResponse.status, 200);
+    assert.equal(compactPayload.ok, true);
+    assert.equal(typeof compactPayload.contextUsage?.contextWindow, "number");
+    assert.equal(upstreamRequests.length >= 2, true);
+  } finally {
+    await close(renge.server);
+    await close(upstream);
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 function toolDefinition(name) {
   return {
     type: "function",

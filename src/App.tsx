@@ -640,6 +640,13 @@ type ContextRuntimeUsage = {
   updatedAt: number;
 };
 
+type PiContextUsage = {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+  updatedAt: number;
+};
+
 function getContextRuntimeUsageKey(sessionId: string, modelId: string) {
   return `${sessionId}\u0000${modelId.trim().toLowerCase()}`;
 }
@@ -1357,6 +1364,7 @@ type PiStreamEvent = {
     | "tool_end"
     | "compaction_start"
     | "compaction_end"
+    | "context_usage"
     | "auto_retry_start"
     | "auto_retry_end";
   runId?: string;
@@ -1371,6 +1379,11 @@ type PiStreamEvent = {
   attempt?: number;
   maxAttempts?: number;
   delayMs?: number;
+  usage?: {
+    tokens: number | null;
+    contextWindow: number;
+    percent: number | null;
+  } | null;
 };
 
 const PROVIDER_STORAGE_KEY = "renge_provider_channels";
@@ -12287,6 +12300,10 @@ export function App() {
   const [contextRuntimeUsageByKey, setContextRuntimeUsageByKey] = useState<
     Record<string, ContextRuntimeUsage>
   >({});
+  const [piContextUsageByKey, setPiContextUsageByKey] = useState<
+    Record<string, PiContextUsage>
+  >({});
+  const [piCompactionPending, setPiCompactionPending] = useState(false);
   const [chatPersonalization, setChatPersonalization] =
     useState<ChatPersonalizationSettings>(loadChatPersonalization);
   const [chatSender, setChatSender] = useState<ChatSenderIdentity>(loadChatSender);
@@ -12513,6 +12530,118 @@ export function App() {
   };
   const waitForPiSessionReset = (sessionId: string) =>
     piSessionResetPromisesRef.current.get(sessionId) ?? Promise.resolve();
+  const getPiWorkspacePayload = (sessionId: string) => {
+    const session =
+      chatSessionsRef.current.find((candidate) => candidate.id === sessionId) ??
+      chatSessions.find((candidate) => candidate.id === sessionId);
+    const cwd =
+      session?.workspacePath ??
+      (localWorkspaceHandle?.kind === "electron" ? localWorkspaceHandle.path : "");
+    return window.rengeDesktop?.isElectron && cwd
+      ? { kind: "electron" as const, cwd }
+      : undefined;
+  };
+  const recordPiContextUsage = (
+    sessionId: string,
+    modelId: string,
+    usage: PiStreamEvent["usage"],
+  ) => {
+    if (!sessionId || !modelId.trim() || !usage) return;
+    const contextWindow = Number(usage.contextWindow);
+    if (!Number.isFinite(contextWindow) || contextWindow <= 0) return;
+    const tokens = usage.tokens === null ? null : Number(usage.tokens);
+    const percent = usage.percent === null ? null : Number(usage.percent);
+    const normalizedUsage: PiContextUsage = {
+      tokens: Number.isFinite(tokens) ? tokens : null,
+      contextWindow,
+      percent: Number.isFinite(percent) ? percent : null,
+      updatedAt: Date.now(),
+    };
+    setPiContextUsageByKey((current) => ({
+      ...current,
+      [getContextRuntimeUsageKey(sessionId, modelId)]: normalizedUsage,
+    }));
+  };
+  const setPiAutoCompaction = async (enabled: boolean) => {
+    setContextCompressionSettings((current) => ({
+      ...current,
+      enabled,
+      ...(enabled ? {} : { astPruningEnabled: false }),
+    }));
+    setContextRuntimeUsageByKey({});
+    const sessionId = activeChatSessionIdRef.current;
+    if (!sessionId) return;
+    try {
+      const response = await fetch("/api/pi/set-auto-compaction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId,
+          piSessionScope: "main",
+          enabled,
+          workspace: getPiWorkspacePayload(sessionId),
+        }),
+      });
+      if (response.status === 404) return;
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error || `Pi 自动压缩设置失败：${response.status}`);
+      }
+    } catch (error) {
+      setChatStatus({
+        status: "warning",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+  const compactActivePiSession = async () => {
+    if (piCompactionPending || chatStatus.status === "loading") return;
+    const sessionId = activeChatSessionIdRef.current;
+    if (!sessionId) {
+      setChatStatus({ status: "warning", message: "当前没有可压缩的 Pi 会话。" });
+      return;
+    }
+    setPiCompactionPending(true);
+    setChatStatus({ status: "loading", message: "Pi 正在压缩会话上下文..." });
+    try {
+      const response = await fetch("/api/pi/compact", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId,
+          piSessionScope: "main",
+          piCompaction: {
+            enabled: contextCompressionSettings.enabled,
+            reserveTokens: 16_384,
+            keepRecentTokens: 20_000,
+          },
+          workspace: getPiWorkspacePayload(sessionId),
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        contextUsage?: PiStreamEvent["usage"];
+      };
+      if (!response.ok) {
+        throw new Error(payload.error || `Pi 手动压缩失败：${response.status}`);
+      }
+      recordPiContextUsage(sessionId, selectedModelValue, payload.contextUsage);
+      const usageKey = getContextRuntimeUsageKey(sessionId, selectedModelValue);
+      setContextRuntimeUsageByKey((current) => {
+        const next = { ...current };
+        delete next[usageKey];
+        return next;
+      });
+      setChatStatus({ status: "success", message: "Pi 已完成手动上下文压缩。" });
+    } catch (error) {
+      setChatStatus({
+        status: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setPiCompactionPending(false);
+    }
+  };
   const chatSessionsRef = useRef<ChatSession[]>([]);
   const characterCardsRef = useRef<CharacterCard[]>([]);
   const personasRef = useRef<AgentPersona[]>([]);
@@ -21728,6 +21857,7 @@ export function App() {
         astPrunedMessageCount: 0,
         assistantWindowedMessageCount: 0,
         appendedMessageCount: 0,
+        nativePiContext: false,
         contextBreakdown: [],
       };
     }
@@ -21949,6 +22079,10 @@ export function App() {
       contextRuntimeUsageByKey[
         getContextRuntimeUsageKey(activeChatSession?.id ?? activeChatSessionId, meterModelId)
       ];
+    const nativePiUsage =
+      piContextUsageByKey[
+        getContextRuntimeUsageKey(activeChatSession?.id ?? activeChatSessionId, meterModelId)
+      ];
     const currentChatMessageSignatures = contextMeterChatMessages.map(
       getChatMessageContextSignature,
     );
@@ -21986,11 +22120,16 @@ export function App() {
             (runtimeUsage?.mutableChatMessageTokens ?? 0),
         )
       : 0;
-    const currentTokens =
+    const estimatedRuntimeTokens =
       runtimeUsage && runtimeUsageMatchesCurrentHistory
         ? runtimeUsage.currentTokens + appendedTokens + mutableMessageDeltaTokens
         : estimatedCurrentTokens;
-    const thresholdTokens = limitingBudget?.budget.safetyThresholdTokens ?? null;
+    const currentTokens = nativePiUsage
+      ? nativePiUsage.tokens ?? 0
+      : estimatedRuntimeTokens;
+    const thresholdTokens = nativePiUsage
+      ? nativePiUsage.contextWindow
+      : limitingBudget?.budget.safetyThresholdTokens ?? null;
     const estimateMessageCollectionTokens = (messages: ChatApiMessage[]) =>
       messages.length > 0 ? Math.max(0, estimateContextMessagesTokens(messages) - 2) : 0;
     const systemPromptTokens = estimateMessageCollectionTokens(
@@ -22040,10 +22179,13 @@ export function App() {
       currentTokens,
       thresholdTokens,
       usageRatio: thresholdTokens ? currentTokens / thresholdTokens : null,
-      limitingModelId: limitingBudget?.modelId ?? "",
+      limitingModelId: nativePiUsage?.contextWindow ? meterModelId : limitingBudget?.modelId ?? "",
       modelIds: distinctModelIds,
-      missingModelIds,
-      usesActualRequestTokens: Boolean(runtimeUsage && runtimeUsageMatchesCurrentHistory),
+      missingModelIds: nativePiUsage?.contextWindow ? [] : missingModelIds,
+      usesActualRequestTokens: Boolean(
+        nativePiUsage || (runtimeUsage && runtimeUsageMatchesCurrentHistory),
+      ),
+      nativePiContext: Boolean(nativePiUsage),
       compressed: Boolean(
         runtimeUsage && runtimeUsageMatchesCurrentHistory && runtimeUsage.compressed,
       ),
@@ -22085,6 +22227,7 @@ export function App() {
     contextMeterChatMessages,
     contextCompressionSettings,
     contextRuntimeUsageByKey,
+    piContextUsageByKey,
     currentChatSender.kind,
     effectiveChatModelId,
     enabledMcpServers,
@@ -22114,12 +22257,18 @@ export function App() {
       contextTokenMeter.modelIds.length > 1
         ? `多 Agent 按最小阈值模型 ${contextTokenMeter.limitingModelId} 计算`
         : `模型 ${contextTokenMeter.limitingModelId}`;
-    const compressionNote = contextCompressionSettings.enabled
-      ? "上下文压缩已开启"
+    const compressionNote = contextTokenMeter.nativePiContext
+      ? contextCompressionSettings.enabled
+        ? "Pi 原生自动压缩已开启"
+        : "Pi 原生自动压缩已关闭"
+      : contextCompressionSettings.enabled
+        ? "上下文压缩已开启"
       : contextTokenMeter.assistantWindowedMessageCount > 0
         ? "自动摘要已关闭，但发送安全窗口已生效"
         : "上下文压缩当前已关闭";
-    const usageNote = contextTokenMeter.usesActualRequestTokens
+    const usageNote = contextTokenMeter.nativePiContext
+      ? "按 Pi 内核原生上下文估算"
+      : contextTokenMeter.usesActualRequestTokens
       ? contextTokenMeter.compressed
         ? `按最后一次实际发送的压缩上下文计数；窗口化超长 assistant 历史 ${contextTokenMeter.assistantWindowedMessageCount} 条，高压缩工具/日志 ${contextTokenMeter.machineCompressedMessageCount} 条，AST 剪枝代码 ${contextTokenMeter.astPrunedMessageCount} 条，摘要替换较早消息 ${contextTokenMeter.removedMessageCount} 条；被缩减原文仍保留在聊天记录中但未进入本次生成请求${
             contextTokenMeter.appendedMessageCount > 0
@@ -23824,6 +23973,10 @@ export function App() {
           const runtimeStatus = formatPiRuntimeStatus(event);
           if (runtimeStatus) {
             setChatStatus({ status: "loading", message: runtimeStatus });
+            return;
+          }
+          if (event.type === "context_usage") {
+            recordPiContextUsage(requestSessionId, requestModelId, event.usage);
             return;
           }
           if (event.type === "tool_start") {
@@ -26854,6 +27007,10 @@ export function App() {
           const runtimeStatus = formatPiRuntimeStatus(event);
           if (runtimeStatus) {
             setChatStatus({ status: "loading", message: runtimeStatus });
+            return;
+          }
+          if (event.type === "context_usage") {
+            recordPiContextUsage(requestSessionId, requestModelId, event.usage);
             return;
           }
           if (event.type === "tool_start") {
@@ -31229,13 +31386,8 @@ export function App() {
                     type="checkbox"
                     checked={contextCompressionSettings.enabled}
                     onChange={(event) => {
-                      const enabled = event.target.checked;
-                      setContextCompressionSettings((current) => ({
-                        ...current,
-                        enabled,
-                        ...(enabled ? {} : { astPruningEnabled: false }),
-                      }));
                       contextSummaryCacheRef.current.clear();
+                      void setPiAutoCompaction(event.target.checked);
                     }}
                   />
                   <span>开启 Pi 原生压缩</span>
@@ -36136,15 +36288,19 @@ export function App() {
                           <input
                             type="checkbox"
                             checked={contextCompressionSettings.enabled}
-                            onChange={(event) => {
-                              setContextCompressionSettings((current) => ({
-                                ...current,
-                                enabled: event.target.checked,
-                              }));
-                              setContextRuntimeUsageByKey({});
-                            }}
+                            onChange={(event) => void setPiAutoCompaction(event.target.checked)}
                           />
                         </label>
+                        <button
+                          type="button"
+                          className="ghost-action"
+                          disabled={piCompactionPending || chatStatus.status === "loading"}
+                          onClick={() => void compactActivePiSession()}
+                          title="调用 Pi 原生压缩当前会话"
+                        >
+                          <RefreshCw size={14} />
+                          {piCompactionPending ? "压缩中..." : "立即压缩"}
+                        </button>
                         <button
                           type="button"
                           className="ghost-action"
