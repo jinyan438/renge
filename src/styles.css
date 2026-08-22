@@ -5067,8 +5067,6 @@ summary:focus-visible {
   display: grid;
   gap: 6px;
   width: 100%;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 112px;
 }
 
 .chat-message-time {
