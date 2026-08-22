@@ -3830,6 +3830,29 @@ summary:focus-visible {
   box-shadow: 0 0 0 3px rgba(7, 193, 96, 0.14);
 }
 
+.provider-model-capability {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.provider-model-capability .provider-thinking-toggle {
+  width: fit-content;
+}
+
+.provider-model-capability .provider-thinking-toggle span {
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+.provider-model-capability p {
+  margin: 0;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .provider-thinking-row {
   display: grid;
   grid-template-columns: minmax(160px, 0.32fr) minmax(180px, 0.68fr);

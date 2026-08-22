@@ -233,6 +233,13 @@ import {
   splitLargePiToolCallDelta,
 } from "./piStreamEventQueue";
 import {
+  ensureProviderModelInputModes,
+  normalizeProviderModelInputModes,
+  providerModelSupportsImages,
+  setProviderModelImageSupport,
+  type ProviderModelInputModes,
+} from "./providerModelCapabilities";
+import {
   buildProviderReasoningDisableRequest,
   buildProviderReasoningReplay,
   buildProviderReasoningRequest,
@@ -559,6 +566,7 @@ type ModelProviderChannel = {
   apiKey: string;
   modelId: string;
   models: string[];
+  modelInputModes: ProviderModelInputModes;
   reasoningEnabled: boolean;
   reasoningEffort: ProviderReasoningEffort;
   updatedAt: string;
@@ -1620,6 +1628,7 @@ function createProviderChannel(name = "OpenAI Compatible"): ModelProviderChannel
     apiKey: "",
     modelId: "",
     models: [],
+    modelInputModes: {},
     reasoningEnabled: false,
     reasoningEffort: "medium",
     updatedAt: timestamp,
@@ -1636,6 +1645,7 @@ function createVolcengineCodingPlanProviderChannel(): ModelProviderChannel {
     apiKey: "",
     modelId: VOLCENGINE_CODING_PLAN_MODEL_ID,
     models: [VOLCENGINE_CODING_PLAN_MODEL_ID],
+    modelInputModes: ensureProviderModelInputModes({}, [VOLCENGINE_CODING_PLAN_MODEL_ID]),
     reasoningEnabled: false,
     reasoningEffort: "medium",
     updatedAt: timestamp,
@@ -1655,6 +1665,7 @@ function normalizeProviderChannel(rawProvider: Partial<ModelProviderChannel>): M
     apiKey: rawProvider.apiKey ?? "",
     modelId: rawProvider.modelId ?? "",
     models: Array.isArray(rawProvider.models) ? rawProvider.models.filter(Boolean) : [],
+    modelInputModes: normalizeProviderModelInputModes(rawProvider.modelInputModes),
     reasoningEnabled: rawProvider.reasoningEnabled === true,
     reasoningEffort: normalizeProviderReasoningEffort(rawProvider.reasoningEffort),
     updatedAt: rawProvider.updatedAt ?? new Date().toISOString(),
@@ -7751,10 +7762,7 @@ function canProviderReceiveImageUrl(
   provider: ModelProviderChannel | null | undefined,
   modelId: string,
 ) {
-  const target = `${provider?.name ?? ""} ${provider?.apiBaseUrl ?? ""} ${modelId}`.toLowerCase();
-  return /\b(vl|vision|visual|qwen.*vl|qwen3-vl|gpt-4o|gpt-5|gemini|claude|pixtral|llava|internvl|minicpm-v|glm-4v|yi-vl)\b/i.test(
-    target,
-  );
+  return providerModelSupportsImages(provider?.modelInputModes, modelId);
 }
 
 function shouldUseImageRecognitionMcpForAttachments(
@@ -14469,6 +14477,11 @@ export function App() {
     () => providers.find((provider) => provider.id === activeProviderId) ?? providers[0],
     [providers, activeProviderId],
   );
+  const activeProviderModelId = getEffectiveProviderModelId(activeProvider);
+  const activeProviderModelSupportsImages = providerModelSupportsImages(
+    activeProvider?.modelInputModes,
+    activeProviderModelId,
+  );
   const getMultiAgentRequestConfig = (personaId: string) => {
     const storedConfig = multiAgentModelConfigs[personaId];
     const provider =
@@ -20304,6 +20317,10 @@ export function App() {
             ? {
                 ...provider,
                 models,
+                modelInputModes: ensureProviderModelInputModes(
+                  provider.modelInputModes,
+                  models,
+                ),
                 modelId: provider.modelId || models[0],
                 updatedAt: new Date().toISOString(),
               }
@@ -26802,6 +26819,7 @@ export function App() {
           apiKey: requestApiKey,
           modelId: requestModelId,
           models: chatProvider?.models ?? [requestModelId],
+          modelInputModes: chatProvider?.modelInputModes ?? {},
           reasoningEnabled: hasCustomApi ? false : chatProvider?.reasoningEnabled === true,
           reasoningEffort: chatProvider?.reasoningEffort ?? "medium",
           updatedAt: chatProvider?.updatedAt ?? new Date().toISOString(),
@@ -32108,6 +32126,12 @@ export function App() {
                         provider.reasoningEnabled
                           ? `思考${getProviderReasoningEffortLabel(provider.reasoningEffort, provider)}`
                           : "",
+                        providerModelSupportsImages(
+                          provider.modelInputModes,
+                          getEffectiveProviderModelId(provider),
+                        )
+                          ? "支持图片理解"
+                          : "仅文本输入",
                       ]
                         .filter(Boolean)
                         .join(" · ")}
@@ -32211,7 +32235,7 @@ export function App() {
                     </div>
                   </label>
 
-                  <label className="field">
+                  <div className="field">
                     <span>模型 ID</span>
                     <div className="model-input-row">
                       <input
@@ -32266,7 +32290,37 @@ export function App() {
                         拉取模型
                       </button>
                     </div>
-                  </label>
+                    <div className="provider-model-capability">
+                      <label
+                        className={`provider-thinking-toggle ${
+                          activeProviderModelSupportsImages ? "active" : ""
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={activeProviderModelSupportsImages}
+                          disabled={!activeProviderModelId}
+                          onChange={(event) =>
+                            updateProvider(activeProvider.id, {
+                              modelInputModes: setProviderModelImageSupport(
+                                activeProvider.modelInputModes,
+                                activeProviderModelId,
+                                event.target.checked,
+                              ),
+                            })
+                          }
+                        />
+                        <span>模型支持图片理解</span>
+                      </label>
+                      <p>
+                        {activeProviderModelId
+                          ? activeProviderModelSupportsImages
+                            ? "开启后会把图片作为 image_url 发送给当前模型。"
+                            : "关闭时不会把图片 Base64 放入上下文；可启用图像识别 MCP 处理图片。"
+                          : "先填写或选择模型 ID，再配置图片理解能力。"}
+                      </p>
+                    </div>
+                  </div>
 
                   <div className="provider-thinking-row">
                     <label

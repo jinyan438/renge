@@ -494,6 +494,16 @@ button.settings-window-light.close:hover {
   box-shadow: 0 0 0 3px rgba(0, 102, 221, 0.12);
 }
 
+.settings-desktop .provider-model-capability .provider-thinking-toggle span {
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+.settings-desktop .provider-model-capability p {
+  color: #808087;
+}
+
 .settings-desktop input[type='checkbox'],
 .settings-desktop input[type='radio'],
 .settings-desktop input[type='range'] {
