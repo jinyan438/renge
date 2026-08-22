@@ -237,6 +237,7 @@ import {
   normalizeProviderModelInputModes,
   providerModelSupportsImages,
   setProviderModelImageSupport,
+  stripUnsupportedImageInputs,
   type ProviderModelInputModes,
 } from "./providerModelCapabilities";
 import {
@@ -7765,6 +7766,15 @@ function canProviderReceiveImageUrl(
   return providerModelSupportsImages(provider?.modelInputModes, modelId);
 }
 
+function getPiSessionScope(
+  baseScope: string,
+  provider: ModelProviderChannel | null | undefined,
+  modelId: string,
+) {
+  const suffix = canProviderReceiveImageUrl(provider, modelId) ? "vision" : "text";
+  return `${baseScope}-${suffix}`;
+}
+
 function shouldUseImageRecognitionMcpForAttachments(
   attachments: ChatAttachment[],
   imageRecognitionMcpTool: McpToolDefinition | undefined,
@@ -12688,7 +12698,7 @@ export function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sessionId,
-          piSessionScope: "main",
+          piSessionScope: getPiSessionScope("main", chatProvider, selectedModelValue),
           enabled,
           workspace: getPiWorkspacePayload(sessionId),
         }),
@@ -12720,7 +12730,7 @@ export function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sessionId,
-          piSessionScope: "main",
+          piSessionScope: getPiSessionScope("main", chatProvider, selectedModelValue),
           piCompaction: {
             enabled: contextCompressionSettings.enabled,
             reserveTokens: 16_384,
@@ -16033,9 +16043,12 @@ export function App() {
     mutableChatMessageId?: string;
     kernel?: "pi" | "renge";
   }): Promise<ChatApiMessage[]> => {
+    const allowImages =
+      isImageGenerationModelId(modelId) || canProviderReceiveImageUrl(provider, modelId);
+    const imageSafeMessages = stripUnsupportedImageInputs(messages, allowImages);
     // Pi owns session history and auto-compaction for Pi-backed requests. Keep
     // Renge's compression path only for legacy/image requests.
-    if (kernel === "pi") return messages;
+    if (kernel === "pi") return imageSafeMessages;
     const additionalTokens = estimateContextValueTokens(tools);
     const recordPreparedContextUsage = (
       preparedMessages: ChatApiMessage[],
@@ -16106,8 +16119,8 @@ export function App() {
       requestedOutputTokens,
     );
     const rawEstimatedInputTokens =
-      estimateContextMessagesTokens(messages) + additionalTokens;
-    let preparedMessages = messages;
+      estimateContextMessagesTokens(imageSafeMessages) + additionalTokens;
+    let preparedMessages = imageSafeMessages;
     let machineCompressedMessageCount = 0;
     let astPrunedMessageCount = 0;
     let assistantWindowedMessageCount = 0;
@@ -24418,12 +24431,13 @@ export function App() {
             ...(usePiKernel
               ? {
                   enableTools: options.includeTools,
+                  allowImageInputs: sendImageAttachmentsToProvider,
                   contextWindow: resolveContextCompressionLimit(
                     { ...contextCompressionSettings, enabled: true },
                     requestModelId,
                   ) ?? activeChatPreset?.maxContext ?? 128_000,
                   piCompaction: piCompactionSettings,
-                  piSessionScope: "main",
+                  piSessionScope: getPiSessionScope("main", requestProvider, requestModelId),
                   piSkillPaths: requestPiSkillPaths,
                   mcpConfig: {
                     mcpServers: requestContextSettings.mcpTools
@@ -24856,12 +24870,17 @@ export function App() {
               ...buildProviderApiTarget(subAgentProvider),
               runId: subPiRunId,
               enableTools: subAgentToolDefinitions.length > 0 || piMcpEnabled,
+              allowImageInputs: subAgentCanReceiveImages,
               contextWindow: resolveContextCompressionLimit(
                 { ...contextCompressionSettings, enabled: true },
                 subAgentModelId,
               ) ?? activeChatPreset?.maxContext ?? 128_000,
               piCompaction: piCompactionSettings,
-              piSessionScope: `sub-${subAgent.id}`,
+              piSessionScope: getPiSessionScope(
+                `sub-${subAgent.id}`,
+                subAgentProvider,
+                subAgentModelId,
+              ),
               piSkillPaths: requestPiSkillPaths,
               mcpConfig: {
                 mcpServers: piMcpEnabled
@@ -27578,12 +27597,13 @@ export function App() {
             ...(usePiKernel
               ? {
                   enableTools: options.includeTools,
+                  allowImageInputs: sendImageAttachmentsToProvider,
                   contextWindow: resolveContextCompressionLimit(
                     { ...contextCompressionSettings, enabled: true },
                     requestModelId,
                   ) ?? activeChatPreset?.maxContext ?? 128_000,
                   piCompaction: piCompactionSettings,
-                  piSessionScope: "main",
+                  piSessionScope: getPiSessionScope("main", chatProvider, requestModelId),
                   piSkillPaths: requestPiSkillPaths,
                   mcpConfig: {
                     mcpServers: activeLlmContextSettings.mcpTools

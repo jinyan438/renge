@@ -121,14 +121,14 @@ function piEvent(type, payload = {}) {
   return { pi: { type, ...payload } };
 }
 
-function toolContent(result) {
+function toolContent(result, allowImageInputs = true) {
   const content = result?.result?.content ?? result?.content;
   if (Array.isArray(content)) {
     const blocks = content.flatMap((item) => {
       if (item?.type === "text" && typeof item.text === "string") {
         return [{ type: "text", text: item.text }];
       }
-      if (item?.type === "image" && typeof item.data === "string") {
+      if (allowImageInputs && item?.type === "image" && typeof item.data === "string") {
         const dataUrl = item.data.match(/^data:([^;,]+);base64,([\s\S]+)$/i);
         return [{
           type: "image",
@@ -174,7 +174,13 @@ function resolvePrompt(promptMessage) {
 }
 
 function stableProviderId(provider) {
-  const key = [provider.apiType, provider.apiBaseUrl, provider.modelId, provider.apiKey].join("\u0000");
+  const key = [
+    provider.apiType,
+    provider.apiBaseUrl,
+    provider.modelId,
+    provider.apiKey,
+    provider.allowImageInputs ? "vision" : "text",
+  ].join("\u0000");
   return `renge-${createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
 }
 
@@ -349,7 +355,7 @@ export function createRengePiHost({
           }));
         });
         return {
-          content: toolContent(result),
+          content: toolContent(result, run.allowImageInputs),
           details: result,
           ...(name === "chat_present_options" ? { terminate: true } : {}),
         };
@@ -369,7 +375,10 @@ export function createRengePiHost({
       ? resolve(String(workspace.cwd))
       : resolve(defaultCwd);
     const ownerSessionId = normalizeSessionId(body?.sessionId || runId);
-    const sessionScope = normalizeSessionId(body?.piSessionScope || "main");
+    const requestedSessionScope = normalizeSessionId(body?.piSessionScope || "main");
+    const sessionScope = /-(?:text|vision)$/.test(requestedSessionScope)
+      ? requestedSessionScope
+      : `${requestedSessionScope}-${provider.allowImageInputs ? "vision" : "text"}`;
     const requestedSessionId = String(body?.piSessionId ?? "").trim();
     const piSessionId = normalizeSessionId(
       requestedSessionId || (sessionScope === "main" ? ownerSessionId : `${ownerSessionId}-${sessionScope}`),
@@ -413,6 +422,7 @@ export function createRengePiHost({
       session: null,
       settingsManager: null,
       sessionKey,
+      allowImageInputs: provider.allowImageInputs,
       completed: false,
     };
     runs.set(runId, run);
@@ -465,7 +475,7 @@ export function createRengePiHost({
               requestBody.include_reasoning ||
               requestBody.enable_thinking,
           ),
-          input: ["text", "image"],
+          input: provider.allowImageInputs ? ["text", "image"] : ["text"],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           contextWindow,
           maxTokens: Number.isFinite(requestedMaxTokens) && requestedMaxTokens > 0
@@ -742,26 +752,35 @@ export function createRengePiHost({
 
   const resolveSessionKeyFromBody = (body) => {
     const ownerSessionId = normalizeSessionId(body?.sessionId);
-    const sessionScope = normalizeSessionId(body?.piSessionScope || "main");
+    const requestedSessionScope = normalizeSessionId(body?.piSessionScope || "main");
     const workspace = body?.workspace && typeof body.workspace === "object" ? body.workspace : null;
     const cwd = workspace?.kind === "electron" && workspace.cwd
       ? resolve(String(workspace.cwd))
       : resolve(defaultCwd);
-    return sessionFilePath(sessionDir, ownerSessionId, sessionScope, cwd);
+    return sessionFilePath(sessionDir, ownerSessionId, requestedSessionScope, cwd);
   };
 
   const resolveIdleSession = (body) => {
-    const sessionKey = resolveSessionKeyFromBody(body);
-    const exact = idleSessions.get(sessionKey);
-    if (exact) return { sessionKey, entry: exact };
+    const requestedSessionScope = normalizeSessionId(body?.piSessionScope || "main");
+    const scopeCandidates = /-(?:text|vision)$/.test(requestedSessionScope)
+      ? [requestedSessionScope]
+      : [requestedSessionScope, `${requestedSessionScope}-text`, `${requestedSessionScope}-vision`];
     const ownerSessionId = normalizeSessionId(body?.sessionId);
-    const sessionScope = normalizeSessionId(body?.piSessionScope || "main");
+    const workspace = body?.workspace && typeof body.workspace === "object" ? body.workspace : null;
+    const cwd = workspace?.kind === "electron" && workspace.cwd
+      ? resolve(String(workspace.cwd))
+      : resolve(defaultCwd);
+    for (const scope of scopeCandidates) {
+      const sessionKey = sessionFilePath(sessionDir, ownerSessionId, scope, cwd);
+      const exact = idleSessions.get(sessionKey);
+      if (exact) return { sessionKey, entry: exact };
+    }
     for (const [key, entry] of idleSessions) {
-      if (entry.ownerSessionId === ownerSessionId && entry.sessionScope === sessionScope) {
+      if (entry.ownerSessionId === ownerSessionId && scopeCandidates.includes(entry.sessionScope)) {
         return { sessionKey: key, entry };
       }
     }
-    return { sessionKey, entry: null };
+    return { sessionKey: resolveSessionKeyFromBody(body), entry: null };
   };
 
   const handleCompact = async (body) => {

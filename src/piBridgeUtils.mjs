@@ -108,6 +108,7 @@ export function normalizePiProviderConfig(body) {
     apiBaseUrl,
     apiKey,
     apiType,
+    allowImageInputs: body?.allowImageInputs === true,
     piApi: apiType === "responses" ? "openai-responses" : "openai-completions",
     modelId,
   };

@@ -1,6 +1,10 @@
 export type ModelInputMode = "text" | "image";
 export type ProviderModelInputModes = Record<string, ModelInputMode[]>;
 
+type MessageWithContent = {
+  content: unknown;
+};
+
 function normalizeModelId(value: unknown) {
   return String(value ?? "").trim().toLowerCase();
 }
@@ -50,4 +54,30 @@ export function ensureProviderModelInputModes(value: unknown, modelIds: string[]
     if (key && !normalized[key]) normalized[key] = ["text"];
   });
   return normalized;
+}
+
+function isImageContentPart(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const type = (value as { type?: unknown }).type;
+  return type === "image_url" || type === "input_image" || type === "image";
+}
+
+export function stripUnsupportedImageInputs<T extends MessageWithContent>(
+  messages: T[],
+  allowImages: boolean,
+) {
+  if (allowImages) return messages;
+
+  return messages.map((message) => {
+    if (!Array.isArray(message.content)) return message;
+    const content = message.content.filter((part) => !isImageContentPart(part));
+    if (content.length === message.content.length) return message;
+    return {
+      ...message,
+      content:
+        content.length > 0
+          ? content
+          : [{ type: "text", text: "图片内容未发送给当前文本模型。" }],
+    };
+  });
 }

@@ -153,7 +153,12 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
             body: JSON.stringify({
               runId: payload.pi.runId,
               toolCallId: payload.pi.toolCallId,
-              result: { text: "visible page text" },
+              result: {
+                content: [
+                  { type: "text", text: "visible page text" },
+                  { type: "image", data: "QUFB", mimeType: "image/png" },
+                ],
+              },
             }),
           });
           assert.equal(toolResponse.status, 200);
@@ -189,6 +194,7 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
       upstreamRequests[1].messages.some((message) => message.role === "tool"),
       true,
     );
+    assert.doesNotMatch(JSON.stringify(upstreamRequests[1].messages), /image_url|QUFB/);
   } finally {
     await close(renge.server);
     await close(upstream);

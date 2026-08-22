@@ -158,6 +158,7 @@ test("provider normalization selects the matching Pi OpenAI adapter", () => {
       apiBaseUrl: "http://127.0.0.1:1234/v1",
       apiKey: "TOKEN",
       apiType: "responses",
+      allowImageInputs: false,
       piApi: "openai-responses",
       modelId: "model-a",
     },

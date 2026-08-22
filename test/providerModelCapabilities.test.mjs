@@ -6,6 +6,7 @@ import {
   normalizeProviderModelInputModes,
   providerModelSupportsImages,
   setProviderModelImageSupport,
+  stripUnsupportedImageInputs,
 } from "../src/providerModelCapabilities.ts";
 
 test("normalizes model input modes and defaults configured models to text", () => {
@@ -53,4 +54,32 @@ test("adds newly pulled models as text-only while preserving configured capabili
       "new-model": ["text"],
     },
   );
+});
+
+test("strips image content parts for text-only models while preserving text", () => {
+  const messages = [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "读取截图" },
+        { type: "image_url", image_url: { url: "data:image/png;base64,AAA" } },
+      ],
+    },
+    {
+      role: "assistant",
+      content: [{ type: "image", data: "AAA" }],
+    },
+  ];
+
+  assert.deepEqual(stripUnsupportedImageInputs(messages, false), [
+    {
+      role: "user",
+      content: [{ type: "text", text: "读取截图" }],
+    },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "图片内容未发送给当前文本模型。" }],
+    },
+  ]);
+  assert.strictEqual(stripUnsupportedImageInputs(messages, true), messages);
 });
