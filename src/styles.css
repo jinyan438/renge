@@ -3838,6 +3838,17 @@ summary:focus-visible {
 
 .provider-model-capability .provider-thinking-toggle {
   width: fit-content;
+  white-space: nowrap;
+}
+
+.provider-model-capability .provider-thinking-toggle input {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  flex: 0 0 auto;
 }
 
 .provider-model-capability .provider-thinking-toggle span {

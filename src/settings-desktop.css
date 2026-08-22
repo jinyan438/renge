@@ -500,6 +500,15 @@ button.settings-window-light.close:hover {
   font-weight: inherit;
 }
 
+.settings-desktop .provider-model-capability .provider-thinking-toggle input {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+}
+
 .settings-desktop .provider-model-capability p {
   color: #808087;
 }
