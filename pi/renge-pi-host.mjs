@@ -48,15 +48,48 @@ function getReliableContextUsage(session) {
   const usage = session?.getContextUsage?.() ?? null;
   const contextWindow = Number(usage?.contextWindow ?? session?.model?.contextWindow ?? 0);
   const reportedTokens = usage?.tokens === null ? null : Number(usage?.tokens);
-  if (Number.isFinite(reportedTokens) && reportedTokens > 0) return usage;
-
   const estimatedTokens = estimateSessionContextTokens(session);
-  if (estimatedTokens <= 0) return usage;
+  // Gateways frequently report only the latest completion's usage. That value
+  // is not a safe representation of the complete prompt, so never let a
+  // smaller reported value suppress our local session estimate.
+  const reliableTokens = Math.max(
+    Number.isFinite(reportedTokens) && reportedTokens > 0 ? reportedTokens : 0,
+    estimatedTokens,
+  );
+  if (reliableTokens <= 0) return usage;
   return {
-    tokens: estimatedTokens,
+    ...(usage ?? {}),
+    tokens: reliableTokens,
     contextWindow,
-    percent: contextWindow > 0 ? (estimatedTokens / contextWindow) * 100 : null,
+    percent: contextWindow > 0 ? (reliableTokens / contextWindow) * 100 : null,
   };
+}
+
+function estimatePendingPromptTokens(prompt) {
+  const text = String(prompt?.text ?? "");
+  const images = Array.isArray(prompt?.images) ? prompt.images : [];
+  return estimateTokens({
+    role: "user",
+    content: [
+      { type: "text", text },
+      ...images.map(() => ({ type: "image" })),
+    ],
+  });
+}
+
+function extractContextWindowFromError(error) {
+  const text = error instanceof Error ? error.message : String(error ?? "");
+  const patterns = [
+    /available\s+context\s+size\s*\(?\s*([\d,]+)/i,
+    /(?:maximum|max)\s+context(?:\s+length|\s+size)?[^\d]{0,32}([\d,]+)/i,
+    /context\s+window[^\d]{0,32}([\d,]+)/i,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const value = Number(String(match?.[1] ?? "").replace(/,/g, ""));
+    if (Number.isFinite(value) && value >= 512) return Math.floor(value);
+  }
+  return null;
 }
 
 function getSessionFinishReason(session) {
@@ -227,7 +260,28 @@ export function createRengePiHost({
     }
   };
 
-  const maybeAutoCompact = async (session, compaction) => {
+  const contextWindowOverrides = new Map();
+
+  const providerContextKey = (provider) =>
+    `${provider.apiBaseUrl}\u0000${provider.modelId}`;
+
+  const resolveContextWindow = (body, provider) => {
+    const requested = Number(body?.contextWindow ?? 128_000);
+    const requestedWindow = Number.isFinite(requested) && requested > 0
+      ? Math.floor(requested)
+      : 128_000;
+    const override = contextWindowOverrides.get(providerContextKey(provider));
+    return override ? Math.min(requestedWindow, override) : requestedWindow;
+  };
+
+  const rememberContextWindow = (provider, discoveredWindow) => {
+    if (!Number.isFinite(discoveredWindow) || discoveredWindow < 512) return;
+    const key = providerContextKey(provider);
+    const current = contextWindowOverrides.get(key);
+    contextWindowOverrides.set(key, current ? Math.min(current, discoveredWindow) : discoveredWindow);
+  };
+
+  const maybeAutoCompact = async (session, compaction, pendingPromptTokens = 0) => {
     if (!compaction.enabled || typeof session?.getContextUsage !== "function") return false;
     const usage = getReliableContextUsage(session);
     const contextWindow = Number(usage?.contextWindow ?? 0);
@@ -238,7 +292,7 @@ export function createRengePiHost({
       !Number.isFinite(contextWindow) ||
       contextWindow <= 0 ||
       triggerTokens <= 0 ||
-      contextTokens <= triggerTokens
+      contextTokens + Math.max(0, pendingPromptTokens) <= triggerTokens
     ) {
       return false;
     }
@@ -382,7 +436,10 @@ export function createRengePiHost({
     let unsubscribe = () => {};
     let providerId = "";
     let modelRuntime;
+    let effectiveContextWindow = 0;
     try {
+      const contextWindow = resolveContextWindow(body, provider);
+      effectiveContextWindow = contextWindow;
       providerId = stableProviderId({ ...provider, apiKey: provider.apiKey });
       modelRuntime = await getModelRuntime();
       providerUsers.set(providerId, (providerUsers.get(providerId) ?? 0) + 1);
@@ -410,7 +467,7 @@ export function createRengePiHost({
           ),
           input: ["text", "image"],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow: Number(body.contextWindow ?? 128000),
+          contextWindow,
           maxTokens: Number.isFinite(requestedMaxTokens) && requestedMaxTokens > 0
             ? requestedMaxTokens
             : DEFAULT_PI_MODEL_MAX_TOKENS,
@@ -588,13 +645,53 @@ export function createRengePiHost({
       });
 
       const prompt = resolvePrompt(converted.promptMessage);
+      const pendingPromptTokens = estimatePendingPromptTokens(prompt);
       // PiDeck performs native auto-compaction before a prompt when the
       // context is over the reserve threshold. Keep that behavior even when
       // a local OpenAI-compatible gateway omits usage metadata.
-      await maybeAutoCompact(session, compaction);
-      await session.prompt(prompt.text, prompt.images.length > 0 ? { images: prompt.images } : undefined);
-      const errorMessage = session.agent.state.errorMessage;
-      if (errorMessage) throw new Error(errorMessage);
+      await maybeAutoCompact(session, compaction, pendingPromptTokens);
+      const promptOptions = prompt.images.length > 0 ? { images: prompt.images } : undefined;
+      try {
+        await session.prompt(prompt.text, promptOptions);
+        const errorMessage = session.agent.state.errorMessage;
+        if (errorMessage) throw new Error(errorMessage);
+      } catch (promptError) {
+        const discoveredWindow = extractContextWindowFromError(promptError);
+        if (!discoveredWindow) throw promptError;
+        rememberContextWindow(provider, discoveredWindow);
+        effectiveContextWindow = Math.min(effectiveContextWindow || discoveredWindow, discoveredWindow);
+        try {
+          if (session.model) session.model.contextWindow = effectiveContextWindow;
+        } catch {
+          // Some SDK model wrappers expose contextWindow as read-only.
+        }
+
+        // Some gateways reject the first request before Pi can run its own
+        // overflow recovery. Compact once with the discovered hard limit and
+        // retry the same prompt so the user does not lose the turn.
+        const recoveryCompaction = {
+          ...compaction,
+          enabled: true,
+          reserveTokens: Math.max(compaction.reserveTokens, 16_384),
+        };
+        let recovered = await maybeAutoCompact(
+          session,
+          recoveryCompaction,
+          pendingPromptTokens,
+        );
+        if (!recovered) {
+          try {
+            await session.compact();
+            recovered = true;
+          } catch {
+            recovered = false;
+          }
+        }
+        if (!recovered) throw promptError;
+        await session.prompt(prompt.text, promptOptions);
+        const retryError = session.agent.state.errorMessage;
+        if (retryError) throw new Error(retryError);
+      }
       const finishReason = getSessionFinishReason(session);
       for (const pendingToolCall of run.streamingToolCalls.values()) {
         writeSse(response, piEvent("tool_call_incomplete", {
