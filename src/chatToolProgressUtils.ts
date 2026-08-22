@@ -167,6 +167,29 @@ const browserResultTitleMap: Record<string, string> = {
   execute_script: "页面脚本",
 };
 
+const piNativeToolTitleMap: Record<string, string> = {
+  read: "读取文件",
+  grep: "搜索内容",
+  find: "查找文件",
+  ls: "列出文件",
+  write: "写入文件",
+  edit: "修改文件",
+  bash: "运行命令",
+};
+
+const piNativeActionMap: ReadonlyArray<
+  readonly [prefix: string, toolName: string, title: string]
+> = [
+  ["Pi 读取文件：", "read", piNativeToolTitleMap.read],
+  ["Pi 搜索内容：", "grep", piNativeToolTitleMap.grep],
+  ["Pi 查找文件：", "find", piNativeToolTitleMap.find],
+  ["Pi 列出目录：", "ls", piNativeToolTitleMap.ls],
+  ["Pi 写入文件：", "write", piNativeToolTitleMap.write],
+  ["Pi 修改文件：", "edit", piNativeToolTitleMap.edit],
+  ["Pi 运行命令：", "bash", piNativeToolTitleMap.bash],
+  ["Pi 执行原生工具：", "", "Pi 原生工具"],
+];
+
 function parseMarkdownLinks(content: string) {
   const links: ChatToolProgressLink[] = [];
   const linkPattern = /\[([^\]]+)\]\(([^)]+)\)/g;
@@ -272,6 +295,37 @@ export function parseToolProgressContent(content: string): ChatToolProgressBlock
     .map(stripMarkdownLinks)
     .map((line) => line.trim())
     .filter(Boolean);
+
+  const piAction = piNativeActionMap.find(([prefix]) => firstLine.startsWith(prefix));
+  if (piAction) {
+    const [prefix, toolName, title] = piAction;
+    const inlineDetail = stripMarkdownLinks(firstLine.slice(prefix.length)).trim();
+    const actionDetails = [inlineDetail, ...details.slice(1)].filter(Boolean);
+    const pathLine = toolName !== "bash"
+      ? details.slice(1).find((line) => isLikelyToolPath(stripMarkdownLinks(line).trim()))
+      : "";
+    const path = pathLine ? stripMarkdownLinks(pathLine).trim() : "";
+    return {
+      variant: "action",
+      title,
+      badge: "执行中",
+      links: path ? [{ label: path }] : [],
+      details: actionDetails,
+    };
+  }
+
+  const piResultMatch = firstLine.match(/^Pi 工具(完成|失败)：(.+)$/);
+  if (piResultMatch) {
+    const failed = piResultMatch[1] === "失败";
+    const toolName = piResultMatch[2].trim();
+    return {
+      variant: failed ? "error" : "success",
+      title: piNativeToolTitleMap[toolName] ?? `Pi 工具 ${toolName}`,
+      badge: failed ? "失败" : "完成",
+      links,
+      details: details.slice(1),
+    };
+  }
 
   if (firstLine.startsWith("执行 MCP 工具：")) {
     const toolLabel = firstLine.replace("执行 MCP 工具：", "").trim();

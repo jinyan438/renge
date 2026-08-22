@@ -84,6 +84,34 @@ test("recognizes every terminal action and result as collapsible tool progress",
   }
 });
 
+const piNativeCases = [
+  ["Pi 读取文件：\nE:/AI/test/index.html", "action", "读取文件"],
+  ["Pi 搜索内容：snake\nE:/AI/test", "action", "搜索内容"],
+  ["Pi 查找文件：*.html\nE:/AI/test", "action", "查找文件"],
+  ["Pi 列出目录：\nE:/AI/test", "action", "列出文件"],
+  ["Pi 写入文件：\nE:/AI/test/snake.html", "action", "写入文件"],
+  ["Pi 修改文件：\nE:/AI/test/snake.html", "action", "修改文件"],
+  ["Pi 运行命令：\nnpm test", "action", "运行命令"],
+  ["Pi 工具完成：ls\n(empty directory)", "success", "列出文件"],
+  ["Pi 工具完成：write\nSuccessfully wrote 19314 bytes", "success", "写入文件"],
+  ["Pi 工具失败：bash\nCommand exited with code 7", "error", "运行命令"],
+];
+
+test("renders Pi native tools through the existing collapsible progress UI", () => {
+  for (const [content, variant, title] of piNativeCases) {
+    const block = parseToolProgressContent(content);
+    assert.ok(block, content);
+    assert.equal(block.variant, variant, content);
+    assert.equal(block.title, title, content);
+  }
+
+  assert.deepEqual(
+    parseToolProgressContent("Pi 写入文件：\nE:/AI/test/snake.html")?.links,
+    [{ label: "E:/AI/test/snake.html" }],
+  );
+  assert.deepEqual(parseToolProgressContent("Pi 运行命令：\nnpm test")?.links, []);
+});
+
 test("keeps browser result URLs inside the tool card as clickable links", () => {
   const url = "http://localhost:8123/snake.html";
   const block = parseToolProgressContent(`网页操作完成：press_key\n${url}`);

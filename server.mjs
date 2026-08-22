@@ -7,11 +7,16 @@ import { homedir, networkInterfaces, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   buildResponsesApiRequest,
   normalizeProviderApiType,
 } from "./src/responsesApiUtils.mjs";
+import { createRengePiHost } from "./pi/renge-pi-host.mjs";
+import {
+  callPiMcpTool,
+  discoverPiMcpTools,
+} from "./pi/pi-mcp-adapter-bridge.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const distDir = resolve(__dirname, "dist");
@@ -20,7 +25,6 @@ const appDataFileName = "app-data.json";
 const appDataBackupCount = 3;
 const appDataWriteQueues = new Map();
 const tavernModuleProxyVersion = "2";
-const mcpClientCache = new Map();
 const tavernModuleProxyCache = new Map();
 
 const mimeTypes = {
@@ -338,533 +342,12 @@ function shortHash(value) {
   return createHash("sha1").update(value).digest("hex").slice(0, 8);
 }
 
-function sanitizeToolNamePart(value, fallback = "tool") {
-  const sanitized = String(value ?? "")
-    .trim()
-    .replace(/[^A-Za-z0-9_-]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-  return sanitized || fallback;
-}
-
-function buildMcpToolAlias(serverName, toolName) {
-  const serverPart = sanitizeToolNamePart(serverName, "server");
-  const toolPart = sanitizeToolNamePart(toolName, "tool");
-  const rawAlias = `mcp_${serverPart}_${toolPart}`;
-  if (rawAlias.length <= 64) return rawAlias;
-  const suffix = shortHash(`${serverName}:${toolName}`);
-  return `${rawAlias.slice(0, 55)}_${suffix}`;
-}
-
-function normalizeStringMap(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter(([, mapValue]) => mapValue !== undefined && mapValue !== null)
-      .map(([key, mapValue]) => [String(key), String(mapValue)]),
-  );
-}
-
-function normalizeMcpServerConfig(rawServer, fallbackName = "mcp") {
-  const source = rawServer && typeof rawServer === "object" ? rawServer : {};
-  const name = String(source.name ?? fallbackName).trim() || fallbackName;
-  const url = String(source.url ?? source.baseUrl ?? "").trim();
-  const command = String(source.command ?? "").trim();
-  const rawTransport = String(source.transport ?? source.type ?? "").toLowerCase();
-  const transport =
-    rawTransport === "http" ||
-    rawTransport === "streamablehttp" ||
-    rawTransport === "streamable_http" ||
-    rawTransport === "sse" ||
-    (url && !command)
-      ? "http"
-      : "stdio";
-
-  return {
-    id: String(source.id ?? name),
-    name,
-    enabled: source.disabled === true ? false : source.enabled !== false,
-    transport,
-    command,
-    args: Array.isArray(source.args) ? source.args.map(String) : [],
-    cwd: source.cwd ? String(source.cwd) : "",
-    env: normalizeStringMap(source.env),
-    url,
-    headers: normalizeStringMap(source.headers),
-  };
-}
-
-function normalizeMcpServerConfigs(rawServers) {
-  const source = rawServers && typeof rawServers === "object" && "mcpServers" in rawServers
-    ? rawServers.mcpServers
-    : rawServers;
-
-  if (Array.isArray(source)) {
-    return source.map((server, index) => normalizeMcpServerConfig(server, `server_${index + 1}`));
-  }
-
-  if (source && typeof source === "object") {
-    return Object.entries(source).map(([name, server]) => {
-      const rawServer = server && typeof server === "object" ? server : {};
-      return normalizeMcpServerConfig({ name, ...rawServer }, name);
-    });
-  }
-
-  return [];
-}
-
-function getMcpClientCacheKey(server) {
-  return JSON.stringify({
-    id: server.id,
-    name: server.name,
-    transport: server.transport,
-    command: server.command,
-    args: server.args,
-    cwd: server.cwd,
-    env: server.env,
-    url: server.url,
-    headers: server.headers,
-  });
-}
-
-function parseSseJsonPayload(text) {
-  const dataLines = text
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith("data:"))
-    .map((line) => line.slice(5).trim())
-    .filter((line) => line && line !== "[DONE]");
-  if (dataLines.length === 0) return null;
-  return JSON.parse(dataLines.join("\n"));
-}
-
-function quoteWindowsCommandArg(value) {
-  const arg = String(value ?? "");
-  if (arg.length === 0) return '""';
-  if (!/[\s"&|<>^]/.test(arg)) return arg;
-  return `"${arg.replace(/"/g, '\\"')}"`;
-}
-
-function getStdioSpawnInvocation(command, args) {
-  if (process.platform !== "win32") {
-    return {
-      command,
-      args,
-      shell: false,
-    };
-  }
-
-  const commandLine = [command, ...args].map(quoteWindowsCommandArg).join(" ");
-  return {
-    command: process.env.ComSpec || "cmd.exe",
-    args: ["/d", "/s", "/c", commandLine],
-    shell: false,
-  };
-}
-
-class HttpMcpClient {
-  constructor(server) {
-    this.server = server;
-    this.nextId = 1;
-    this.sessionId = "";
-    this.initialized = false;
-  }
-
-  async connect() {
-    if (this.initialized) return;
-    await this.request("initialize", {
-      protocolVersion: "2024-11-05",
-      capabilities: {},
-      clientInfo: {
-        name: "Renge Agent Lab",
-        version: "0.1.0",
-      },
-    });
-    await this.notify("notifications/initialized", {});
-    this.initialized = true;
-  }
-
-  async post(message, expectResponse) {
-    const response = await fetch(this.server.url, {
-      method: "POST",
-      headers: {
-        Accept: "application/json, text/event-stream",
-        "Content-Type": "application/json",
-        ...this.server.headers,
-        ...(this.sessionId ? { "Mcp-Session-Id": this.sessionId } : {}),
-      },
-      body: JSON.stringify(message),
-    });
-    const responseSessionId = response.headers.get("mcp-session-id");
-    if (responseSessionId) this.sessionId = responseSessionId;
-    const text = await response.text();
-
-    if (!response.ok) {
-      throw new Error(text || `HTTP MCP request failed: ${response.status}`);
-    }
-
-    if (!expectResponse || !text.trim()) return {};
-
-    const contentType = response.headers.get("content-type") ?? "";
-    const payload = contentType.includes("text/event-stream")
-      ? parseSseJsonPayload(text)
-      : JSON.parse(text);
-
-    if (!payload) return {};
-    if (payload.error) {
-      throw new Error(payload.error.message || JSON.stringify(payload.error));
-    }
-    return payload.result ?? {};
-  }
-
-  request(method, params = {}) {
-    return this.post(
-      {
-        jsonrpc: "2.0",
-        id: this.nextId++,
-        method,
-        params,
-      },
-      true,
-    );
-  }
-
-  notify(method, params = {}) {
-    return this.post(
-      {
-        jsonrpc: "2.0",
-        method,
-        params,
-      },
-      false,
-    );
-  }
-
-  isMissingSessionError(error) {
-    return error instanceof Error && /Session not found/i.test(error.message);
-  }
-
-  async resetSessionAndRetry(operation) {
-    this.sessionId = "";
-    this.initialized = false;
-    await this.connect();
-    return operation();
-  }
-
-  async listTools(retryOnMissingSession = true) {
-    await this.connect();
-    try {
-      const tools = [];
-      let cursor;
-      do {
-        const result = await this.request("tools/list", cursor ? { cursor } : {});
-        tools.push(...(Array.isArray(result.tools) ? result.tools : []));
-        cursor = result.nextCursor;
-      } while (cursor);
-      return tools;
-    } catch (error) {
-      if (retryOnMissingSession && this.isMissingSessionError(error)) {
-        return this.resetSessionAndRetry(() => this.listTools(false));
-      }
-      throw error;
-    }
-  }
-
-  async callTool(name, args, retryOnMissingSession = true) {
-    await this.connect();
-    try {
-      return await this.request("tools/call", {
-        name,
-        arguments: args && typeof args === "object" ? args : {},
-      });
-    } catch (error) {
-      if (retryOnMissingSession && this.isMissingSessionError(error)) {
-        return this.resetSessionAndRetry(() => this.callTool(name, args, false));
-      }
-      throw error;
-    }
-  }
-
-  close() {
-    this.initialized = false;
-  }
-}
-
-class StdioMcpClient {
-  constructor(server) {
-    this.server = server;
-    this.nextId = 1;
-    this.pending = new Map();
-    this.stdoutBuffer = Buffer.alloc(0);
-    this.stderrText = "";
-    this.child = null;
-    this.initialized = false;
-  }
-
-  async connect() {
-    if (this.initialized && this.child && !this.child.killed) return;
-    if (!this.server.command) throw new Error(`MCP 服务器「${this.server.name}」缺少 command`);
-
-    const invocation = getStdioSpawnInvocation(this.server.command, this.server.args);
-
-    this.child = spawn(invocation.command, invocation.args, {
-      cwd: this.server.cwd || undefined,
-      env: {
-        ...process.env,
-        ...this.server.env,
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-      shell: invocation.shell,
-    });
-
-    this.child.stdout.on("data", (chunk) => this.handleStdout(chunk));
-    this.child.stderr.on("data", (chunk) => {
-      this.stderrText = `${this.stderrText}${Buffer.from(chunk).toString("utf8")}`.slice(-4000);
-    });
-    this.child.once("error", (error) => {
-      this.rejectAll(error);
-    });
-    this.child.once("exit", (code, signal) => {
-      if (!this.initialized) return;
-      this.initialized = false;
-      this.rejectAll(new Error(`MCP 服务器已退出：code=${code ?? "null"} signal=${signal ?? "null"}`));
-    });
-
-    await this.request("initialize", {
-      protocolVersion: "2024-11-05",
-      capabilities: {},
-      clientInfo: {
-        name: "Renge Agent Lab",
-        version: "0.1.0",
-      },
-    });
-    this.notify("notifications/initialized", {});
-    this.initialized = true;
-  }
-
-  rejectAll(error) {
-    for (const { reject, timeout } of this.pending.values()) {
-      clearTimeout(timeout);
-      reject(error);
-    }
-    this.pending.clear();
-  }
-
-  handleStdout(chunk) {
-    this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, Buffer.from(chunk)]);
-
-    while (true) {
-      const headerEnd = this.stdoutBuffer.indexOf("\r\n\r\n");
-      const lineEnd = this.stdoutBuffer.indexOf("\n");
-
-      if (headerEnd >= 0 && (lineEnd < 0 || headerEnd < lineEnd)) {
-        const headerText = this.stdoutBuffer.slice(0, headerEnd).toString("utf8");
-        const lengthMatch = /content-length:\s*(\d+)/i.exec(headerText);
-        if (!lengthMatch) {
-          this.stdoutBuffer = this.stdoutBuffer.slice(headerEnd + 4);
-          continue;
-        }
-
-        const contentLength = Number(lengthMatch[1]);
-        const messageStart = headerEnd + 4;
-        const messageEnd = messageStart + contentLength;
-        if (this.stdoutBuffer.length < messageEnd) return;
-
-        const messageText = this.stdoutBuffer.slice(messageStart, messageEnd).toString("utf8");
-        this.stdoutBuffer = this.stdoutBuffer.slice(messageEnd);
-
-        try {
-          this.handleMessage(JSON.parse(messageText));
-        } catch {
-          // Ignore malformed protocol frames.
-        }
-        continue;
-      }
-
-      if (lineEnd < 0) return;
-
-      const messageText = this.stdoutBuffer.slice(0, lineEnd).toString("utf8").replace(/\r$/, "");
-      this.stdoutBuffer = this.stdoutBuffer.slice(lineEnd + 1);
-      if (!messageText.trim()) continue;
-
-      try {
-        this.handleMessage(JSON.parse(messageText));
-      } catch {
-        // Ignore malformed protocol frames.
-      }
-    }
-  }
-
-  handleMessage(message) {
-    if (!message || typeof message !== "object" || !("id" in message)) return;
-    const pending = this.pending.get(message.id);
-    if (!pending) return;
-    clearTimeout(pending.timeout);
-    this.pending.delete(message.id);
-
-    if (message.error) {
-      pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
-      return;
-    }
-
-    pending.resolve(message.result ?? {});
-  }
-
-  writeMessage(message) {
-    if (!this.child?.stdin || this.child.stdin.destroyed) {
-      throw new Error(`MCP 服务器「${this.server.name}」未运行`);
-    }
-    const payload = JSON.stringify(message);
-    this.child.stdin.write(`${payload}\n`);
-  }
-
-  request(method, params = {}) {
-    const id = this.nextId++;
-    const message = {
-      jsonrpc: "2.0",
-      id,
-      method,
-      params,
-    };
-
-    return new Promise((resolveRequest, rejectRequest) => {
-      const timeout = setTimeout(() => {
-        this.pending.delete(id);
-        rejectRequest(
-          new Error(
-            `MCP 请求超时：${this.server.name}/${method}${
-              this.stderrText.trim() ? `\n${this.stderrText.trim()}` : ""
-            }`,
-          ),
-        );
-      }, 30000);
-      this.pending.set(id, {
-        resolve: resolveRequest,
-        reject: rejectRequest,
-        timeout,
-      });
-
-      try {
-        this.writeMessage(message);
-      } catch (error) {
-        clearTimeout(timeout);
-        this.pending.delete(id);
-        rejectRequest(error);
-      }
-    });
-  }
-
-  notify(method, params = {}) {
-    this.writeMessage({
-      jsonrpc: "2.0",
-      method,
-      params,
-    });
-  }
-
-  async listTools() {
-    await this.connect();
-    const tools = [];
-    let cursor;
-    do {
-      const result = await this.request("tools/list", cursor ? { cursor } : {});
-      tools.push(...(Array.isArray(result.tools) ? result.tools : []));
-      cursor = result.nextCursor;
-    } while (cursor);
-    return tools;
-  }
-
-  async callTool(name, args) {
-    await this.connect();
-    return this.request("tools/call", {
-      name,
-      arguments: args && typeof args === "object" ? args : {},
-    });
-  }
-
-  close() {
-    this.initialized = false;
-    this.rejectAll(new Error("MCP client closed"));
-    this.child?.kill();
-  }
-}
-
-function getMcpClient(server) {
-  const key = getMcpClientCacheKey(server);
-  const cachedClient = mcpClientCache.get(key);
-  if (cachedClient) return cachedClient;
-
-  const client = server.transport === "http"
-    ? new HttpMcpClient(server)
-    : new StdioMcpClient(server);
-  mcpClientCache.set(key, client);
-  return client;
-}
-
-function normalizeMcpToolSchema(schema) {
-  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
-    return { type: "object", properties: {} };
-  }
-  return schema;
-}
-
 async function listMcpTools(rawServers) {
-  const servers = normalizeMcpServerConfigs(rawServers).filter((server) => server.enabled);
-  const tools = [];
-  const errors = [];
-
-  for (const server of servers) {
-    try {
-      const client = getMcpClient(server);
-      const serverTools = await client.listTools();
-      for (const tool of serverTools) {
-        const originalName = String(tool.name ?? "").trim();
-        if (!originalName) continue;
-        tools.push({
-          type: "function",
-          function: {
-            name: buildMcpToolAlias(server.name, originalName),
-            description: `[MCP:${server.name}] ${String(tool.description ?? originalName)}`,
-            parameters: normalizeMcpToolSchema(tool.inputSchema),
-          },
-          serverId: server.id,
-          serverName: server.name,
-          originalName,
-        });
-      }
-    } catch (error) {
-      errors.push({
-        serverId: server.id,
-        serverName: server.name,
-        error: compactError(error),
-      });
-    }
-  }
-
-  return { tools, errors };
+  return discoverPiMcpTools(rawServers, { cwd: process.cwd() });
 }
 
 async function callMcpTool(rawServers, toolName, args) {
-  const servers = normalizeMcpServerConfigs(rawServers).filter((server) => server.enabled);
-
-  for (const server of servers) {
-    const client = getMcpClient(server);
-    const serverTools = await client.listTools();
-    const tool = serverTools.find((candidate) => {
-      const originalName = String(candidate.name ?? "").trim();
-      return originalName && buildMcpToolAlias(server.name, originalName) === toolName;
-    });
-    if (!tool) continue;
-
-    return {
-      ok: true,
-      serverId: server.id,
-      serverName: server.name,
-      toolName: tool.name,
-      result: await client.callTool(tool.name, args),
-    };
-  }
-
-  throw new Error(`没有找到启用的 MCP 工具：${toolName}`);
+  return callPiMcpTool(rawServers, toolName, args, { cwd: process.cwd() });
 }
 
 function getDefaultDataDir() {
@@ -996,7 +479,7 @@ async function clearAppData(dataFilePath) {
         ownedFiles.map((filePath) => rm(filePath, { force: true })),
       );
       await Promise.all(
-        ["extensions", "generated-images", "session-images", "skills"].map((name) =>
+        [".pi", "extensions", "generated-images", "session-images", "skills"].map((name) =>
           rm(join(dataDirectory, name), { recursive: true, force: true }),
         ),
       );
@@ -1382,17 +865,10 @@ function createServerId(prefix = "skill") {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
-function isMarkdownEntryFile(fileName) {
-  return /^(skill|readme)\.md$/i.test(fileName) || /\.md$/i.test(fileName);
-}
-
 async function findSkillEntryFile(rootPath) {
   const entries = await readdir(rootPath, { withFileTypes: true });
   const files = entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
-  const directMatch =
-    files.find((name) => /^skill\.md$/i.test(name)) ??
-    files.find((name) => /^readme\.md$/i.test(name)) ??
-    files.find((name) => /\.md$/i.test(name));
+  const directMatch = files.find((name) => /^skill\.md$/i.test(name));
 
   if (directMatch) {
     return {
@@ -1406,54 +882,59 @@ async function findSkillEntryFile(rootPath) {
     if (!entry.isDirectory()) continue;
     if ([".git", "node_modules", "__MACOSX"].includes(entry.name)) continue;
     const childPath = join(rootPath, entry.name);
-    const childEntries = await readdir(childPath, { withFileTypes: true });
-    const childFile = childEntries
-      .filter((childEntry) => childEntry.isFile())
-      .map((childEntry) => childEntry.name)
-      .find(isMarkdownEntryFile);
-    if (childFile) {
-      return {
-        rootPath: childPath,
-        entryFile: childFile,
-        content: await readFile(join(childPath, childFile), "utf8"),
-      };
+    try {
+      return await findSkillEntryFile(childPath);
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "PI_SKILL_ENTRY_NOT_FOUND") throw error;
     }
   }
 
-  throw new Error("没有找到 SKILL.md、README.md 或 Markdown 技能说明文件。");
+  throw new Error("PI_SKILL_ENTRY_NOT_FOUND");
 }
 
-function parseSkillMetadata(content, fallbackName) {
+function parsePiSkillDocument(content) {
   const normalizedContent = String(content ?? "").replace(/\r\n/g, "\n");
-  const lines = normalizedContent.split("\n");
-  const titleLine = lines.find((line) => /^#\s+/.test(line.trim()));
-  const name = (titleLine ? titleLine.replace(/^#\s+/, "") : fallbackName).trim() || fallbackName;
-  const descriptionLines = [];
-  let afterTitle = false;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!afterTitle) {
-      if (titleLine && line === titleLine) afterTitle = true;
-      if (!titleLine && trimmed) afterTitle = true;
-      continue;
-    }
-    if (!trimmed) {
-      if (descriptionLines.length > 0) break;
-      continue;
-    }
-    if (trimmed.startsWith("#")) {
-      if (descriptionLines.length > 0) break;
-      continue;
-    }
-    descriptionLines.push(trimmed);
-    if (descriptionLines.join(" ").length > 220) break;
+  const match = normalizedContent.match(/^\uFEFF?---\n([\s\S]*?)\n---(?:\n|$)/);
+  if (!match) {
+    throw new Error("SKILL.md 缺少 Pi 原生 YAML frontmatter。");
   }
+  let frontmatter;
+  try {
+    frontmatter = parseYaml(match[1]);
+  } catch {
+    throw new Error("SKILL.md 的 Pi 原生 YAML frontmatter 格式无效。");
+  }
+  if (!frontmatter || typeof frontmatter !== "object" || Array.isArray(frontmatter)) {
+    throw new Error("SKILL.md 的 Pi 原生 YAML frontmatter 格式无效。");
+  }
+  return {
+    frontmatter,
+    body: normalizedContent.slice(match[0].length),
+  };
+}
+
+export function parsePiSkillMetadata(content, fallbackName = "skill") {
+  const parsed = parsePiSkillDocument(content);
+  const { frontmatter } = parsed;
+  const name = typeof frontmatter.name === "string" && frontmatter.name.trim()
+    ? frontmatter.name.trim()
+    : String(fallbackName ?? "skill").trim() || "skill";
+  const description = typeof frontmatter.description === "string"
+    ? frontmatter.description.trim()
+    : "";
+  if (!description) throw new Error("SKILL.md 的 Pi 原生 frontmatter 缺少 description。");
 
   return {
     name,
-    description: descriptionLines.join(" ").slice(0, 260),
+    description,
+    frontmatter,
+    body: parsed.body,
   };
+}
+
+function formatPiSkillDocument(frontmatter, body) {
+  const normalizedBody = String(body ?? "").replace(/^\n+/, "");
+  return `---\n${stringifyYaml(frontmatter).trimEnd()}\n---\n\n${normalizedBody}`;
 }
 
 async function importSkillDirectory(dataFilePath, sourcePath) {
@@ -1463,8 +944,16 @@ async function importSkillDirectory(dataFilePath, sourcePath) {
     throw new Error("导入路径不是文件夹。");
   }
 
-  const found = await findSkillEntryFile(sourceRoot);
-  const metadata = parseSkillMetadata(found.content, basename(found.rootPath));
+  let found;
+  try {
+    found = await findSkillEntryFile(sourceRoot);
+  } catch (error) {
+    if (error instanceof Error && error.message === "PI_SKILL_ENTRY_NOT_FOUND") {
+      throw new Error("没有找到 Pi 原生 SKILL.md。");
+    }
+    throw error;
+  }
+  const metadata = parsePiSkillMetadata(found.content, basename(found.rootPath));
   const id = createServerId("skill");
   const targetPath = join(getSkillsDir(dataFilePath), `${sanitizePathName(metadata.name)}-${id}`);
   await mkdir(dirname(targetPath), { recursive: true });
@@ -1476,6 +965,13 @@ async function importSkillDirectory(dataFilePath, sourcePath) {
       return !/(^|\/)(\.git|node_modules|dist|build)(\/|$)/.test(normalized);
     },
   });
+  if (typeof metadata.frontmatter.name !== "string" || !metadata.frontmatter.name.trim()) {
+    await writeFile(join(targetPath, found.entryFile), formatPiSkillDocument({
+      ...metadata.frontmatter,
+      name: metadata.name,
+      description: metadata.description,
+    }, metadata.body), "utf8");
+  }
 
   return {
     id,
@@ -1485,6 +981,8 @@ async function importSkillDirectory(dataFilePath, sourcePath) {
     sourceType: "folder",
     path: targetPath,
     entryFile: found.entryFile,
+    piNativeValid: true,
+    piNativeError: "",
     importedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -1549,8 +1047,16 @@ async function importSkillZip(dataFilePath, body) {
     const extractedDir = join(stagingDir, "extracted");
     await mkdir(extractedDir, { recursive: true });
     await extractZipArchive(zipPath, extractedDir);
-    const found = await findSkillEntryFile(extractedDir);
-    const metadata = parseSkillMetadata(found.content, sanitizePathName(body.name ?? basename(zipPath), "skill"));
+    let found;
+    try {
+      found = await findSkillEntryFile(extractedDir);
+    } catch (error) {
+      if (error instanceof Error && error.message === "PI_SKILL_ENTRY_NOT_FOUND") {
+        throw new Error("ZIP 中没有找到 Pi 原生 SKILL.md。");
+      }
+      throw error;
+    }
+    const metadata = parsePiSkillMetadata(found.content, basename(found.rootPath));
     const targetPath = join(skillsDir, `${sanitizePathName(metadata.name)}-${id}`);
     await cp(found.rootPath, targetPath, {
       recursive: true,
@@ -1560,6 +1066,13 @@ async function importSkillZip(dataFilePath, body) {
         return !/(^|\/)(\.git|node_modules|dist|build|__MACOSX)(\/|$)/.test(normalized);
       },
     });
+    if (typeof metadata.frontmatter.name !== "string" || !metadata.frontmatter.name.trim()) {
+      await writeFile(join(targetPath, found.entryFile), formatPiSkillDocument({
+        ...metadata.frontmatter,
+        name: metadata.name,
+        description: metadata.description,
+      }, metadata.body), "utf8");
+    }
 
     return {
       id,
@@ -1569,6 +1082,8 @@ async function importSkillZip(dataFilePath, body) {
       sourceType: "zip",
       path: targetPath,
       entryFile: found.entryFile,
+      piNativeValid: true,
+      piNativeError: "",
       importedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -1587,9 +1102,67 @@ function normalizeSkillConfig(rawSkill) {
     sourceType: source.sourceType === "zip" ? "zip" : "folder",
     path: String(source.path ?? ""),
     entryFile: String(source.entryFile ?? "SKILL.md"),
+    piNativeValid: source.piNativeValid !== false,
+    piNativeError: String(source.piNativeError ?? ""),
     importedAt: String(source.importedAt ?? new Date().toISOString()),
     updatedAt: String(source.updatedAt ?? new Date().toISOString()),
   };
+}
+
+async function resolveImportedSkillEntry(dataFilePath, skill) {
+  const skillsRoot = await realpath(resolve(getSkillsDir(dataFilePath)));
+  const rootPath = await realpath(resolve(skill.path));
+  const relativeRoot = relative(skillsRoot, rootPath);
+  if (!relativeRoot || relativeRoot.startsWith("..") || isAbsolute(relativeRoot)) {
+    throw new Error("只能访问已导入到 Renge 数据目录的 Skill。");
+  }
+  const entryPath = await realpath(resolve(rootPath, skill.entryFile || "SKILL.md"));
+  const relativeEntry = relative(rootPath, entryPath);
+  if (!relativeEntry || relativeEntry.startsWith("..") || isAbsolute(relativeEntry)) {
+    throw new Error("Skill 入口文件路径无效。");
+  }
+  return entryPath;
+}
+
+async function readPiSkillMetadata(dataFilePath, rawSkill) {
+  const skill = normalizeSkillConfig(rawSkill);
+  const entryPath = await resolveImportedSkillEntry(dataFilePath, skill);
+  const parsed = parsePiSkillMetadata(
+    await readFile(entryPath, "utf8"),
+    basename(dirname(entryPath)),
+  );
+  return {
+    ...skill,
+    name: parsed.name,
+    description: parsed.description,
+    piNativeValid: true,
+    piNativeError: "",
+  };
+}
+
+async function inspectPiSkillMetadata(dataFilePath, rawSkills) {
+  const skills = [];
+  const errors = [];
+  for (const rawSkill of Array.isArray(rawSkills) ? rawSkills : []) {
+    const skill = normalizeSkillConfig(rawSkill);
+    try {
+      skills.push(await readPiSkillMetadata(dataFilePath, skill));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Pi Skill 元数据读取失败。";
+      skills.push({
+        ...skill,
+        enabled: false,
+        piNativeValid: false,
+        piNativeError: message,
+      });
+      errors.push({
+        id: skill.id,
+        name: skill.name,
+        error: message,
+      });
+    }
+  }
+  return { skills, errors };
 }
 
 function buildSkillContextPrompt(skillContexts) {
@@ -1963,6 +1536,38 @@ function getProviderTarget(body) {
   }
 
   return { apiBaseUrl, apiKey, apiType };
+}
+
+async function updatePiSkillMetadata(dataFilePath, rawSkill) {
+  const skill = normalizeSkillConfig(rawSkill);
+  const entryPath = await resolveImportedSkillEntry(dataFilePath, skill);
+  const content = await readFile(entryPath, "utf8");
+  let parsed;
+  try {
+    parsed = parsePiSkillDocument(content);
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("缺少 Pi 原生 YAML frontmatter")) {
+      throw error;
+    }
+    parsed = { frontmatter: {}, body: content };
+  }
+  const name = skill.name.trim() || basename(dirname(entryPath));
+  const description = skill.description.trim();
+  if (!description) throw new Error("Pi Skill 的 description 不能为空。");
+  const updatedAt = new Date().toISOString();
+  await writeFile(entryPath, formatPiSkillDocument({
+    ...parsed.frontmatter,
+    name,
+    description,
+  }, parsed.body), "utf8");
+  return {
+    ...skill,
+    name,
+    description,
+    piNativeValid: true,
+    piNativeError: "",
+    updatedAt,
+  };
 }
 
 const unsafeObjectKeys = new Set(["__proto__", "constructor", "prototype"]);
@@ -2660,7 +2265,7 @@ async function proxyStream({ url, apiKey, body, response }) {
   }
 }
 
-async function handleApi(request, response, pathname, dataFilePath) {
+async function handleApi(request, response, pathname, dataFilePath, piHost) {
   try {
     if (request.method === "OPTIONS") {
       sendOptions(response);
@@ -2851,12 +2456,55 @@ async function handleApi(request, response, pathname, dataFilePath) {
       return;
     }
 
+    if (pathname === "/api/pi/session") {
+      if (request.method !== "DELETE") {
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+      }
+      const body = await readJsonBody(request);
+      const result = await piHost.handleDeleteSession(body);
+      sendJson(response, result.status, result.ok ? { ok: true } : { error: result.error });
+      return;
+    }
+
     if (request.method !== "POST") {
       sendJson(response, 405, { error: "Method not allowed" });
       return;
     }
 
     const body = await readJsonBody(request);
+
+    if (pathname === "/api/pi/chat") {
+      await piHost.handleChat(body, request, response);
+      return;
+    }
+
+    if (pathname === "/api/pi/tool-result") {
+      const result = piHost.handleToolResult(body);
+      sendJson(response, result.status, result.ok ? { ok: true } : { error: result.error });
+      return;
+    }
+
+    if (pathname === "/api/pi/compact") {
+      const result = await piHost.handleCompact(body);
+      sendJson(response, result.status, result.ok
+        ? { ok: true, result: result.result, contextUsage: result.contextUsage }
+        : { error: result.error });
+      return;
+    }
+
+    if (pathname === "/api/pi/set-auto-compaction") {
+      const result = piHost.handleSetAutoCompaction(body);
+      sendJson(response, result.status, result.ok
+        ? { ok: true, enabled: result.enabled }
+        : { error: result.error });
+      return;
+    }
+
+    if (pathname === "/api/pi/abort") {
+      sendJson(response, 200, await piHost.handleAbort(body));
+      return;
+    }
 
     if (pathname === "/api/skills/import-folder") {
       const skill = await importSkillDirectory(dataFilePath, body.path);
@@ -2867,6 +2515,17 @@ async function handleApi(request, response, pathname, dataFilePath) {
     if (pathname === "/api/skills/import-zip") {
       const skill = await importSkillZip(dataFilePath, body);
       sendJson(response, 200, { skill });
+      return;
+    }
+
+    if (pathname === "/api/skills/update") {
+      const skill = await updatePiSkillMetadata(dataFilePath, body.skill);
+      sendJson(response, 200, { skill });
+      return;
+    }
+
+    if (pathname === "/api/skills/metadata") {
+      sendJson(response, 200, await inspectPiSkillMetadata(dataFilePath, body.skills));
       return;
     }
 
@@ -3380,6 +3039,7 @@ export function startRengeServer(options = {}) {
   const temporaryFilesRoot = options.temporaryFilesRoot
     ? resolve(options.temporaryFilesRoot)
     : "";
+  const piHost = createRengePiHost({ defaultCwd: __dirname, dataDir });
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     const isHtmlPreviewOrigin = url.hostname.toLowerCase() === "preview.localhost";
@@ -3451,11 +3111,14 @@ export function startRengeServer(options = {}) {
     }
 
     if (url.pathname.startsWith("/api/")) {
-      await handleApi(request, response, url.pathname, dataFilePath);
+      await handleApi(request, response, url.pathname, dataFilePath, piHost);
       return;
     }
 
     await serveStatic(request, response, url.pathname);
+  });
+  server.once("close", () => {
+    void piHost.dispose();
   });
 
   return new Promise((resolveServer, rejectServer) => {

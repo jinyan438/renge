@@ -17,6 +17,8 @@ import {
   ExternalLink,
   Eye,
   EyeOff,
+  FileCode2,
+  FilePenLine,
   FileJson,
   FolderOpen,
   Globe,
@@ -46,6 +48,7 @@ import {
   Square,
   Send,
   Tags,
+  Terminal,
   Trash2,
   Upload,
   UserRound,
@@ -68,7 +71,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { strFromU8, strToU8, unzip, zip } from "fflate";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
@@ -224,6 +227,19 @@ import {
   waitForToolProgressPaint,
   type ChatToolProgressBlock,
 } from "./chatToolProgressUtils";
+import { createPiStreamingTimeline } from "./piStreamingTimeline";
+import {
+  createPiStreamEventQueue,
+  splitLargePiToolCallDelta,
+} from "./piStreamEventQueue";
+import {
+  ensureProviderModelInputModes,
+  normalizeProviderModelInputModes,
+  providerModelSupportsImages,
+  setProviderModelImageSupport,
+  stripUnsupportedImageInputs,
+  type ProviderModelInputModes,
+} from "./providerModelCapabilities";
 import {
   buildProviderReasoningDisableRequest,
   buildProviderReasoningReplay,
@@ -254,6 +270,10 @@ import {
   resolveStatusBarProviderApiType,
   type ProviderApiType,
 } from "./responsesApiUtils.mjs";
+import {
+  shouldAutoContinueLocalTask,
+  shouldRequireLocalToolCall,
+} from "./localTaskUtils";
 import {
   applyContextCompressionSummary,
   buildFallbackContextSummary,
@@ -317,6 +337,10 @@ import {
   normalizeTextFileWriteArguments,
   scopeWorkspaceHandleToSession,
 } from "./fileBrowserUtils";
+import {
+  isDefaultWorkspaceKey,
+  normalizeWorkspaceSessionPath,
+} from "./workspaceSessionUtils";
 import {
   buildBrowserToolsSystemPrompt,
   executeBrowserTool,
@@ -543,6 +567,7 @@ type ModelProviderChannel = {
   apiKey: string;
   modelId: string;
   models: string[];
+  modelInputModes: ProviderModelInputModes;
   reasoningEnabled: boolean;
   reasoningEffort: ProviderReasoningEffort;
   updatedAt: string;
@@ -586,6 +611,17 @@ type ChatChoiceRequest = {
   response?: ChatChoiceResponse;
 };
 
+type ToolVisualization = {
+  toolCallId?: string;
+  name: string;
+  args?: Record<string, unknown>;
+  partialArguments?: string;
+  result?: unknown;
+  status: "running" | "done" | "error";
+  startedAt?: string;
+  endedAt?: string;
+};
+
 type ChatMessage = {
   id: string;
   role: ChatRole;
@@ -597,6 +633,7 @@ type ChatMessage = {
   attachments?: ChatAttachment[];
   source?: "heartbeat" | "roleplay-greeting" | "wechat";
   choiceRequest?: ChatChoiceRequest;
+  toolVisualization?: ToolVisualization;
   dialogueRewritePending?: boolean;
   dialoguePlaceholderCount?: number;
   variables?: Record<string, unknown>;
@@ -621,6 +658,13 @@ type ContextRuntimeUsage = {
   updatedAt: number;
 };
 
+type PiContextUsage = {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+  updatedAt: number;
+};
+
 function getContextRuntimeUsageKey(sessionId: string, modelId: string) {
   return `${sessionId}\u0000${modelId.trim().toLowerCase()}`;
 }
@@ -634,6 +678,15 @@ function getChatMessageContextSignature(message: ChatMessage) {
     sender: message.sender ?? null,
     source: message.source ?? null,
     choiceRequest: message.choiceRequest ?? null,
+    toolVisualization: message.toolVisualization
+      ? {
+          toolCallId: message.toolVisualization.toolCallId ?? "",
+          name: message.toolVisualization.name,
+          status: message.toolVisualization.status,
+          args: message.toolVisualization.args ?? null,
+          result: message.toolVisualization.result ?? null,
+        }
+      : null,
     attachments: (message.attachments ?? []).map((attachment) => ({
       id: attachment.id,
       name: attachment.name,
@@ -800,6 +853,7 @@ type PcConnectionData = {
 type McpServerTransport = "stdio" | "http";
 
 type McpServerConfig = {
+  [key: string]: unknown;
   id: string;
   name: string;
   enabled: boolean;
@@ -810,6 +864,16 @@ type McpServerConfig = {
   env: Record<string, string>;
   url: string;
   headers: Record<string, string>;
+  lifecycle?: "lazy" | "eager" | "keep-alive";
+  idleTimeout?: number;
+  requestTimeoutMs?: number;
+  directTools?: boolean | string[];
+  includeTools?: string[];
+  excludeTools?: string[];
+  searchKeywords?: string[];
+  toolPrefix?: "server" | "none" | "short" | "mcp";
+  bearerToken?: string;
+  bearerTokenEnv?: string;
   updatedAt: string;
 };
 
@@ -821,6 +885,8 @@ type SkillProfile = {
   sourceType: "folder" | "zip";
   path: string;
   entryFile: string;
+  piNativeValid: boolean;
+  piNativeError: string;
   importedAt: string;
   updatedAt: string;
 };
@@ -1308,6 +1374,44 @@ type ChatApiMessage = {
   responses_reasoning_items?: unknown[];
 };
 
+type PiStreamEvent = {
+  type:
+    | "run_start"
+    | "tool_request"
+    | "tool_start"
+    | "tool_end"
+    | "tool_call_start"
+    | "tool_call_delta"
+    | "tool_call_end"
+    | "tool_call_incomplete"
+    | "compaction_start"
+    | "compaction_end"
+    | "context_usage"
+    | "auto_retry_start"
+    | "auto_retry_end";
+  runId?: string;
+  kernel?: string;
+  nativeTools?: string[];
+  toolCallId?: string;
+  toolName?: string;
+  contentIndex?: number;
+  delta?: string;
+  argumentsText?: string;
+  toolCall?: unknown;
+  arguments?: Record<string, unknown>;
+  result?: unknown;
+  isError?: boolean;
+  reason?: string;
+  attempt?: number;
+  maxAttempts?: number;
+  delayMs?: number;
+  usage?: {
+    tokens: number | null;
+    contextWindow: number;
+    percent: number | null;
+  } | null;
+};
+
 const PROVIDER_STORAGE_KEY = "renge_provider_channels";
 const ACTIVE_PROVIDER_STORAGE_KEY = "renge_active_provider";
 const CHAT_SESSIONS_STORAGE_KEY = "renge_chat_sessions";
@@ -1409,8 +1513,8 @@ const LLM_CONTEXT_SOURCE_META: Record<
   { label: string; description: string }
 > = {
   skills: {
-    label: "Skills 提示词",
-    description: "注入所有已启用 Skill 的完整说明。",
+    label: "Pi 原生 Skills",
+    description: "由 Pi 匹配已启用 Skill，并通过原生 read 按需读取完整说明。",
   },
   workspaceTools: {
     label: "工作区文件工具",
@@ -1426,7 +1530,7 @@ const LLM_CONTEXT_SOURCE_META: Record<
   },
   mcpTools: {
     label: "MCP 工具",
-    description: "发现并注入所有已启用 MCP 服务器的工具。",
+    description: "启用 Pi MCP Adapter 原生代理工具，并按需连接已启用的服务器。",
   },
   phoneTools: {
     label: "手机工具",
@@ -1525,6 +1629,7 @@ function createProviderChannel(name = "OpenAI Compatible"): ModelProviderChannel
     apiKey: "",
     modelId: "",
     models: [],
+    modelInputModes: {},
     reasoningEnabled: false,
     reasoningEffort: "medium",
     updatedAt: timestamp,
@@ -1541,6 +1646,7 @@ function createVolcengineCodingPlanProviderChannel(): ModelProviderChannel {
     apiKey: "",
     modelId: VOLCENGINE_CODING_PLAN_MODEL_ID,
     models: [VOLCENGINE_CODING_PLAN_MODEL_ID],
+    modelInputModes: ensureProviderModelInputModes({}, [VOLCENGINE_CODING_PLAN_MODEL_ID]),
     reasoningEnabled: false,
     reasoningEffort: "medium",
     updatedAt: timestamp,
@@ -1560,6 +1666,7 @@ function normalizeProviderChannel(rawProvider: Partial<ModelProviderChannel>): M
     apiKey: rawProvider.apiKey ?? "",
     modelId: rawProvider.modelId ?? "",
     models: Array.isArray(rawProvider.models) ? rawProvider.models.filter(Boolean) : [],
+    modelInputModes: normalizeProviderModelInputModes(rawProvider.modelInputModes),
     reasoningEnabled: rawProvider.reasoningEnabled === true,
     reasoningEffort: normalizeProviderReasoningEffort(rawProvider.reasoningEffort),
     updatedAt: rawProvider.updatedAt ?? new Date().toISOString(),
@@ -1625,6 +1732,7 @@ function createMcpServerConfig(name = "MCP Server"): McpServerConfig {
     env: {},
     url: "",
     headers: {},
+    lifecycle: "lazy",
     updatedAt: timestamp,
   };
 }
@@ -1659,6 +1767,7 @@ function normalizeMcpServerConfig(
       ? "http"
       : "stdio";
   return {
+    ...rawServer,
     id: typeof rawServer.id === "string" ? rawServer.id : crypto.randomUUID(),
     name: typeof rawServer.name === "string" && rawServer.name.trim()
       ? rawServer.name
@@ -1671,6 +1780,22 @@ function normalizeMcpServerConfig(
     env: normalizeStringRecord(rawServer.env),
     url,
     headers: normalizeStringRecord(rawServer.headers),
+    ...(rawServer.lifecycle === "eager" || rawServer.lifecycle === "keep-alive" || rawServer.lifecycle === "lazy"
+      ? { lifecycle: rawServer.lifecycle }
+      : {}),
+    ...(Number.isFinite(Number(rawServer.idleTimeout)) ? { idleTimeout: Number(rawServer.idleTimeout) } : {}),
+    ...(Number.isFinite(Number(rawServer.requestTimeoutMs)) ? { requestTimeoutMs: Number(rawServer.requestTimeoutMs) } : {}),
+    ...(typeof rawServer.directTools === "boolean" || Array.isArray(rawServer.directTools)
+      ? { directTools: rawServer.directTools }
+      : {}),
+    ...(Array.isArray(rawServer.includeTools) ? { includeTools: rawServer.includeTools.map(String) } : {}),
+    ...(Array.isArray(rawServer.excludeTools) ? { excludeTools: rawServer.excludeTools.map(String) } : {}),
+    ...(Array.isArray(rawServer.searchKeywords) ? { searchKeywords: rawServer.searchKeywords.map(String) } : {}),
+    ...(rawServer.toolPrefix === "server" || rawServer.toolPrefix === "none" || rawServer.toolPrefix === "short" || rawServer.toolPrefix === "mcp"
+      ? { toolPrefix: rawServer.toolPrefix }
+      : {}),
+    ...(typeof rawServer.bearerToken === "string" ? { bearerToken: rawServer.bearerToken } : {}),
+    ...(typeof rawServer.bearerTokenEnv === "string" ? { bearerTokenEnv: rawServer.bearerTokenEnv } : {}),
     updatedAt: typeof rawServer.updatedAt === "string" ? rawServer.updatedAt : new Date().toISOString(),
   };
 }
@@ -1747,18 +1872,39 @@ function buildMcpServerExportJson(servers: McpServerConfig[]) {
       }
       usedNames.add(name);
 
+      const adapterFields: Record<string, unknown> = { ...server };
+      for (const key of ["id", "name", "enabled", "transport", "updatedAt", "type", "baseUrl"]) {
+        delete adapterFields[key];
+      }
+      if (server.enabled === false) adapterFields.disabled = true;
+      else delete adapterFields.disabled;
+      if (!server.lifecycle || server.lifecycle === "lazy") delete adapterFields.lifecycle;
+      if (!server.includeTools?.length) delete adapterFields.includeTools;
+      if (!server.excludeTools?.length) delete adapterFields.excludeTools;
+      if (!server.searchKeywords?.length) delete adapterFields.searchKeywords;
       const exportedServer: Record<string, unknown> =
         server.transport === "http"
           ? {
+              ...adapterFields,
               url: server.url,
               ...(Object.keys(server.headers).length > 0 ? { headers: server.headers } : {}),
             }
           : {
+              ...adapterFields,
               command: server.command,
               ...(server.args.length > 0 ? { args: server.args } : {}),
               ...(server.cwd.trim() ? { cwd: server.cwd } : {}),
               ...(Object.keys(server.env).length > 0 ? { env: server.env } : {}),
             };
+      if (server.transport === "http") {
+        delete exportedServer.command;
+        delete exportedServer.args;
+        delete exportedServer.cwd;
+        delete exportedServer.env;
+      } else {
+        delete exportedServer.url;
+        delete exportedServer.headers;
+      }
 
       return [name, exportedServer];
     }),
@@ -1786,6 +1932,8 @@ function normalizeSkillProfile(rawSkill: Partial<SkillProfile> & Record<string, 
     entryFile: typeof rawSkill.entryFile === "string" && rawSkill.entryFile.trim()
       ? rawSkill.entryFile
       : "SKILL.md",
+    piNativeValid: rawSkill.piNativeValid !== false,
+    piNativeError: typeof rawSkill.piNativeError === "string" ? rawSkill.piNativeError : "",
     importedAt: typeof rawSkill.importedAt === "string" ? rawSkill.importedAt : timestamp,
     updatedAt: typeof rawSkill.updatedAt === "string" ? rawSkill.updatedAt : timestamp,
   };
@@ -2287,6 +2435,38 @@ function normalizeChatMessage(rawValue: unknown): ChatMessage {
     Number(rawMessage.dialoguePlaceholderCount) > 0
       ? countDialoguePlaceholders(content)
       : 0;
+  const rawToolVisualization = isObjectRecord(rawMessage.toolVisualization)
+    ? rawMessage.toolVisualization
+    : null;
+  const toolVisualization =
+    rawToolVisualization &&
+    typeof rawToolVisualization.name === "string" &&
+    (rawToolVisualization.status === "running" ||
+      rawToolVisualization.status === "done" ||
+      rawToolVisualization.status === "error")
+      ? {
+          name: rawToolVisualization.name,
+          status: rawToolVisualization.status as ToolVisualization["status"],
+          ...(typeof rawToolVisualization.toolCallId === "string"
+            ? { toolCallId: rawToolVisualization.toolCallId }
+            : {}),
+          ...(isObjectRecord(rawToolVisualization.args)
+            ? { args: rawToolVisualization.args }
+            : {}),
+          ...(typeof rawToolVisualization.partialArguments === "string"
+            ? { partialArguments: rawToolVisualization.partialArguments }
+            : {}),
+          ...("result" in rawToolVisualization
+            ? { result: rawToolVisualization.result }
+            : {}),
+          ...(typeof rawToolVisualization.startedAt === "string"
+            ? { startedAt: rawToolVisualization.startedAt }
+            : {}),
+          ...(typeof rawToolVisualization.endedAt === "string"
+            ? { endedAt: rawToolVisualization.endedAt }
+            : {}),
+        }
+      : undefined;
 
   return {
     id:
@@ -2315,6 +2495,7 @@ function normalizeChatMessage(rawValue: unknown): ChatMessage {
       ? { source: rawMessage.source }
       : {}),
     ...(role === "assistant" && choiceRequest ? { choiceRequest } : {}),
+    ...(toolVisualization ? { toolVisualization } : {}),
     ...(dialoguePlaceholderCount > 0
       ? {
           dialogueRewritePending: true,
@@ -2424,9 +2605,7 @@ function applyHeartbeatPatch(
 function createChatSession(
   workspaceKey = DEFAULT_WORKSPACE_KEY,
   workspaceName = DEFAULT_WORKSPACE_NAME,
-  workspacePath = workspaceKey !== DEFAULT_WORKSPACE_KEY && !workspaceKey.startsWith("browser:")
-    ? workspaceKey
-    : undefined,
+  workspacePath = normalizeWorkspaceSessionPath(workspaceKey, undefined),
   roleplay?: { characterCardId: string; greetingIndex?: number },
 ): ChatSession {
   const timestamp = new Date().toISOString();
@@ -2456,7 +2635,9 @@ function createChatSession(
     id: crypto.randomUUID(),
     workspaceKey,
     workspaceName,
-    ...(workspacePath ? { workspacePath } : {}),
+    ...(normalizeWorkspaceSessionPath(workspaceKey, workspacePath)
+      ? { workspacePath: normalizeWorkspaceSessionPath(workspaceKey, workspacePath) }
+      : {}),
     title: "新会话",
     messages: [],
     heartbeat: createDefaultHeartbeatConfig(),
@@ -2502,11 +2683,9 @@ function normalizeChatSession(rawValue: unknown): ChatSession {
       typeof rawSession.workspaceName === "string" && rawSession.workspaceName.trim()
         ? rawSession.workspaceName
         : DEFAULT_WORKSPACE_NAME,
-    workspacePath:
-      (typeof rawSession.workspacePath === "string" && rawSession.workspacePath) ||
-      (workspaceKey !== DEFAULT_WORKSPACE_KEY && !workspaceKey.startsWith("browser:")
-        ? workspaceKey
-        : undefined),
+    ...(normalizeWorkspaceSessionPath(workspaceKey, rawSession.workspacePath)
+      ? { workspacePath: normalizeWorkspaceSessionPath(workspaceKey, rawSession.workspacePath) }
+      : {}),
     title,
     messages,
     heartbeat: normalizeHeartbeatConfig(
@@ -3534,6 +3713,7 @@ type RenderedChatItem =
       message: ChatMessage;
       segments: RenderedChatSegment[];
       blocks: ChatToolProgressBlock[];
+      visualizations: ToolVisualization[];
       showTime: boolean;
       startedAt: string;
       endedAt: string;
@@ -4745,12 +4925,15 @@ function getRenderedChatItems(
   };
 
   for (const segment of segments) {
+    const toolVisualization =
+      segment.message.role === "assistant" ? segment.message.toolVisualization : undefined;
     const toolBlock =
+      !toolVisualization &&
       segment.message.role === "assistant" && segment.message.renderAsPlainText !== true
         ? parseToolProgressContent(segment.segment)
         : null;
 
-    if (!toolBlock) {
+    if (!toolBlock && !toolVisualization) {
       flushToolGroup();
       items.push({ kind: "segment", ...segment });
       continue;
@@ -4762,7 +4945,8 @@ function getRenderedChatItems(
         id: `tool-group-${segment.id}`,
         message: segment.message,
         segments: [segment],
-        blocks: [toolBlock],
+        blocks: toolBlock ? [toolBlock] : [],
+        visualizations: toolVisualization ? [toolVisualization] : [],
         showTime: segment.showTime,
         startedAt: segment.message.createdAt,
         endedAt: segment.message.createdAt,
@@ -4771,7 +4955,8 @@ function getRenderedChatItems(
     }
 
     toolGroup.segments.push(segment);
-    toolGroup.blocks.push(toolBlock);
+    if (toolBlock) toolGroup.blocks.push(toolBlock);
+    if (toolVisualization) toolGroup.visualizations.push(toolVisualization);
     toolGroup.endedAt = segment.message.createdAt;
   }
 
@@ -7578,10 +7763,16 @@ function canProviderReceiveImageUrl(
   provider: ModelProviderChannel | null | undefined,
   modelId: string,
 ) {
-  const target = `${provider?.name ?? ""} ${provider?.apiBaseUrl ?? ""} ${modelId}`.toLowerCase();
-  return /\b(vl|vision|visual|qwen.*vl|qwen3-vl|gpt-4o|gpt-5|gemini|claude|pixtral|llava|internvl|minicpm-v|glm-4v|yi-vl)\b/i.test(
-    target,
-  );
+  return providerModelSupportsImages(provider?.modelInputModes, modelId);
+}
+
+function getPiSessionScope(
+  baseScope: string,
+  provider: ModelProviderChannel | null | undefined,
+  modelId: string,
+) {
+  const suffix = canProviderReceiveImageUrl(provider, modelId) ? "vision" : "text";
+  return `${baseScope}-${suffix}`;
 }
 
 function shouldUseImageRecognitionMcpForAttachments(
@@ -8678,46 +8869,21 @@ function buildChromeDevtoolsObservationPrompt(tools: McpToolDefinition[]) {
   ].join("\n");
 }
 
-function shouldRequireLocalToolCall(
-  messages: ChatMessage[],
-  handle: LocalDirectoryHandle | ElectronWorkspaceHandle | AndroidWorkspaceHandle | PcWorkspaceHandle | null,
+function buildPiNativeToolsSystemPrompt(
+  handle: LocalToolsWorkspaceHandle | null,
 ) {
-  if (!handle) return false;
-
-  const recentText = messages
-    .slice(-4)
-    .map((message) =>
-      [
-        message.content,
-        ...(message.attachments ?? []).map((attachment) => attachment.name),
-      ].join("\n"),
-    )
-    .join("\n")
-    .toLowerCase();
-
-  if (!recentText.trim()) return false;
-
-  const operationPattern =
-    /(安装|部署|启动|运行|构建|打包|验证|检查|创建|新建|写入|生成|保存|存进|存入|存到|放到|放进|放入|放至|加到|拷贝|传输|上传|下载|发给我|发送|复制|还原|导出|导入|重命名|改名|名字改|文件夹名|移动|挪到|mkdir|删除|删掉|移除|读取|阅读|预览|查看|搜索|查找|筛选|比较|覆盖|编辑|替换|执行|npm run|build|test|lint|install|deploy|setup|start|serve|rename|move|create|delete|remove|read|preview|search|write|edit|replace|save|transfer|upload|download|send|copy|export|import)/i;
-  const fileContextPattern =
-    /(项目|依赖|脚本|附件|二进制|base64|zip|apk|图片|音频|视频|bat|cmd|文件|文件夹|目录|工作区|路径|package\.json|\.tsx|\.ts|\.js|\.json|\.md|\.txt|\.zip|\.apk|\.png|\.jpg|\.jpeg|\.webp|folder|directory|file|path|script|project|attachment|binary)/i;
-  const shortExecutionPattern = /^(执行|执行吧|开始|开始吧|可以|确认|继续|run|go|ok|yes)$/i;
-  const latestUserMessage = [...messages].reverse().find((message) => message.role === "user");
-  const latestText = latestUserMessage?.content.trim().toLowerCase() ?? "";
-
-  return (
-    (operationPattern.test(recentText) && fileContextPattern.test(recentText)) ||
-    (shortExecutionPattern.test(latestText) && operationPattern.test(recentText))
-  );
-}
-
-function shouldAutoContinueLocalTask(content: string) {
-  const normalizedContent = content.trim();
-  if (!normalizedContent) return false;
-
-  return /(还没有完成|尚未完成|需要继续|继续执行|下一步|还需要|待完成|未完成|没有完成|需要安装|需要创建|需要构建|need to continue|not complete|next step|still need)/i.test(
-    normalizedContent,
-  );
+  if (handle?.kind !== "electron") return "";
+  return [
+    `当前 Pi 工作目录是用户授权的工作区「${handle.name}」。`,
+    "文件和终端操作优先直接使用 Pi 内核原生工具，不要寻找同名 local_* 替代工具：",
+    "- read：读取文本文件或指定行段。",
+    "- grep：搜索文件内容；find：按路径或文件名查找；ls：列出目录。",
+    "- write：创建或覆盖文本文件；edit：精确修改文本文件。",
+    "- bash：运行命令、npm script、Git、创建/移动/删除目录与文件，以及完成项目检测。",
+    "相对路径以当前工作区为根；未收到工具成功结果前不得声称已经读取、写入、修改或执行。",
+    "Pi 原生工具不处理聊天附件、二进制直传、电脑图片预览或跨设备传输；遇到这些任务时使用当前列出的 Renge 专用工具。",
+    "用户要求多步骤编码、构建或验证时，持续调用工具推进到完成、真实阻塞或用户中止，不要只汇报计划。",
+  ].join("\n");
 }
 
 function appendReasoningOnlyToolRetryApiMessages(
@@ -8746,6 +8912,7 @@ function appendAssistantTimelineMessage(
   attachments: ChatAttachment[] = [],
   reasoning = "",
   sender?: ChatSenderIdentity,
+  toolVisualization?: ToolVisualization,
 ) {
   const trimmedContent = content.trim();
   const trimmedReasoning = reasoning.trim();
@@ -8759,10 +8926,27 @@ function appendAssistantTimelineMessage(
       content: trimmedContent,
       ...(trimmedReasoning ? { reasoning: trimmedReasoning } : {}),
       ...(sender ? { sender } : {}),
+      ...(toolVisualization ? { toolVisualization } : {}),
       createdAt: new Date().toISOString(),
       ...(attachments.length > 0 ? { attachments } : {}),
     },
   ]);
+}
+
+function updateAssistantToolVisualization(
+  setChatMessages: Dispatch<SetStateAction<ChatMessage[]>>,
+  toolCallId: string,
+  update: (visualization: ToolVisualization) => ToolVisualization,
+) {
+  flushSync(() => {
+    setChatMessages((current) => current.map((message) => {
+      if (message.toolVisualization?.toolCallId !== toolCallId) return message;
+      return {
+        ...message,
+        toolVisualization: update(message.toolVisualization),
+      };
+    }));
+  });
 }
 
 function parseToolCallArgs(toolCall: ChatToolCall) {
@@ -8773,6 +8957,65 @@ function parseToolCallArgs(toolCall: ChatToolCall) {
       : {};
   } catch {
     return {};
+  }
+}
+
+function decodePartialJsonString(value: string) {
+  try {
+    return JSON.parse(`"${value}"`) as string;
+  } catch {
+    return value
+      .replace(/\\n/g, "\n")
+      .replace(/\\r/g, "\r")
+      .replace(/\\t/g, "\t")
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, "\\");
+  }
+}
+
+function extractPartialJsonStringField(source: string, key: string) {
+  const marker = `"${key}"`;
+  const markerIndex = source.indexOf(marker);
+  if (markerIndex < 0) return undefined;
+  const colonIndex = source.indexOf(":", markerIndex + marker.length);
+  if (colonIndex < 0) return undefined;
+  let quoteIndex = colonIndex + 1;
+  while (/\s/.test(source[quoteIndex] ?? "")) quoteIndex += 1;
+  if (source[quoteIndex] !== '"') return undefined;
+
+  let escaped = false;
+  let value = "";
+  for (let index = quoteIndex + 1; index < source.length; index += 1) {
+    const character = source[index];
+    if (escaped) {
+      value += `\\${character}`;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      value += character;
+      escaped = true;
+      continue;
+    }
+    if (character === '"') return decodePartialJsonString(value);
+    value += character;
+  }
+  return decodePartialJsonString(value);
+}
+
+function parsePartialToolCallArguments(argumentsText: string | undefined) {
+  const source = String(argumentsText ?? "");
+  if (!source.trim()) return {};
+  try {
+    const parsed = JSON.parse(source) as unknown;
+    return isObjectRecord(parsed) ? parsed : {};
+  } catch {
+    const partial: Record<string, unknown> = {};
+    for (const key of ["path", "filePath", "file_path", "content", "command", "script"]) {
+      const value = extractPartialJsonStringField(source, key);
+      if (value !== undefined) partial[key] = value;
+    }
+    return partial;
   }
 }
 
@@ -9472,6 +9715,69 @@ function formatToolResultForApi(result: unknown, toolName?: string) {
     });
   }
   return JSON.stringify(sanitizeToolResultForApiValue(result));
+}
+
+function toolVisualizationResultText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(toolVisualizationResultText).filter(Boolean).join("\n");
+  if (!isObjectRecord(value)) return value == null ? "" : String(value);
+  if (Array.isArray(value.content)) {
+    const content = value.content
+      .map((part) => (isObjectRecord(part) ? part.text : ""))
+      .filter((part): part is string => typeof part === "string")
+      .join("\n");
+    if (content) return content;
+  }
+  for (const key of ["output", "stdout", "text", "message", "result", "error"]) {
+    if (key in value) {
+      const text = toolVisualizationResultText(value[key]);
+      if (text) return text;
+    }
+  }
+  try {
+    return JSON.stringify(value, null, 2) ?? "";
+  } catch {
+    return String(value);
+  }
+}
+
+function toolVisualizationDiff(meta: ToolVisualization): string {
+  const args = meta.args ?? {};
+  const result = isObjectRecord(meta.result) ? meta.result : {};
+  const details = isObjectRecord(result.details) ? result.details : result;
+  for (const key of ["patch", "diff"]) {
+    if (typeof details[key] === "string" && details[key].trim()) return details[key];
+  }
+  const edits = args.edits;
+  if (Array.isArray(edits)) {
+    return edits
+      .map((edit) => {
+        const record = isObjectRecord(edit) ? edit : {};
+        const oldText = typeof record.oldText === "string" ? record.oldText : String(record.old_text ?? "");
+        const newText = typeof record.newText === "string" ? record.newText : String(record.new_text ?? "");
+        return [
+          ...oldText.split("\n").map((line) => `-${line}`),
+          ...newText.split("\n").map((line) => `+${line}`),
+        ].join("\n");
+      })
+      .join("\n");
+  }
+  if (typeof args.oldText === "string" || typeof args.old_text === "string") {
+    const oldText = String(args.oldText ?? args.old_text ?? "");
+    const newText = String(args.newText ?? args.new_text ?? "");
+    return [
+      ...oldText.split("\n").map((line) => `-${line}`),
+      ...newText.split("\n").map((line) => `+${line}`),
+    ].join("\n");
+  }
+  if (typeof args.content === "string") {
+    return args.content.split("\n").map((line) => `+${line}`).join("\n");
+  }
+  const partialContent = extractPartialJsonStringField(meta.partialArguments ?? "", "content");
+  if (partialContent) {
+    return partialContent.split("\n").map((line) => `+${line}`).join("\n");
+  }
+  return "";
 }
 
 function formatSilentChatToolErrorForApi(toolName: string, error: unknown) {
@@ -10415,8 +10721,8 @@ function createStreamingAssistantMessage(
   setChatMessages: Dispatch<SetStateAction<ChatMessage[]>>,
   signal?: AbortSignal,
   sender?: ChatSenderIdentity,
+  messageId: string = crypto.randomUUID(),
 ) {
-  const messageId = crypto.randomUUID();
   const updateMessage = (
     current: ChatMessage[],
     updater: (message: ChatMessage) => ChatMessage,
@@ -10511,6 +10817,7 @@ async function readChatStream(
   onDelta: (delta: string) => void,
   onReasoningDelta: (delta: string) => void = () => undefined,
   signal?: AbortSignal,
+  onPiEvent: (event: PiStreamEvent) => void | Promise<void> = () => undefined,
 ) {
   throwIfChatAborted(signal);
 
@@ -10569,6 +10876,13 @@ async function readChatStream(
   let finishReason = "";
   const toolCallsByIndex = new Map<number, ChatToolCall>();
   const responsesReasoningItemsById = new Map<string, unknown>();
+  const piEventQueue = createPiStreamEventQueue<PiStreamEvent>({
+    dispatch: onPiEvent,
+    shouldPaintAfter: (event) => event.type === "tool_call_delta",
+    waitForPaint: waitForToolProgressPaint,
+    paintWeight: (event) => event.delta?.length ?? 0,
+    maxPaintWeight: 48,
+  });
 
   const applyToolCallDeltas = (deltas: ChatToolCallDelta[]) => {
     deltas.forEach((delta, fallbackIndex) => {
@@ -10621,6 +10935,12 @@ async function readChatStream(
     }
     const errorMessage = getChatApiErrorMessage(payload);
     if (errorMessage) throw new Error(`请求失败：${errorMessage}`);
+
+    if (isObjectRecord(payload) && isObjectRecord(payload.pi)) {
+      const event = payload.pi as unknown as PiStreamEvent;
+      splitLargePiToolCallDelta(event).forEach(piEventQueue.enqueue);
+      return true;
+    }
 
     try {
       const streamContent = extractStreamContent(payload);
@@ -10692,6 +11012,7 @@ async function readChatStream(
 
   buffer += decoder.decode();
   splitSseFrames(buffer, true).frames.forEach(applySseFrame);
+  await piEventQueue.waitForIdle();
 
   return {
     content: fullContent,
@@ -10703,6 +11024,109 @@ async function readChatStream(
       .map(([, toolCall]) => toolCall)
       .filter((toolCall) => toolCall.function.name),
   };
+}
+
+function piToolCallFromEvent(event: PiStreamEvent): ChatToolCall {
+  return {
+    id: event.toolCallId || crypto.randomUUID(),
+    type: "function",
+    function: {
+      name: event.toolName || "unknown_tool",
+      arguments: JSON.stringify(event.arguments ?? {}),
+    },
+  };
+}
+
+function createPiStreamingAssistantTimeline(
+  setChatMessages: Dispatch<SetStateAction<ChatMessage[]>>,
+  signal?: AbortSignal,
+  sender?: ChatSenderIdentity,
+  initialMessageId?: string,
+  onSegmentStarted?: (messageId: string) => void,
+) {
+  return createPiStreamingTimeline({
+    initialMessageId,
+    onSegmentStarted,
+    createSegment: (messageId) =>
+      createStreamingAssistantMessage(
+        setChatMessages,
+        signal,
+        sender,
+        messageId,
+      ),
+  });
+}
+
+function formatPiNativeToolAction(event: PiStreamEvent) {
+  const args = event.arguments ?? {};
+  const path = String(args.path ?? args.file_path ?? "");
+  switch (event.toolName) {
+    case "read":
+      return `Pi 读取文件：\n${path}`;
+    case "grep":
+      return `Pi 搜索内容：${String(args.pattern ?? args.query ?? "")}\n${path}`.trim();
+    case "find":
+      return `Pi 查找文件：${String(args.pattern ?? args.query ?? "")}\n${path}`.trim();
+    case "ls":
+      return `Pi 列出目录：\n${path || "."}`;
+    case "write":
+      return `Pi 写入文件：\n${path}`;
+    case "edit":
+      return `Pi 修改文件：\n${path}`;
+    case "bash":
+      return `Pi 运行命令：\n${String(args.command ?? "")}`;
+    default:
+      return `Pi 执行原生工具：${event.toolName || "unknown"}`;
+  }
+}
+
+function formatPiNativeToolResult(event: PiStreamEvent) {
+  const result = event.result;
+  const content = isObjectRecord(result) && Array.isArray(result.content)
+    ? result.content
+        .filter((item) => isObjectRecord(item) && item.type === "text")
+        .map((item) => String(item.text ?? ""))
+        .filter(Boolean)
+        .join("\n")
+    : "";
+  const title = event.isError
+    ? `Pi 工具失败：${event.toolName || "unknown"}`
+    : `Pi 工具完成：${event.toolName || "unknown"}`;
+  return content ? `${title}\n${trimBlock(content, 900)}` : title;
+}
+
+function formatPiRuntimeStatus(event: PiStreamEvent) {
+  if (event.type === "compaction_start") return "Pi 正在压缩会话上下文...";
+  if (event.type === "compaction_end") return "Pi 已完成上下文压缩，正在继续生成...";
+  if (event.type === "auto_retry_start") {
+    return `Pi 正在重试模型请求（${event.attempt ?? 1}/${event.maxAttempts ?? "?"}）...`;
+  }
+  if (event.type === "auto_retry_end") return "Pi 已完成模型请求重试，正在继续生成...";
+  return "";
+}
+
+async function submitPiToolResult(
+  event: PiStreamEvent,
+  result: unknown,
+  error: unknown,
+  signal?: AbortSignal,
+) {
+  const response = await fetch("/api/pi/tool-result", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal,
+    body: JSON.stringify({
+      runId: event.runId,
+      toolCallId: event.toolCallId,
+      ...(error
+        ? { error: error instanceof Error ? error.message : String(error) }
+        : { result }),
+    }),
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error || `Pi 工具结果提交失败：${response.status}`);
+  }
 }
 
 function splitLocalPath(path = "") {
@@ -11992,6 +12416,10 @@ export function App() {
   const [contextRuntimeUsageByKey, setContextRuntimeUsageByKey] = useState<
     Record<string, ContextRuntimeUsage>
   >({});
+  const [piContextUsageByKey, setPiContextUsageByKey] = useState<
+    Record<string, PiContextUsage>
+  >({});
+  const [piCompactionPending, setPiCompactionPending] = useState(false);
   const [chatPersonalization, setChatPersonalization] =
     useState<ChatPersonalizationSettings>(loadChatPersonalization);
   const [chatSender, setChatSender] = useState<ChatSenderIdentity>(loadChatSender);
@@ -12060,6 +12488,7 @@ export function App() {
   );
   const [chatSessions, setChatSessions] = useState<ChatSession[]>(loadChatSessions);
   const [activeChatSessionId, setActiveChatSessionId] = useState("");
+  const [selectedChatWorkspaceKey, setSelectedChatWorkspaceKey] = useState("");
   const [appDataLoaded, setAppDataLoaded] = useState(false);
   const [chatStatus, setChatStatus] = useState<{
     status: ChatStatusState;
@@ -12154,6 +12583,7 @@ export function App() {
   const htmlPreviewFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const activeUserRequestTextRef = useRef("");
   const activeChatAbortControllerRef = useRef<AbortController | null>(null);
+  const piSessionResetPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
   const restoredWorkspacePathRef = useRef("");
   const restoredPcWorkspaceRef = useRef(false);
   const workspaceAutoRestoreDisabledRef = useRef(false);
@@ -12167,6 +12597,7 @@ export function App() {
     evidence: string;
   } | null>(null);
   const activeChatSessionIdRef = useRef("");
+  const pendingSessionSelectionRef = useRef<string | null>(null);
   const chatModeRef = useRef<ChatMode>(chatMode);
   const tavernScriptRuntimeRef = useRef<TavernScriptRuntime | null>(null);
   const chatMessagesRef = useRef<ChatMessage[]>([]);
@@ -12193,6 +12624,145 @@ export function App() {
       }
     >;
   }>({ context: null, entries: new Map() });
+  const resetPiSession = (sessionId: string) => {
+    if (!sessionId) return Promise.resolve();
+    const pending = fetch("/api/pi/session", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+    })
+      .then(async (response) => {
+        if (response.ok) return;
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error || `Pi 会话重置失败：${response.status}`);
+      })
+      .finally(() => {
+        if (piSessionResetPromisesRef.current.get(sessionId) === pending) {
+          piSessionResetPromisesRef.current.delete(sessionId);
+        }
+      });
+    piSessionResetPromisesRef.current.set(sessionId, pending);
+    return pending;
+  };
+  const waitForPiSessionReset = (sessionId: string) =>
+    piSessionResetPromisesRef.current.get(sessionId) ?? Promise.resolve();
+  const getPiWorkspacePayload = (sessionId: string) => {
+    const session =
+      chatSessionsRef.current.find((candidate) => candidate.id === sessionId) ??
+      chatSessions.find((candidate) => candidate.id === sessionId);
+    if (!session || isDefaultWorkspaceKey(session.workspaceKey)) return undefined;
+    const cwd =
+      session?.workspacePath ??
+      (localWorkspaceHandle?.kind === "electron" ? localWorkspaceHandle.path : "");
+    return window.rengeDesktop?.isElectron && cwd
+      ? { kind: "electron" as const, cwd }
+      : undefined;
+  };
+  const recordPiContextUsage = (
+    sessionId: string,
+    modelId: string,
+    usage: PiStreamEvent["usage"],
+  ) => {
+    if (!sessionId || !modelId.trim() || !usage) return;
+    const contextWindow = Number(usage.contextWindow);
+    if (!Number.isFinite(contextWindow) || contextWindow <= 0) return;
+    const tokens = usage.tokens === null ? null : Number(usage.tokens);
+    // Local gateways can return an all-zero usage object even though Pi has a
+    // complete session history. Keep the meter on its local estimate instead
+    // of persisting zero and making the context appear empty.
+    if (tokens !== null && (!Number.isFinite(tokens) || tokens <= 0)) return;
+    const percent = usage.percent === null ? null : Number(usage.percent);
+    const normalizedUsage: PiContextUsage = {
+      tokens: Number.isFinite(tokens) ? tokens : null,
+      contextWindow,
+      percent: Number.isFinite(percent) ? percent : null,
+      updatedAt: Date.now(),
+    };
+    setPiContextUsageByKey((current) => ({
+      ...current,
+      [getContextRuntimeUsageKey(sessionId, modelId)]: normalizedUsage,
+    }));
+  };
+  const setPiAutoCompaction = async (enabled: boolean) => {
+    setContextCompressionSettings((current) => ({
+      ...current,
+      enabled,
+      ...(enabled ? {} : { astPruningEnabled: false }),
+    }));
+    setContextRuntimeUsageByKey({});
+    const sessionId = activeChatSessionIdRef.current;
+    if (!sessionId) return;
+    try {
+      const response = await fetch("/api/pi/set-auto-compaction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId,
+          piSessionScope: getPiSessionScope("main", chatProvider, selectedModelValue),
+          enabled,
+          workspace: getPiWorkspacePayload(sessionId),
+        }),
+      });
+      if (response.status === 404) return;
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error || `Pi 自动压缩设置失败：${response.status}`);
+      }
+    } catch (error) {
+      setChatStatus({
+        status: "warning",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+  const compactActivePiSession = async () => {
+    if (piCompactionPending || chatStatus.status === "loading") return;
+    const sessionId = activeChatSessionIdRef.current;
+    if (!sessionId) {
+      setChatStatus({ status: "warning", message: "当前没有可压缩的 Pi 会话。" });
+      return;
+    }
+    setPiCompactionPending(true);
+    setChatStatus({ status: "loading", message: "Pi 正在压缩会话上下文..." });
+    try {
+      const response = await fetch("/api/pi/compact", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId,
+          piSessionScope: getPiSessionScope("main", chatProvider, selectedModelValue),
+          piCompaction: {
+            enabled: contextCompressionSettings.enabled,
+            reserveTokens: 16_384,
+            keepRecentTokens: 20_000,
+          },
+          workspace: getPiWorkspacePayload(sessionId),
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        contextUsage?: PiStreamEvent["usage"];
+      };
+      if (!response.ok) {
+        throw new Error(payload.error || `Pi 手动压缩失败：${response.status}`);
+      }
+      recordPiContextUsage(sessionId, selectedModelValue, payload.contextUsage);
+      const usageKey = getContextRuntimeUsageKey(sessionId, selectedModelValue);
+      setContextRuntimeUsageByKey((current) => {
+        const next = { ...current };
+        delete next[usageKey];
+        return next;
+      });
+      setChatStatus({ status: "success", message: "Pi 已完成手动上下文压缩。" });
+    } catch (error) {
+      setChatStatus({
+        status: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setPiCompactionPending(false);
+    }
+  };
   const chatSessionsRef = useRef<ChatSession[]>([]);
   const characterCardsRef = useRef<CharacterCard[]>([]);
   const personasRef = useRef<AgentPersona[]>([]);
@@ -13022,6 +13592,7 @@ export function App() {
   };
 
   const showChatSession = (session: Pick<ChatSession, "id" | "messages">) => {
+    pendingSessionSelectionRef.current = session.id;
     activeChatSessionIdRef.current = session.id;
     chatMessagesRef.current = session.messages;
     setActiveChatSessionId(session.id);
@@ -13338,11 +13909,39 @@ export function App() {
             normalizeMcpServerConfig(server as Partial<McpServerConfig> & Record<string, unknown>, `MCP Server ${index + 1}`),
           )
         : loadMcpServers();
-      const nextSkills = Array.isArray(persistentData?.skills)
+      let nextSkills = Array.isArray(persistentData?.skills)
         ? persistentData.skills.map((skill) =>
             normalizeSkillProfile(skill as Partial<SkillProfile> & Record<string, unknown>),
           )
         : loadSkills();
+      if (nextSkills.length > 0) {
+        try {
+          const skillMetadataResponse = await fetch("/api/skills/metadata", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ skills: nextSkills }),
+          });
+          const skillMetadataPayload = (await skillMetadataResponse.json()) as {
+            skills?: SkillProfile[];
+            errors?: Array<{ name?: string; error?: string }>;
+          };
+          if (skillMetadataResponse.ok && Array.isArray(skillMetadataPayload.skills)) {
+            nextSkills = skillMetadataPayload.skills.map((skill) =>
+              normalizeSkillProfile(skill as Partial<SkillProfile> & Record<string, unknown>),
+            );
+          }
+          if (skillMetadataPayload.errors?.length) {
+            setSkillStatus({
+              status: "error",
+              message: skillMetadataPayload.errors
+                .map((item) => `${item.name ?? "Skill"}：${item.error ?? "元数据无效"}`)
+                .join("；"),
+            });
+          }
+        } catch (error) {
+          console.warn("Pi Skill 元数据同步失败", error);
+        }
+      }
       const nextExtensions = normalizeInstalledExtensions(
         Array.isArray(persistentData?.extensions)
           ? persistentData.extensions
@@ -13759,6 +14358,14 @@ export function App() {
     if (!appDataLoaded) return;
     if (!activeChatSessionId) return;
 
+    // Loading a session also replaces chatMessages. Do not treat that selection
+    // as a new message and refresh updatedAt, or the selected session jumps to
+    // the top of the recent-session list.
+    if (pendingSessionSelectionRef.current === activeChatSessionId) {
+      pendingSessionSelectionRef.current = null;
+      return;
+    }
+
     setChatSessions((current) =>
       current.map((session) =>
         session.id === activeChatSessionId
@@ -13880,6 +14487,11 @@ export function App() {
     () => providers.find((provider) => provider.id === activeProviderId) ?? providers[0],
     [providers, activeProviderId],
   );
+  const activeProviderModelId = getEffectiveProviderModelId(activeProvider);
+  const activeProviderModelSupportsImages = providerModelSupportsImages(
+    activeProvider?.modelInputModes,
+    activeProviderModelId,
+  );
   const getMultiAgentRequestConfig = (personaId: string) => {
     const storedConfig = multiAgentModelConfigs[personaId];
     const provider =
@@ -13938,6 +14550,10 @@ export function App() {
   const enabledSkills = useMemo(
     () => skills.filter((skill) => skill.enabled),
     [skills],
+  );
+  const enabledPiSkillPaths = useMemo(
+    () => enabledSkills.map((skill) => `${skill.path}/${skill.entryFile}`),
+    [enabledSkills],
   );
   const activeSystemPrompt = useMemo(
     () =>
@@ -15413,6 +16029,7 @@ export function App() {
     quiet = false,
     trackUsage = false,
     mutableChatMessageId,
+    kernel = "renge",
   }: {
     messages: ChatApiMessage[];
     provider: ModelProviderChannel;
@@ -15424,7 +16041,14 @@ export function App() {
     quiet?: boolean;
     trackUsage?: boolean;
     mutableChatMessageId?: string;
+    kernel?: "pi" | "renge";
   }): Promise<ChatApiMessage[]> => {
+    const allowImages =
+      isImageGenerationModelId(modelId) || canProviderReceiveImageUrl(provider, modelId);
+    const imageSafeMessages = stripUnsupportedImageInputs(messages, allowImages);
+    // Pi owns session history and auto-compaction for Pi-backed requests. Keep
+    // Renge's compression path only for legacy/image requests.
+    if (kernel === "pi") return imageSafeMessages;
     const additionalTokens = estimateContextValueTokens(tools);
     const recordPreparedContextUsage = (
       preparedMessages: ChatApiMessage[],
@@ -15495,8 +16119,8 @@ export function App() {
       requestedOutputTokens,
     );
     const rawEstimatedInputTokens =
-      estimateContextMessagesTokens(messages) + additionalTokens;
-    let preparedMessages = messages;
+      estimateContextMessagesTokens(imageSafeMessages) + additionalTokens;
+    let preparedMessages = imageSafeMessages;
     let machineCompressedMessageCount = 0;
     let astPrunedMessageCount = 0;
     let assistantWindowedMessageCount = 0;
@@ -15842,8 +16466,10 @@ export function App() {
     && typeof window.rengeDesktop.searchFiles === "function",
   );
   const activeFileToolsWorkspaceHandle: LocalToolsWorkspaceHandle | null =
-    activeWorkspaceKey === DEFAULT_WORKSPACE_KEY && temporaryFileToolsAvailable
-      ? TEMPORARY_WORKSPACE_HANDLE
+    activeWorkspaceKey === DEFAULT_WORKSPACE_KEY
+      ? temporaryFileToolsAvailable
+        ? TEMPORARY_WORKSPACE_HANDLE
+        : null
       : activeLocalWorkspaceHandle && (localToolsEnabled || activeLocalWorkspaceHandle.kind !== "electron")
         ? activeLocalWorkspaceHandle
         : desktopSystemFileToolsAvailable
@@ -15859,6 +16485,10 @@ export function App() {
         desktopSystemFileToolsAvailable,
       )
     : buildUnavailableLocalToolsSystemPrompt(activeWorkspaceKey);
+  const activePiWorkspaceToolsSystemPrompt =
+    activeFileToolsWorkspaceHandle?.kind === "electron" && activeLocalToolsEnabled
+      ? buildPiNativeToolsSystemPrompt(activeFileToolsWorkspaceHandle)
+      : activeLocalToolsSystemPrompt;
   const activeLlmContextSettings = llmContextSettings[chatMode];
   const workspaceInfo = getWorkspaceInfo(localWorkspaceHandle);
   const fileBrowserSource = useMemo<FileBrowserSource | null>(() => {
@@ -15964,7 +16594,9 @@ export function App() {
   useEffect(() => {
     setTerminalWorkspaceContext({
       workspaceKey: activeChatSession?.workspaceKey ?? DEFAULT_WORKSPACE_KEY,
-      ...(activeChatSession?.workspacePath ? { cwd: activeChatSession.workspacePath } : {}),
+      ...(!isDefaultWorkspaceKey(activeChatSession?.workspaceKey) && activeChatSession?.workspacePath
+        ? { cwd: activeChatSession.workspacePath }
+        : {}),
     });
   }, [activeChatSession?.workspaceKey, activeChatSession?.workspacePath]);
   const activeStatusBarState = useMemo(
@@ -18554,9 +19186,6 @@ export function App() {
       }),
     [chatMessages],
   );
-  const activeSessionMemoryEnabled = Boolean(
-    activePersona && activeChatSession?.memoryPersonaIds.includes(activePersona.id),
-  );
   const workspaceGroups = useMemo(() => {
     const groups = new Map<string, { key: string; name: string; sessions: ChatSession[] }>();
 
@@ -18570,8 +19199,39 @@ export function App() {
       groups.set(session.workspaceKey, group);
     }
 
-    return Array.from(groups.values());
+    return Array.from(groups.values()).map((group) => ({
+      ...group,
+      sessions: [...group.sessions].sort(
+        (left, right) =>
+          (Date.parse(right.updatedAt) || 0) - (Date.parse(left.updatedAt) || 0),
+      ),
+    }));
   }, [chatSessions]);
+  const selectedWorkspaceGroup =
+    workspaceGroups.find((group) => group.key === selectedChatWorkspaceKey) ??
+    workspaceGroups.find((group) => group.key === activeChatSession?.workspaceKey) ??
+    workspaceGroups[0] ??
+    null;
+
+  useEffect(() => {
+    const activeWorkspace = activeChatSession?.workspaceKey;
+    if (activeWorkspace && workspaceGroups.some((group) => group.key === activeWorkspace)) {
+      setSelectedChatWorkspaceKey(activeWorkspace);
+      return;
+    }
+    if (!selectedChatWorkspaceKey && workspaceGroups[0]) {
+      setSelectedChatWorkspaceKey(workspaceGroups[0].key);
+    }
+  }, [activeChatSession?.workspaceKey, selectedChatWorkspaceKey, workspaceGroups]);
+
+  const selectChatWorkspace = (group: (typeof workspaceGroups)[number]) => {
+    if (activeSessionChangeIsBlocked()) return;
+    setSelectedChatWorkspaceKey(group.key);
+    const nextSession = group.sessions[0];
+    if (nextSession && nextSession.id !== activeChatSessionId) {
+      void openChatSession(nextSession.id);
+    }
+  };
 
   const updateHeartbeatForSession = (sessionId: string, patch: ChatHeartbeatPatch) => {
     const targetSession = chatSessions.find((session) => session.id === sessionId);
@@ -18637,6 +19297,11 @@ export function App() {
     { ...contextCompressionSettings, enabled: true },
     selectedModelValue,
   );
+  const piCompactionSettings = {
+    enabled: contextCompressionSettings.enabled,
+    reserveTokens: 16_384,
+    keepRecentTokens: 20_000,
+  };
   const editedLlmContextSettings = llmContextSettings[llmContextSettingsMode];
   const enabledLlmContextSourceCount = LLM_CONTEXT_SOURCES.filter(
     (source) => editedLlmContextSettings[source],
@@ -18926,16 +19591,39 @@ export function App() {
     setSkillStatus({ status: "idle", message: "技能配置已更新，下一次发送消息时生效。" });
   };
 
+  const savePiSkillMetadata = async (skill: SkillProfile) => {
+    setSkillStatus({ status: "loading", message: "正在保存 Pi Skill 元数据..." });
+    try {
+      const response = await fetch("/api/skills/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skill }),
+      });
+      const payload = (await response.json()) as { skill?: SkillProfile; error?: string };
+      if (!response.ok || payload.error || !payload.skill) {
+        throw new Error(payload.error || `Pi Skill 保存失败：${response.status}`);
+      }
+      const savedSkill = normalizeSkillProfile(
+        payload.skill as Partial<SkillProfile> & Record<string, unknown>,
+      );
+      setSkills((current) =>
+        current.map((item) => item.id === savedSkill.id ? savedSkill : item),
+      );
+      setSkillStatus({ status: "success", message: "已同步保存到 SKILL.md frontmatter。" });
+    } catch (error) {
+      setSkillStatus({
+        status: "error",
+        message: error instanceof Error ? error.message : "Pi Skill 元数据保存失败。",
+      });
+    }
+  };
+
   const applyImportedSkill = (skill: SkillProfile) => {
     const normalizedSkill = normalizeSkillProfile(skill as Partial<SkillProfile> & Record<string, unknown>);
     setSkills((current) => {
-      const existingNames = new Set(current.map((item) => item.name));
       const nextSkill = {
         ...normalizedSkill,
         id: normalizedSkill.id || crypto.randomUUID(),
-        name: existingNames.has(normalizedSkill.name)
-          ? `${normalizedSkill.name} ${current.length + 1}`
-          : normalizedSkill.name,
         enabled: true,
         updatedAt: new Date().toISOString(),
       };
@@ -19093,26 +19781,6 @@ export function App() {
     );
   };
 
-  const toggleActiveSessionMemory = () => {
-    if (!activePersona || !activeChatSession) return;
-
-    setChatSessions((current) =>
-      current.map((session) => {
-        if (session.id !== activeChatSession.id) return session;
-
-        const memoryPersonaIds = session.memoryPersonaIds.includes(activePersona.id)
-          ? session.memoryPersonaIds.filter((personaId) => personaId !== activePersona.id)
-          : [...session.memoryPersonaIds, activePersona.id];
-
-        return {
-          ...session,
-          memoryPersonaIds,
-          updatedAt: new Date().toISOString(),
-        };
-      }),
-    );
-  };
-
   const openChatMessageMenu = (messageId: string, event: MouseEvent<HTMLElement>) => {
     event.preventDefault();
     event.stopPropagation();
@@ -19156,6 +19824,7 @@ export function App() {
     commitActiveSessionMessagesAndStatusBar(sessionId, nextMessages, (current) =>
       rebuildStatusBarStateFromMessages(current, nextMessages),
     );
+    void resetPiSession(sessionId).catch(() => undefined);
     if (editingChatMessage?.messageId === messageId) {
       setEditingChatMessage(null);
     }
@@ -19273,6 +19942,14 @@ export function App() {
       setActiveCharacterCardId(session.roleplayCharacterCardId);
     }
 
+    if (isDefaultWorkspaceKey(session.workspaceKey)) {
+      setLocalWorkspaceHandle(null);
+      setLocalToolsEnabled(false);
+      restoredWorkspacePathRef.current = "";
+      setChatStatus({ status: "idle", message: "" });
+      return;
+    }
+
     if (session.workspacePath && window.rengeDesktop?.isElectron) {
       setChatStatus({ status: "loading", message: `正在恢复工作区：${session.workspaceName}` });
       try {
@@ -19292,14 +19969,6 @@ export function App() {
           message: error instanceof Error ? error.message : "工作区恢复失败，请重新选择文件夹。",
         });
       }
-      return;
-    }
-
-    if (session.workspaceKey === DEFAULT_WORKSPACE_KEY) {
-      setLocalWorkspaceHandle(null);
-      setLocalToolsEnabled(false);
-      restoredWorkspacePathRef.current = "";
-      setChatStatus({ status: "idle", message: "" });
       return;
     }
 
@@ -19401,7 +20070,11 @@ export function App() {
 
   useEffect(() => {
     if (!appDataLoaded) return;
-    if (!activeChatSession?.workspacePath || !window.rengeDesktop?.isElectron) return;
+    if (
+      isDefaultWorkspaceKey(activeChatSession?.workspaceKey) ||
+      !activeChatSession?.workspacePath ||
+      !window.rengeDesktop?.isElectron
+    ) return;
     if (restoredWorkspacePathRef.current === activeChatSession.workspacePath) return;
 
     let cancelled = false;
@@ -19456,6 +20129,8 @@ export function App() {
     const deletedSession = chatSessions.find((session) => session.id === sessionId);
     // 后端清理该会话目录下持久化的生成图片，fire-and-forget
     void fetch(`/api/session-images/${encodeURIComponent(sessionId)}`, { method: "DELETE" }).catch(() => undefined);
+    // Keep Pi's persisted session tree aligned with Renge session deletion.
+    void resetPiSession(sessionId).catch(() => undefined);
     const remaining = deleteChatSessionsWithMemoryCleanup(
       chatSessions,
       (session) => session.id === sessionId,
@@ -19655,6 +20330,10 @@ export function App() {
             ? {
                 ...provider,
                 models,
+                modelInputModes: ensureProviderModelInputModes(
+                  provider.modelInputModes,
+                  models,
+                ),
                 modelId: provider.modelId || models[0],
                 updatedAt: new Date().toISOString(),
               }
@@ -21319,6 +21998,8 @@ export function App() {
         astPrunedMessageCount: 0,
         assistantWindowedMessageCount: 0,
         appendedMessageCount: 0,
+        nativePiContext: false,
+        contextBreakdown: [],
       };
     }
     const modelEntries =
@@ -21363,7 +22044,7 @@ export function App() {
       )
       .sort(
         (left, right) =>
-          left.budget.safetyThresholdTokens - right.budget.safetyThresholdTokens,
+          left.budget.maxContextTokens - right.budget.maxContextTokens,
       );
     const limitingBudget =
       missingModelIds.length === 0 ? configuredBudgets[0] ?? null : null;
@@ -21539,6 +22220,18 @@ export function App() {
       contextRuntimeUsageByKey[
         getContextRuntimeUsageKey(activeChatSession?.id ?? activeChatSessionId, meterModelId)
       ];
+    const nativePiUsage =
+      piContextUsageByKey[
+        getContextRuntimeUsageKey(activeChatSession?.id ?? activeChatSessionId, meterModelId)
+      ];
+    const usableNativePiTokens =
+      nativePiUsage?.tokens !== null &&
+      Number.isFinite(nativePiUsage?.tokens) &&
+      Number(nativePiUsage?.tokens) > 0
+        ? Number(nativePiUsage?.tokens)
+        : undefined;
+    const usableNativePiUsage =
+      usableNativePiTokens === undefined ? undefined : nativePiUsage;
     const currentChatMessageSignatures = contextMeterChatMessages.map(
       getChatMessageContextSignature,
     );
@@ -21576,20 +22269,70 @@ export function App() {
             (runtimeUsage?.mutableChatMessageTokens ?? 0),
         )
       : 0;
-    const currentTokens =
+    const estimatedRuntimeTokens =
       runtimeUsage && runtimeUsageMatchesCurrentHistory
         ? runtimeUsage.currentTokens + appendedTokens + mutableMessageDeltaTokens
         : estimatedCurrentTokens;
-    const thresholdTokens = limitingBudget?.budget.safetyThresholdTokens ?? null;
+    const currentTokens = usableNativePiTokens ?? estimatedRuntimeTokens;
+    const thresholdTokens = usableNativePiUsage
+      ? usableNativePiUsage.contextWindow
+      : limitingBudget?.budget.maxContextTokens ?? null;
+    const estimateMessageCollectionTokens = (messages: ChatApiMessage[]) =>
+      messages.length > 0 ? Math.max(0, estimateContextMessagesTokens(messages) - 2) : 0;
+    const systemPromptTokens = estimateMessageCollectionTokens(
+      messagesWithStatus.filter((message) => message.role === "system"),
+    );
+    const userPromptTokens = estimateMessageCollectionTokens(
+      baseMessages.filter((message) => message.role === "user"),
+    );
+    const assistantMessageTokens = estimateMessageCollectionTokens(
+      baseMessages.filter(
+        (message, index) =>
+          message.role === "assistant" && !contextMeterChatMessages[index]?.toolVisualization,
+      ),
+    );
+    const toolResultTokens = estimateMessageCollectionTokens(
+      baseMessages.filter(
+        (message, index) =>
+          message.role === "assistant" && Boolean(contextMeterChatMessages[index]?.toolVisualization),
+      ),
+    );
+    const toolDefinitionTokens = estimateContextValueTokens(availableTools);
+    const knownBreakdownTokens =
+      systemPromptTokens +
+      toolDefinitionTokens +
+      userPromptTokens +
+      assistantMessageTokens +
+      toolResultTokens;
+    const breakdownScale =
+      knownBreakdownTokens > 0 && currentTokens < knownBreakdownTokens
+        ? currentTokens / knownBreakdownTokens
+        : 1;
+    const contextBreakdown = [
+      { label: "系统提示词", tokens: Math.round(systemPromptTokens * breakdownScale) },
+      { label: "工具定义", tokens: Math.round(toolDefinitionTokens * breakdownScale) },
+      { label: "用户提示词", tokens: Math.round(userPromptTokens * breakdownScale) },
+      { label: "助手消息", tokens: Math.round(assistantMessageTokens * breakdownScale) },
+      { label: "工具结果", tokens: Math.round(toolResultTokens * breakdownScale) },
+      { label: "摘要", tokens: 0 },
+    ];
+    const breakdownTotal = contextBreakdown.reduce((total, item) => total + item.tokens, 0);
+    contextBreakdown.push({
+      label: "其他 / 协议开销",
+      tokens: Math.max(0, Math.round(currentTokens - breakdownTotal)),
+    });
 
     return {
       currentTokens,
       thresholdTokens,
       usageRatio: thresholdTokens ? currentTokens / thresholdTokens : null,
-      limitingModelId: limitingBudget?.modelId ?? "",
+      limitingModelId: usableNativePiUsage?.contextWindow ? meterModelId : limitingBudget?.modelId ?? "",
       modelIds: distinctModelIds,
-      missingModelIds,
-      usesActualRequestTokens: Boolean(runtimeUsage && runtimeUsageMatchesCurrentHistory),
+      missingModelIds: usableNativePiUsage?.contextWindow ? [] : missingModelIds,
+      usesActualRequestTokens: Boolean(
+        usableNativePiUsage || (runtimeUsage && runtimeUsageMatchesCurrentHistory),
+      ),
+      nativePiContext: Boolean(usableNativePiUsage),
       compressed: Boolean(
         runtimeUsage && runtimeUsageMatchesCurrentHistory && runtimeUsage.compressed,
       ),
@@ -21610,6 +22353,7 @@ export function App() {
           ? runtimeUsage.assistantWindowedMessageCount
           : 0,
       appendedMessageCount,
+      contextBreakdown,
     };
   }, [
     activeChatPreset,
@@ -21630,6 +22374,7 @@ export function App() {
     contextMeterChatMessages,
     contextCompressionSettings,
     contextRuntimeUsageByKey,
+    piContextUsageByKey,
     currentChatSender.kind,
     effectiveChatModelId,
     enabledMcpServers,
@@ -21659,12 +22404,18 @@ export function App() {
       contextTokenMeter.modelIds.length > 1
         ? `多 Agent 按最小阈值模型 ${contextTokenMeter.limitingModelId} 计算`
         : `模型 ${contextTokenMeter.limitingModelId}`;
-    const compressionNote = contextCompressionSettings.enabled
-      ? "上下文压缩已开启"
+    const compressionNote = contextTokenMeter.nativePiContext
+      ? contextCompressionSettings.enabled
+        ? "Pi 原生自动压缩已开启"
+        : "Pi 原生自动压缩已关闭"
+      : contextCompressionSettings.enabled
+        ? "上下文压缩已开启"
       : contextTokenMeter.assistantWindowedMessageCount > 0
         ? "自动摘要已关闭，但发送安全窗口已生效"
         : "上下文压缩当前已关闭";
-    const usageNote = contextTokenMeter.usesActualRequestTokens
+    const usageNote = contextTokenMeter.nativePiContext
+      ? "按 Pi 内核原生上下文估算"
+      : contextTokenMeter.usesActualRequestTokens
       ? contextTokenMeter.compressed
         ? `按最后一次实际发送的压缩上下文计数；窗口化超长 assistant 历史 ${contextTokenMeter.assistantWindowedMessageCount} 条，高压缩工具/日志 ${contextTokenMeter.machineCompressedMessageCount} 条，AST 剪枝代码 ${contextTokenMeter.astPrunedMessageCount} 条，摘要替换较早消息 ${contextTokenMeter.removedMessageCount} 条；被缩减原文仍保留在聊天记录中但未进入本次生成请求${
             contextTokenMeter.appendedMessageCount > 0
@@ -21673,8 +22424,29 @@ export function App() {
           }`
         : "按最后一次实际发送的上下文计数"
       : "当前尚无可复用的实际请求记录，使用发送前估算";
-    return `当前上下文约 ${current} Token；${modelNote}，安全阈值 ${threshold} Token；${compressionNote}；${usageNote}。点击打开 LLM 设置。`;
+    return `当前上下文约 ${current} Token；${modelNote}，上下文上限 ${threshold} Token；${compressionNote}；${usageNote}。点击打开 LLM 设置。`;
   })();
+  const contextUsagePercent =
+    contextTokenMeter.usageRatio === null
+      ? null
+      : Math.round(Math.max(0, contextTokenMeter.usageRatio) * 100);
+  const contextRingProgress =
+    contextTokenMeter.usageRatio === null
+      ? 0
+      : Math.min(1, Math.max(0, contextTokenMeter.usageRatio)) * 100;
+  const contextTokenRingStyle = {
+    "--context-progress": `${contextRingProgress}%`,
+  } as CSSProperties;
+  const contextUsageTone =
+    contextTokenMeter.usageRatio === null
+      ? "usage-unknown"
+      : contextTokenMeter.usageRatio >= 0.9
+        ? "usage-critical"
+        : contextTokenMeter.usageRatio >= 0.75
+          ? "usage-high"
+          : contextTokenMeter.usageRatio >= 0.5
+            ? "usage-medium"
+            : "usage-low";
 
   const executeChatCommandBlock = async (content: string) => {
     if (!localWorkspaceHandle || !localToolsEnabled) {
@@ -21731,6 +22503,73 @@ export function App() {
     }
 
     setChatStatus({ status: "success", message: "命令块执行完成。" });
+  };
+
+  const renderPiToolVisualization = (meta: ToolVisualization, key: string) => {
+    const normalizedName = meta.name.trim().toLocaleLowerCase().replace(/[\s.-]+/g, "_");
+    const args = meta.args ?? {};
+    const path = String(args.path ?? args.filePath ?? args.file_path ?? "");
+    const command = String(args.command ?? args.cmd ?? args.script ?? "");
+    const isRead =
+      ["read", "read_file", "file_read"].includes(normalizedName) ||
+      normalizedName.includes("read_file");
+    const isShell =
+      ["bash", "shell", "exec", "exec_command", "command"].includes(normalizedName) ||
+      normalizedName.includes("run_command");
+    const isMutation =
+      ["write", "edit", "write_file", "apply_patch"].includes(normalizedName) ||
+      normalizedName.includes("write_file") ||
+      normalizedName.includes("edit_file");
+    const resultText = toolVisualizationResultText(meta.result);
+    const diff = toolVisualizationDiff(meta);
+    const lines = resultText.split("\n").slice(0, 400);
+    const statusLabel = meta.status === "running" ? "执行中" : meta.status === "error" ? "失败" : "完成";
+    const title = isRead ? "读取文件" : isShell ? "运行命令" : isMutation ? (normalizedName.includes("write") ? "写入文件" : "修改文件") : meta.name;
+    const Icon = isRead ? FileCode2 : isShell ? Terminal : isMutation ? FilePenLine : Wrench;
+    const additions = diff.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++"));
+    const deletions = diff.split("\n").filter((line) => line.startsWith("-") && !line.startsWith("---"));
+    return (
+      <details
+        className={`pi-tool-visualization ${meta.status} ${isMutation ? "mutation" : ""}`}
+        key={key}
+        open={meta.status === "running" || isMutation}
+      >
+        <summary className="pi-tool-visualization-header">
+          <span className="pi-tool-visualization-icon"><Icon size={14} /></span>
+          <strong>{title}</strong>
+          <span className="pi-tool-visualization-summary" title={path || command || meta.name}>
+            {path || command || meta.name}
+          </span>
+          <span className="pi-tool-visualization-status">{statusLabel}</span>
+          <ChevronDown className="pi-tool-visualization-chevron" size={15} />
+        </summary>
+        <div className="pi-tool-visualization-body">
+          {path && <div className="pi-tool-visualization-path"><FileCode2 size={13} /> <code>{path}</code></div>}
+          {isMutation && diff ? (
+            <div className="pi-tool-diff">
+              <div className="pi-tool-diff-toolbar">
+                <span>{path || "文件变更"}</span>
+                <span><b className="additions">+{additions.length}</b> <b className="deletions">-{deletions.length}</b></span>
+              </div>
+              <pre>{diff.split("\n").slice(0, 600).map((line, index) => {
+                const addition = line.startsWith("+") && !line.startsWith("+++");
+                const deletion = line.startsWith("-") && !line.startsWith("---");
+                return <span key={`${key}-line-${index}`} className={addition ? "addition" : deletion ? "deletion" : "context"}>{line || " "}</span>;
+              })}</pre>
+            </div>
+          ) : isRead && resultText ? (
+            <div className="pi-tool-code-preview"><pre>{lines.map((line, index) => <span key={`${key}-read-${index}`}><i>{index + 1}</i>{line || " "}</span>)}</pre></div>
+          ) : isShell ? (
+            <div className="pi-tool-terminal-preview">
+              {command && <div className="command"><b>$</b>{command}</div>}
+              <pre>{resultText || (meta.status === "running" ? "等待输出…" : "无输出")}</pre>
+            </div>
+          ) : resultText ? (
+            <pre className="pi-tool-result-preview">{resultText}</pre>
+          ) : null}
+        </div>
+      </details>
+    );
   };
 
   const renderToolProgressBlock = (block: ChatToolProgressBlock, messageId: string) => {
@@ -21805,28 +22644,52 @@ export function App() {
     item: Extract<RenderedChatItem, { kind: "toolGroup" }>,
     messageId: string,
   ) => {
-    const firstPath = item.blocks.find((block) => block.links.length > 0)?.links[0]?.label ?? "";
-    const hasError = item.blocks.some((block) => block.variant === "error");
+    const firstVisualization = item.visualizations.find((visualization) => {
+      const args = visualization.args ?? {};
+      return Boolean(args.path ?? args.filePath ?? args.file_path);
+    });
+    const firstPath = firstVisualization
+      ? String(firstVisualization.args?.path ?? firstVisualization.args?.filePath ?? firstVisualization.args?.file_path ?? "")
+      : item.blocks.find((block) => block.links.length > 0)?.links[0]?.label ?? "";
+    const hasError =
+      item.blocks.some((block) => block.variant === "error") ||
+      item.visualizations.some((visualization) => visualization.status === "error");
     const duration = formatProcessingDuration(item.startedAt, item.endedAt);
     const groupedAttachments = item.segments.flatMap(
       (segment) => segment.message.attachments ?? [],
     );
+    const visualizations = Array.from(
+      new Map(
+        item.visualizations.map((visualization, index) => [
+          visualization.toolCallId || `${visualization.name}-${index}`,
+          visualization,
+        ]),
+      ).values(),
+    );
+    const stepCount = visualizations.length > 0 ? visualizations.length : item.blocks.length;
+    const autoOpen = visualizations.some((visualization) =>
+      /(?:write|edit|patch)/i.test(visualization.name),
+    ) || visualizations.some((visualization) => visualization.status === "running");
 
     return (
-      <details className={`chat-tool-run ${hasError ? "error" : ""}`}>
+      <details className={`chat-tool-run ${hasError ? "error" : ""}`} open={autoOpen || undefined}>
         <summary className="chat-tool-run-header">
           <span className="chat-tool-run-icon">
             {hasError ? <X size={15} /> : <Wrench size={15} />}
           </span>
           <strong>已处理 {duration}</strong>
           {firstPath && <span className="chat-tool-run-path">{firstPath}</span>}
-          <span className="chat-tool-run-badge">{item.blocks.length} 步</span>
+          <span className="chat-tool-run-badge">{stepCount} 步</span>
           <ChevronDown className="chat-tool-run-chevron" size={16} />
         </summary>
         <div className="chat-tool-run-body">
-          {item.blocks.map((block, index) =>
-            renderToolProgressBlock(block, `${messageId}-tool-run-${index}`),
-          )}
+          {visualizations.length > 0
+            ? visualizations.map((visualization, index) =>
+                renderPiToolVisualization(visualization, `${messageId}-pi-tool-${index}`),
+              )
+            : item.blocks.map((block, index) =>
+                renderToolProgressBlock(block, `${messageId}-tool-run-${index}`),
+              )}
           {groupedAttachments.length > 0 && renderChatAttachments(groupedAttachments)}
         </div>
       </details>
@@ -22881,6 +23744,7 @@ export function App() {
     const abortSignal = abortController.signal;
     let assistantMessageId = "";
     let streamingAssistantInserted = false;
+    let piTimelineHasMultipleTextSegments = false;
 
     try {
       const generationPrompt =
@@ -22906,7 +23770,9 @@ export function App() {
         false,
       );
       setChatStatus({ status: "loading", message: options.statusMessage ?? "正在重新生成回复..." });
+      const piMcpEnabled = requestContextSettings.mcpTools && enabledMcpServers.length > 0;
       const requestMcpTools =
+        isImageGenerationRequest &&
         !isContinuation &&
         !isDialogueRewrite &&
         !isLocalRewrite &&
@@ -22968,9 +23834,10 @@ export function App() {
         .map((promptProfile) => promptProfile.content.trim())
         .filter(Boolean)
         .join("\n\n");
-      const skillSystemPrompt = requestContextSettings.skills
+      const skillSystemPrompt = requestContextSettings.skills && isImageGenerationRequest
         ? await loadEnabledSkillPrompt()
         : "";
+      const requestPiSkillPaths = requestContextSettings.skills ? enabledPiSkillPaths : [];
       throwIfChatAborted(abortSignal);
       const userProfileSystemPrompt =
         requestSender.kind === "user" &&
@@ -23078,7 +23945,7 @@ export function App() {
         supervisorMultiAgentSystemPrompt || sequenceMultiAgentSystemPrompt;
       const toolSystemPrompt = [
         requestContextSettings.workspaceTools && !isDialogueRewrite && !isLocalRewrite
-          ? activeLocalToolsSystemPrompt
+          ? activePiWorkspaceToolsSystemPrompt
           : "",
         requestContextSettings.browserTools && window.rengeDesktop?.isElectron
           ? buildBrowserToolsSystemPrompt(
@@ -23233,13 +24100,15 @@ export function App() {
         toolChoice?: "auto";
         onDelta?: (delta: string) => void;
         onReasoningDelta?: (delta: string) => void;
+        beforePiToolMessage?: () => void;
       }) => {
         throwIfChatAborted(abortSignal);
+        const usePiKernel = !isImageGenerationRequest;
         const chatToolsForRequest = options.includeTools
           ? availableChatTools.filter(
               (tool) =>
-                !multiAgentDelegationDisabled ||
-                tool.function.name !== "multi_agent_delegate_task",
+                (!usePiKernel || !isMcpToolName(tool.function.name)) &&
+                (!multiAgentDelegationDisabled || tool.function.name !== "multi_agent_delegate_task"),
             )
           : [];
         const requestMessages = await prepareContextCompressedMessages({
@@ -23252,8 +24121,305 @@ export function App() {
           sessionId: requestSessionId,
           trackUsage: true,
           mutableChatMessageId: assistantMessageId,
+          kernel: usePiKernel ? "pi" : "renge",
         });
-        const response = await fetch("/api/chat/completions", {
+        const piRunId = usePiKernel ? crypto.randomUUID() : "";
+        const effectiveToolCount =
+          chatToolsForRequest.length +
+          (usePiKernel && options.includeTools && requestContextSettings.workspaceTools &&
+          activeLocalToolsEnabled && activeFileToolsWorkspaceHandle?.kind === "electron"
+            ? 1
+            : 0) +
+          (usePiKernel && requestPiSkillPaths.length > 0 ? 1 : 0);
+        const piReturnedToolCalls: ChatToolCall[] = [];
+        const piIncompleteToolCalls = new Map<string, ChatToolCall>();
+        const piToolVisualizations = new Map<string, ToolVisualization>();
+        const handlePiEvent = async (event: PiStreamEvent) => {
+          const runtimeStatus = formatPiRuntimeStatus(event);
+          if (runtimeStatus) {
+            setChatStatus({ status: "loading", message: runtimeStatus });
+            return;
+          }
+          if (event.type === "context_usage") {
+            recordPiContextUsage(requestSessionId, requestModelId, event.usage);
+            return;
+          }
+          if (event.type === "tool_call_start") {
+            const toolCallId = event.toolCallId || crypto.randomUUID();
+            const visualization: ToolVisualization = {
+              toolCallId,
+              name: event.toolName || "unknown_tool",
+              args: {},
+              partialArguments: "",
+              status: "running",
+              startedAt: new Date().toISOString(),
+            };
+            piToolVisualizations.set(toolCallId, visualization);
+            options.beforePiToolMessage?.();
+            const toolCall: ChatToolCall = {
+              id: toolCallId,
+              type: "function",
+              function: { name: visualization.name, arguments: "{}" },
+            };
+            const action = getMcpToolInfo(requestMcpTools, visualization.name) || visualization.name.startsWith("local_")
+              ? formatToolActionMessage(toolCall, localWorkspaceHandle, requestMcpTools, delegationRoster)
+              : formatPiNativeToolAction({ ...event, toolCallId, arguments: {} });
+            appendAssistantTimelineMessage(
+              commitChatMessages,
+              action,
+              [],
+              "",
+              assistantSender,
+              visualization,
+            );
+            await waitForToolProgressPaint();
+            return;
+          }
+          if (event.type === "tool_call_delta") {
+            const toolCallId = event.toolCallId || "";
+            if (!toolCallId) return;
+            const previous = piToolVisualizations.get(toolCallId);
+            const partialArguments = event.argumentsText ?? `${previous?.partialArguments ?? ""}${event.delta ?? ""}`;
+            const nextArgs = parsePartialToolCallArguments(partialArguments);
+            const visualization: ToolVisualization = {
+              ...(previous ?? { name: event.toolName || "unknown_tool", status: "running" as const }),
+              toolCallId,
+              name: event.toolName || previous?.name || "unknown_tool",
+              args: { ...(previous?.args ?? {}), ...nextArgs },
+              partialArguments,
+              status: "running",
+            };
+            piToolVisualizations.set(toolCallId, visualization);
+            updateAssistantToolVisualization(commitChatMessages, toolCallId, () => visualization);
+            return;
+          }
+          if (event.type === "tool_call_end") {
+            const toolCallId = event.toolCallId || "";
+            if (!toolCallId) return;
+            const previous = piToolVisualizations.get(toolCallId);
+            const rawToolCall = isObjectRecord(event.toolCall) ? event.toolCall : {};
+            const rawFunction = isObjectRecord(rawToolCall.function) ? rawToolCall.function : {};
+            const argumentsText = typeof rawFunction.arguments === "string"
+              ? rawFunction.arguments
+              : event.argumentsText ?? previous?.partialArguments ?? "";
+            const visualization: ToolVisualization = {
+              ...(previous ?? { name: event.toolName || String(rawFunction.name ?? "unknown_tool"), status: "running" as const }),
+              toolCallId,
+              name: event.toolName || previous?.name || String(rawFunction.name ?? "unknown_tool"),
+              args: { ...(previous?.args ?? {}), ...parsePartialToolCallArguments(argumentsText) },
+              partialArguments: argumentsText,
+              status: "running",
+            };
+            piToolVisualizations.set(toolCallId, visualization);
+            updateAssistantToolVisualization(commitChatMessages, toolCallId, () => visualization);
+            return;
+          }
+          if (event.type === "tool_call_incomplete") {
+            const toolCallId = event.toolCallId || crypto.randomUUID();
+            const previous = piToolVisualizations.get(toolCallId);
+            const argumentsText = event.argumentsText ?? previous?.partialArguments ?? "";
+            const name = event.toolName || previous?.name || "unknown_tool";
+            const incompleteToolCall: ChatToolCall = {
+              id: toolCallId,
+              type: "function",
+              function: { name, arguments: argumentsText },
+            };
+            piIncompleteToolCalls.set(toolCallId, incompleteToolCall);
+            const visualization: ToolVisualization = {
+              ...(previous ?? {}),
+              toolCallId,
+              name,
+              args: { ...(previous?.args ?? {}), ...parsePartialToolCallArguments(argumentsText) },
+              partialArguments: argumentsText,
+              result: "工具参数未生成完整，尚未执行，正在等待继续补全。",
+              status: "running",
+            };
+            piToolVisualizations.set(toolCallId, visualization);
+            updateAssistantToolVisualization(commitChatMessages, toolCallId, () => visualization);
+            return;
+          }
+          if (event.type === "tool_start") {
+            options.beforePiToolMessage?.();
+            const previous = event.toolCallId ? piToolVisualizations.get(event.toolCallId) : undefined;
+            const visualization: ToolVisualization = {
+              ...(previous ?? {}),
+              toolCallId: event.toolCallId,
+              name: event.toolName || previous?.name || "unknown_tool",
+              args: event.arguments ?? previous?.args ?? {},
+              status: "running",
+              startedAt: previous?.startedAt ?? new Date().toISOString(),
+            };
+            if (event.toolCallId) piToolVisualizations.set(event.toolCallId, visualization);
+            if (event.toolCallId && previous) {
+              updateAssistantToolVisualization(commitChatMessages, event.toolCallId, () => visualization);
+              await waitForToolProgressPaint();
+              return;
+            }
+            appendAssistantTimelineMessage(
+              commitChatMessages,
+              formatPiNativeToolAction(event),
+              [],
+              "",
+              assistantSender,
+              visualization,
+            );
+            await waitForToolProgressPaint();
+            return;
+          }
+          if (event.type === "tool_end") {
+            const previous = event.toolCallId ? piToolVisualizations.get(event.toolCallId) : undefined;
+            const visualization: ToolVisualization = {
+              ...(previous ?? {}),
+              toolCallId: event.toolCallId ?? previous?.toolCallId,
+              name: event.toolName || previous?.name || "unknown_tool",
+              args: previous?.args ?? {},
+              result: event.result,
+              status: event.isError ? "error" : "done",
+              startedAt: previous?.startedAt,
+              endedAt: new Date().toISOString(),
+            };
+            if (event.toolCallId && previous) {
+              updateAssistantToolVisualization(commitChatMessages, event.toolCallId, () => visualization);
+            } else {
+              appendAssistantTimelineMessage(
+                commitChatMessages,
+                formatPiNativeToolResult(event),
+                [],
+                "",
+                assistantSender,
+                visualization,
+              );
+            }
+            hasVisibleToolResult = true;
+            if (!event.isError) hasSuccessfulVisibleToolResult = true;
+            return;
+          }
+          if (event.type !== "tool_request") return;
+
+          const toolCall = piToolCallFromEvent(event);
+          if (isChatChoiceToolName(toolCall.function.name)) {
+            const presentedChoice = createChatChoiceRequestFromToolCall(toolCall);
+            assistantChoiceRequest = presentedChoice.choiceRequest;
+            assistantContent = assistantContent || presentedChoice.prompt;
+            piReturnedToolCalls.push(toolCall);
+            await submitPiToolResult(event, { presented: true }, null, abortSignal);
+            return;
+          }
+
+          const silentControl = isSilentChatControlTool(toolCall.function.name);
+          const isDelegationTool = toolCall.function.name === "multi_agent_delegate_task";
+          if (!silentControl) {
+            options.beforePiToolMessage?.();
+            const previous = piToolVisualizations.get(toolCall.id);
+            const visualization: ToolVisualization = {
+              ...(previous ?? {}),
+              toolCallId: toolCall.id,
+              name: toolCall.function.name,
+              args: parseToolCallArgs(toolCall),
+              status: "running",
+              startedAt: previous?.startedAt ?? new Date().toISOString(),
+            };
+            piToolVisualizations.set(toolCall.id, visualization);
+            if (previous) {
+              updateAssistantToolVisualization(commitChatMessages, toolCall.id, () => visualization);
+            } else {
+              appendAssistantTimelineMessage(
+                commitChatMessages,
+                formatToolActionMessage(
+                  toolCall,
+                  localWorkspaceHandle,
+                  requestMcpTools,
+                  delegationRoster,
+                ),
+                [],
+                "",
+                assistantSender,
+                visualization,
+              );
+            }
+            await waitForToolProgressPaint();
+          }
+          try {
+            const result = await executeRequestChatTool(
+              toolCall.function.name,
+              toolCall.function.arguments,
+            );
+            if (needsChromeDevtoolsObservation(toolCall, requestMcpTools)) {
+              pendingMcpObservationPrompt = buildChromeDevtoolsObservationPrompt(requestMcpTools);
+              pendingMcpObservationRetries = 0;
+              pendingMcpObservationPromptSent = false;
+            }
+            if (isChromeDevtoolsObservation(toolCall, requestMcpTools)) {
+              pendingMcpObservationPrompt = "";
+              pendingMcpObservationRetries = 0;
+              pendingMcpObservationPromptSent = false;
+            }
+            if (!silentControl) {
+              const resultMessage = formatToolResultMessage(toolCall, result);
+              const resultAttachments = getToolResultAttachments(result);
+              const previous = piToolVisualizations.get(toolCall.id);
+              const completedVisualization: ToolVisualization = {
+                ...(previous ?? {}),
+                toolCallId: toolCall.id,
+                name: toolCall.function.name,
+                args: previous?.args ?? parseToolCallArgs(toolCall),
+                result,
+                status: "done",
+                startedAt: previous?.startedAt,
+                endedAt: new Date().toISOString(),
+              };
+              if (previous) {
+                updateAssistantToolVisualization(commitChatMessages, toolCall.id, () => completedVisualization);
+              } else {
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  resultMessage,
+                  resultAttachments,
+                  "",
+                  isDelegationTool && isObjectRecord(result)
+                    ? { kind: "persona", personaId: String(result.agentId ?? "") }
+                    : assistantSender,
+                  completedVisualization,
+                );
+              }
+              if (resultMessage.trim() || resultAttachments.length > 0) {
+                hasVisibleToolResult = true;
+                hasSuccessfulVisibleToolResult = true;
+              }
+            }
+            await submitPiToolResult(event, result, null, abortSignal);
+          } catch (toolError) {
+            if (!silentControl && !isChatAbortError(toolError)) {
+              const previous = piToolVisualizations.get(toolCall.id);
+              const errorVisualization: ToolVisualization = {
+                ...(previous ?? {}),
+                toolCallId: toolCall.id,
+                name: toolCall.function.name,
+                args: previous?.args ?? parseToolCallArgs(toolCall),
+                result: toolError instanceof Error ? toolError.message : String(toolError),
+                status: "error",
+                startedAt: previous?.startedAt,
+                endedAt: new Date().toISOString(),
+              };
+              if (previous) {
+                updateAssistantToolVisualization(commitChatMessages, toolCall.id, () => errorVisualization);
+              } else {
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  formatToolErrorMessage(toolCall, toolError),
+                  [],
+                  "",
+                  assistantSender,
+                  errorVisualization,
+                );
+              }
+              hasVisibleToolResult = true;
+            }
+            await submitPiToolResult(event, null, toolError, abortSignal);
+          }
+        };
+        if (usePiKernel) await waitForPiSessionReset(requestSessionId);
+        const response = await fetch(usePiKernel ? "/api/pi/chat" : "/api/chat/completions", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -23261,7 +24427,35 @@ export function App() {
           signal: abortSignal,
           body: JSON.stringify({
             ...buildProviderApiTarget(requestProvider),
-            sessionId: activeChatSessionId,
+            ...(usePiKernel ? { runId: piRunId } : {}),
+            ...(usePiKernel
+              ? {
+                  enableTools: options.includeTools,
+                  allowImageInputs: sendImageAttachmentsToProvider,
+                  contextWindow: resolveContextCompressionLimit(
+                    { ...contextCompressionSettings, enabled: true },
+                    requestModelId,
+                  ) ?? activeChatPreset?.maxContext ?? 128_000,
+                  piCompaction: piCompactionSettings,
+                  piSessionScope: getPiSessionScope("main", requestProvider, requestModelId),
+                  piSkillPaths: requestPiSkillPaths,
+                  mcpConfig: {
+                    mcpServers: requestContextSettings.mcpTools
+                      ? mcpServers.filter((server) => server.enabled)
+                      : [],
+                  },
+                }
+              : {}),
+            ...(usePiKernel && options.includeTools && requestContextSettings.workspaceTools &&
+            activeLocalToolsEnabled && activeFileToolsWorkspaceHandle?.kind === "electron"
+              ? {
+                  workspace: {
+                    kind: "electron",
+                    cwd: activeFileToolsWorkspaceHandle.path,
+                  },
+                }
+              : {}),
+            sessionId: requestSessionId,
             request: {
               model: requestModelId,
               messages: requestMessages,
@@ -23282,6 +24476,60 @@ export function App() {
           }),
         });
 
+        if (usePiKernel) {
+          const abortPiRun = () => {
+            void fetch("/api/pi/abort", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              keepalive: true,
+              body: JSON.stringify({ runId: piRunId }),
+            });
+          };
+          abortSignal.addEventListener("abort", abortPiRun, { once: true });
+          try {
+            const streamResult = await readChatStream(
+              response,
+              options.onDelta ?? (() => undefined),
+              options.onReasoningDelta ?? (() => undefined),
+              abortSignal,
+              handlePiEvent,
+            );
+            const payload: {
+              error?: string | { message?: string };
+              choices?: Array<{ message?: ChatApiMessage; finish_reason?: string }>;
+              output_text?: string;
+            } | null = options.stream
+              ? null
+              : {
+                  choices: [{
+                    message: {
+                      role: "assistant" as const,
+                      content: streamResult.content,
+                      ...(streamResult.reasoning
+                        ? { reasoning_content: streamResult.reasoning }
+                        : {}),
+                    },
+                    finish_reason: streamResult.finishReason || "stop",
+                  }],
+                  output_text: streamResult.content,
+                };
+            return {
+              payload,
+              content: streamResult.content,
+              reasoning: streamResult.reasoning,
+              toolCalls: [...streamResult.toolCalls, ...piReturnedToolCalls].filter(
+                (toolCall) => !piIncompleteToolCalls.has(toolCall.id),
+              ),
+              incompleteToolCalls: Array.from(piIncompleteToolCalls.values()),
+              responsesReasoningItems: streamResult.responsesReasoningItems,
+              finishReason: streamResult.finishReason,
+              includedToolCount: effectiveToolCount,
+            };
+          } finally {
+            abortSignal.removeEventListener("abort", abortPiRun);
+          }
+        }
+
         if (options.stream) {
           const streamResult = await readChatStream(
             response,
@@ -23294,9 +24542,10 @@ export function App() {
             content: streamResult.content,
             reasoning: streamResult.reasoning,
             toolCalls: streamResult.toolCalls,
+            incompleteToolCalls: [],
             responsesReasoningItems: streamResult.responsesReasoningItems,
             finishReason: streamResult.finishReason,
-            includedToolCount: chatToolsForRequest.length,
+            includedToolCount: effectiveToolCount,
           };
         }
 
@@ -23318,10 +24567,11 @@ export function App() {
           content: "",
           reasoning: getChatCompletionPayloadReasoning(payload),
           toolCalls: [] as ChatToolCall[],
+          incompleteToolCalls: [],
           responsesReasoningItems:
             payload.choices?.[0]?.message?.responses_reasoning_items ?? [],
           finishReason: payload.choices?.[0]?.finish_reason ?? "",
-          includedToolCount: chatToolsForRequest.length,
+          includedToolCount: effectiveToolCount,
         };
       };
       const subAgentToolDefinitions = getAvailableChatToolDefinitions(
@@ -23512,7 +24762,6 @@ export function App() {
 
         for (let subToolRound = 0; subToolRound < MAX_SUB_AGENT_TOOL_ROUNDS; subToolRound += 1) {
           throwIfChatAborted(abortSignal);
-          const subAgentShouldStream = subAgentProvider.reasoningEnabled;
           const subAgentRequestMessages = await prepareContextCompressedMessages({
             messages: substituteUserNicknameInApiMessages(
               subAgentApiMessages,
@@ -23524,14 +24773,130 @@ export function App() {
             requestedOutputTokens: activeChatPresetRequestParameters?.max_tokens ?? 0,
             signal: abortSignal,
             sessionId: requestSessionId,
+            kernel: "pi",
           });
-          const response = await fetch("/api/chat/completions", {
+          const subPiRunId = crypto.randomUUID();
+          const subAgentSender: ChatSenderIdentity = {
+            kind: "persona",
+            personaId: subAgent.id,
+          };
+          const subStreamingTimeline = createPiStreamingAssistantTimeline(
+            commitChatMessages,
+            abortSignal,
+            subAgentSender,
+          );
+          const handleSubAgentPiEvent = async (event: PiStreamEvent) => {
+            const runtimeStatus = formatPiRuntimeStatus(event);
+            if (runtimeStatus) {
+              setChatStatus({ status: "loading", message: `${subAgent.name}：${runtimeStatus}` });
+              return;
+            }
+            if (event.type === "tool_start") {
+              subStreamingTimeline.beforeTool();
+              appendAssistantTimelineMessage(
+                commitChatMessages,
+                formatPiNativeToolAction(event),
+                [],
+                "",
+                subAgentSender,
+              );
+              await waitForToolProgressPaint();
+              return;
+            }
+            if (event.type === "tool_end") {
+              appendAssistantTimelineMessage(
+                commitChatMessages,
+                formatPiNativeToolResult(event),
+                [],
+                "",
+                subAgentSender,
+              );
+              return;
+            }
+            if (event.type !== "tool_request") return;
+            const subToolCall = piToolCallFromEvent(event);
+            const silentControl = isSilentChatControlTool(subToolCall.function.name);
+            if (!silentControl) {
+              subStreamingTimeline.beforeTool();
+              appendAssistantTimelineMessage(
+                commitChatMessages,
+                formatToolActionMessage(
+                  subToolCall,
+                  localWorkspaceHandle,
+                  requestMcpTools,
+                ),
+                [],
+                "",
+                subAgentSender,
+              );
+              await waitForToolProgressPaint();
+            }
+            try {
+              const result = await executeChatTool(
+                subToolCall.function.name,
+                subToolCall.function.arguments,
+                abortSignal,
+                requestSessionId,
+              );
+              if (!silentControl) {
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  formatToolResultMessage(subToolCall, result),
+                  getToolResultAttachments(result),
+                  "",
+                  subAgentSender,
+                );
+              }
+              await submitPiToolResult(event, result, null, abortSignal);
+            } catch (toolError) {
+              if (!silentControl && !isChatAbortError(toolError)) {
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  formatToolErrorMessage(subToolCall, toolError),
+                  [],
+                  "",
+                  subAgentSender,
+                );
+              }
+              await submitPiToolResult(event, null, toolError, abortSignal);
+            }
+          };
+          await waitForPiSessionReset(requestSessionId);
+          const response = await fetch("/api/pi/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             signal: abortSignal,
             body: JSON.stringify({
               ...buildProviderApiTarget(subAgentProvider),
-              sessionId: activeChatSessionId,
+              runId: subPiRunId,
+              enableTools: subAgentToolDefinitions.length > 0 || piMcpEnabled,
+              allowImageInputs: subAgentCanReceiveImages,
+              contextWindow: resolveContextCompressionLimit(
+                { ...contextCompressionSettings, enabled: true },
+                subAgentModelId,
+              ) ?? activeChatPreset?.maxContext ?? 128_000,
+              piCompaction: piCompactionSettings,
+              piSessionScope: getPiSessionScope(
+                `sub-${subAgent.id}`,
+                subAgentProvider,
+                subAgentModelId,
+              ),
+              piSkillPaths: requestPiSkillPaths,
+              mcpConfig: {
+                mcpServers: piMcpEnabled
+                  ? mcpServers.filter((server) => server.enabled)
+                  : [],
+              },
+              ...(requestContextSettings.workspaceTools && activeLocalToolsEnabled &&
+              activeFileToolsWorkspaceHandle?.kind === "electron"
+                ? {
+                    workspace: {
+                      kind: "electron",
+                      cwd: activeFileToolsWorkspaceHandle.path,
+                    },
+                  }
+                : {}),
+              sessionId: requestSessionId,
               request: {
                 model: subAgentModelId,
                 messages: subAgentRequestMessages,
@@ -23542,185 +24907,73 @@ export function App() {
                     }
                   : {}),
                 ...buildProviderReasoningRequest(subAgentProvider, {
-                  stream: subAgentShouldStream,
+                  stream: true,
                 }),
                 ...(activeChatPresetRequestParameters ?? { temperature: 0.72 }),
-                stream: subAgentShouldStream,
+                stream: true,
               },
             }),
           });
-          const streamResult = subAgentShouldStream
-            ? await readChatStream(
-                response,
-                () => undefined,
-                () => undefined,
-                abortSignal,
-              )
-            : null;
-          const payload = subAgentShouldStream
-            ? null
-            : ((await readChatCompletionPayload(response)) as {
-                error?: string | { message?: string };
-                choices?: Array<{ message?: ChatApiMessage }>;
-                output_text?: string;
-              });
-          throwIfChatAborted(abortSignal);
-          if (!subAgentShouldStream && !response.ok) {
-            const errorMessage =
-              typeof payload?.error === "string"
-                ? payload.error
-                : payload?.error?.message;
-            throw new Error(
-              errorMessage
-                ? `${subAgent.name} 请求失败：${response.status} ${errorMessage}`
-                : `${subAgent.name} 请求失败：${response.status}`,
+          const abortSubPiRun = () => {
+            void fetch("/api/pi/abort", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              keepalive: true,
+              body: JSON.stringify({ runId: subPiRunId }),
+            });
+          };
+          abortSignal.addEventListener("abort", abortSubPiRun, { once: true });
+          let streamResult;
+          try {
+            streamResult = await readChatStream(
+              response,
+              subStreamingTimeline.pushContent,
+              subStreamingTimeline.pushReasoning,
+              abortSignal,
+              handleSubAgentPiEvent,
             );
+            await subStreamingTimeline.finish();
+            subStreamingTimeline.complete(streamResult.content, streamResult.reasoning);
+          } catch (error) {
+            subStreamingTimeline.cancel();
+            throw error;
+          } finally {
+            abortSignal.removeEventListener("abort", abortSubPiRun);
           }
-
-          const subAgentMessage = payload?.choices?.[0]?.message;
-          const subAgentContent =
-            getChatApiMessageText(subAgentMessage).trim() ||
-            payload?.output_text?.trim() ||
-            streamResult?.content.trim() ||
-            "";
-          const subAgentReasoning =
-            getChatApiMessageReasoning(subAgentMessage) || streamResult?.reasoning || "";
-          const subAgentToolCalls =
-            subAgentMessage?.tool_calls ?? streamResult?.toolCalls ?? [];
-          if (subAgentToolCalls.length === 0) {
-            if (
-              localToolsEnabled &&
-              localWorkspaceHandle &&
-              subToolRound < MAX_SUB_AGENT_TOOL_ROUNDS - 1 &&
-              shouldAutoContinueLocalTask(subAgentContent)
-            ) {
-              subAgentApiMessages.push({
-                role: "assistant",
-                content: subAgentContent,
-                ...buildProviderReasoningReplay(
-                  subAgentProvider,
-                  subAgentReasoning,
-                ),
-              });
-              subAgentApiMessages.push({
-                role: "user",
-                content:
-                  "继续执行子任务，直接使用可用工具推进，直到满足完成标准或遇到真实阻塞。不要只说明计划。",
-              });
-              continue;
-            }
-            if (!subAgentContent) {
-              throw new Error(`${subAgent.name} 没有返回可供主 Agent 验收的结果。`);
-            }
-            return {
-              agentId: subAgent.id,
-              agentName: subAgent.name,
-              task,
-              acceptanceCriteria,
-              result: subAgentContent,
-            };
-          }
-
-          subAgentApiMessages.push({
-            ...sanitizeProviderAssistantMessageForReplay(
-              subAgentProvider,
-              subAgentMessage,
-            ),
-            role: "assistant",
-            content:
-              buildProviderReasoningContinuationContent(
+          throwIfChatAborted(abortSignal);
+          const subAgentContent = streamResult.content.trim();
+          const subAgentReasoning = streamResult.reasoning;
+          if (
+            activeLocalToolsEnabled &&
+            activeFileToolsWorkspaceHandle &&
+            subToolRound < MAX_SUB_AGENT_TOOL_ROUNDS - 1 &&
+            shouldAutoContinueLocalTask(subAgentContent)
+          ) {
+            subAgentApiMessages.push({
+              role: "assistant",
+              content: subAgentContent,
+              ...buildProviderReasoningReplay(
                 subAgentProvider,
-                subAgentContent,
                 subAgentReasoning,
-              ) || null,
-            ...(subAgentMessage?.reasoning_content === undefined
-              ? buildProviderReasoningReplay(
-                  subAgentProvider,
-                  subAgentReasoning,
-                )
-              : {}),
-            ...(!subAgentMessage?.responses_reasoning_items?.length &&
-            streamResult?.responsesReasoningItems.length
-              ? { responses_reasoning_items: streamResult.responsesReasoningItems }
-              : {}),
-            tool_calls: subAgentToolCalls.map((toolCall) =>
-              compactToolCallForReplay(toolCall, getTextWriteWorkspacePath()),
-            ),
-          });
-          const subAgentVisionMessages: ChatApiMessage[] = [];
-          for (const subToolCall of subAgentToolCalls) {
-            throwIfChatAborted(abortSignal);
-            const silentControl = isSilentChatControlTool(subToolCall.function.name);
-            if (!silentControl) {
-              appendAssistantTimelineMessage(
-                commitChatMessages,
-                formatToolActionMessage(
-                  subToolCall,
-                  localWorkspaceHandle,
-                  requestMcpTools,
-                ),
-                [],
-                "",
-                { kind: "persona", personaId: subAgent.id },
-              );
-              await waitForToolProgressPaint();
-            }
-            try {
-              const subToolResult = await executeChatTool(
-                subToolCall.function.name,
-                subToolCall.function.arguments,
-                abortSignal,
-                requestSessionId,
-              );
-              throwIfChatAborted(abortSignal);
-              if (!silentControl) {
-                appendAssistantTimelineMessage(
-                  commitChatMessages,
-                  formatToolResultMessage(subToolCall, subToolResult),
-                  getToolResultAttachments(subToolResult),
-                  "",
-                  { kind: "persona", personaId: subAgent.id },
-                );
-              }
-              subAgentApiMessages.push({
-                role: "tool",
-                tool_call_id: subToolCall.id,
-                content: formatToolResultForApi(
-                  subToolResult,
-                  subToolCall.function.name,
-                ),
-              });
-              const visionMessage = subAgentCanReceiveImages
-                ? getToolResultVisionMessage(subToolCall, subToolResult)
-                : null;
-              if (visionMessage) subAgentVisionMessages.push(visionMessage);
-            } catch (subToolError) {
-              if (isChatAbortError(subToolError)) throw subToolError;
-              if (!silentControl) {
-                appendAssistantTimelineMessage(
-                  commitChatMessages,
-                  formatToolErrorMessage(subToolCall, subToolError),
-                  [],
-                  "",
-                  { kind: "persona", personaId: subAgent.id },
-                );
-              }
-              subAgentApiMessages.push({
-                role: "tool",
-                tool_call_id: subToolCall.id,
-                content: silentControl
-                  ? formatSilentChatToolErrorForApi(
-                      subToolCall.function.name,
-                      subToolError,
-                    )
-                  : formatChatToolErrorForApi(
-                      subToolCall.function.name,
-                      subToolError,
-                    ),
-              });
-            }
+              ),
+            });
+            subAgentApiMessages.push({
+              role: "user",
+              content:
+                "继续执行子任务，直接使用可用工具推进，直到满足完成标准或遇到真实阻塞。不要只说明计划。",
+            });
+            continue;
           }
-          subAgentApiMessages.push(...subAgentVisionMessages);
+          if (!subAgentContent) {
+            throw new Error(`${subAgent.name} 没有返回可供主 Agent 验收的结果。`);
+          }
+          return {
+            agentId: subAgent.id,
+            agentName: subAgent.name,
+            task,
+            acceptanceCriteria,
+            result: subAgentContent,
+          };
         }
 
         throw new Error(
@@ -24037,38 +25290,30 @@ export function App() {
         chatStreamEnabled &&
         (availableChatTools.length === 0 || hasOnlyChatChoiceTools(availableChatTools))
       ) {
-        commitChatMessages((current) => [
-          ...current,
-          {
-            id: assistantMessageId,
-            role: "assistant",
-            content: "",
-            renderAsPlainText: true,
-            ...(assistantSender ? { sender: assistantSender } : {}),
-            createdAt: new Date().toISOString(),
-          },
-        ]);
-        streamingAssistantInserted = true;
         setChatStatus({
           status: "loading",
           message: options.streamingStatusMessage ?? "正在流式生成回复...",
         });
-        const assistantWriter = createStreamingWordWriter(
-          appendStreamingAssistant,
+        const streamingTimeline = createPiStreamingAssistantTimeline(
+          commitChatMessages,
           abortSignal,
+          assistantSender,
+          assistantMessageId,
+          (messageId) => {
+            assistantMessageId = messageId;
+            streamingAssistantInserted = true;
+          },
         );
-        const reasoningWriter = createStreamingWordWriter(
-          appendStreamingAssistantReasoning,
-          abortSignal,
-        );
+        assistantMessageId = streamingTimeline.messageId ?? assistantMessageId;
         try {
           const streamResult = await requestChatCompletion(apiMessages, {
-            includeTools: availableChatTools.length > 0,
+            includeTools: availableChatTools.length > 0 || piMcpEnabled,
             stream: true,
-            onDelta: assistantWriter.push,
-            onReasoningDelta: reasoningWriter.push,
+            onDelta: streamingTimeline.pushContent,
+            onReasoningDelta: streamingTimeline.pushReasoning,
+            beforePiToolMessage: streamingTimeline.beforeTool,
           });
-          await Promise.all([assistantWriter.finish(), reasoningWriter.finish()]);
+          await streamingTimeline.finish();
           throwIfChatAborted(abortSignal);
           assistantContent = streamResult.content;
           assistantReasoning = streamResult.reasoning || assistantReasoning;
@@ -24082,13 +25327,17 @@ export function App() {
             assistantChoiceRequest = presentedChoice.choiceRequest;
             assistantContent = streamResult.content.trim() || presentedChoice.prompt;
           }
+          streamingTimeline.complete(assistantContent, assistantReasoning);
+          if (streamingTimeline.segmentCount > 1) {
+            piTimelineHasMultipleTextSegments = true;
+          }
         } finally {
-          assistantWriter.cancel();
-          reasoningWriter.cancel();
+          streamingTimeline.cancel();
         }
       } else {
         let toolLoopCompleted = false;
         let reasoningOnlyToolRetryCount = 0;
+        let incompleteToolRetryCount = 0;
         for (let toolRound = 0; toolRound < 999; toolRound += 1) {
           setChatStatus({
             status: "loading",
@@ -24102,26 +25351,34 @@ export function App() {
             pendingMcpObservationPromptSent = true;
           }
           const streamingRound = chatStreamEnabled
-            ? createStreamingAssistantMessage(
+            ? createPiStreamingAssistantTimeline(
                 commitChatMessages,
                 abortSignal,
                 assistantSender,
+                crypto.randomUUID(),
+                (messageId) => {
+                  assistantMessageId = messageId;
+                  streamingAssistantInserted = true;
+                },
               )
             : null;
           if (streamingRound) {
-            assistantMessageId = streamingRound.messageId;
-            streamingAssistantInserted = true;
+            assistantMessageId = streamingRound.messageId ?? assistantMessageId;
           }
           let completionResult;
           try {
             completionResult = await requestChatCompletion(apiMessages, {
-              includeTools: availableChatTools.length > 0,
+              includeTools: availableChatTools.length > 0 || piMcpEnabled,
               stream: preferStreamingSupervisorToolCalls,
               toolChoice: "auto",
               onDelta: streamingRound?.pushContent,
               onReasoningDelta: streamingRound?.pushReasoning,
+              beforePiToolMessage: streamingRound?.beforeTool,
             });
             await streamingRound?.finish();
+            if ((streamingRound?.segmentCount ?? 0) > 1) {
+              piTimelineHasMultipleTextSegments = true;
+            }
           } catch (error) {
             streamingRound?.cancel();
             throw error;
@@ -24161,10 +25418,17 @@ export function App() {
               message: "主 Agent 正在切换兼容的流式工具调用...",
             });
             completionResult = await requestChatCompletion(apiMessages, {
-              includeTools: availableChatTools.length > 0,
+              includeTools: availableChatTools.length > 0 || piMcpEnabled,
               stream: true,
               toolChoice: "auto",
+              onDelta: streamingRound?.pushContent,
+              onReasoningDelta: streamingRound?.pushReasoning,
+              beforePiToolMessage: streamingRound?.beforeTool,
             });
+            await streamingRound?.finish();
+            if ((streamingRound?.segmentCount ?? 0) > 1) {
+              piTimelineHasMultipleTextSegments = true;
+            }
             throwIfChatAborted(abortSignal);
             assistantMessage = completionResult.payload?.choices?.[0]?.message;
             toolCalls = (
@@ -24207,6 +25471,40 @@ export function App() {
           }
 
           if (toolCalls.length === 0) {
+            if (completionResult.incompleteToolCalls.length > 0) {
+              if (incompleteToolRetryCount >= 2) {
+                throw new Error("工具调用参数连续被输出长度截断，已停止重复重做；请减少单次文件内容或继续当前任务。");
+              }
+              if (!streamingRound) {
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  "工具调用参数尚未生成完整，正在从当前断点继续。",
+                  [],
+                  assistantMessageReasoning,
+                  assistantSender,
+                );
+              } else {
+                streamingRound.complete("", assistantMessageReasoning);
+              }
+              const partialTool = completionResult.incompleteToolCalls[0];
+              apiMessages.push({
+                role: "assistant",
+                content: assistantContent || "",
+                ...buildProviderReasoningReplay(requestProvider, assistantMessageReasoning),
+              });
+              apiMessages.push({
+                role: "user",
+                content: [
+                  "上一轮正在生成工具调用，但工具参数在 JSON 完成前被输出长度限制截断。",
+                  `工具名称：${partialTool.function.name}`,
+                  "不要重新设计、解释或从头开始；只从当前会话断点继续补全同一个工具调用，直到参数完整后再执行。",
+                ].join("\n"),
+              });
+              incompleteToolRetryCount += 1;
+              assistantContent = "";
+              assistantReasoning = "";
+              continue;
+            }
             if (pendingMcpObservationPrompt && pendingMcpObservationRetries < 2 && toolRound < 998) {
               apiMessages.push({
                 role: "assistant",
@@ -24235,10 +25533,14 @@ export function App() {
                 toolCallCount: toolCalls.length,
                 includedToolCount: completionResult.includedToolCount,
                 requiresTool:
-                  localToolsEnabled &&
-                  Boolean(localWorkspaceHandle) &&
-                  shouldRequireLocalToolCall(messagesForApi, localWorkspaceHandle),
+                  completionResult.includedToolCount > 0 &&
+                  shouldRequireLocalToolCall(
+                    messagesForApi,
+                    Boolean(activeFileToolsWorkspaceHandle),
+                    completionResult.includedToolCount > 0,
+                  ),
                 retryCount: reasoningOnlyToolRetryCount,
+                maxRetries: 6,
                 finishReason: completionResult.finishReason,
               })
             ) {
@@ -24266,10 +25568,11 @@ export function App() {
             }
 
             if (
-              localToolsEnabled &&
-              localWorkspaceHandle &&
+              activeLocalToolsEnabled &&
+              activeFileToolsWorkspaceHandle &&
               toolRound < 998 &&
-              shouldAutoContinueLocalTask(assistantContent)
+              (isTruncatedChatFinishReason(completionResult.finishReason) ||
+                shouldAutoContinueLocalTask(assistantContent))
             ) {
               if (!streamingRound) {
                 appendAssistantTimelineMessage(
@@ -24292,8 +25595,9 @@ export function App() {
               });
               apiMessages.push({
                 role: "user",
-                content:
-                  "继续执行上面的任务，直接调用可用工具推进，直到任务完成、遇到真实阻塞或需要用户授权。不要只说明计划。",
+                content: isTruncatedChatFinishReason(completionResult.finishReason)
+                  ? "上一轮因输出长度限制被截断。紧接已有进度继续执行任务，优先调用可用工具完成尚未完成的步骤，不要重做已完成内容，直到任务完成、遇到真实阻塞或需要用户授权。"
+                  : "继续执行上面的任务，直接调用可用工具推进，直到任务完成、遇到真实阻塞或需要用户授权。不要只说明计划。",
               });
               assistantContent = "";
               assistantReasoning = "";
@@ -24565,7 +25869,7 @@ export function App() {
           assistantMessageVariables = summaryTemplateResult.messageVariables;
         }
       }
-      if (!assistantContent) {
+      if (!hasAssistantTimelinePayload(assistantContent, assistantReasoning)) {
         if (hasSuccessfulVisibleToolResult && options.multiAgentSupervisorMode) {
           throw new Error(
             "主 Agent 已收到子任务结果，但未能生成最终验收答复。",
@@ -24642,14 +25946,28 @@ export function App() {
       }
 
       if (streamingAssistantInserted) {
+        const {
+          id: _finalMessageId,
+          content: _finalMessageContent,
+          reasoning: _finalMessageReasoning,
+          createdAt: _finalMessageCreatedAt,
+          renderAsPlainText: _finalMessagePlainText,
+          ...finalMessageMetadata
+        } = finalAssistantMessage;
         commitChatMessages((current) =>
           current.map((message) =>
             message.id === assistantMessageId
-              ? {
-                  ...message,
-                  ...finalAssistantMessage,
-                  renderAsPlainText: false,
-                }
+              ? piTimelineHasMultipleTextSegments
+                ? {
+                    ...message,
+                    ...finalMessageMetadata,
+                    renderAsPlainText: false,
+                  }
+                : {
+                    ...message,
+                    ...finalAssistantMessage,
+                    renderAsPlainText: false,
+                  }
               : message,
           ),
         );
@@ -25520,6 +26838,7 @@ export function App() {
           apiKey: requestApiKey,
           modelId: requestModelId,
           models: chatProvider?.models ?? [requestModelId],
+          modelInputModes: chatProvider?.modelInputModes ?? {},
           reasoningEnabled: hasCustomApi ? false : chatProvider?.reasoningEnabled === true,
           reasoningEffort: chatProvider?.reasoningEffort ?? "medium",
           updatedAt: chatProvider?.updatedAt ?? new Date().toISOString(),
@@ -25734,6 +27053,7 @@ export function App() {
     let abortSignal: AbortSignal | undefined;
     let assistantMessageId = "";
     let streamingAssistantInserted = false;
+    let piTimelineHasMultipleTextSegments = false;
     let nextMessages = initialMessages;
     let effectiveContent = content;
 
@@ -25758,7 +27078,9 @@ export function App() {
       );
       throwIfChatAborted(abortSignal);
       setChatStatus({ status: "loading", message: "正在生成回复..." });
+      const piMcpEnabled = activeLlmContextSettings.mcpTools && enabledMcpServers.length > 0;
       const requestMcpTools =
+        isImageGenerationRequest &&
         activeLlmContextSettings.mcpTools && enabledMcpServers.length > 0
           ? await refreshMcpTools({ silent: true })
           : [];
@@ -25808,9 +27130,10 @@ export function App() {
         .map((promptProfile) => promptProfile.content.trim())
         .filter(Boolean)
         .join("\n\n");
-      const skillSystemPrompt = activeLlmContextSettings.skills
+      const skillSystemPrompt = activeLlmContextSettings.skills && isImageGenerationRequest
         ? await loadEnabledSkillPrompt()
         : "";
+      const requestPiSkillPaths = activeLlmContextSettings.skills ? enabledPiSkillPaths : [];
       throwIfChatAborted(abortSignal);
       const userProfileSystemPrompt =
         currentChatSender.kind === "user" &&
@@ -25848,7 +27171,7 @@ export function App() {
           ? buildChatSenderContextPrompt(nextMessages, personas, chatPersona)
           : buildChatSenderContextPrompt(nextMessages, personas);
       const toolSystemPrompt = [
-        activeLlmContextSettings.workspaceTools ? activeLocalToolsSystemPrompt : "",
+        activeLlmContextSettings.workspaceTools ? activePiWorkspaceToolsSystemPrompt : "",
         activeLlmContextSettings.browserTools && window.rengeDesktop?.isElectron
           ? buildBrowserToolsSystemPrompt(
               availableChatTools.some(
@@ -25993,9 +27316,13 @@ export function App() {
         toolChoice?: "auto";
         onDelta?: (delta: string) => void;
         onReasoningDelta?: (delta: string) => void;
+        beforePiToolMessage?: () => void;
       }) => {
         throwIfChatAborted(abortSignal);
-        const requestTools = options.includeTools ? availableChatTools : [];
+        const usePiKernel = !isImageGenerationRequest;
+        const requestTools = options.includeTools
+          ? availableChatTools.filter((tool) => !usePiKernel || !isMcpToolName(tool.function.name))
+          : [];
         const requestMessages = await prepareContextCompressedMessages({
           messages: substituteUserNicknameInApiMessages(messages, userProfile.nickname),
           provider: chatProvider,
@@ -26006,8 +27333,259 @@ export function App() {
           sessionId: requestSessionId,
           trackUsage: true,
           mutableChatMessageId: assistantMessageId,
+          kernel: usePiKernel ? "pi" : "renge",
         });
-        const response = await fetch("/api/chat/completions", {
+        const piRunId = usePiKernel ? crypto.randomUUID() : "";
+        const effectiveToolCount =
+          requestTools.length +
+          (usePiKernel && options.includeTools && activeLlmContextSettings.workspaceTools &&
+          activeLocalToolsEnabled && activeFileToolsWorkspaceHandle?.kind === "electron"
+            ? 1
+            : 0) +
+          (usePiKernel && requestPiSkillPaths.length > 0 ? 1 : 0);
+        const piReturnedToolCalls: ChatToolCall[] = [];
+        const piIncompleteToolCalls = new Map<string, ChatToolCall>();
+        const piToolVisualizations = new Map<string, ToolVisualization>();
+        const handlePiEvent = async (event: PiStreamEvent) => {
+          const runtimeStatus = formatPiRuntimeStatus(event);
+          if (runtimeStatus) {
+            setChatStatus({ status: "loading", message: runtimeStatus });
+            return;
+          }
+          if (event.type === "context_usage") {
+            recordPiContextUsage(requestSessionId, requestModelId, event.usage);
+            return;
+          }
+          if (event.type === "tool_call_start") {
+            const toolCallId = event.toolCallId || crypto.randomUUID();
+            const visualization: ToolVisualization = {
+              toolCallId,
+              name: event.toolName || "unknown_tool",
+              args: {},
+              partialArguments: "",
+              status: "running",
+              startedAt: new Date().toISOString(),
+            };
+            piToolVisualizations.set(toolCallId, visualization);
+            options.beforePiToolMessage?.();
+            const toolCall: ChatToolCall = {
+              id: toolCallId,
+              type: "function",
+              function: { name: visualization.name, arguments: "{}" },
+            };
+            const action = getMcpToolInfo(requestMcpTools, visualization.name) || visualization.name.startsWith("local_")
+              ? formatToolActionMessage(toolCall, localWorkspaceHandle, requestMcpTools)
+              : formatPiNativeToolAction({ ...event, toolCallId, arguments: {} });
+            appendAssistantTimelineMessage(commitChatMessages, action, [], "", undefined, visualization);
+            await waitForToolProgressPaint();
+            return;
+          }
+          if (event.type === "tool_call_delta") {
+            const toolCallId = event.toolCallId || "";
+            if (!toolCallId) return;
+            const previous = piToolVisualizations.get(toolCallId);
+            const partialArguments = event.argumentsText ?? `${previous?.partialArguments ?? ""}${event.delta ?? ""}`;
+            const visualization: ToolVisualization = {
+              ...(previous ?? { name: event.toolName || "unknown_tool", status: "running" as const }),
+              toolCallId,
+              name: event.toolName || previous?.name || "unknown_tool",
+              args: { ...(previous?.args ?? {}), ...parsePartialToolCallArguments(partialArguments) },
+              partialArguments,
+              status: "running",
+            };
+            piToolVisualizations.set(toolCallId, visualization);
+            updateAssistantToolVisualization(commitChatMessages, toolCallId, () => visualization);
+            return;
+          }
+          if (event.type === "tool_call_end") {
+            const toolCallId = event.toolCallId || "";
+            if (!toolCallId) return;
+            const previous = piToolVisualizations.get(toolCallId);
+            const rawToolCall = isObjectRecord(event.toolCall) ? event.toolCall : {};
+            const rawFunction = isObjectRecord(rawToolCall.function) ? rawToolCall.function : {};
+            const argumentsText = typeof rawFunction.arguments === "string"
+              ? rawFunction.arguments
+              : event.argumentsText ?? previous?.partialArguments ?? "";
+            const visualization: ToolVisualization = {
+              ...(previous ?? { name: event.toolName || String(rawFunction.name ?? "unknown_tool"), status: "running" as const }),
+              toolCallId,
+              name: event.toolName || previous?.name || String(rawFunction.name ?? "unknown_tool"),
+              args: { ...(previous?.args ?? {}), ...parsePartialToolCallArguments(argumentsText) },
+              partialArguments: argumentsText,
+              status: "running",
+            };
+            piToolVisualizations.set(toolCallId, visualization);
+            updateAssistantToolVisualization(commitChatMessages, toolCallId, () => visualization);
+            return;
+          }
+          if (event.type === "tool_call_incomplete") {
+            const toolCallId = event.toolCallId || crypto.randomUUID();
+            const previous = piToolVisualizations.get(toolCallId);
+            const argumentsText = event.argumentsText ?? previous?.partialArguments ?? "";
+            const name = event.toolName || previous?.name || "unknown_tool";
+            piIncompleteToolCalls.set(toolCallId, {
+              id: toolCallId,
+              type: "function",
+              function: { name, arguments: argumentsText },
+            });
+            const visualization: ToolVisualization = {
+              ...(previous ?? {}),
+              toolCallId,
+              name,
+              args: { ...(previous?.args ?? {}), ...parsePartialToolCallArguments(argumentsText) },
+              partialArguments: argumentsText,
+              result: "工具参数未生成完整，尚未执行，正在等待继续补全。",
+              status: "running",
+            };
+            piToolVisualizations.set(toolCallId, visualization);
+            updateAssistantToolVisualization(commitChatMessages, toolCallId, () => visualization);
+            return;
+          }
+          if (event.type === "tool_start") {
+            options.beforePiToolMessage?.();
+            const previous = event.toolCallId ? piToolVisualizations.get(event.toolCallId) : undefined;
+            const visualization: ToolVisualization = {
+              ...(previous ?? {}),
+              toolCallId: event.toolCallId,
+              name: event.toolName || previous?.name || "unknown_tool",
+              args: event.arguments ?? previous?.args ?? {},
+              status: "running",
+              startedAt: previous?.startedAt ?? new Date().toISOString(),
+            };
+            if (event.toolCallId) piToolVisualizations.set(event.toolCallId, visualization);
+            if (event.toolCallId && previous) {
+              updateAssistantToolVisualization(commitChatMessages, event.toolCallId, () => visualization);
+            } else {
+              appendAssistantTimelineMessage(commitChatMessages, formatPiNativeToolAction(event), [], "", undefined, visualization);
+            }
+            await waitForToolProgressPaint();
+            return;
+          }
+          if (event.type === "tool_end") {
+            const previous = event.toolCallId ? piToolVisualizations.get(event.toolCallId) : undefined;
+            const visualization: ToolVisualization = {
+              ...(previous ?? {}),
+              toolCallId: event.toolCallId ?? previous?.toolCallId,
+              name: event.toolName || previous?.name || "unknown_tool",
+              args: previous?.args ?? {},
+              result: event.result,
+              status: event.isError ? "error" : "done",
+              startedAt: previous?.startedAt,
+              endedAt: new Date().toISOString(),
+            };
+            if (event.toolCallId && previous) {
+              updateAssistantToolVisualization(commitChatMessages, event.toolCallId, () => visualization);
+            } else {
+              appendAssistantTimelineMessage(commitChatMessages, formatPiNativeToolResult(event), [], "", undefined, visualization);
+            }
+            hasVisibleToolResult = true;
+            return;
+          }
+          if (event.type !== "tool_request") return;
+
+          const toolCall = piToolCallFromEvent(event);
+          if (isChatChoiceToolName(toolCall.function.name)) {
+            const presentedChoice = createChatChoiceRequestFromToolCall(toolCall);
+            assistantChoiceRequest = presentedChoice.choiceRequest;
+            assistantContent = assistantContent || presentedChoice.prompt;
+            piReturnedToolCalls.push(toolCall);
+            await submitPiToolResult(event, { presented: true }, null, abortSignal);
+            return;
+          }
+
+          const silentControl = isSilentChatControlTool(toolCall.function.name);
+          if (!silentControl) {
+            options.beforePiToolMessage?.();
+            const previous = piToolVisualizations.get(toolCall.id);
+            const visualization: ToolVisualization = {
+              ...(previous ?? {}),
+              toolCallId: toolCall.id,
+              name: toolCall.function.name,
+              args: parseToolCallArgs(toolCall),
+              status: "running",
+              startedAt: previous?.startedAt ?? new Date().toISOString(),
+            };
+            piToolVisualizations.set(toolCall.id, visualization);
+            if (previous) {
+              updateAssistantToolVisualization(commitChatMessages, toolCall.id, () => visualization);
+            } else {
+              appendAssistantTimelineMessage(
+                commitChatMessages,
+                formatToolActionMessage(toolCall, localWorkspaceHandle, requestMcpTools),
+                [],
+                "",
+                undefined,
+                visualization,
+              );
+            }
+            await waitForToolProgressPaint();
+          }
+          try {
+            const result = await executeChatTool(
+              toolCall.function.name,
+              toolCall.function.arguments,
+              abortSignal,
+              requestSessionId,
+            );
+            if (needsChromeDevtoolsObservation(toolCall, requestMcpTools)) {
+              pendingMcpObservationPrompt = buildChromeDevtoolsObservationPrompt(requestMcpTools);
+              pendingMcpObservationRetries = 0;
+              pendingMcpObservationPromptSent = false;
+            }
+            if (isChromeDevtoolsObservation(toolCall, requestMcpTools)) {
+              pendingMcpObservationPrompt = "";
+              pendingMcpObservationRetries = 0;
+              pendingMcpObservationPromptSent = false;
+            }
+            if (!silentControl) {
+              const resultMessage = formatToolResultMessage(toolCall, result);
+              const resultAttachments = getToolResultAttachments(result);
+              const previous = piToolVisualizations.get(toolCall.id);
+              const visualization: ToolVisualization = {
+                ...(previous ?? {}),
+                toolCallId: toolCall.id,
+                name: toolCall.function.name,
+                args: previous?.args ?? parseToolCallArgs(toolCall),
+                result,
+                status: "done",
+                startedAt: previous?.startedAt,
+                endedAt: new Date().toISOString(),
+              };
+              if (previous) {
+                updateAssistantToolVisualization(commitChatMessages, toolCall.id, () => visualization);
+              } else {
+                appendAssistantTimelineMessage(commitChatMessages, resultMessage, resultAttachments, "", undefined, visualization);
+              }
+              if (resultMessage.trim() || resultAttachments.length > 0) {
+                hasVisibleToolResult = true;
+              }
+            }
+            await submitPiToolResult(event, result, null, abortSignal);
+          } catch (toolError) {
+            if (!silentControl && !isChatAbortError(toolError)) {
+              const previous = piToolVisualizations.get(toolCall.id);
+              const visualization: ToolVisualization = {
+                ...(previous ?? {}),
+                toolCallId: toolCall.id,
+                name: toolCall.function.name,
+                args: previous?.args ?? parseToolCallArgs(toolCall),
+                result: toolError instanceof Error ? toolError.message : String(toolError),
+                status: "error",
+                startedAt: previous?.startedAt,
+                endedAt: new Date().toISOString(),
+              };
+              if (previous) {
+                updateAssistantToolVisualization(commitChatMessages, toolCall.id, () => visualization);
+              } else {
+                appendAssistantTimelineMessage(commitChatMessages, formatToolErrorMessage(toolCall, toolError), [], "", undefined, visualization);
+              }
+              hasVisibleToolResult = true;
+            }
+            await submitPiToolResult(event, null, toolError, abortSignal);
+          }
+        };
+        if (usePiKernel) await waitForPiSessionReset(requestSessionId);
+        const response = await fetch(usePiKernel ? "/api/pi/chat" : "/api/chat/completions", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -26015,7 +27593,35 @@ export function App() {
           signal: abortSignal,
           body: JSON.stringify({
             ...buildProviderApiTarget(chatProvider),
-            sessionId: activeChatSessionId,
+            ...(usePiKernel ? { runId: piRunId } : {}),
+            ...(usePiKernel
+              ? {
+                  enableTools: options.includeTools,
+                  allowImageInputs: sendImageAttachmentsToProvider,
+                  contextWindow: resolveContextCompressionLimit(
+                    { ...contextCompressionSettings, enabled: true },
+                    requestModelId,
+                  ) ?? activeChatPreset?.maxContext ?? 128_000,
+                  piCompaction: piCompactionSettings,
+                  piSessionScope: getPiSessionScope("main", chatProvider, requestModelId),
+                  piSkillPaths: requestPiSkillPaths,
+                  mcpConfig: {
+                    mcpServers: activeLlmContextSettings.mcpTools
+                      ? mcpServers.filter((server) => server.enabled)
+                      : [],
+                  },
+                }
+              : {}),
+            ...(usePiKernel && options.includeTools && activeLlmContextSettings.workspaceTools &&
+            activeLocalToolsEnabled && activeFileToolsWorkspaceHandle?.kind === "electron"
+              ? {
+                  workspace: {
+                    kind: "electron",
+                    cwd: activeFileToolsWorkspaceHandle.path,
+                  },
+                }
+              : {}),
+            sessionId: requestSessionId,
             request: {
               model: requestModelId,
               messages: requestMessages,
@@ -26036,6 +27642,60 @@ export function App() {
           }),
         });
 
+        if (usePiKernel) {
+          const abortPiRun = () => {
+            void fetch("/api/pi/abort", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              keepalive: true,
+              body: JSON.stringify({ runId: piRunId }),
+            });
+          };
+          abortSignal?.addEventListener("abort", abortPiRun, { once: true });
+          try {
+            const streamResult = await readChatStream(
+              response,
+              options.onDelta ?? (() => undefined),
+              options.onReasoningDelta ?? (() => undefined),
+              abortSignal,
+              handlePiEvent,
+            );
+            const payload: {
+              error?: string | { message?: string };
+              choices?: Array<{ message?: ChatApiMessage; finish_reason?: string }>;
+              output_text?: string;
+            } | null = options.stream
+              ? null
+              : {
+                  choices: [{
+                    message: {
+                      role: "assistant" as const,
+                      content: streamResult.content,
+                      ...(streamResult.reasoning
+                        ? { reasoning_content: streamResult.reasoning }
+                        : {}),
+                    },
+                    finish_reason: streamResult.finishReason || "stop",
+                  }],
+                  output_text: streamResult.content,
+                };
+            return {
+              payload,
+              content: streamResult.content,
+              reasoning: streamResult.reasoning,
+              toolCalls: [...streamResult.toolCalls, ...piReturnedToolCalls].filter(
+                (toolCall) => !piIncompleteToolCalls.has(toolCall.id),
+              ),
+              incompleteToolCalls: Array.from(piIncompleteToolCalls.values()),
+              responsesReasoningItems: streamResult.responsesReasoningItems,
+              finishReason: streamResult.finishReason,
+              includedToolCount: effectiveToolCount,
+            };
+          } finally {
+            abortSignal?.removeEventListener("abort", abortPiRun);
+          }
+        }
+
         if (options.stream) {
           const streamResult = await readChatStream(
             response,
@@ -26048,9 +27708,10 @@ export function App() {
             content: streamResult.content,
             reasoning: streamResult.reasoning,
             toolCalls: streamResult.toolCalls,
+            incompleteToolCalls: [],
             responsesReasoningItems: streamResult.responsesReasoningItems,
             finishReason: streamResult.finishReason,
-            includedToolCount: requestTools.length,
+            includedToolCount: effectiveToolCount,
           };
         }
 
@@ -26072,10 +27733,11 @@ export function App() {
           content: "",
           reasoning: getChatCompletionPayloadReasoning(payload),
           toolCalls: [] as ChatToolCall[],
+          incompleteToolCalls: [],
           responsesReasoningItems:
             payload.choices?.[0]?.message?.responses_reasoning_items ?? [],
           finishReason: payload.choices?.[0]?.finish_reason ?? "",
-          includedToolCount: requestTools.length,
+          includedToolCount: effectiveToolCount,
         };
       };
       const appendStreamingAssistant = (delta: string) => {
@@ -26113,34 +27775,27 @@ export function App() {
         chatStreamEnabled &&
         (availableChatTools.length === 0 || hasOnlyChatChoiceTools(availableChatTools))
       ) {
-        commitChatMessages((current) => [
-          ...current,
-          {
-            id: assistantMessageId,
-            role: "assistant",
-            content: "",
-            renderAsPlainText: true,
-            createdAt: new Date().toISOString(),
-          },
-        ]);
-        streamingAssistantInserted = true;
         setChatStatus({ status: "loading", message: "正在流式生成回复..." });
-        const assistantWriter = createStreamingWordWriter(
-          appendStreamingAssistant,
+        const streamingTimeline = createPiStreamingAssistantTimeline(
+          commitChatMessages,
           abortSignal,
+          undefined,
+          assistantMessageId,
+          (messageId) => {
+            assistantMessageId = messageId;
+            streamingAssistantInserted = true;
+          },
         );
-        const reasoningWriter = createStreamingWordWriter(
-          appendStreamingAssistantReasoning,
-          abortSignal,
-        );
+        assistantMessageId = streamingTimeline.messageId ?? assistantMessageId;
         try {
           const streamResult = await requestChatCompletion(apiMessages, {
-            includeTools: availableChatTools.length > 0,
+            includeTools: availableChatTools.length > 0 || piMcpEnabled,
             stream: true,
-            onDelta: assistantWriter.push,
-            onReasoningDelta: reasoningWriter.push,
+            onDelta: streamingTimeline.pushContent,
+            onReasoningDelta: streamingTimeline.pushReasoning,
+            beforePiToolMessage: streamingTimeline.beforeTool,
           });
-          await Promise.all([assistantWriter.finish(), reasoningWriter.finish()]);
+          await streamingTimeline.finish();
           throwIfChatAborted(abortSignal);
           assistantContent = streamResult.content;
           assistantReasoning = streamResult.reasoning || assistantReasoning;
@@ -26154,13 +27809,17 @@ export function App() {
             assistantChoiceRequest = presentedChoice.choiceRequest;
             assistantContent = streamResult.content.trim() || presentedChoice.prompt;
           }
+          streamingTimeline.complete(assistantContent, assistantReasoning);
+          if (streamingTimeline.segmentCount > 1) {
+            piTimelineHasMultipleTextSegments = true;
+          }
         } finally {
-          assistantWriter.cancel();
-          reasoningWriter.cancel();
+          streamingTimeline.cancel();
         }
       } else {
         const useStreamingToolCompletion = chatStreamEnabled;
         let reasoningOnlyToolRetryCount = 0;
+        let incompleteToolRetryCount = 0;
         for (let toolRound = 0; toolRound < 999; toolRound += 1) {
           setChatStatus({
             status: "loading",
@@ -26174,22 +27833,34 @@ export function App() {
             pendingMcpObservationPromptSent = true;
           }
           const streamingRound = chatStreamEnabled
-            ? createStreamingAssistantMessage(commitChatMessages, abortSignal)
+            ? createPiStreamingAssistantTimeline(
+                commitChatMessages,
+                abortSignal,
+                undefined,
+                crypto.randomUUID(),
+                (messageId) => {
+                  assistantMessageId = messageId;
+                  streamingAssistantInserted = true;
+                },
+              )
             : null;
           if (streamingRound) {
-            assistantMessageId = streamingRound.messageId;
-            streamingAssistantInserted = true;
+            assistantMessageId = streamingRound.messageId ?? assistantMessageId;
           }
           let completionResult;
           try {
             completionResult = await requestChatCompletion(apiMessages, {
-              includeTools: availableChatTools.length > 0,
+              includeTools: availableChatTools.length > 0 || piMcpEnabled,
               stream: useStreamingToolCompletion,
               toolChoice: "auto",
               onDelta: streamingRound?.pushContent,
               onReasoningDelta: streamingRound?.pushReasoning,
+              beforePiToolMessage: streamingRound?.beforeTool,
             });
             await streamingRound?.finish();
+            if ((streamingRound?.segmentCount ?? 0) > 1) {
+              piTimelineHasMultipleTextSegments = true;
+            }
           } catch (error) {
             streamingRound?.cancel();
             throw error;
@@ -26235,6 +27906,30 @@ export function App() {
           }
 
           if (toolCalls.length === 0) {
+            if (completionResult.incompleteToolCalls.length > 0) {
+              if (incompleteToolRetryCount >= 2) {
+                throw new Error("工具调用参数连续被输出长度截断，已停止重复重做；请减少单次文件内容或继续当前任务。");
+              }
+              streamingRound?.complete("", assistantMessageReasoning);
+              const partialTool = completionResult.incompleteToolCalls[0];
+              apiMessages.push({
+                role: "assistant",
+                content: assistantContent || "",
+                ...buildProviderReasoningReplay(chatProvider, assistantMessageReasoning),
+              });
+              apiMessages.push({
+                role: "user",
+                content: [
+                  "上一轮正在生成工具调用，但工具参数在 JSON 完成前被输出长度限制截断。",
+                  `工具名称：${partialTool.function.name}`,
+                  "不要重新设计、解释或从头开始；只从当前会话断点继续补全同一个工具调用，直到参数完整后再执行。",
+                ].join("\n"),
+              });
+              incompleteToolRetryCount += 1;
+              assistantContent = "";
+              assistantReasoning = "";
+              continue;
+            }
             if (pendingMcpObservationPrompt && pendingMcpObservationRetries < 2 && toolRound < 998) {
               apiMessages.push({
                 role: "assistant",
@@ -26263,10 +27958,14 @@ export function App() {
                 toolCallCount: toolCalls.length,
                 includedToolCount: completionResult.includedToolCount,
                 requiresTool:
-                  localToolsEnabled &&
-                  Boolean(localWorkspaceHandle) &&
-                  shouldRequireLocalToolCall(messagesForApi, localWorkspaceHandle),
+                  completionResult.includedToolCount > 0 &&
+                  shouldRequireLocalToolCall(
+                    messagesForApi,
+                    Boolean(activeFileToolsWorkspaceHandle),
+                    completionResult.includedToolCount > 0,
+                  ),
                 retryCount: reasoningOnlyToolRetryCount,
+                maxRetries: 6,
                 finishReason: completionResult.finishReason,
               })
             ) {
@@ -26293,10 +27992,11 @@ export function App() {
             }
 
             if (
-              localToolsEnabled &&
-              localWorkspaceHandle &&
+              activeLocalToolsEnabled &&
+              activeFileToolsWorkspaceHandle &&
               toolRound < 998 &&
-              shouldAutoContinueLocalTask(assistantContent)
+              (isTruncatedChatFinishReason(completionResult.finishReason) ||
+                shouldAutoContinueLocalTask(assistantContent))
             ) {
               if (!streamingRound) {
                 appendAssistantTimelineMessage(
@@ -26318,8 +28018,9 @@ export function App() {
               });
               apiMessages.push({
                 role: "user",
-                content:
-                  "继续执行上面的任务，直接调用可用工具推进，直到任务完成、遇到真实阻塞或需要用户授权。不要只说明计划。",
+                content: isTruncatedChatFinishReason(completionResult.finishReason)
+                  ? "上一轮因输出长度限制被截断。紧接已有进度继续执行任务，优先调用可用工具完成尚未完成的步骤，不要重做已完成内容，直到任务完成、遇到真实阻塞或需要用户授权。"
+                  : "继续执行上面的任务，直接调用可用工具推进，直到任务完成、遇到真实阻塞或需要用户授权。不要只说明计划。",
               });
               assistantContent = "";
               assistantReasoning = "";
@@ -26475,7 +28176,7 @@ export function App() {
         assistantContent = maskedDialogues.content;
         dialoguePlaceholderCount = maskedDialogues.count;
       }
-      if (!assistantContent) {
+      if (!hasAssistantTimelinePayload(assistantContent, assistantReasoning)) {
         if (hasVisibleToolResult) {
           setChatStatus({ status: "success", message: "工具执行完成。" });
           return;
@@ -26489,12 +28190,18 @@ export function App() {
             message.id === assistantMessageId
               ? {
                   ...message,
-                  content: assistantContent,
+                  ...(piTimelineHasMultipleTextSegments
+                    ? {}
+                    : {
+                        content: assistantContent,
+                        ...(assistantReasoning.trim()
+                          ? { reasoning: assistantReasoning.trim() }
+                          : {}),
+                      }),
                   renderAsPlainText: false,
                   ...(Object.keys(assistantMessageVariables).length > 0
                     ? { variables: assistantMessageVariables }
                     : {}),
-                  ...(assistantReasoning.trim() ? { reasoning: assistantReasoning.trim() } : {}),
                   ...(assistantChoiceRequest ? { choiceRequest: assistantChoiceRequest } : {}),
                   ...(dialoguePlaceholderCount > 0
                     ? {
@@ -26545,7 +28252,9 @@ export function App() {
         assistantMessageId,
         sourceMessageIds: [userMessage.id],
         latestUser: effectiveContent,
-        finalAssistant: finalAssistantForStatus,
+        finalAssistant: piTimelineHasMultipleTextSegments
+          ? assistantContent
+          : finalAssistantForStatus,
         signal: abortSignal,
       });
       if (activeChatSessionIdRef.current === requestSessionId) {
@@ -27265,7 +28974,7 @@ export function App() {
         ? getMultiAgentRequestConfig(responderPersona.id)
         : undefined;
 
-    await generateAssistantForMessages(messagesForContinuation, requestSender, {
+    const result = await generateAssistantForMessages(messagesForContinuation, requestSender, {
       responseMode,
       ...(responderPersona ? { responderPersona } : {}),
       ...(multiAgentRequestConfig
@@ -27279,6 +28988,7 @@ export function App() {
       streamingStatusMessage: "正在续写当前回复...",
       successMessage: "续写已完成。",
     });
+    if (result) await resetPiSession(activeChatSessionIdRef.current);
   };
 
   const rewriteAssistantDialogues = async (messageId: string) => {
@@ -27319,7 +29029,7 @@ export function App() {
         ? getMultiAgentRequestConfig(responderPersona.id)
         : undefined;
 
-    await generateAssistantForMessages(messagesForRewrite, requestSender, {
+    const result = await generateAssistantForMessages(messagesForRewrite, requestSender, {
       responseMode,
       ...(responderPersona ? { responderPersona } : {}),
       ...(multiAgentRequestConfig
@@ -27333,6 +29043,7 @@ export function App() {
       streamingStatusMessage: "正在根据上下文重写对白...",
       successMessage: "对白重写已完成。",
     });
+    if (result) await resetPiSession(activeChatSessionIdRef.current);
   };
 
   const rewriteAssistantLocally = async (messageId: string) => {
@@ -27373,7 +29084,7 @@ export function App() {
         ? getMultiAgentRequestConfig(responderPersona.id)
         : undefined;
 
-    await generateAssistantForMessages(messagesForRewrite, requestSender, {
+    const result = await generateAssistantForMessages(messagesForRewrite, requestSender, {
       responseMode,
       ...(responderPersona ? { responderPersona } : {}),
       ...(multiAgentRequestConfig
@@ -27387,6 +29098,7 @@ export function App() {
       streamingStatusMessage: "正在根据上下文局部重写...",
       successMessage: "局部重写已完成。",
     });
+    if (result) await resetPiSession(activeChatSessionIdRef.current);
   };
 
   const saveEditedAssistantMessage = () => {
@@ -27422,6 +29134,7 @@ export function App() {
       nextMessages,
       (current) => rebuildStatusBarStateFromMessages(current, nextMessages),
     );
+    void resetPiSession(activeChatSessionIdRef.current).catch(() => undefined);
     renderedEditingDraftRef.current = null;
     setEditingChatMessage(null);
     setChatStatus({ status: "success", message: "AI 消息已保存。" });
@@ -27458,6 +29171,7 @@ export function App() {
       nextMessages,
       (current) => rebuildStatusBarStateFromMessages(current, nextMessages),
     );
+    void resetPiSession(activeChatSessionIdRef.current).catch(() => undefined);
     renderedEditingDraftRef.current = null;
     setEditingChatMessage(null);
     setChatStatus({ status: "success", message: "用户消息已保存，关联状态已重新计算。" });
@@ -27511,6 +29225,7 @@ export function App() {
       activeChatSessionIdRef.current,
     );
     try {
+      await resetPiSession(requestSessionId);
       if (chatMode === "multi") {
         const result = await runMultiAgentResponses(
           nextMessages,
@@ -30121,10 +31836,10 @@ export function App() {
               </article>
               <article className="llm-setting-card context-compression-card">
                 <div className="llm-setting-copy">
-                  <h3>自动上下文压缩</h3>
+                  <h3>Pi 原生上下文压缩</h3>
                   <p>
-                    请求接近模型上限时，优先将工具输出、日志和冗余机器文本压缩 90% 以上，再摘要较早对话。
-                    源代码默认原样保留，压缩过程不会改写聊天记录。
+                    普通聊天和代码任务由 Pi 会话内核监控上下文；接近模型上限时，Pi 会原生摘要较早历史，
+                    保留最近上下文并继续当前任务。图片生成等非 Pi 请求仍使用兼容压缩路径。
                   </p>
                 </div>
                 <label className="tool-toggle llm-feature-toggle">
@@ -30132,16 +31847,11 @@ export function App() {
                     type="checkbox"
                     checked={contextCompressionSettings.enabled}
                     onChange={(event) => {
-                      const enabled = event.target.checked;
-                      setContextCompressionSettings((current) => ({
-                        ...current,
-                        enabled,
-                        ...(enabled ? {} : { astPruningEnabled: false }),
-                      }));
                       contextSummaryCacheRef.current.clear();
+                      void setPiAutoCompaction(event.target.checked);
                     }}
                   />
-                  <span>开启上下文压缩</span>
+                  <span>开启 Pi 原生压缩</span>
                 </label>
                 <div
                   className={`llm-setting-status ${
@@ -30153,11 +31863,11 @@ export function App() {
                   </strong>
                   <span>
                     {!contextCompressionSettings.enabled
-                      ? "所有请求仍发送完整上下文。"
+                      ? "Pi 自动压缩已关闭；请求仍由 Pi 内核运行，但不会主动压缩会话。"
                       : selectedModelValue && selectedModelContextLimit
-                        ? `当前模型 ${selectedModelValue} 的上限为 ${selectedModelContextLimit.toLocaleString()} Token；达到安全阈值后自动压缩。`
+                        ? `当前模型 ${selectedModelValue} 的上限为 ${selectedModelContextLimit.toLocaleString()} Token；Pi 将按原生阈值自动压缩。`
                         : selectedModelValue
-                          ? `当前模型 ${selectedModelValue} 尚未配置上限，因此不会自动压缩。`
+                          ? `当前模型 ${selectedModelValue} 尚未单独配置，将使用预设或默认上下文上限。`
                           : "请先配置模型 ID 和上下文上限。"}
                   </span>
                 </div>
@@ -30167,32 +31877,17 @@ export function App() {
                   }`}
                 >
                   <div>
-                    <strong>AST 代码剪枝</strong>
+                    <strong>Pi 原生保留策略</strong>
                     <span>
-                      可选。使用语法树保留声明、类型和函数签名，仅剪除 JavaScript、TypeScript、JSX、TSX
-                      的函数体；其他语言继续原样保留。
+                      压缩时预留 16,384 Token 输出空间，并保留最近约 20,000 Token 上下文；摘要和会话续接均由
+                      Pi 内核完成。
                     </span>
                   </div>
-                  <label className="tool-toggle llm-feature-toggle">
-                    <input
-                      type="checkbox"
-                      disabled={!contextCompressionSettings.enabled}
-                      checked={contextCompressionSettings.astPruningEnabled}
-                      onChange={(event) => {
-                        setContextCompressionSettings((current) => ({
-                          ...current,
-                          astPruningEnabled: event.target.checked,
-                        }));
-                        contextSummaryCacheRef.current.clear();
-                      }}
-                    />
-                    <span>开启 AST 剪枝</span>
-                  </label>
                 </div>
                 <div className="context-compression-limits">
                   <div className="context-compression-limits-heading">
                     <div>
-                      <strong>模型上下文上限</strong>
+                      <strong>Pi 模型上下文上限</strong>
                       <span>
                         按模型 ID 精确匹配（忽略大小写），已配置 {configuredContextCompressionLimits.length} 项。
                       </span>
@@ -30281,8 +31976,8 @@ export function App() {
                     </div>
                   )}
                   <p className="context-compression-note">
-                    Token 数为兼容不同供应商的安全估算；系统会预留输出空间，并在约 90% 输入预算处开始压缩。
-                    代码保护优先级高于工具输出压缩；包含源码的工具结果不会被文本摘要破坏。
+                    这里的上限会作为 Pi 模型的 contextWindow。Pi 根据上下文用量、16,384 Token 输出预留和
+                    20,000 Token 最近历史保留量决定压缩时机；压缩结果写入 Pi 会话树，不会改写 Renge 聊天记录。
                   </p>
                 </div>
               </article>
@@ -30451,6 +32146,12 @@ export function App() {
                         provider.reasoningEnabled
                           ? `思考${getProviderReasoningEffortLabel(provider.reasoningEffort, provider)}`
                           : "",
+                        providerModelSupportsImages(
+                          provider.modelInputModes,
+                          getEffectiveProviderModelId(provider),
+                        )
+                          ? "支持图片理解"
+                          : "仅文本输入",
                       ]
                         .filter(Boolean)
                         .join(" · ")}
@@ -30554,7 +32255,7 @@ export function App() {
                     </div>
                   </label>
 
-                  <label className="field">
+                  <div className="field">
                     <span>模型 ID</span>
                     <div className="model-input-row">
                       <input
@@ -30609,7 +32310,37 @@ export function App() {
                         拉取模型
                       </button>
                     </div>
-                  </label>
+                    <div className="provider-model-capability">
+                      <label
+                        className={`provider-thinking-toggle ${
+                          activeProviderModelSupportsImages ? "active" : ""
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={activeProviderModelSupportsImages}
+                          disabled={!activeProviderModelId}
+                          onChange={(event) =>
+                            updateProvider(activeProvider.id, {
+                              modelInputModes: setProviderModelImageSupport(
+                                activeProvider.modelInputModes,
+                                activeProviderModelId,
+                                event.target.checked,
+                              ),
+                            })
+                          }
+                        />
+                        <span>模型支持图片理解</span>
+                      </label>
+                      <p>
+                        {activeProviderModelId
+                          ? activeProviderModelSupportsImages
+                            ? "开启后会把图片作为 image_url 发送给当前模型。"
+                            : "关闭时不会把图片 Base64 放入上下文；可启用图像识别 MCP 处理图片。"
+                          : "先填写或选择模型 ID，再配置图片理解能力。"}
+                      </p>
+                    </div>
+                  </div>
 
                   <div className="provider-thinking-row">
                     <label
@@ -32676,7 +34407,7 @@ export function App() {
                 <div className="section-heading compact">
                   <div>
                     <h2>MCP 工具</h2>
-                    <p>启用后，聊天发送时会自动发现工具并交给模型按需调用。</p>
+                    <p>聊天由 Pi MCP Adapter 原生代理工具按需发现、连接和调用服务器。</p>
                   </div>
                   <div className="mcp-editor-actions">
                     <button
@@ -32870,6 +34601,78 @@ export function App() {
                               </label>
                             </>
                           )}
+
+                          <div className="section-heading compact mcp-adapter-policy-heading">
+                            <div>
+                              <h3>Pi MCP Adapter 策略</h3>
+                              <p>连接生命周期和工具暴露策略由 Pi 原生扩展处理。</p>
+                            </div>
+                          </div>
+                          <label className="field">
+                            <span>连接生命周期</span>
+                            <select
+                              value={activeMcpServer.lifecycle ?? "lazy"}
+                              onChange={(event) =>
+                                updateMcpServer(activeMcpServer.id, {
+                                  lifecycle: event.target.value as McpServerConfig["lifecycle"],
+                                })
+                              }
+                            >
+                              <option value="lazy">lazy：首次使用时连接</option>
+                              <option value="eager">eager：会话启动时连接</option>
+                              <option value="keep-alive">keep-alive：保持连接</option>
+                            </select>
+                          </label>
+                          <label className="tool-toggle mcp-enable-toggle">
+                            <input
+                              type="checkbox"
+                              checked={activeMcpServer.directTools === true}
+                              onChange={(event) =>
+                                updateMcpServer(activeMcpServer.id, { directTools: event.target.checked })
+                              }
+                            />
+                            <span>将 MCP 工具注册为 Pi 原生 direct tools</span>
+                          </label>
+                          <label className="field">
+                            <span>工具前缀</span>
+                            <select
+                              value={activeMcpServer.toolPrefix ?? "server"}
+                              onChange={(event) =>
+                                updateMcpServer(activeMcpServer.id, {
+                                  toolPrefix: event.target.value as McpServerConfig["toolPrefix"],
+                                })
+                              }
+                            >
+                              <option value="server">server</option>
+                              <option value="short">short</option>
+                              <option value="mcp">mcp__server_tool</option>
+                              <option value="none">none</option>
+                            </select>
+                          </label>
+                          <label className="field">
+                            <span>包含工具（每行一个，可选）</span>
+                            <textarea
+                              value={(activeMcpServer.includeTools ?? []).join("\n")}
+                              placeholder="例如：search\nread_file"
+                              onChange={(event) =>
+                                updateMcpServer(activeMcpServer.id, {
+                                  includeTools: event.target.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+                                })
+                              }
+                            />
+                          </label>
+                          <label className="field">
+                            <span>排除工具（每行一个，可选）</span>
+                            <textarea
+                              value={(activeMcpServer.excludeTools ?? []).join("\n")}
+                              placeholder="例如：delete_*"
+                              onChange={(event) =>
+                                updateMcpServer(activeMcpServer.id, {
+                                  excludeTools: event.target.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+                                })
+                              }
+                            />
+                          </label>
                         </>
                       )}
                     </>
@@ -32912,10 +34715,14 @@ export function App() {
                       }`}
                       key={skill.id}
                     >
-                      <label className="prompt-select-check" title={skill.enabled ? "禁用" : "启用"}>
+                      <label
+                        className="prompt-select-check"
+                        title={!skill.piNativeValid ? "请先保存并转换为 Pi 原生格式" : skill.enabled ? "禁用" : "启用"}
+                      >
                         <input
                           type="checkbox"
                           checked={skill.enabled}
+                          disabled={!skill.piNativeValid}
                           onChange={(event) => updateSkill(skill.id, { enabled: event.target.checked })}
                         />
                       </label>
@@ -32936,17 +34743,29 @@ export function App() {
                 <div className="section-heading compact">
                   <div>
                     <h2>Skill 设置</h2>
-                    <p>启用后，聊天发送时会自动读取技能说明并注入给 AI 进行匹配和使用。</p>
+                    <p>保留 Renge 管理界面；运行时由 Pi 原生匹配，并通过 read 按需读取完整说明。</p>
                   </div>
-                  <button
-                    type="button"
-                    className="icon-button danger"
-                    title="移除技能"
-                    disabled={!activeSkill}
-                    onClick={deleteSkill}
-                  >
-                    <Trash2 size={16} />
-                  </button>
+                  <div className="mcp-editor-actions">
+                    <button
+                      type="button"
+                      className="ghost-action"
+                      title="保存 Pi Skill 元数据"
+                      disabled={!activeSkill || skillStatus.status === "loading"}
+                      onClick={() => activeSkill && void savePiSkillMetadata(activeSkill)}
+                    >
+                      <Save size={16} />
+                      保存
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button danger"
+                      title="移除技能"
+                      disabled={!activeSkill}
+                      onClick={deleteSkill}
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="provider-form skill-form">
@@ -32976,6 +34795,7 @@ export function App() {
                         <input
                           type="checkbox"
                           checked={activeSkill.enabled}
+                          disabled={!activeSkill.piNativeValid}
                           onChange={(event) =>
                             updateSkill(activeSkill.id, { enabled: event.target.checked })
                           }
@@ -33008,9 +34828,7 @@ export function App() {
                         <input
                           value={activeSkill.entryFile}
                           placeholder="SKILL.md"
-                          onChange={(event) =>
-                            updateSkill(activeSkill.id, { entryFile: event.target.value })
-                          }
+                          readOnly
                         />
                       </label>
 
@@ -33021,9 +34839,17 @@ export function App() {
 
                       <div className="skill-meta-row">
                         <span>{activeSkill.sourceType === "zip" ? "ZIP 导入" : "文件夹导入"}</span>
-                        <span>{activeSkill.enabled ? "已启用" : "已禁用"}</span>
+                        <span>{activeSkill.piNativeValid
+                          ? activeSkill.enabled ? "已启用" : "已禁用"
+                          : "待转换为 Pi 原生"}</span>
                         <span>{new Date(activeSkill.importedAt).toLocaleString("zh-CN")}</span>
                       </div>
+                      {!activeSkill.piNativeValid && (
+                        <p className="provider-status error">
+                          {activeSkill.piNativeError || "此 Skill 不是有效的 Pi 原生格式。"}
+                          {" 确认名称和描述后点击保存即可转换。"}
+                        </p>
+                      )}
                     </>
                   )}
 
@@ -33033,7 +34859,7 @@ export function App() {
 
                   {skills.length > 0 && (
                     <p className="provider-status idle">
-                      当前启用 {enabledSkills.length} 个 Skill；发送消息时会自动读取并交给 AI 判断是否使用。
+                      当前启用 {enabledSkills.length} 个 Pi Skill；发送消息时只注入名称、描述和路径，匹配后再按需读取完整内容。
                     </p>
                   )}
                 </div>
@@ -33506,10 +35332,6 @@ export function App() {
           </div>
 
           <div className="local-tools-panel">
-            <button type="button" className="local-workspace-button" onClick={authorizeLocalWorkspace}>
-              <FolderOpen size={16} />
-              {localWorkspaceHandle ? localWorkspaceHandle.name : "选择文件夹"}
-            </button>
             <button type="button" className="local-workspace-button" onClick={openPcBrowser}>
               <Server size={16} />
               连接电脑
@@ -33542,32 +35364,68 @@ export function App() {
           )}
 
           <div className="chat-session-area">
-            {workspaceGroups.map((group) => (
-              <section
-                className="chat-session-group"
-                key={group.key}
-                title="右键删除该工作区的所有会话"
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  deleteWorkspaceSessions(group.key, group.name);
-                }}
-              >
-                <div className="chat-session-group-header">
-                  <span title={group.name}>
-                    <FolderOpen size={14} />
-                    {group.name}
-                  </span>
+            <section className="chat-workspace-picker" aria-label="工作区选择">
+              <header className="chat-workspace-picker-header">
+                <strong>工作区</strong>
+                <button
+                  type="button"
+                  className="session-icon-button"
+                  title="添加工作区"
+                  aria-label="添加工作区"
+                  onClick={() => void authorizeLocalWorkspace()}
+                >
+                  <Plus size={16} />
+                </button>
+              </header>
+              <div className="chat-workspace-list">
+                {workspaceGroups.map((group) => (
                   <button
                     type="button"
-                    className="session-icon-button"
-                    title="新建会话"
-                    onClick={() => addChatSession(group.key, group.name)}
+                    className={`chat-workspace-item ${
+                      group.key === selectedWorkspaceGroup?.key ? "active" : ""
+                    }`}
+                    key={group.key}
+                    title={`${group.name} · ${group.sessions.length} 个会话`}
+                    onClick={() => selectChatWorkspace(group)}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      deleteWorkspaceSessions(group.key, group.name);
+                    }}
                   >
-                    <Plus size={13} />
+                    <FolderOpen size={17} />
+                    <span>{group.name}</span>
+                    {group.key === activeChatSession?.workspaceKey && (
+                      <i aria-label="当前工作区" />
+                    )}
                   </button>
-                </div>
-                <div className="chat-session-list">
-                  {group.sessions.map((session) => (
+                ))}
+              </div>
+            </section>
+
+            <section className="chat-session-group chat-recent-session-group">
+              <div className="chat-session-group-header">
+                <span>
+                  <MessageSquare size={14} />
+                  最近对话
+                </span>
+                <button
+                  type="button"
+                  className="session-icon-button"
+                  title={selectedWorkspaceGroup ? `在 ${selectedWorkspaceGroup.name} 新建会话` : "新建会话"}
+                  aria-label="新建会话"
+                  onClick={() =>
+                    addChatSession(
+                      selectedWorkspaceGroup?.key,
+                      selectedWorkspaceGroup?.name,
+                    )
+                  }
+                >
+                  <Plus size={15} />
+                </button>
+              </div>
+              <div className="chat-session-list">
+                {selectedWorkspaceGroup?.sessions.length ? (
+                  selectedWorkspaceGroup.sessions.map((session) => (
                     <div
                       className={`chat-session-item ${
                         session.id === activeChatSessionId ? "active" : ""
@@ -33593,10 +35451,12 @@ export function App() {
                         <Trash2 size={13} />
                       </button>
                     </div>
-                  ))}
-                </div>
-              </section>
-            ))}
+                  ))
+                ) : (
+                  <p className="chat-session-empty">该工作区暂无会话</p>
+                )}
+              </div>
+            </section>
           </div>
         </aside>
         <button
@@ -33652,40 +35512,6 @@ export function App() {
                           : "选择角色卡开始角色扮演"
                       : "AI Direct")}
               </h1>
-              <button
-                type="button"
-                className={`chat-context-token-meter ${
-                  contextCompressionSettings.enabled ? "compression-enabled" : "compression-disabled"
-                } ${
-                  contextTokenMeter.usageRatio !== null && contextTokenMeter.usageRatio >= 1
-                    ? "over-threshold"
-                    : contextTokenMeter.usageRatio !== null && contextTokenMeter.usageRatio >= 0.8
-                      ? "near-threshold"
-                      : ""
-                }`}
-                title={contextTokenMeterTitle}
-                aria-label={contextTokenMeterTitle}
-                onClick={() => {
-                  setLlmContextSettingsMode(chatMode);
-                  setSettingsTab("llm");
-                  openWindow("settings");
-                }}
-              >
-                <span className="chat-context-token-part current">
-                  <span className="chat-context-token-label">Token</span>
-                  <span aria-hidden="true">≈</span>
-                  <strong>{contextTokenMeter.currentTokens.toLocaleString("zh-CN")}</strong>
-                </span>
-                <span className="chat-context-token-separator" aria-hidden="true">
-                  /
-                </span>
-                <span className="chat-context-token-part threshold">
-                  <span className="chat-context-token-label">安全阈值</span>
-                  <strong>
-                    {contextTokenMeter.thresholdTokens?.toLocaleString("zh-CN") ?? "未配置"}
-                  </strong>
-                </span>
-              </button>
             </div>
             <div className="chat-header-actions">
               <button
@@ -33707,30 +35533,36 @@ export function App() {
                 )}
                 <span>右侧栏</span>
               </button>
-              <label
-                className={`heartbeat-toggle ${activeHeartbeat.enabled ? "active" : ""}`}
-                title={activeHeartbeat.event.trim() ? "开启/关闭当前会话心跳" : "先填写心跳事件"}
-              >
-                <input
-                  type="checkbox"
-                  checked={activeHeartbeat.enabled}
-                  disabled={!activeChatSession || !activeHeartbeat.event.trim()}
-                  onChange={(event) =>
-                    updateActiveHeartbeat({
-                      enabled: event.target.checked,
-                      resetRunCount: true,
-                    })
-                  }
-                />
-                <RefreshCw size={15} />
-                <span>心跳</span>
-              </label>
               <details className="heartbeat-menu">
                 <summary className="ghost-action" title="心跳设置">
                   <Settings2 size={16} />
-                  设置
+                  心跳
                 </summary>
                 <div className="heartbeat-panel">
+                  <div className="heartbeat-panel-heading">
+                    <div>
+                      <strong>会话心跳</strong>
+                      <small>{activeHeartbeat.event.trim() ? "按间隔自动检查待执行事件" : "先填写待执行事件"}</small>
+                    </div>
+                    <label
+                      className={`heartbeat-toggle ${activeHeartbeat.enabled ? "active" : ""}`}
+                      title={activeHeartbeat.event.trim() ? "开启/关闭当前会话心跳" : "先填写心跳事件"}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={activeHeartbeat.enabled}
+                        disabled={!activeChatSession || !activeHeartbeat.event.trim()}
+                        onChange={(event) =>
+                          updateActiveHeartbeat({
+                            enabled: event.target.checked,
+                            resetRunCount: true,
+                          })
+                        }
+                      />
+                      <RefreshCw size={15} />
+                      <span>{activeHeartbeat.enabled ? "已开启" : "已关闭"}</span>
+                    </label>
+                  </div>
                   <label className="heartbeat-field compact">
                     <span>间隔</span>
                     <input
@@ -33809,20 +35641,6 @@ export function App() {
                   </div>
                 </div>
               </details>
-              <button
-                type="button"
-                className={`ghost-action ${activeSessionMemoryEnabled ? "active-memory" : ""}`}
-                disabled={chatMode !== "persona" || !activePersona || !activeChatSession}
-                title={
-                  activePersona
-                    ? `${activeSessionMemoryEnabled ? "取消" : "设为"} ${activePersona.name} 的记忆`
-                    : "需要先选择人格 Agent"
-                }
-                onClick={toggleActiveSessionMemory}
-              >
-                <Bookmark size={16} />
-                {activeSessionMemoryEnabled ? "取消记忆" : "设为记忆"}
-              </button>
               <button
                 type="button"
                 className="ghost-action"
@@ -34889,6 +36707,105 @@ export function App() {
                           </button>
                         ))
                       )}
+                    </div>
+                  </details>
+                  <details
+                    className={`context-token-menu ${
+                      contextCompressionSettings.enabled ? "compression-enabled" : "compression-disabled"
+                    } ${contextUsageTone}`}
+                  >
+                    <summary
+                      className="context-token-trigger"
+                      title={contextTokenMeterTitle}
+                      aria-label={contextTokenMeterTitle}
+                    >
+                      <span className="context-token-ring" style={contextTokenRingStyle}>
+                        <span>{contextUsagePercent === null ? "--" : `${contextUsagePercent}%`}</span>
+                      </span>
+                    </summary>
+                    <div className="context-token-panel">
+                      <header>
+                        <strong>上下文用量</strong>
+                        <span>
+                          {contextTokenMeter.currentTokens.toLocaleString("zh-CN")} / {contextTokenMeter.thresholdTokens?.toLocaleString("zh-CN") ?? "未配置"} Token
+                        </span>
+                      </header>
+                      <div className="context-token-progress" aria-hidden="true">
+                        <span style={contextTokenRingStyle} />
+                      </div>
+                      <section className="context-token-breakdown">
+                        <header>估算构成</header>
+                        <dl>
+                          {contextTokenMeter.contextBreakdown.map((item) => (
+                            <div key={item.label}>
+                              <dt>{item.label}</dt>
+                              <dd>~{item.tokens.toLocaleString("zh-CN")}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                        <p>各项为估算值，总量由模型服务提供。</p>
+                      </section>
+                      <dl>
+                        <div>
+                          <dt>模型</dt>
+                          <dd>{contextTokenMeter.limitingModelId || "未配置"}</dd>
+                        </div>
+                        <div>
+                          <dt>压缩</dt>
+                          <dd>{contextCompressionSettings.enabled ? "自动压缩已开启" : "自动压缩已关闭"}</dd>
+                        </div>
+                        <div>
+                          <dt>计数方式</dt>
+                          <dd>{contextTokenMeter.usesActualRequestTokens ? "按最近一次请求" : "发送前估算"}</dd>
+                        </div>
+                        {contextTokenMeter.compressed && (
+                          <div>
+                            <dt>最近压缩</dt>
+                            <dd>
+                              移除 {contextTokenMeter.removedMessageCount} 条消息
+                              {contextTokenMeter.appendedMessageCount > 0
+                                ? `，新增 ${contextTokenMeter.appendedMessageCount} 条`
+                                : ""}
+                            </dd>
+                          </div>
+                        )}
+                      </dl>
+                      {contextTokenMeter.missingModelIds.length > 0 && (
+                        <p className="context-token-note">模型 {contextTokenMeter.missingModelIds.join("、")} 尚未配置上下文上限。</p>
+                      )}
+                      <div className="context-token-panel-actions">
+                        <label className="context-token-compression-toggle">
+                          <span>自动压缩</span>
+                          <input
+                            type="checkbox"
+                            checked={contextCompressionSettings.enabled}
+                            onChange={(event) => void setPiAutoCompaction(event.target.checked)}
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          className="ghost-action"
+                          disabled={piCompactionPending || chatStatus.status === "loading"}
+                          onClick={() => void compactActivePiSession()}
+                          title="调用 Pi 原生压缩当前会话"
+                        >
+                          <RefreshCw size={14} />
+                          {piCompactionPending ? "压缩中..." : "立即压缩"}
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-action"
+                          onClick={(event) => {
+                            setLlmContextSettingsMode(chatMode);
+                            setSettingsTab("llm");
+                            openWindow("settings");
+                            event.currentTarget.closest("details")?.removeAttribute("open");
+                          }}
+                        >
+                          <Settings2 size={14} />
+                          上下文设置
+                        </button>
+                      </div>
                     </div>
                   </details>
                   {chatMode !== "multi" && (

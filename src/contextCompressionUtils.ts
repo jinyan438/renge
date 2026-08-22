@@ -56,7 +56,7 @@ export type ContextAssistantWindowResult<T extends ContextCompressionMessage> = 
 export const MIN_CONTEXT_LIMIT_TOKENS = 512;
 export const MAX_CONTEXT_LIMIT_TOKENS = 4_000_000;
 export const DEFAULT_CONTEXT_COMPRESSION_SETTINGS: ContextCompressionSettings = {
-  enabled: false,
+  enabled: true,
   astPruningEnabled: false,
   modelLimits: [],
 };
@@ -108,7 +108,7 @@ export function normalizeContextCompressionSettings(
     });
   }
 
-  const enabled = value.enabled === true;
+  const enabled = value.enabled === undefined ? DEFAULT_CONTEXT_COMPRESSION_SETTINGS.enabled : value.enabled === true;
   return {
     enabled,
     astPruningEnabled:

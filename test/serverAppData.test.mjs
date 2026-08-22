@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, request } from "node:http";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   normalizeUpstreamErrorMessage,
+  parsePiSkillMetadata,
   rewriteTavernModuleImports,
   startRengeServer,
 } from "../server.mjs";
@@ -18,6 +19,132 @@ test("reduces HTML upstream failures to a readable error message", () => {
     ),
     "Internal Server Error",
   );
+});
+
+test("parses Pi native Skill frontmatter and rejects legacy Markdown metadata", () => {
+  assert.deepEqual(
+    parsePiSkillMetadata([
+      "---",
+      "name: video-prompts",
+      "description: Writes production-ready video prompts when users request video generation.",
+      "---",
+      "",
+      "# Video prompts",
+    ].join("\n")),
+    {
+      name: "video-prompts",
+      description: "Writes production-ready video prompts when users request video generation.",
+      frontmatter: {
+        name: "video-prompts",
+        description: "Writes production-ready video prompts when users request video generation.",
+      },
+      body: "\n# Video prompts",
+    },
+  );
+  assert.throws(
+    () => parsePiSkillMetadata("# Legacy Skill\n\nThis is not Pi frontmatter."),
+    /Pi 原生 YAML frontmatter/,
+  );
+  assert.equal(parsePiSkillMetadata([
+    "---",
+    "name: 中文 Skill 名称",
+    "description: Pi reports a validation warning but still loads this Skill.",
+    "---",
+  ].join("\n")).name, "中文 Skill 名称");
+});
+
+test("imports and updates Pi native Skills through the Renge management API", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "renge-pi-skill-test-"));
+  const dataDir = join(root, "data");
+  const sourceDir = join(root, "source-skill");
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(join(sourceDir, "SKILL.md"), [
+    "---",
+    "name: original-skill",
+    "description: Original Pi skill description.",
+    "license: MIT",
+    "---",
+    "",
+    "# Original instructions",
+  ].join("\n"), "utf8");
+
+  const controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  t.after(async () => {
+    await new Promise((resolve, reject) => {
+      controller.server.close((error) => (error ? reject(error) : resolve()));
+    });
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const importResponse = await fetch(`${controller.url}/api/skills/import-folder`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: sourceDir }),
+  });
+  assert.equal(importResponse.status, 200);
+  const imported = (await importResponse.json()).skill;
+  assert.equal(imported.name, "original-skill");
+  assert.equal(imported.description, "Original Pi skill description.");
+  assert.equal(imported.entryFile, "SKILL.md");
+
+  const updateResponse = await fetch(`${controller.url}/api/skills/update`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      skill: {
+        ...imported,
+        name: "updated-skill",
+        description: "Updated natively from the Renge management UI.",
+      },
+    }),
+  });
+  assert.equal(updateResponse.status, 200);
+  const updated = (await updateResponse.json()).skill;
+  assert.equal(updated.name, "updated-skill");
+
+  const metadataResponse = await fetch(`${controller.url}/api/skills/metadata`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ skills: [imported] }),
+  });
+  assert.equal(metadataResponse.status, 200);
+  const metadata = await metadataResponse.json();
+  assert.equal(metadata.errors.length, 0);
+  assert.equal(metadata.skills[0].name, "updated-skill");
+  assert.equal(metadata.skills[0].description, "Updated natively from the Renge management UI.");
+
+  const saved = parsePiSkillMetadata(await readFile(join(imported.path, "SKILL.md"), "utf8"));
+  assert.equal(saved.frontmatter.license, "MIT");
+  assert.match(saved.body, /Original instructions/);
+
+  const legacyDir = join(dataDir, "skills", "legacy-skill");
+  await mkdir(legacyDir, { recursive: true });
+  await writeFile(join(legacyDir, "SKILL.md"), "# Legacy instructions\n", "utf8");
+  const legacySkill = {
+    ...imported,
+    id: "legacy-skill",
+    name: "legacy-skill",
+    description: "Converted from the old Renge format.",
+    path: legacyDir,
+  };
+  const invalidMetadataResponse = await fetch(`${controller.url}/api/skills/metadata`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ skills: [legacySkill] }),
+  });
+  const invalidMetadata = await invalidMetadataResponse.json();
+  assert.equal(invalidMetadata.skills[0].enabled, false);
+  assert.equal(invalidMetadata.skills[0].piNativeValid, false);
+
+  const migrateResponse = await fetch(`${controller.url}/api/skills/update`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ skill: legacySkill }),
+  });
+  assert.equal(migrateResponse.status, 200);
+  const migrated = (await migrateResponse.json()).skill;
+  assert.equal(migrated.piNativeValid, true);
+  assert.match(await readFile(join(legacyDir, "SKILL.md"), "utf8"), /^---\nname: legacy-skill\n/);
 });
 
 function requestLocalServer(controller, path, host = "preview.localhost", method = "GET") {
