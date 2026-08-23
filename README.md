@@ -227,6 +227,7 @@ npm start
 | `RENGE_DATA_DIR` | `%APPDATA%\Renge Agent Lab` | 设置持久化数据目录 |
 | `RENGE_PC_FILES` | 启用 | 设为 `0` 可关闭电脑文件服务 API |
 | `RENGE_ELECTRON_CACHE_DIR` | `%LOCALAPPDATA%\Renge Agent Lab\ElectronCache` | 设置 Electron 缓存目录 |
+| `RENGE_HARDWARE_ACCELERATION` | 自动 | `1` 强制启用，`0` 强制关闭 Electron 硬件加速；Linux X11 + NVIDIA 默认关闭 |
 
 例如，仅在本机使用 Web 服务并关闭电脑文件服务：
 

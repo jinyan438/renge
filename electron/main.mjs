@@ -13,7 +13,7 @@ import {
   webContents,
 } from "electron";
 import { mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -54,6 +54,7 @@ import {
   writeSidebarTextFile,
 } from "./sidebar-files.mjs";
 import { createSidebarTerminalManager } from "./sidebar-terminal.mjs";
+import { shouldDisableHardwareAcceleration } from "./hardware-acceleration.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const appIconPath = join(
@@ -376,7 +377,20 @@ function configureElectronStorage() {
   app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
 }
 
-if (singleInstanceLockAcquired) configureElectronStorage();
+function configureElectronRendering() {
+  if (shouldDisableHardwareAcceleration({
+    nvidiaDriverPresent: existsSync("/proc/driver/nvidia/version"),
+  })) {
+    // NVIDIA's X11 compositor can corrupt Chromium surfaces and hit testing when
+    // a fractionally scaled window is maximized. Software rendering is stable.
+    app.disableHardwareAcceleration();
+  }
+}
+
+if (singleInstanceLockAcquired) {
+  configureElectronRendering();
+  configureElectronStorage();
+}
 
 async function flushPersistentSidebarBrowserData() {
   if (!app.isReady()) return;
