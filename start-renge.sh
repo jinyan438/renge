@@ -11,6 +11,7 @@ readonly PORTABLE_NODE_DIR="$RUNTIME_DIR/node"
 readonly NODE_VERSION="22.23.2"
 readonly NODE_ARCHIVE="node-v${NODE_VERSION}-linux-x64.tar.xz"
 readonly NODE_SHA256="d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307"
+readonly DEFAULT_ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"
 
 export PORT="${PORT:-5190}"
 export npm_config_cache="${npm_config_cache:-$RUNTIME_DIR/npm-cache}"
@@ -134,7 +135,9 @@ fi
 
 if [[ "$LAUNCH_MODE" == "desktop" ]] && ! electron_is_ready; then
   log "正在安装 Electron 客户端运行时（仅首次需要）..."
-  node node_modules/electron/install.js || fail "Electron 客户端运行时安装失败，请检查网络后重试。"
+  ELECTRON_MIRROR="${ELECTRON_MIRROR:-$DEFAULT_ELECTRON_MIRROR}" \
+    node node_modules/electron/install.js ||
+    fail "Electron 客户端运行时安装失败，请检查网络或设置 ELECTRON_MIRROR 后重试。"
   electron_is_ready || fail "Electron 客户端运行时安装不完整，请重试。"
 fi
 
