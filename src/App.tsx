@@ -12551,6 +12551,8 @@ export function App() {
   }>({ context: null, entries: new Map() });
   const resetPiSession = (sessionId: string) => {
     if (!sessionId) return Promise.resolve();
+    const existing = piSessionResetPromisesRef.current.get(sessionId);
+    if (existing) return existing;
     const pending = fetch("/api/pi/session", {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
@@ -18845,6 +18847,12 @@ export function App() {
         );
     const session = buildRoleplaySession(baseSession, card, greetingIndex);
 
+    // Binding a role card replaces the visible message history while retaining
+    // the Renge session id. Clear any Pi tree left behind by that id before a
+    // greeting script can trigger generation.
+    if (canBindCurrentSession) {
+      void resetPiSession(session.id).catch(() => undefined);
+    }
     markCharacterCardUsed(card.id);
     setChatSessions((current) =>
       canBindCurrentSession
@@ -18921,6 +18929,9 @@ export function App() {
     );
     chatSessionsRef.current = nextSessions;
     setChatSessions(nextSessions);
+    // The greeting is the root of the roleplay history, so Pi must rebuild its
+    // tree from the updated visible messages on the next generation.
+    void resetPiSession(activeChatSession.id).catch(() => undefined);
     processRoleplayGreeting(nextSession, activeSessionRoleplayCard, true);
     await tavernScriptRuntimeRef.current?.initializeGreeting(nextIndex);
     return true;
@@ -26113,6 +26124,10 @@ export function App() {
 
   generateTavernCommandMessageRef.current = async (messages, triggerMessage) => {
     const requestSessionId = activeChatSessionIdRef.current;
+    // Tavern /sys generation treats the messages supplied by the card script
+    // as authoritative. Rebuild Pi from those messages instead of resuming a
+    // stale tree that may predate a role-card binding or greeting replacement.
+    await resetPiSession(requestSessionId);
     const generatedMessage = await generateAssistantForMessages(messages, { kind: "user" }, {
       automaticTrigger: true,
       generationPrompt: triggerMessage.content,
