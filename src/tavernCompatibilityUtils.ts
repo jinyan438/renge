@@ -10,6 +10,7 @@ export type ParsedTavernSlashCommand =
       system: boolean;
       hidden: boolean;
       compact: boolean;
+      generate: boolean;
     }
   | {
       type: "echo";
@@ -108,6 +109,7 @@ export function parseTavernSlashCommand(command: string): ParsedTavernSlashComma
           system: false,
           hidden: false,
           compact: false,
+          generate: hasTrigger,
         }
       : null;
   }
@@ -127,6 +129,7 @@ export function parseTavernSlashCommand(command: string): ParsedTavernSlashComma
           system: true,
           hidden: false,
           compact: parseTavernBoolean(parsed.options.compact),
+          generate: true,
         }
       : null;
   }
@@ -146,6 +149,7 @@ export function parseTavernSlashCommand(command: string): ParsedTavernSlashComma
           system: true,
           hidden: true,
           compact: parseTavernBoolean(parsed.options.compact, true),
+          generate: false,
         }
       : null;
   }

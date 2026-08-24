@@ -4329,7 +4329,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "});",
     "const requestParentCommand = (operation, data = {}) => new Promise((resolve, reject) => {",
     "  const requestId = `${previewId}:${Date.now()}:${++commandRequestSequence}`;",
-    "  const timeoutMs = operation === \"generate\" ? 10 * 60 * 1000 : 15000;",
+    "  const timeoutMs = operation === \"generate\" || operation === \"triggerSlash\" ? 10 * 60 * 1000 : 15000;",
     "  const timeoutId = setTimeout(() => {",
     "    pendingCommandRequests.delete(requestId);",
     "    reject(new Error(`Renge 命令执行超时：${String(operation)}`));",
@@ -12494,6 +12494,11 @@ export function App() {
   >(() => {
     throw new Error("酒馆斜杠命令接口尚未初始化。");
   });
+  const generateTavernCommandMessageRef = useRef<
+    (messages: ChatMessage[], triggerMessage: ChatMessage) => Promise<ChatMessage | null>
+  >(async () => {
+    throw new Error("酒馆命令生成接口尚未初始化。");
+  });
   const selectRoleplayGreetingRef = useRef<
     (requestedIndex: number) => boolean | Promise<boolean>
   >(() => false);
@@ -12974,12 +12979,15 @@ export function App() {
       return true;
     };
 
-    const appendTavernCommandMessage = (
+    const appendTavernCommandMessage = async (
       parsed: Extract<
         NonNullable<ReturnType<typeof parseTavernSlashCommand>>,
         { type: "message" }
       >,
     ) => {
+      if (parsed.generate && activeChatAbortControllerRef.current) {
+        throw new Error("已有生成任务正在运行，请等待完成或先停止当前生成。");
+      }
       const extra = {
         ...(parsed.name ? { tavernName: parsed.name } : {}),
         ...(parsed.system ? { tavernIsSystem: true } : {}),
@@ -12994,33 +13002,36 @@ export function App() {
         ...(parsed.role === "user" ? { sender: { kind: "user" as const } } : {}),
         ...(Object.keys(extra).length > 0 ? { extra } : {}),
       };
-      commitChatMessages((current) => [...current, message]);
-      window.setTimeout(() => {
-        const index = chatMessagesRef.current.findIndex((candidate) => candidate.id === message.id);
-        if (index < 0) return;
-        emitTavernEvent(
-          parsed.role === "user"
-            ? TAVERN_EVENTS.MESSAGE_SENT
-            : TAVERN_EVENTS.MESSAGE_RECEIVED,
-          index,
-        );
-        emitTavernEvent(TAVERN_EVENTS.MESSAGE_RENDERED, index);
-        emitTavernEvent(
-          parsed.role === "user"
-            ? TAVERN_EVENTS.USER_MESSAGE_RENDERED
-            : TAVERN_EVENTS.CHARACTER_MESSAGE_RENDERED,
-          index,
-        );
-      }, 0);
+      const nextMessages = [...chatMessagesRef.current, message];
+      commitChatMessages(nextMessages);
+      const index = nextMessages.length - 1;
+      await emitTavernEvent(
+        parsed.role === "user"
+          ? TAVERN_EVENTS.MESSAGE_SENT
+          : TAVERN_EVENTS.MESSAGE_RECEIVED,
+        index,
+      );
+      await emitTavernEvent(TAVERN_EVENTS.MESSAGE_RENDERED, index);
+      await emitTavernEvent(
+        parsed.role === "user"
+          ? TAVERN_EVENTS.USER_MESSAGE_RENDERED
+          : TAVERN_EVENTS.CHARACTER_MESSAGE_RENDERED,
+        index,
+      );
+      const generatedMessage = parsed.generate
+        ? await generateTavernCommandMessageRef.current(nextMessages, message)
+        : null;
       return {
         messageId: message.id,
         message: parsed.text,
         is_system: parsed.system,
         is_hidden: parsed.hidden,
+        generation_requested: parsed.generate,
+        generatedMessageId: generatedMessage?.id ?? null,
       };
     };
 
-    const executeSlashCommand = (command: string) => {
+    const executeSlashCommand = async (command: string) => {
       const parsed = parseTavernSlashCommand(command);
       if (!parsed) throw new Error(`暂不支持该酒馆命令：${command.trim() || "空命令"}`);
       if (parsed.type === "message") {
@@ -13133,7 +13144,7 @@ export function App() {
         if (!sourceFrameEntry || typeof payload.command !== "string") return;
         const [, frame] = sourceFrameEntry;
         try {
-          const result = executeSlashCommand(payload.command);
+          const result = await executeSlashCommand(payload.command);
           frame.contentWindow?.postMessage(
             { type: "TH_TRIGGER_SLASH_RESPONSE", requestId: payload.requestId, result },
             "*",
@@ -13178,7 +13189,7 @@ export function App() {
           let result: unknown;
           if (payload.operation === "triggerSlash") {
             if (typeof payload.command !== "string") throw new Error("酒馆命令内容为空。");
-            result = executeSlashCommand(payload.command);
+            result = await executeSlashCommand(payload.command);
           } else if (payload.operation === "setInput") {
             result = writeChatInput(typeof payload.text === "string" ? payload.text : "", false, false);
           } else if (payload.operation === "appendInput") {
@@ -13457,6 +13468,9 @@ export function App() {
       window.removeEventListener("renge-native-fullscreen-exit", handleNativeFullscreenExit);
       executeTavernSlashCommandRef.current = () => {
         throw new Error("酒馆斜杠命令接口尚未初始化。");
+      };
+      generateTavernCommandMessageRef.current = async () => {
+        throw new Error("酒馆命令生成接口尚未初始化。");
       };
     };
   }, []);
@@ -23590,6 +23604,8 @@ export function App() {
       multiAgentSubPersonaIds?: string[];
       multiAgentTaskGoal?: string;
       generationAfterCommands?: boolean;
+      automaticTrigger?: boolean;
+      generationPrompt?: string;
       requestSessionId?: string;
       continuationMessageId?: string;
       dialogueRewriteMessageId?: string;
@@ -23683,7 +23699,9 @@ export function App() {
         ? { kind: "persona", personaId: responderPersona.id }
         : undefined;
     activeUserRequestTextRef.current =
-      [...nextMessages].reverse().find((message) => message.role === "user")?.content ?? "";
+      options.generationPrompt ??
+      [...nextMessages].reverse().find((message) => message.role === "user")?.content ??
+      "";
     const requestProvider = options.requestProvider ?? chatProvider;
     const requestModelId =
       options.requestModelId?.trim() || getEffectiveProviderModelId(requestProvider);
@@ -23716,9 +23734,13 @@ export function App() {
 
     try {
       const generationPrompt =
-        [...nextMessages].reverse().find((message) => message.role === "user")?.content ?? "";
+        options.generationPrompt ??
+        [...nextMessages].reverse().find((message) => message.role === "user")?.content ??
+        "";
       const generationType = options.exposeHeartbeatTools
         ? "quiet"
+        : options.automaticTrigger
+          ? "normal"
         : options.multiAgentIndex !== undefined ||
             options.multiAgentSupervisorMode ||
             isContinuation ||
@@ -23732,7 +23754,8 @@ export function App() {
         {
           prompt: generationPrompt,
           user_input: generationPrompt,
-          automatic_trigger: options.exposeHeartbeatTools === true,
+          automatic_trigger:
+            options.automaticTrigger === true || options.exposeHeartbeatTools === true,
           quiet_prompt: options.exposeHeartbeatTools ? generationPrompt : "",
         },
         false,
@@ -24668,7 +24691,7 @@ export function App() {
             personas,
             userProfile,
           ),
-          buildChatSenderContextPrompt(nextMessages, personas, subAgent),
+          buildChatSenderContextPrompt(messagesForApi, personas, subAgent),
           subAgentWorldBookPrompt,
           toolSystemPrompt,
           mcpToolsSystemPrompt,
@@ -26088,6 +26111,41 @@ export function App() {
     }
   };
 
+  generateTavernCommandMessageRef.current = async (messages, triggerMessage) => {
+    const requestSessionId = activeChatSessionIdRef.current;
+    const generatedMessage = await generateAssistantForMessages(messages, { kind: "user" }, {
+      automaticTrigger: true,
+      generationPrompt: triggerMessage.content,
+      requestSessionId,
+      statusMessage: "酒馆系统消息已写入，正在生成回复...",
+      streamingStatusMessage: "正在根据酒馆系统消息生成回复...",
+      successMessage: "酒馆系统消息已处理，回复生成完成。",
+    });
+    if (!generatedMessage) return null;
+    const currentMessage = getMessagesForSession(requestSessionId).find(
+      (message) => message.id === generatedMessage.id,
+    ) ?? generatedMessage;
+    if (!currentMessage.content.trim()) return currentMessage;
+    const statusBarResult = await updateStatusBarAfterAssistant({
+      sessionId: requestSessionId,
+      assistantMessageId: currentMessage.id,
+      sourceMessageIds: [triggerMessage.id],
+      latestUser: triggerMessage.content,
+      finalAssistant: currentMessage.content,
+    });
+    if (activeChatSessionIdRef.current === requestSessionId) {
+      setChatStatus({
+        status: statusBarResult.error ? "warning" : "success",
+        message: statusBarResult.error
+          ? `酒馆系统消息已生成回复，但状态栏未更新：${statusBarResult.error}`
+          : statusBarResult.updated > 0
+            ? `酒馆系统消息已生成回复，状态栏已更新 ${statusBarResult.updated} 项。`
+            : "酒馆系统消息已处理，回复生成完成。",
+      });
+    }
+    return currentMessage;
+  };
+
   const handleChatAttachmentChange = async (files: FileList | null) => {
     const selectedFiles = Array.from(files ?? []);
     if (chatAttachmentInputRef.current) {
@@ -27068,7 +27126,9 @@ export function App() {
         isImageGenerationRequest ||
         (!useImageRecognitionMcp && canProviderReceiveImageUrl(chatProvider, requestModelId));
       const suppressAttachmentTransferTool = false;
-      let messagesForApi = nextMessages;
+      let messagesForApi = nextMessages.filter(
+        (message) => !isTavernHiddenMessage(message),
+      );
       if (useImageRecognitionMcp && imageRecognitionMcpTool) {
         const imageRecognitionContext = await describeImageAttachmentsWithMcp(
           imageRecognitionMcpTool,
@@ -27078,7 +27138,7 @@ export function App() {
         );
         throwIfChatAborted(abortSignal);
         if (imageRecognitionContext) {
-          messagesForApi = nextMessages.map((message) =>
+          messagesForApi = messagesForApi.map((message) =>
             message.id === userMessage.id
               ? {
                   ...message,
@@ -27141,8 +27201,8 @@ export function App() {
           : "";
       const chatSenderContextPrompt =
         chatMode === "persona"
-          ? buildChatSenderContextPrompt(nextMessages, personas, chatPersona)
-          : buildChatSenderContextPrompt(nextMessages, personas);
+          ? buildChatSenderContextPrompt(messagesForApi, personas, chatPersona)
+          : buildChatSenderContextPrompt(messagesForApi, personas);
       const toolSystemPrompt = [
         activeLlmContextSettings.workspaceTools ? activePiWorkspaceToolsSystemPrompt : "",
         activeLlmContextSettings.browserTools && window.rengeDesktop?.isElectron

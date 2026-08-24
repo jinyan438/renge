@@ -28,6 +28,7 @@ test("parses system narrator commands with Markdown payloads and options", () =>
       system: true,
       hidden: false,
       compact: true,
+      generate: true,
     },
   );
 });
@@ -41,6 +42,7 @@ test("parses comments as hidden system messages", () => {
     system: true,
     hidden: true,
     compact: true,
+    generate: false,
   });
 });
 
@@ -59,7 +61,12 @@ test("keeps the supported composer and trigger command behavior", () => {
     system: false,
     hidden: false,
     compact: false,
+    generate: false,
   });
+  assert.equal(
+    parseTavernSlashCommand('/sendas name="旁白角色" 内容 | /trigger')?.generate,
+    true,
+  );
 });
 
 test("extracts Tavern context headers from same-line code fences", () => {
