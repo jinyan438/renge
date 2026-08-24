@@ -8,6 +8,7 @@ import {
   FolderOpen,
   GripVertical,
   Globe,
+  HeartPulse,
   Pencil,
   Plus,
   RefreshCw,
@@ -115,6 +116,23 @@ export type StatusBarSidebarProps = {
     proactive: boolean,
     onResponderSelected: (responder: WechatContact) => void,
   ) => Promise<WechatGroupSendMessageResult>;
+  heartbeat: {
+    enabled: boolean;
+    intervalMinutes: number;
+    event: string;
+    loopLimit: number | null;
+    runCount: number;
+    nextRunAt?: string;
+  };
+  chatHeartbeatReminderVisible: boolean;
+  onHeartbeatChange: (patch: {
+    enabled?: boolean;
+    intervalMinutes?: number;
+    event?: string;
+    loopLimit?: number | null;
+    resetRunCount?: boolean;
+  }) => void;
+  onHeartbeatReminderVisibleChange: (visible: boolean) => void;
 };
 
 type StatusBarCssProperties = CSSProperties & {
@@ -122,7 +140,14 @@ type StatusBarCssProperties = CSSProperties & {
   "--right-sidebar-width"?: string;
 };
 
-type RightSidebarToolId = "phone" | "review" | "terminal" | "browser" | "files" | "status";
+type RightSidebarToolId =
+  | "phone"
+  | "review"
+  | "terminal"
+  | "browser"
+  | "files"
+  | "status"
+  | "heartbeat";
 type RightSidebarViewId = "menu" | RightSidebarToolId;
 
 const RIGHT_SIDEBAR_DEFAULT_WIDTH = 360;
@@ -169,6 +194,13 @@ const RIGHT_SIDEBAR_TOOLS = [
     label: "状态栏",
     description: "查看会话中的动态状态",
     icon: Activity,
+    available: true,
+  },
+  {
+    id: "heartbeat",
+    label: "心跳",
+    description: "按间隔自动检查待执行事件",
+    icon: HeartPulse,
     available: true,
   },
 ] as const satisfies ReadonlyArray<{
@@ -381,6 +413,16 @@ function formatUpdatedAt(value: string) {
   return new Date(timestamp).toLocaleString("zh-CN", {
     month: "2-digit",
     day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatHeartbeatRunTime(value?: string) {
+  if (!value) return "未安排";
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "未安排";
+  return new Date(timestamp).toLocaleTimeString("zh-CN", {
     hour: "2-digit",
     minute: "2-digit",
   });
@@ -853,6 +895,10 @@ export function StatusBarSidebar({
   onWechatGenerateReply,
   onWechatQueueGroupMessage,
   onWechatGenerateGroupReply,
+  heartbeat,
+  chatHeartbeatReminderVisible,
+  onHeartbeatChange,
+  onHeartbeatReminderVisibleChange,
 }: StatusBarSidebarProps) {
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
   const [requestedTerminalId, setRequestedTerminalId] = useState("");
@@ -2135,6 +2181,163 @@ export function StatusBarSidebar({
               </span>
               <time dateTime={state.updatedAt}>{formatUpdatedAt(state.updatedAt)}</time>
             </footer>
+          </section>
+        ) : activeToolId === "heartbeat" ? (
+          <section className="right-tool-content heartbeat-tool-content" aria-label="会话心跳">
+            <header className="right-tool-page-header">
+              <button
+                className="right-tool-page-back"
+                onClick={() => setActiveToolId("menu")}
+                type="button"
+              >
+                <ArrowLeft size={16} />
+                <span>心跳</span>
+              </button>
+              <button
+                aria-label="关闭右侧栏"
+                onClick={() => onCollapsedChange(true)}
+                title="关闭右侧栏"
+                type="button"
+              >
+                <X size={16} />
+              </button>
+            </header>
+            <div className="heartbeat-sidebar-body">
+              <div className="heartbeat-sidebar-intro">
+                <span className="heartbeat-sidebar-icon" aria-hidden="true">
+                  <HeartPulse size={19} />
+                </span>
+                <div>
+                  <strong>会话心跳</strong>
+                  <p>
+                    {heartbeat.event.trim()
+                      ? "按间隔自动检查待执行事件"
+                      : "先填写待执行事件，再开启自动检查"}
+                  </p>
+                </div>
+              </div>
+
+              <div className="heartbeat-sidebar-card">
+                <div className="heartbeat-panel-heading">
+                  <div>
+                    <strong>运行设置</strong>
+                    <small>{chatSessionId ? "设置会保存到当前会话" : "请先打开一个会话"}</small>
+                  </div>
+                  <label
+                    className={`heartbeat-toggle ${heartbeat.enabled ? "active" : ""}`}
+                    title={
+                      heartbeat.event.trim() && chatSessionId
+                        ? "开启/关闭当前会话心跳"
+                        : "先填写心跳事件并打开一个会话"
+                    }
+                  >
+                    <input
+                      aria-label="启用会话心跳"
+                      type="checkbox"
+                      checked={heartbeat.enabled}
+                      disabled={!chatSessionId || !heartbeat.event.trim()}
+                      onChange={(event) =>
+                        onHeartbeatChange({
+                          enabled: event.target.checked,
+                          resetRunCount: true,
+                        })
+                      }
+                    />
+                    <HeartPulse size={15} />
+                    <span>{heartbeat.enabled ? "已开启" : "已关闭"}</span>
+                  </label>
+                </div>
+
+                <label className="heartbeat-field compact">
+                  <span>间隔</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={24 * 60}
+                    value={heartbeat.intervalMinutes}
+                    disabled={!chatSessionId}
+                    onChange={(event) =>
+                      onHeartbeatChange({
+                        intervalMinutes: Number(event.target.value),
+                        resetRunCount: true,
+                      })
+                    }
+                  />
+                  <small>分钟</small>
+                </label>
+
+                <label className="heartbeat-field">
+                  <span>待执行事件</span>
+                  <textarea
+                    rows={4}
+                    value={heartbeat.event}
+                    disabled={!chatSessionId}
+                    placeholder="例如：检查构建是否完成，未完成则继续修复并重新测试"
+                    onChange={(event) =>
+                      onHeartbeatChange({
+                        event: event.target.value,
+                        resetRunCount: true,
+                      })
+                    }
+                  />
+                </label>
+
+                <label className="heartbeat-check">
+                  <input
+                    type="checkbox"
+                    checked={heartbeat.loopLimit !== null}
+                    disabled={!chatSessionId}
+                    onChange={(event) =>
+                      onHeartbeatChange({
+                        loopLimit: event.target.checked ? heartbeat.loopLimit ?? 3 : null,
+                        resetRunCount: true,
+                      })
+                    }
+                  />
+                  <span>限制循环次数</span>
+                </label>
+
+                <label className="heartbeat-check">
+                  <input
+                    type="checkbox"
+                    checked={chatHeartbeatReminderVisible}
+                    onChange={(event) =>
+                      onHeartbeatReminderVisibleChange(event.target.checked)
+                    }
+                  />
+                  <span>显示心跳检查提醒气泡</span>
+                </label>
+
+                <label className="heartbeat-field compact">
+                  <span>次数</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={heartbeat.loopLimit ?? 3}
+                    disabled={!chatSessionId || heartbeat.loopLimit === null}
+                    onChange={(event) =>
+                      onHeartbeatChange({
+                        loopLimit: Number(event.target.value),
+                        resetRunCount: true,
+                      })
+                    }
+                  />
+                  <small>{heartbeat.loopLimit === null ? "无限" : "次"}</small>
+                </label>
+
+                <div className="heartbeat-status-line">
+                  <span>
+                    已执行 {heartbeat.runCount}
+                    {heartbeat.loopLimit === null ? " / 无限" : ` / ${heartbeat.loopLimit}`}
+                  </span>
+                  <span>下次 {formatHeartbeatRunTime(heartbeat.nextRunAt)}</span>
+                </div>
+              </div>
+
+              <p className="heartbeat-sidebar-note">
+                心跳会在当前会话空闲时自动触发，并将待执行事件交给 AI 检查。
+              </p>
+            </div>
           </section>
         ) : (
           <section

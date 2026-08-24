@@ -2551,16 +2551,6 @@ function getHeartbeatNextRunAt(intervalMinutes: number) {
   return new Date(Date.now() + intervalMinutes * 60 * 1000).toISOString();
 }
 
-function formatHeartbeatTime(value?: string) {
-  if (!value) return "未安排";
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return "未安排";
-  return new Date(timestamp).toLocaleTimeString("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 function applyHeartbeatPatch(
   currentHeartbeat: ChatHeartbeatConfig,
   patch: ChatHeartbeatPatch,
@@ -35533,114 +35523,6 @@ export function App() {
                 )}
                 <span>右侧栏</span>
               </button>
-              <details className="heartbeat-menu">
-                <summary className="ghost-action" title="心跳设置">
-                  <Settings2 size={16} />
-                  心跳
-                </summary>
-                <div className="heartbeat-panel">
-                  <div className="heartbeat-panel-heading">
-                    <div>
-                      <strong>会话心跳</strong>
-                      <small>{activeHeartbeat.event.trim() ? "按间隔自动检查待执行事件" : "先填写待执行事件"}</small>
-                    </div>
-                    <label
-                      className={`heartbeat-toggle ${activeHeartbeat.enabled ? "active" : ""}`}
-                      title={activeHeartbeat.event.trim() ? "开启/关闭当前会话心跳" : "先填写心跳事件"}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={activeHeartbeat.enabled}
-                        disabled={!activeChatSession || !activeHeartbeat.event.trim()}
-                        onChange={(event) =>
-                          updateActiveHeartbeat({
-                            enabled: event.target.checked,
-                            resetRunCount: true,
-                          })
-                        }
-                      />
-                      <RefreshCw size={15} />
-                      <span>{activeHeartbeat.enabled ? "已开启" : "已关闭"}</span>
-                    </label>
-                  </div>
-                  <label className="heartbeat-field compact">
-                    <span>间隔</span>
-                    <input
-                      type="number"
-                      min={MIN_HEARTBEAT_INTERVAL_MINUTES}
-                      max={MAX_HEARTBEAT_INTERVAL_MINUTES}
-                      value={activeHeartbeat.intervalMinutes}
-                      onChange={(event) =>
-                        updateActiveHeartbeat({
-                          intervalMinutes: Number(event.target.value),
-                          resetRunCount: true,
-                        })
-                      }
-                    />
-                    <small>分钟</small>
-                  </label>
-                  <label className="heartbeat-field">
-                    <span>待执行事件</span>
-                    <textarea
-                      rows={3}
-                      value={activeHeartbeat.event}
-                      placeholder="例如：检查构建是否完成，未完成则继续修复并重新测试"
-                      onChange={(event) =>
-                        updateActiveHeartbeat({
-                          event: event.target.value,
-                          resetRunCount: true,
-                        })
-                      }
-                    />
-                  </label>
-                  <label className="heartbeat-check">
-                    <input
-                      type="checkbox"
-                      checked={activeHeartbeat.loopLimit !== null}
-                      onChange={(event) =>
-                        updateActiveHeartbeat({
-                          loopLimit: event.target.checked ? activeHeartbeat.loopLimit ?? 3 : null,
-                          resetRunCount: true,
-                        })
-                      }
-                    />
-                    <span>限制循环次数</span>
-                  </label>
-                  <label className="heartbeat-check">
-                    <input
-                      type="checkbox"
-                      checked={chatHeartbeatReminderVisible}
-                      onChange={(event) =>
-                        setChatHeartbeatReminderVisible(event.target.checked)
-                      }
-                    />
-                    <span>显示心跳检查提醒气泡</span>
-                  </label>
-                  <label className="heartbeat-field compact">
-                    <span>次数</span>
-                    <input
-                      type="number"
-                      min={1}
-                      value={activeHeartbeat.loopLimit ?? 3}
-                      disabled={activeHeartbeat.loopLimit === null}
-                      onChange={(event) =>
-                        updateActiveHeartbeat({
-                          loopLimit: Number(event.target.value),
-                          resetRunCount: true,
-                        })
-                      }
-                    />
-                    <small>{activeHeartbeat.loopLimit === null ? "无限" : "次"}</small>
-                  </label>
-                  <div className="heartbeat-status-line">
-                    <span>
-                      已执行 {activeHeartbeat.runCount}
-                      {activeHeartbeat.loopLimit === null ? " / 无限" : ` / ${activeHeartbeat.loopLimit}`}
-                    </span>
-                    <span>下次 {formatHeartbeatTime(activeHeartbeat.nextRunAt)}</span>
-                  </div>
-                </div>
-              </details>
               <button
                 type="button"
                 className="ghost-action"
@@ -37112,6 +36994,10 @@ export function App() {
           onWechatGenerateReply={generateWechatReply}
           onWechatQueueGroupMessage={queueWechatGroupMessage}
           onWechatGenerateGroupReply={generateWechatGroupReply}
+          heartbeat={activeHeartbeat}
+          chatHeartbeatReminderVisible={chatHeartbeatReminderVisible}
+          onHeartbeatChange={updateActiveHeartbeat}
+          onHeartbeatReminderVisibleChange={setChatHeartbeatReminderVisible}
         />
       </PortfolioDesktopWindow>
   ) : null;

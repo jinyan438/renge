@@ -4459,33 +4459,6 @@ summary:focus-visible {
   background: #E6F8EF;
 }
 
-.heartbeat-menu {
-  position: relative;
-}
-
-.heartbeat-menu > summary {
-  list-style: none;
-}
-
-.heartbeat-menu > summary::-webkit-details-marker {
-  display: none;
-}
-
-.heartbeat-panel {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: 20;
-  display: grid;
-  width: min(360px, calc(100vw - 24px));
-  gap: 12px;
-  padding: 14px;
-  border: 1px solid #d9dee8;
-  border-radius: 8px;
-  background: #ffffff;
-  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.16);
-}
-
 .heartbeat-panel-heading {
   display: flex;
   align-items: center;
@@ -9935,19 +9908,8 @@ input[type="range"] {
     font-size: 12px;
   }
 
-  .heartbeat-toggle span,
-  .heartbeat-menu > summary span {
+  .heartbeat-toggle span {
     display: none;
-  }
-
-  .heartbeat-panel {
-    position: fixed;
-    top: 56px;
-    right: 10px;
-    left: 10px;
-    width: auto;
-    max-height: calc(100dvh - 76px);
-    overflow: auto;
   }
 
   .chat-thread {
