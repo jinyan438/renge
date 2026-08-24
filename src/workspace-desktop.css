@@ -1248,6 +1248,61 @@ button.portfolio-window-light.close:hover {
   transform: none !important;
 }
 
+.managed-window-snap-preview {
+  position: fixed;
+  z-index: 1;
+  top: 8px;
+  bottom: 8px;
+  width: calc(50vw - 12px);
+  box-sizing: border-box;
+  border: 1px solid rgba(255, 255, 255, 0.84);
+  border-radius: 18px;
+  background: rgba(226, 235, 248, 0.58);
+  box-shadow:
+    0 22px 64px rgba(20, 36, 60, 0.18),
+    0 0 0 1px rgba(103, 133, 175, 0.22) inset;
+  backdrop-filter: blur(18px) saturate(125%);
+  pointer-events: none;
+  animation: managed-window-snap-preview-in 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.managed-window-snap-preview.is-left {
+  left: 8px;
+}
+
+.managed-window-snap-preview.is-right {
+  right: 8px;
+}
+
+.managed-window-layer .portfolio-window-shell[data-window-snap],
+.managed-window-layer .settings-window-shell[data-window-snap] {
+  position: fixed !important;
+  top: 8px !important;
+  bottom: 8px !important;
+  width: calc(50vw - 12px) !important;
+  height: auto !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: none !important;
+  max-height: none !important;
+  box-sizing: border-box;
+  border-radius: 18px;
+  transform: none !important;
+  animation: managed-window-snap-in 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.managed-window-layer .portfolio-window-shell[data-window-snap="left"],
+.managed-window-layer .settings-window-shell[data-window-snap="left"] {
+  right: auto !important;
+  left: 8px !important;
+}
+
+.managed-window-layer .portfolio-window-shell[data-window-snap="right"],
+.managed-window-layer .settings-window-shell[data-window-snap="right"] {
+  right: 8px !important;
+  left: auto !important;
+}
+
 button.portfolio-window-light.minimize,
 button.settings-window-light.minimize,
 .desktop-home-window-light.minimize {
@@ -1309,6 +1364,43 @@ button.settings-window-light.maximize:hover,
   transform: none !important;
 }
 
+.desktop-home-window-drag-layer {
+  position: relative;
+  z-index: 2;
+}
+
+.desktop-home-window-drag-layer[data-window-snap] {
+  position: fixed !important;
+  top: 8px !important;
+  bottom: 8px !important;
+  width: calc(50vw - 12px) !important;
+  height: auto !important;
+  box-sizing: border-box;
+  transform: none !important;
+  animation: managed-window-snap-in 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.desktop-home-window-drag-layer[data-window-snap="left"] {
+  right: auto !important;
+  left: 8px !important;
+}
+
+.desktop-home-window-drag-layer[data-window-snap="right"] {
+  right: 8px !important;
+  left: auto !important;
+}
+
+.desktop-home-window-drag-layer[data-window-snap] .desktop-home-window-shell {
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: none !important;
+  max-height: none !important;
+  box-sizing: border-box;
+  border-radius: 18px !important;
+}
+
 .desktop-home-window-shell.is-maximized {
   position: fixed !important;
   inset: 8px !important;
@@ -1345,7 +1437,35 @@ button.settings-window-light.maximize:hover,
   }
 }
 
+@keyframes managed-window-snap-preview-in {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes managed-window-snap-in {
+  from {
+    opacity: 0.92;
+    transform: scale(0.99);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 @media (max-width: 820px) {
+  .managed-window-snap-preview {
+    display: none;
+  }
+
   .portfolio-desktop-shell.managed-window-layer,
   .settings-shell.settings-desktop.managed-window-layer {
     padding: 0;
@@ -1364,6 +1484,8 @@ button.settings-window-light.maximize:hover,
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .managed-window-snap-preview,
+  .desktop-home-window-drag-layer[data-window-snap],
   .managed-window-layer .portfolio-window-shell,
   .managed-window-layer .settings-window-shell {
     animation: none;

@@ -208,6 +208,7 @@ import {
 } from "./promptTemplateExtension";
 import { DesktopHome, type HomeDestination } from "./DesktopHome";
 import { WindowResizeHandles } from "./WindowResizeHandles";
+import { WindowSnapPreview } from "./WindowSnapPreview";
 import { useWindowDrag, type WindowOffset } from "./useWindowDrag";
 import {
   containsChatAudioMarkup,
@@ -12008,6 +12009,10 @@ function PortfolioDesktopWindow({
     initialOffset,
     disabled: maximized,
   });
+  const toggleMaximized = () => {
+    titleDragHandlers.clearSnap();
+    onToggleMaximize();
+  };
   return (
     <main
       className={`portfolio-desktop-shell managed-window-layer ${
@@ -12018,6 +12023,7 @@ function PortfolioDesktopWindow({
     >
       <div className="portfolio-desktop-background" aria-hidden="true" />
       <div className="portfolio-desktop-shade" aria-hidden="true" />
+      <WindowSnapPreview side={titleDragHandlers.snapPreviewSide} />
       <section
         ref={windowRef}
         className={`portfolio-window-shell ${maximized ? "managed-window-maximized" : ""}`}
@@ -12029,12 +12035,15 @@ function PortfolioDesktopWindow({
           targetRef={windowRef}
           minWidth={720}
           minHeight={480}
-          disabled={maximized}
+          disabled={maximized || titleDragHandlers.snappedSide !== null}
         />
         <header
           className="portfolio-window-bar managed-window-drag-handle"
-          onDoubleClick={onToggleMaximize}
-          {...titleDragHandlers}
+          onDoubleClick={toggleMaximized}
+          onPointerDown={titleDragHandlers.onPointerDown}
+          onPointerMove={titleDragHandlers.onPointerMove}
+          onPointerUp={titleDragHandlers.onPointerUp}
+          onPointerCancel={titleDragHandlers.onPointerCancel}
         >
           <div className="portfolio-window-lights">
             <button
@@ -12056,7 +12065,7 @@ function PortfolioDesktopWindow({
               className="portfolio-window-light maximize"
               title={maximized ? "还原窗口" : "最大化窗口"}
               aria-label={maximized ? "还原窗口" : "最大化窗口"}
-              onClick={onToggleMaximize}
+              onClick={toggleMaximized}
             />
           </div>
           <span className="portfolio-window-caption">Renge Agent Lab — {title}</span>
@@ -31220,6 +31229,7 @@ export function App() {
       >
         <div className="settings-desktop-background" aria-hidden="true" />
         <div className="settings-desktop-shade" aria-hidden="true" />
+        <WindowSnapPreview side={settingsTitleDragHandlers.snapPreviewSide} />
         <section
           ref={settingsWindowRef}
           className={`settings-window-shell ${
@@ -31235,12 +31245,21 @@ export function App() {
             targetRef={settingsWindowRef}
             minWidth={720}
             minHeight={480}
-            disabled={settingsWindowState.maximized}
+            disabled={
+              settingsWindowState.maximized ||
+              settingsTitleDragHandlers.snappedSide !== null
+            }
           />
           <header
             className="settings-window-bar managed-window-drag-handle"
-            onDoubleClick={() => toggleMaximizeWindow("settings")}
-            {...settingsTitleDragHandlers}
+            onDoubleClick={() => {
+              settingsTitleDragHandlers.clearSnap();
+              toggleMaximizeWindow("settings");
+            }}
+            onPointerDown={settingsTitleDragHandlers.onPointerDown}
+            onPointerMove={settingsTitleDragHandlers.onPointerMove}
+            onPointerUp={settingsTitleDragHandlers.onPointerUp}
+            onPointerCancel={settingsTitleDragHandlers.onPointerCancel}
           >
             <div className="settings-window-lights">
               <button
@@ -31265,7 +31284,10 @@ export function App() {
                 className="settings-window-light maximize"
                 title={settingsWindowState.maximized ? "还原设置窗口" : "最大化设置窗口"}
                 aria-label={settingsWindowState.maximized ? "还原设置窗口" : "最大化设置窗口"}
-                onClick={() => toggleMaximizeWindow("settings")}
+                onClick={() => {
+                  settingsTitleDragHandlers.clearSnap();
+                  toggleMaximizeWindow("settings");
+                }}
               />
             </div>
             <span className="settings-window-caption">Renge Agent Lab — 设置</span>

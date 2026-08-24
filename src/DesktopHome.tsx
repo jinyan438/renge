@@ -28,6 +28,8 @@ import rengeBrandModuleIcon from "./assets/module-icons/renge-brand.png";
 import settingsModuleIcon from "./assets/module-icons/settings.png";
 import defaultDesktopWallpaper from "./assets/wallpapers/default-desktop.webp";
 import { WindowResizeHandles } from "./WindowResizeHandles";
+import { WindowSnapPreview } from "./WindowSnapPreview";
+import { useWindowDrag } from "./useWindowDrag";
 
 const BACKGROUND_IMAGE = defaultDesktopWallpaper;
 
@@ -759,10 +761,12 @@ function WindowShell({
   const reducedMotion = useReducedMotion();
   const windowRef = useRef<HTMLElement | null>(null);
   const dragLayerRef = useRef<HTMLDivElement | null>(null);
-  const offsetRef = useRef<DragOffset>({ x: 0, y: 0 });
-  const dragRef = useRef({ active: false, pointerId: -1, startX: 0, startY: 0, x: 0, y: 0 });
-  const frameRef = useRef<number | null>(null);
-  const pendingRef = useRef<DragOffset>({ x: 0, y: 0 });
+  const titleDragHandlers = useWindowDrag({
+    targetRef: dragLayerRef,
+    initialOffset: { x: 0, y: 0 },
+    disabled: maximized,
+    visibleTitleWidth: 96,
+  });
 
   useEffect(() => {
     if (reducedMotion) {
@@ -781,60 +785,9 @@ function WindowShell({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
-  useEffect(
-    () => () => {
-      if (frameRef.current !== null) window.cancelAnimationFrame(frameRef.current);
-    },
-    [],
-  );
-
-  const onTitlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (
-      maximized ||
-      event.button !== 0 ||
-      (event.target as HTMLElement).closest("button")
-    ) {
-      return;
-    }
-    event.currentTarget.setPointerCapture(event.pointerId);
-    dragRef.current = {
-      active: true,
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      x: offsetRef.current.x,
-      y: offsetRef.current.y,
-    };
-    if (dragLayerRef.current) dragLayerRef.current.style.willChange = "transform";
-  };
-
-  const onTitlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = dragRef.current;
-    if (!drag.active || drag.pointerId !== event.pointerId) return;
-    pendingRef.current = {
-      x: drag.x + event.clientX - drag.startX,
-      y: drag.y + event.clientY - drag.startY,
-    };
-    if (frameRef.current === null) {
-      frameRef.current = window.requestAnimationFrame(() => {
-        frameRef.current = null;
-        const node = dragLayerRef.current;
-        if (!node) return;
-        const { x, y } = pendingRef.current;
-        node.style.transform = `translate3d(${x}px, ${y}px, 0)`;
-      });
-    }
-  };
-
-  const onTitlePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = dragRef.current;
-    if (!drag.active || drag.pointerId !== event.pointerId) return;
-    drag.active = false;
-    offsetRef.current = pendingRef.current;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    if (dragLayerRef.current) dragLayerRef.current.style.willChange = "auto";
+  const toggleMaximized = () => {
+    titleDragHandlers.clearSnap();
+    setMaximized((current) => !current);
   };
 
   return createPortal(
@@ -851,6 +804,7 @@ function WindowShell({
         pointerEvents: "none",
       }}
     >
+      <WindowSnapPreview side={titleDragHandlers.snapPreviewSide} />
       <div
         ref={dragLayerRef}
         className={`desktop-home-window-drag-layer ${maximized ? "is-maximized" : ""}`}
@@ -888,14 +842,14 @@ function WindowShell({
             targetRef={windowRef}
             minWidth={320}
             minHeight={240}
-            disabled={maximized}
+            disabled={maximized || titleDragHandlers.snappedSide !== null}
           />
           <div
-            onPointerDown={onTitlePointerDown}
-            onPointerMove={onTitlePointerMove}
-            onPointerUp={onTitlePointerUp}
-            onPointerCancel={onTitlePointerUp}
-            onDoubleClick={() => setMaximized((current) => !current)}
+            onPointerDown={titleDragHandlers.onPointerDown}
+            onPointerMove={titleDragHandlers.onPointerMove}
+            onPointerUp={titleDragHandlers.onPointerUp}
+            onPointerCancel={titleDragHandlers.onPointerCancel}
+            onDoubleClick={toggleMaximized}
             style={{
               position: "relative",
               display: "flex",
@@ -928,7 +882,7 @@ function WindowShell({
                 className="desktop-home-window-light maximize"
                 title={maximized ? "还原窗口" : "最大化窗口"}
                 aria-label={maximized ? "还原窗口" : "最大化窗口"}
-                onClick={() => setMaximized((current) => !current)}
+                onClick={toggleMaximized}
               />
             </div>
             <span
