@@ -4431,9 +4431,10 @@ summary:focus-visible {
   gap: 8px;
 }
 
-.chat-header-icon-action {
-  width: 38px;
-  height: 38px;
+.chat-header-actions .chat-header-icon-action {
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
   flex: 0 0 auto;
   padding: 0;
 }
@@ -10000,9 +10001,9 @@ input[type="range"] {
   }
 
   .chat-header-actions .ghost-action {
-    min-height: 30px;
+    min-height: 34px;
     width: 34px;
-    height: 30px;
+    height: 34px;
     gap: 0;
     padding: 0;
     font-size: 0;
