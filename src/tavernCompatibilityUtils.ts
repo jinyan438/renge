@@ -1,5 +1,189 @@
 export type TavernCompatibilityErrorReporter = (error: unknown) => void;
 
+export type ParsedTavernSlashCommand =
+  | { type: "set-input"; text: string; append: boolean; submit: boolean }
+  | {
+      type: "message";
+      text: string;
+      role: "user" | "assistant";
+      name: string;
+      system: boolean;
+      hidden: boolean;
+      compact: boolean;
+    }
+  | {
+      type: "echo";
+      text: string;
+      title: string;
+      severity: "info" | "success" | "warning" | "error";
+      duration: number;
+    }
+  | { type: "trigger" };
+
+function readTavernCommandOption(remainder: string) {
+  const match =
+    /^(severity|title|duration|timeout|name|compact|at|return|raw)=(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|(\S+))(?:\s+|$)/i.exec(
+      remainder,
+    );
+  if (!match) return null;
+  const quotedValue = match[2] ?? match[3];
+  return {
+    name: match[1].toLowerCase(),
+    value: (quotedValue ?? match[4] ?? "").replace(/\\([\\"'])/g, "$1"),
+    length: match[0].length,
+  };
+}
+
+function readLeadingTavernCommandOptions(
+  remainder: string,
+  allowedOptions: ReadonlySet<string>,
+) {
+  const options: Record<string, string> = {};
+  let text = remainder.trim();
+  while (text) {
+    const option = readTavernCommandOption(text);
+    if (!option || !allowedOptions.has(option.name)) break;
+    options[option.name] = option.value;
+    text = text.slice(option.length).trimStart();
+  }
+  return { options, text };
+}
+
+function parseTavernBoolean(value: string | undefined, fallback = false) {
+  if (value === undefined) return fallback;
+  return /^(?:1|true|yes|on)$/i.test(value);
+}
+
+/** Parses the common message/composer commands used by character-card frontends. */
+export function parseTavernSlashCommand(command: string): ParsedTavernSlashCommand | null {
+  const normalized = command.trim();
+  if (!normalized) return null;
+  const parts = normalized.split(/\s*\|\s*(?=\/)/);
+  const primary = parts.shift()?.trim() ?? "";
+  const hasTrigger = parts.some((part) => /^\/(?:trigger|gen)\b/i.test(part.trim()));
+
+  const echoMatch = /^\/echo\b(?:\s+([\s\S]*))?$/i.exec(primary);
+  if (echoMatch) {
+    const parsed = readLeadingTavernCommandOptions(
+      echoMatch[1] ?? "",
+      new Set(["severity", "title", "duration", "timeout"]),
+    );
+    const normalizedSeverity = (parsed.options.severity ?? "").toLowerCase();
+    const severity =
+      normalizedSeverity === "success" || normalizedSeverity === "positive"
+        ? "success"
+        : normalizedSeverity === "warning" || normalizedSeverity === "warn"
+          ? "warning"
+          : normalizedSeverity === "error" ||
+              normalizedSeverity === "danger" ||
+              normalizedSeverity === "negative"
+            ? "error"
+            : "info";
+    const rawDuration = Number(parsed.options.duration ?? parsed.options.timeout ?? 0);
+    const duration =
+      Number.isFinite(rawDuration) && rawDuration > 0
+        ? Math.min(Math.round(rawDuration), 60_000)
+        : 0;
+    return {
+      type: "echo",
+      text: parsed.text,
+      title: parsed.options.title ?? "",
+      severity,
+      duration,
+    };
+  }
+
+  const sendAsMatch = /^\/sendas\b(?:\s+([\s\S]*))?$/i.exec(primary);
+  if (sendAsMatch) {
+    const parsed = readLeadingTavernCommandOptions(
+      sendAsMatch[1] ?? "",
+      new Set(["name", "raw"]),
+    );
+    return parsed.text
+      ? {
+          type: "message",
+          text: parsed.text,
+          role: "assistant",
+          name: parsed.options.name ?? "",
+          system: false,
+          hidden: false,
+          compact: false,
+        }
+      : null;
+  }
+
+  const systemMatch = /^\/(?:sys|narrator)\b(?:\s+([\s\S]*))?$/i.exec(primary);
+  if (systemMatch) {
+    const parsed = readLeadingTavernCommandOptions(
+      systemMatch[1] ?? "",
+      new Set(["name", "compact", "at", "return", "raw"]),
+    );
+    return parsed.text
+      ? {
+          type: "message",
+          text: parsed.text,
+          role: "assistant",
+          name: parsed.options.name ?? "System",
+          system: true,
+          hidden: false,
+          compact: parseTavernBoolean(parsed.options.compact),
+        }
+      : null;
+  }
+
+  const commentMatch = /^\/(?:comment|note)\b(?:\s+([\s\S]*))?$/i.exec(primary);
+  if (commentMatch) {
+    const parsed = readLeadingTavernCommandOptions(
+      commentMatch[1] ?? "",
+      new Set(["name", "compact", "at", "return", "raw"]),
+    );
+    return parsed.text
+      ? {
+          type: "message",
+          text: parsed.text,
+          role: "assistant",
+          name: parsed.options.name ?? "Comment",
+          system: true,
+          hidden: true,
+          compact: parseTavernBoolean(parsed.options.compact, true),
+        }
+      : null;
+  }
+
+  const setInputMatch = /^\/setinput(?:\s+([\s\S]*))?$/i.exec(primary);
+  if (setInputMatch) {
+    return {
+      type: "set-input",
+      text: setInputMatch[1] ?? "",
+      append: false,
+      submit: hasTrigger,
+    };
+  }
+
+  const appendInputMatch = /^\/appendinput(?:\s+([\s\S]*))?$/i.exec(primary);
+  if (appendInputMatch) {
+    return {
+      type: "set-input",
+      text: appendInputMatch[1] ?? "",
+      append: true,
+      submit: hasTrigger,
+    };
+  }
+
+  const sendMatch = /^\/send(?:\s+([\s\S]*))?$/i.exec(primary);
+  if (sendMatch) {
+    return {
+      type: "set-input",
+      text: sendMatch[1] ?? "",
+      append: false,
+      submit: true,
+    };
+  }
+
+  if (/^\/(?:trigger|gen)\b/i.test(primary)) return { type: "trigger" };
+  return null;
+}
+
 export type TavernContextHeaderSegment =
   | { type: "text"; content: string }
   | {

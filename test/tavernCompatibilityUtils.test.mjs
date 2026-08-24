@@ -8,11 +8,59 @@ import {
   getTavernCallerScriptSource,
   installLegacyTavernSendControls,
   installTavernPresetManagerControls,
+  parseTavernSlashCommand,
   proxyTavernModuleUrls,
   resolveTavernButtonOwnerId,
   resolveTavernCallerScriptId,
   splitTavernContextHeaders,
 } from "../src/tavernCompatibilityUtils.ts";
+
+test("parses system narrator commands with Markdown payloads and options", () => {
+  assert.deepEqual(
+    parseTavernSlashCommand(
+      '/sys name="心海校规系统" compact=true [校园档案建立] **姓名**: 萧宸 **性别**: 男',
+    ),
+    {
+      type: "message",
+      text: "[校园档案建立] **姓名**: 萧宸 **性别**: 男",
+      role: "assistant",
+      name: "心海校规系统",
+      system: true,
+      hidden: false,
+      compact: true,
+    },
+  );
+});
+
+test("parses comments as hidden system messages", () => {
+  assert.deepEqual(parseTavernSlashCommand("/comment 仅供作者查看"), {
+    type: "message",
+    text: "仅供作者查看",
+    role: "assistant",
+    name: "Comment",
+    system: true,
+    hidden: true,
+    compact: true,
+  });
+});
+
+test("keeps the supported composer and trigger command behavior", () => {
+  assert.deepEqual(parseTavernSlashCommand("/setinput 继续调查 | /trigger"), {
+    type: "set-input",
+    text: "继续调查",
+    append: false,
+    submit: true,
+  });
+  assert.deepEqual(parseTavernSlashCommand('/sendas name="旁白角色" 内容'), {
+    type: "message",
+    text: "内容",
+    role: "assistant",
+    name: "旁白角色",
+    system: false,
+    hidden: false,
+    compact: false,
+  });
+});
 
 test("extracts Tavern context headers from same-line code fences", () => {
   const segments = splitTavernContextHeaders(

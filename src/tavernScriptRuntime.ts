@@ -3743,6 +3743,10 @@ export class TavernScriptRuntime {
   private formatHelperMessage(message: TavernRuntimeMessage, index: number) {
     const character = this.adapter.getCharacter();
     const extra = cloneValue(message.extra ?? {});
+    const isSystem = extra.tavernIsSystem === true;
+    const isHidden = extra.tavernIsHidden === true;
+    const tavernName =
+      typeof extra.tavernName === "string" ? extra.tavernName.trim() : "";
     const swipeState = getTavernMessageSwipeState(
       message,
       this.adapter.getGreetingState?.(),
@@ -3753,13 +3757,13 @@ export class TavernScriptRuntime {
       mesid: index,
       id: index,
       name:
-        message.role === "user"
+        tavernName || (message.role === "user"
           ? this.adapter.getUserName() || "User"
-          : character?.name || "Assistant",
-      role: message.role,
-      is_user: message.role === "user",
-      is_system: false,
-      is_hidden: false,
+          : character?.name || "Assistant"),
+      role: isSystem ? "system" : message.role,
+      is_user: message.role === "user" && !isSystem,
+      is_system: isSystem,
+      is_hidden: isHidden,
       message: message.content,
       mes: message.content,
       data: this.localizePlaceholderImages(cloneValue(message.variables ?? {})),
@@ -3864,6 +3868,28 @@ export class TavernScriptRuntime {
         if (previousHas) extra[key] = cloneValue(previousExtra[key]);
         else delete extra[key];
       });
+      if (rawMessage.is_system === true || rawMessage.role === "system") {
+        extra.tavernIsSystem = true;
+      } else {
+        delete extra.tavernIsSystem;
+      }
+      if (rawMessage.is_hidden === true) extra.tavernIsHidden = true;
+      else delete extra.tavernIsHidden;
+      const defaultName =
+        previous?.role === "user"
+          ? this.adapter.getUserName() || "User"
+          : this.adapter.getCharacter()?.name || "Assistant";
+      if (
+        typeof rawMessage.name === "string" &&
+        rawMessage.name.trim() &&
+        (rawMessage.is_system === true ||
+          rawMessage.is_hidden === true ||
+          rawMessage.name.trim() !== defaultName)
+      ) {
+        extra.tavernName = rawMessage.name.trim();
+      } else {
+        delete extra.tavernName;
+      }
       const swipeIndex = Number(rawMessage.swipe_id) || 0;
       const variableValue = Array.isArray(rawMessage.variables)
         ? rawMessage.variables[swipeIndex]

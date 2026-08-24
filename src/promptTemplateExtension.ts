@@ -538,12 +538,29 @@ async function createTemplateContext(
     );
   const compatSillyTavern = {
     getContext: () => ({
-      chat: bridgeMessages.map((message) => ({
-        ...lodash.cloneDeep(message),
-        is_user: message.role === "user",
-        is_system: message.role === "system",
-        mes: message.content,
-      })),
+      chat: bridgeMessages.map((message) => {
+        const messageExtra = isRecord(message.extra) ? message.extra : {};
+        const isSystem =
+          message.role === "system" || messageExtra.tavernIsSystem === true;
+        const isHidden = messageExtra.tavernIsHidden === true;
+        const tavernName =
+          typeof messageExtra.tavernName === "string"
+            ? messageExtra.tavernName.trim()
+            : "";
+        return {
+          ...lodash.cloneDeep(message),
+          role: isSystem ? "system" : message.role,
+          name:
+            tavernName ||
+            (message.role === "user"
+              ? runtime.options.userName
+              : runtime.options.assistantName),
+          is_user: message.role === "user" && !isSystem,
+          is_system: isSystem,
+          is_hidden: isHidden,
+          mes: message.content,
+        };
+      }),
       characters: character ? [{ name: character.name, data: lodash.cloneDeep(character) }] : [],
       characterId: character ? "0" : undefined,
       name1: runtime.options.userName,

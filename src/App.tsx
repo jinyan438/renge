@@ -160,7 +160,10 @@ import {
   renderCharacterRegexTemplate,
 } from "./characterTemplateUtils";
 import { HTML_PREVIEW_STSCRIPT_COMPAT_SOURCE } from "./htmlPreviewStscript";
-import { splitTavernContextHeaders } from "./tavernCompatibilityUtils";
+import {
+  parseTavernSlashCommand,
+  splitTavernContextHeaders,
+} from "./tavernCompatibilityUtils";
 import {
   getTavernGreetingSwipeIndex,
   getTavernMessageSwipeState,
@@ -641,6 +644,20 @@ type ChatMessage = {
   extra?: Record<string, unknown>;
 };
 
+function isTavernSystemMessage(message: Pick<ChatMessage, "extra">) {
+  return message.extra?.tavernIsSystem === true;
+}
+
+function isTavernHiddenMessage(message: Pick<ChatMessage, "extra">) {
+  return message.extra?.tavernIsHidden === true;
+}
+
+function getTavernMessageName(message: Pick<ChatMessage, "extra">) {
+  return typeof message.extra?.tavernName === "string"
+    ? message.extra.tavernName.trim()
+    : "";
+}
+
 type ContextRuntimeUsage = {
   sessionId: string;
   modelId: string;
@@ -688,6 +705,9 @@ function getChatMessageContextSignature(message: ChatMessage) {
           result: message.toolVisualization.result ?? null,
         }
       : null,
+    tavernIsSystem: isTavernSystemMessage(message),
+    tavernIsHidden: isTavernHiddenMessage(message),
+    tavernName: getTavernMessageName(message),
     attachments: (message.attachments ?? []).map((attachment) => ({
       id: attachment.id,
       name: attachment.name,
@@ -3841,112 +3861,6 @@ function enqueueHeavyHtmlPreviewMount(mount: () => void) {
   };
 }
 
-type ParsedTavernSlashCommand =
-  | { type: "set-input"; text: string; append: boolean; submit: boolean }
-  | { type: "send-as"; text: string; name: string }
-  | {
-      type: "echo";
-      text: string;
-      title: string;
-      severity: "info" | "success" | "warning" | "error";
-      duration: number;
-    }
-  | { type: "trigger" };
-
-function parseTavernSlashCommand(command: string): ParsedTavernSlashCommand | null {
-  const normalized = command.trim();
-  if (!normalized) return null;
-  const parts = normalized.split(/\s*\|\s*(?=\/)/);
-  const primary = parts.shift()?.trim() ?? "";
-  const hasTrigger = parts.some((part) => /^\/(?:trigger|gen)\b/i.test(part.trim()));
-
-  const echoMatch = /^\/echo\b(?:\s+([\s\S]*))?$/i.exec(primary);
-  if (echoMatch) {
-    let remainder = (echoMatch[1] ?? "").trim();
-    let severity: "info" | "success" | "warning" | "error" = "info";
-    let title = "";
-    let duration = 0;
-    while (remainder) {
-      const optionMatch =
-        /^(severity|title|duration|timeout)=(?:"([^"]*)"|'([^']*)'|(\S+))(?:\s+|$)/i.exec(
-          remainder,
-        );
-      if (!optionMatch) break;
-      const optionName = optionMatch[1].toLowerCase();
-      const optionValue = optionMatch[2] ?? optionMatch[3] ?? optionMatch[4] ?? "";
-      if (optionName === "severity") {
-        const normalizedSeverity = optionValue.toLowerCase();
-        if (normalizedSeverity === "success" || normalizedSeverity === "positive") {
-          severity = "success";
-        } else if (normalizedSeverity === "warning" || normalizedSeverity === "warn") {
-          severity = "warning";
-        } else if (
-          normalizedSeverity === "error" ||
-          normalizedSeverity === "danger" ||
-          normalizedSeverity === "negative"
-        ) {
-          severity = "error";
-        } else {
-          severity = "info";
-        }
-      } else if (optionName === "title") {
-        title = optionValue;
-      } else {
-        const numericDuration = Number(optionValue);
-        if (Number.isFinite(numericDuration) && numericDuration > 0) {
-          duration = Math.min(Math.round(numericDuration), 60_000);
-        }
-      }
-      remainder = remainder.slice(optionMatch[0].length).trimStart();
-    }
-    return { type: "echo", text: remainder, title, severity, duration };
-  }
-
-  const sendAsMatch = /^\/sendas\b\s*([\s\S]*)$/i.exec(primary);
-  if (sendAsMatch) {
-    let remainder = sendAsMatch[1].trim();
-    let name = "";
-    const nameMatch = /^name=(?:"([^"]*)"|'([^']*)'|(\S+))\s*/i.exec(remainder);
-    if (nameMatch) {
-      name = nameMatch[1] ?? nameMatch[2] ?? nameMatch[3] ?? "";
-      remainder = remainder.slice(nameMatch[0].length);
-    }
-    return remainder ? { type: "send-as", text: remainder, name } : null;
-  }
-
-  const setInputMatch = /^\/setinput(?:\s+([\s\S]*))?$/i.exec(primary);
-  if (setInputMatch) {
-    return {
-      type: "set-input",
-      text: setInputMatch[1] ?? "",
-      append: false,
-      submit: hasTrigger,
-    };
-  }
-
-  const appendInputMatch = /^\/appendinput(?:\s+([\s\S]*))?$/i.exec(primary);
-  if (appendInputMatch) {
-    return {
-      type: "set-input",
-      text: appendInputMatch[1] ?? "",
-      append: true,
-      submit: hasTrigger,
-    };
-  }
-
-  const sendMatch = /^\/send(?:\s+([\s\S]*))?$/i.exec(primary);
-  if (sendMatch) {
-    return {
-      type: "set-input",
-      text: sendMatch[1] ?? "",
-      append: false,
-      submit: true,
-    };
-  }
-
-  if (/^\/(?:trigger|gen)\b/i.test(primary)) return { type: "trigger" };
-  return null;
-}
 const htmlPreviewStyle = [
   '<style data-renge-html-preview="true">',
   ":root{--TH-viewport-height:100vh;--renge-parent-viewport-height:100vh;--renge-parent-viewport-width:100vw;--renge-chat-quote-color:#E18A24;}",
@@ -4521,10 +4435,13 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  const swipes = Array.isArray(storedSwipeState.swipes) && storedSwipeState.swipes.length > 0 ? clone(storedSwipeState.swipes) : [message.content];",
     "  const swipesData = Array.isArray(storedSwipeState.swipesData) ? clone(storedSwipeState.swipesData) : [clone(variables)];",
     "  const swipesInfo = Array.isArray(storedSwipeState.swipesInfo) ? clone(storedSwipeState.swipesInfo) : [clone(extra)];",
+    "  const isSystem = extra.tavernIsSystem === true;",
+    "  const isHidden = extra.tavernIsHidden === true;",
+    "  const tavernName = typeof extra.tavernName === 'string' ? extra.tavernName.trim() : '';",
     "  return {",
     "    message_id: index, mesid: index, id: index,",
-    "    name: message.role === \"user\" ? snapshot.userName : snapshot.characterName,",
-    "    role: message.role, is_user: message.role === \"user\", is_system: false, is_hidden: false,",
+    "    name: tavernName || (message.role === \"user\" ? snapshot.userName : snapshot.characterName),",
+    "    role: isSystem ? \"system\" : message.role, is_user: message.role === \"user\" && !isSystem, is_system: isSystem, is_hidden: isHidden,",
     "    message: message.content, mes: message.content, data: variables,",
     "    variables: sillyTavern ? [clone(variables)] : variables, extra, swipe_id: swipeId,",
     "    swipes, swipes_data: swipesData, swipes_info: swipesInfo,",
@@ -8059,7 +7976,7 @@ function buildChatMessageForApi(
         )
       : formattedContent;
   return {
-    role: message.role,
+    role: isTavernSystemMessage(message) ? "system" : message.role,
     ...(senderPersona ? { name: getAgentApiName(senderPersona.id) } : {}),
     content: replayableContent,
     ...(message.role === "assistant" && options.replayReasoningContent
@@ -12482,8 +12399,12 @@ export function App() {
   } | null>(null);
   const [chatChoiceDrafts, setChatChoiceDrafts] = useState<Record<string, string>>({});
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const contextVisibleChatMessages = useMemo(
+    () => chatMessages.filter((message) => !isTavernHiddenMessage(message)),
+    [chatMessages],
+  );
   const contextMeterChatMessages = useThrottledValue(
-    chatMessages,
+    contextVisibleChatMessages,
     CONTEXT_METER_REFRESH_INTERVAL_MS,
   );
   const [chatSessions, setChatSessions] = useState<ChatSession[]>(loadChatSessions);
@@ -13053,30 +12974,57 @@ export function App() {
       return true;
     };
 
-    const appendSendAsMessage = (text: string, name: string) => {
+    const appendTavernCommandMessage = (
+      parsed: Extract<
+        NonNullable<ReturnType<typeof parseTavernSlashCommand>>,
+        { type: "message" }
+      >,
+    ) => {
+      const extra = {
+        ...(parsed.name ? { tavernName: parsed.name } : {}),
+        ...(parsed.system ? { tavernIsSystem: true } : {}),
+        ...(parsed.hidden ? { tavernIsHidden: true } : {}),
+        ...(parsed.compact ? { tavernCompact: true } : {}),
+      };
       const message: ChatMessage = {
         id: crypto.randomUUID(),
-        role: "assistant",
-        content: text,
+        role: parsed.role,
+        content: parsed.text,
         createdAt: new Date().toISOString(),
-        ...(name ? { extra: { sendAsName: name } } : {}),
+        ...(parsed.role === "user" ? { sender: { kind: "user" as const } } : {}),
+        ...(Object.keys(extra).length > 0 ? { extra } : {}),
       };
       commitChatMessages((current) => [...current, message]);
       window.setTimeout(() => {
         const index = chatMessagesRef.current.findIndex((candidate) => candidate.id === message.id);
         if (index < 0) return;
-        emitTavernEvent(TAVERN_EVENTS.MESSAGE_RECEIVED, index);
+        emitTavernEvent(
+          parsed.role === "user"
+            ? TAVERN_EVENTS.MESSAGE_SENT
+            : TAVERN_EVENTS.MESSAGE_RECEIVED,
+          index,
+        );
         emitTavernEvent(TAVERN_EVENTS.MESSAGE_RENDERED, index);
-        emitTavernEvent(TAVERN_EVENTS.CHARACTER_MESSAGE_RENDERED, index);
+        emitTavernEvent(
+          parsed.role === "user"
+            ? TAVERN_EVENTS.USER_MESSAGE_RENDERED
+            : TAVERN_EVENTS.CHARACTER_MESSAGE_RENDERED,
+          index,
+        );
       }, 0);
-      return { messageId: message.id };
+      return {
+        messageId: message.id,
+        message: parsed.text,
+        is_system: parsed.system,
+        is_hidden: parsed.hidden,
+      };
     };
 
     const executeSlashCommand = (command: string) => {
       const parsed = parseTavernSlashCommand(command);
       if (!parsed) throw new Error(`暂不支持该酒馆命令：${command.trim() || "空命令"}`);
-      if (parsed.type === "send-as") {
-        return appendSendAsMessage(parsed.text, parsed.name);
+      if (parsed.type === "message") {
+        return appendTavernCommandMessage(parsed);
       }
       if (parsed.type === "echo") {
         const message = parsed.title
@@ -17031,22 +16979,28 @@ export function App() {
       if (session && typeof chatMetadata.file_name !== "string") {
         chatMetadata.file_name = session.id;
       }
-      const messages = chatMessagesRef.current.map((message, index) => ({
-        ...(message.extra ?? {}),
-        message_id: index,
-        mesid: index,
-        name: message.role === "user" ? userName : characterName,
-        role: message.role,
-        is_user: message.role === "user",
-        is_system: false,
-        mes: message.content,
-        message: message.content,
-        content: message.content,
-        extra: message.extra ?? {},
-        swipe_id: 0,
-        swipes: [message.content],
-        variables: [message.variables ?? {}],
-      }));
+      const messages = chatMessagesRef.current.map((message, index) => {
+        const tavernName = getTavernMessageName(message);
+        const isSystem = isTavernSystemMessage(message);
+        const isHidden = isTavernHiddenMessage(message);
+        return {
+          ...(message.extra ?? {}),
+          message_id: index,
+          mesid: index,
+          name: tavernName || (message.role === "user" ? userName : characterName),
+          role: isSystem ? "system" : message.role,
+          is_user: message.role === "user" && !isSystem,
+          is_system: isSystem,
+          is_hidden: isHidden,
+          mes: message.content,
+          message: message.content,
+          content: message.content,
+          extra: message.extra ?? {},
+          swipe_id: 0,
+          swipes: [message.content],
+          variables: [message.variables ?? {}],
+        };
+      });
       const saveChat = async () => {
         const reservedKeys = new Set([
           "message_id",
@@ -17055,6 +17009,7 @@ export function App() {
           "role",
           "is_user",
           "is_system",
+          "is_hidden",
           "mes",
           "message",
           "content",
@@ -17082,6 +17037,25 @@ export function App() {
             ...(message.extra ?? {}),
             ...(isObjectRecord(tavernMessage.extra) ? tavernMessage.extra : {}),
           };
+          if (tavernMessage.is_system === true || tavernMessage.role === "system") {
+            nextExtra.tavernIsSystem = true;
+          } else {
+            delete nextExtra.tavernIsSystem;
+          }
+          if (tavernMessage.is_hidden === true) nextExtra.tavernIsHidden = true;
+          else delete nextExtra.tavernIsHidden;
+          const defaultTavernName = message.role === "user" ? userName : characterName;
+          if (
+            typeof tavernMessage.name === "string" &&
+            tavernMessage.name.trim() &&
+            (tavernMessage.is_system === true ||
+              tavernMessage.is_hidden === true ||
+              tavernMessage.name.trim() !== defaultTavernName)
+          ) {
+            nextExtra.tavernName = tavernMessage.name.trim();
+          } else {
+            delete nextExtra.tavernName;
+          }
           Object.entries(tavernMessage).forEach(([key, value]) => {
             if (!reservedKeys.has(key)) nextExtra[key] = value;
           });
@@ -23804,7 +23778,9 @@ export function App() {
             delegationRoster,
             requestContextSettings,
           );
-      let messagesForApi = nextMessages;
+      let messagesForApi = nextMessages.filter(
+        (message) => !isTavernHiddenMessage(message),
+      );
       if (useImageRecognitionMcp && imageRecognitionMcpTool && latestImageUserMessage) {
         const imageRecognitionContext = await describeImageAttachmentsWithMcp(
           imageRecognitionMcpTool,
@@ -23814,7 +23790,7 @@ export function App() {
         );
         throwIfChatAborted(abortSignal);
         if (imageRecognitionContext) {
-          messagesForApi = nextMessages.map((message) =>
+          messagesForApi = messagesForApi.map((message) =>
             message.id === latestImageUserMessage.id
               ? {
                   ...message,
@@ -23868,8 +23844,8 @@ export function App() {
           : "";
       const chatSenderContextPrompt =
         responseMode === "persona"
-          ? buildChatSenderContextPrompt(nextMessages, personas, responderPersona)
-          : buildChatSenderContextPrompt(nextMessages, personas);
+          ? buildChatSenderContextPrompt(messagesForApi, personas, responderPersona)
+          : buildChatSenderContextPrompt(messagesForApi, personas);
       const sequenceMultiAgentSystemPrompt =
         responderPersona && options.multiAgentPersonaIds && options.multiAgentPersonaIds.length > 1
           ? [
@@ -26702,10 +26678,13 @@ export function App() {
       const maxChatHistory = Number.isFinite(Number(normalizedConfig.max_chat_history))
         ? Math.max(0, Math.floor(Number(normalizedConfig.max_chat_history)))
         : chatMessagesRef.current.length;
-      const chatHistoryMessages = chatMessagesRef.current
-        .slice(Math.max(0, chatMessagesRef.current.length - maxChatHistory))
+      const visibleChatHistoryMessages = chatMessagesRef.current.filter(
+        (message) => !isTavernHiddenMessage(message),
+      );
+      const chatHistoryMessages = visibleChatHistoryMessages
+        .slice(Math.max(0, visibleChatHistoryMessages.length - maxChatHistory))
         .map((message): ChatApiMessage => ({
-          role: message.role,
+          role: isTavernSystemMessage(message) ? "system" : message.role,
           content: message.content,
         }));
       let worldInfoInserted = false;
@@ -35774,6 +35753,9 @@ export function App() {
                   activeRoleplayGreetings.length > 1 &&
                   renderedSegmentIndex === renderedSegments.length - 1;
                 const messageSender = message.role === "user" ? (message.sender ?? { kind: "user" as const }) : undefined;
+                const tavernSystemMessage = isTavernSystemMessage(message);
+                const tavernHiddenMessage = isTavernHiddenMessage(message);
+                const tavernMessageName = getTavernMessageName(message);
                 const assistantPersona =
                   message.role === "assistant"
                     ? getAssistantMessagePersona(
@@ -35784,7 +35766,7 @@ export function App() {
                     : null;
                 const wechatMetadata = getWechatMessageMetadata(message);
                 const messageName =
-                  wechatMetadata
+                  tavernMessageName || (wechatMetadata
                     ? message.role === "assistant"
                       ? wechatMetadata.groupId
                         ? `${wechatMetadata.contactName || "群成员"} · ${wechatMetadata.groupName}`
@@ -35796,7 +35778,7 @@ export function App() {
                     ? getChatSenderName(messageSender, personas, userProfile)
                     : chatMode === "roleplay" && activeSessionRoleplayCard
                       ? activeSessionRoleplayCard.name
-                      : assistantPersona?.name ?? "AI";
+                      : assistantPersona?.name ?? "AI");
                 const messageAvatarImage =
                   wechatMetadata
                     ? message.role === "assistant"
@@ -35818,12 +35800,16 @@ export function App() {
 
                 return (
                   <article
-                    className={`chat-message mes ${message.role}`}
+                    className={`chat-message mes ${
+                      tavernSystemMessage ? "system assistant" : message.role
+                    }${tavernHiddenMessage ? " tavern-hidden-message" : ""}`}
                     key={id}
                     {...{
                       mesid: messageIndex,
-                      is_user: message.role === "user" ? "true" : "false",
-                      is_system: "false",
+                      is_user:
+                        message.role === "user" && !tavernSystemMessage ? "true" : "false",
+                      is_system: tavernSystemMessage ? "true" : "false",
+                      is_hidden: tavernHiddenMessage ? "true" : "false",
                     }}
                   >
                     {showTime && (
@@ -35844,7 +35830,7 @@ export function App() {
                             <span className="chat-wechat-avatar-fallback" aria-hidden="true">
                               {wechatMetadata.contactName.slice(0, 1).toUpperCase()}
                             </span>
-                          ) : messageSender?.kind === "system" ? (
+                          ) : tavernSystemMessage || messageSender?.kind === "system" ? (
                             <Settings2 size={16} />
                           ) : messageSender?.kind === "persona" ? (
                             <Bot size={16} />
