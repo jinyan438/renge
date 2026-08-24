@@ -4081,6 +4081,11 @@ summary:focus-visible {
   padding-top: 2px;
 }
 
+.local-tools-panel-clear-only {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .chat-workspace-picker {
   display: grid;
   flex: 0 0 auto;

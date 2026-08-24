@@ -14,6 +14,7 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  Server,
   Smartphone,
   SquareTerminal,
   Trash2,
@@ -86,6 +87,7 @@ export type StatusBarSidebarProps = {
   manualUpdateRunning?: boolean;
   fileBrowserSource?: FileBrowserSource | null;
   onChooseWorkspace?: () => void | Promise<void>;
+  onConnectPc: () => void;
   onBrowserComment?: (comment: BrowserPageComment) => void;
   terminalWorkspaceKey?: string;
   terminalWorkspacePath?: string;
@@ -141,6 +143,7 @@ type StatusBarCssProperties = CSSProperties & {
 };
 
 type RightSidebarToolId =
+  | "computer"
   | "phone"
   | "review"
   | "terminal"
@@ -154,6 +157,13 @@ const RIGHT_SIDEBAR_DEFAULT_WIDTH = 360;
 const RIGHT_SIDEBAR_WIDTH_STORAGE_KEY = "renge-chat-right-sidebar-width";
 
 const RIGHT_SIDEBAR_TOOLS = [
+  {
+    id: "computer",
+    label: "连接电脑",
+    description: "连接电脑端工作区与传输文件",
+    icon: Server,
+    available: true,
+  },
   {
     id: "phone",
     label: "手机",
@@ -883,6 +893,7 @@ export function StatusBarSidebar({
   manualUpdateRunning = false,
   fileBrowserSource = null,
   onChooseWorkspace,
+  onConnectPc,
   onBrowserComment,
   terminalWorkspaceKey = "default",
   terminalWorkspacePath = "",
@@ -2047,7 +2058,17 @@ export function StatusBarSidebar({
                 {RIGHT_SIDEBAR_TOOLS.map((tool) => {
                   const ToolIcon = tool.icon;
                   return (
-                    <button key={tool.id} onClick={() => setActiveToolId(tool.id)} type="button">
+                    <button
+                      key={tool.id}
+                      onClick={() => {
+                        if (tool.id === "computer") {
+                          onConnectPc();
+                          return;
+                        }
+                        setActiveToolId(tool.id);
+                      }}
+                      type="button"
+                    >
                       <span className="right-tool-icon" aria-hidden="true">
                         <ToolIcon size={17} />
                       </span>

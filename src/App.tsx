@@ -35390,12 +35390,8 @@ export function App() {
             </div>
           </div>
 
-          <div className="local-tools-panel">
-            <button type="button" className="local-workspace-button" onClick={openPcBrowser}>
-              <Server size={16} />
-              连接电脑
-            </button>
-            {localWorkspaceHandle && (
+          {localWorkspaceHandle && (
+            <div className="local-tools-panel local-tools-panel-clear-only">
               <button
                 type="button"
                 className="session-icon-button local-workspace-clear"
@@ -35404,8 +35400,8 @@ export function App() {
               >
                 <X size={14} />
               </button>
-            )}
-          </div>
+            </div>
+          )}
 
           {mcpServers.length > 0 && (
             <div className="mcp-chat-status">
@@ -37034,6 +37030,7 @@ export function App() {
           manualUpdateRunning={manualStatusBarUpdateRunning}
           fileBrowserSource={fileBrowserSource}
           onChooseWorkspace={authorizeLocalWorkspace}
+          onConnectPc={openPcBrowser}
           onBrowserComment={addBrowserCommentToComposer}
           terminalWorkspaceKey={activeChatSession?.workspaceKey ?? DEFAULT_WORKSPACE_KEY}
           terminalWorkspacePath={activeChatSession?.workspacePath ?? ""}
