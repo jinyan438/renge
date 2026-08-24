@@ -12089,6 +12089,7 @@ export function App() {
     useState(() =>
       typeof window !== "undefined" && window.matchMedia("(max-width: 820px)").matches,
     );
+  const [chatClearConfirmationOpen, setChatClearConfirmationOpen] = useState(false);
   const [mobilePromptPreviewOpen, setMobilePromptPreviewOpen] = useState(false);
 
   useEffect(() => {
@@ -35084,6 +35085,74 @@ export function App() {
   const chatWindowState = openWindows.find(
     (windowState) => windowState.id === "chat",
   );
+  const confirmClearActiveChatSession = () => {
+    const greeting =
+      chatMode === "roleplay" && activeSessionRoleplayCard
+        ? createRoleplayGreetingMessage(
+            activeSessionRoleplayCard,
+            activeChatSession?.roleplayGreetingIndex ?? 0,
+          )
+        : null;
+    const nextMessages = greeting ? [greeting] : [];
+    commitActiveSessionMessagesAndStatusBar(
+      activeChatSessionIdRef.current,
+      nextMessages,
+      (current) => rebuildStatusBarStateFromMessages(current, nextMessages),
+    );
+    setChatStatus({ status: "idle", message: "" });
+    setChatClearConfirmationOpen(false);
+  };
+  const chatClearConfirmationModal =
+    chatClearConfirmationOpen && chatWindowState && !chatWindowState.minimized ? (
+      <div
+        className="modal-backdrop chat-clear-confirmation-backdrop"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="chat-clear-confirmation-title"
+        aria-describedby="chat-clear-confirmation-description"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            setChatClearConfirmationOpen(false);
+          }
+        }}
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget) {
+            setChatClearConfirmationOpen(false);
+          }
+        }}
+      >
+        <section className="chat-clear-confirmation-modal">
+          <span className="chat-clear-confirmation-icon" aria-hidden="true">
+            <Trash2 size={20} />
+          </span>
+          <div className="chat-clear-confirmation-copy">
+            <h2 id="chat-clear-confirmation-title">清空当前会话？</h2>
+            <p id="chat-clear-confirmation-description">
+              当前对话内容将被清空，相关动态状态会重新计算。此操作无法撤销。
+            </p>
+          </div>
+          <div className="chat-clear-confirmation-actions">
+            <button
+              type="button"
+              className="ghost-action"
+              autoFocus
+              onClick={() => setChatClearConfirmationOpen(false)}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className="chat-clear-confirm-button"
+              onClick={confirmClearActiveChatSession}
+            >
+              <Trash2 size={15} />
+              确认清空
+            </button>
+          </div>
+        </section>
+      </div>
+    ) : null;
   const roleplayGreetingSelectorModal =
     roleplayGreetingSelectorOpen &&
     chatWindowState &&
@@ -35506,7 +35575,17 @@ export function App() {
             <div className="chat-header-actions">
               <button
                 type="button"
-                className={`ghost-action chat-status-sidebar-toggle ${
+                className="ghost-action chat-header-icon-action chat-clear-action"
+                disabled={chatMessages.length === 0 || chatStatus.status === "loading"}
+                title="清空当前会话"
+                aria-label="清空当前会话"
+                onClick={() => setChatClearConfirmationOpen(true)}
+              >
+                <X size={16} />
+              </button>
+              <button
+                type="button"
+                className={`ghost-action chat-header-icon-action chat-status-sidebar-toggle ${
                   activeStatusBarState.enabled ? "active-status-bar" : ""
                 }`}
                 title={chatStatusSidebarCollapsed ? "展开右侧栏" : "隐藏右侧栏"}
@@ -35521,33 +35600,6 @@ export function App() {
                 ) : (
                   <PanelRightClose size={16} />
                 )}
-                <span>右侧栏</span>
-              </button>
-              <button
-                type="button"
-                className="ghost-action"
-                disabled={chatMessages.length === 0 || chatStatus.status === "loading"}
-                title="清空当前会话"
-                aria-label="清空当前会话"
-                onClick={() => {
-                  const greeting =
-                    chatMode === "roleplay" && activeSessionRoleplayCard
-                      ? createRoleplayGreetingMessage(
-                          activeSessionRoleplayCard,
-                          activeChatSession?.roleplayGreetingIndex ?? 0,
-                        )
-                      : null;
-                  const nextMessages = greeting ? [greeting] : [];
-                  commitActiveSessionMessagesAndStatusBar(
-                    activeChatSessionIdRef.current,
-                    nextMessages,
-                    (current) => rebuildStatusBarStateFromMessages(current, nextMessages),
-                  );
-                  setChatStatus({ status: "idle", message: "" });
-                }}
-              >
-                <X size={16} />
-                清空
               </button>
             </div>
           </header>
@@ -37567,11 +37619,13 @@ export function App() {
       {studioWindow}
       {(avatarCropModal ||
         pcBrowserModal ||
+        chatClearConfirmationModal ||
         roleplayGreetingSelectorModal ||
         dataClearConfirmationModal) && (
         <div className="managed-global-overlays portfolio-desktop-shell">
           {avatarCropModal}
           {pcBrowserModal}
+          {chatClearConfirmationModal}
           {roleplayGreetingSelectorModal}
           {dataClearConfirmationModal}
         </div>
