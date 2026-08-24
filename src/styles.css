@@ -3137,73 +3137,6 @@ summary:focus-visible {
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
 }
 
-.chat-worldbook-control {
-  position: relative;
-  color: #d9e3f2;
-}
-
-.chat-worldbook-control > summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 40px;
-  padding: 0 11px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
-  background: rgba(15, 23, 42, 0.8);
-  cursor: pointer;
-  list-style: none;
-}
-
-.chat-worldbook-control > summary::-webkit-details-marker {
-  display: none;
-}
-
-.chat-worldbook-control > summary span {
-  color: #a7b0c3;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.chat-worldbook-control > summary strong {
-  overflow: hidden;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chat-worldbook-options {
-  display: grid;
-  gap: 6px;
-  max-height: 220px;
-  overflow: auto;
-  margin-top: 6px;
-  padding: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
-  background: #172033;
-}
-
-.chat-worldbook-options .tool-toggle {
-  min-width: 0;
-  padding: 6px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.chat-worldbook-options .tool-toggle span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chat-worldbook-options p {
-  margin: 4px;
-  color: #a7b0c3;
-  font-size: 12px;
-}
-
 .regex-settings-grid {
   grid-template-columns: 320px minmax(0, 1fr);
 }
@@ -4440,6 +4373,13 @@ summary:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chat-resource-select-menu p {
+  margin: 7px;
+  color: #a7b0c3;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .chat-workspace {

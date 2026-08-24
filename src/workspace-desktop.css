@@ -822,35 +822,7 @@ button.portfolio-window-light.close:hover {
   accent-color: #0066dd;
 }
 
-.portfolio-window-body .chat-worldbook-control {
-  color: #44444a;
-}
-
-.portfolio-window-body .chat-worldbook-control > summary {
-  border-color: #d6d6dc;
-  background: rgba(255, 255, 255, 0.82);
-}
-
-.portfolio-window-body .chat-worldbook-control > summary span {
-  color: #77777d;
-}
-
-.portfolio-window-body .chat-worldbook-control > summary strong {
-  color: #3e3e44;
-}
-
-.portfolio-window-body .chat-worldbook-options {
-  border-color: #d6d6dc;
-  background: #f8f8fa;
-  box-shadow: 0 8px 20px rgba(25, 25, 30, 0.08);
-}
-
-.portfolio-window-body .chat-worldbook-options .tool-toggle {
-  background: #ffffff;
-  color: #4c4c52;
-}
-
-.portfolio-window-body .chat-worldbook-options p {
+.portfolio-window-body .chat-resource-select-menu p {
   color: #77777d;
 }
 

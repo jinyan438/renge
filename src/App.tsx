@@ -35318,17 +35318,19 @@ export function App() {
                 ))}
               </select>
             </label>
-            <details className="chat-worldbook-control">
-              <summary>
-                <span>世界书</span>
-                <strong>{activeWorldBookIds.length > 0 ? `${activeWorldBookIds.length} 本已启用` : "未启用"}</strong>
+            <details className="chat-resource-select">
+              <summary title="选择世界书">
+                <BookOpen size={15} />
+                <strong>世界书</strong>
+                <span>{activeWorldBookIds.length}</span>
+                <ChevronDown size={14} />
               </summary>
-              <div className="chat-worldbook-options">
+              <div className="chat-resource-select-menu" role="group" aria-label="选择世界书">
                 {worldBooks.length === 0 ? (
                   <p>请先在设置的“世界书”中导入或新建。</p>
                 ) : (
                   worldBooks.map((worldBook) => (
-                    <label className="tool-toggle" key={worldBook.id}>
+                    <label key={worldBook.id}>
                       <input
                         type="checkbox"
                         checked={activeWorldBookIds.includes(worldBook.id)}
@@ -35340,6 +35342,58 @@ export function App() {
                 )}
               </div>
             </details>
+            {mcpServers.length > 0 && (
+              <details className="chat-resource-select">
+                <summary title="选择 MCP">
+                  <Boxes size={15} />
+                  <strong>MCP</strong>
+                  <span>{enabledMcpServers.length}</span>
+                  <ChevronDown size={14} />
+                </summary>
+                <div className="chat-resource-select-menu" role="group" aria-label="选择 MCP">
+                  {mcpServers.map((server) => (
+                    <label key={server.id}>
+                      <input
+                        type="checkbox"
+                        checked={server.enabled}
+                        onChange={(event) =>
+                          updateMcpServer(server.id, { enabled: event.target.checked })
+                        }
+                      />
+                      <span>{server.name || "未命名 MCP"}</span>
+                    </label>
+                  ))}
+                </div>
+              </details>
+            )}
+            {skills.length > 0 && (
+              <details className="chat-resource-select">
+                <summary title="选择 Skill">
+                  <Sparkles size={15} />
+                  <strong>Skill</strong>
+                  <span>{enabledSkills.length}</span>
+                  <ChevronDown size={14} />
+                </summary>
+                <div className="chat-resource-select-menu" role="group" aria-label="选择 Skill">
+                  {skills.map((skill) => (
+                    <label
+                      key={skill.id}
+                      title={!skill.piNativeValid ? "请先在设置中转换为 Pi 原生格式" : undefined}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={skill.enabled}
+                        disabled={!skill.piNativeValid}
+                        onChange={(event) =>
+                          updateSkill(skill.id, { enabled: event.target.checked })
+                        }
+                      />
+                      <span>{skill.name || "未命名 Skill"}</span>
+                    </label>
+                  ))}
+                </div>
+              </details>
+            )}
             {chatMode === "roleplay" && activeSessionRoleplayCard && (
               <div className="chat-roleplay-scope">
                 <BookOpen size={15} />
@@ -35398,59 +35452,6 @@ export function App() {
                 <X size={14} />
               </button>
             </div>
-          )}
-
-          {mcpServers.length > 0 && (
-            <details className="chat-resource-select">
-              <summary title="选择 MCP">
-                <Boxes size={15} />
-                <strong>MCP</strong>
-                <span>{enabledMcpServers.length}</span>
-                <ChevronDown size={14} />
-              </summary>
-              <div className="chat-resource-select-menu" role="group" aria-label="选择 MCP">
-                {mcpServers.map((server) => (
-                  <label key={server.id}>
-                    <input
-                      type="checkbox"
-                      checked={server.enabled}
-                      onChange={(event) =>
-                        updateMcpServer(server.id, { enabled: event.target.checked })
-                      }
-                    />
-                    <span>{server.name || "未命名 MCP"}</span>
-                  </label>
-                ))}
-              </div>
-            </details>
-          )}
-          {skills.length > 0 && (
-            <details className="chat-resource-select">
-              <summary title="选择 Skill">
-                <Sparkles size={15} />
-                <strong>Skill</strong>
-                <span>{enabledSkills.length}</span>
-                <ChevronDown size={14} />
-              </summary>
-              <div className="chat-resource-select-menu" role="group" aria-label="选择 Skill">
-                {skills.map((skill) => (
-                  <label
-                    key={skill.id}
-                    title={!skill.piNativeValid ? "请先在设置中转换为 Pi 原生格式" : undefined}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={skill.enabled}
-                      disabled={!skill.piNativeValid}
-                      onChange={(event) =>
-                        updateSkill(skill.id, { enabled: event.target.checked })
-                      }
-                    />
-                    <span>{skill.name || "未命名 Skill"}</span>
-                  </label>
-                ))}
-              </div>
-            </details>
           )}
 
           <div className="chat-session-area">
