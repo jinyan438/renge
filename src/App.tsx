@@ -12488,7 +12488,6 @@ export function App() {
   const [chatGenerationState, setChatGenerationState] =
     useState<ChatGenerationState>("idle");
   const [manualStatusBarUpdateRunning, setManualStatusBarUpdateRunning] = useState(false);
-  const [pcBrowserOpen, setPcBrowserOpen] = useState(false);
   const [pcServerUrl, setPcServerUrl] = useState(
     () => localStorage.getItem(PC_SERVER_URL_STORAGE_KEY) ?? "",
   );
@@ -20414,7 +20413,6 @@ export function App() {
   }
 
   function openPcBrowser() {
-    setPcBrowserOpen(true);
     if (pcServerUrl.trim()) {
       void loadPcDirectory(pcCurrentPath);
     }
@@ -20455,7 +20453,6 @@ export function App() {
     restoredWorkspacePathRef.current = path;
     restoredPcWorkspaceRef.current = true;
     activateWorkspaceSessions(handle);
-    setPcBrowserOpen(false);
     setChatStatus({ status: "success", message: `已连接电脑工作区：${name}` });
   }
 
@@ -29895,92 +29892,6 @@ export function App() {
     </div>
   ) : null;
 
-  const pcBrowserModal = pcBrowserOpen ? (
-    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="连接电脑工作区">
-      <section className="pc-browser-modal">
-        <div className="crop-header">
-          <h2>连接电脑工作区</h2>
-          <button
-            type="button"
-            className="icon-button flat"
-            title="关闭"
-            onClick={() => setPcBrowserOpen(false)}
-          >
-            <X size={18} />
-          </button>
-        </div>
-
-        <div className="pc-connect-row">
-          <label className="field">
-            <span>电脑地址</span>
-            <input
-              value={pcServerUrl}
-              placeholder="例如：192.168.1.20:5190"
-              onChange={(event) => setPcServerUrl(event.target.value)}
-            />
-          </label>
-          <button type="button" className="small-action" onClick={() => void loadPcDirectory("")}>
-            <Server size={16} />
-            连接
-          </button>
-        </div>
-
-        <div className={`provider-status ${pcBrowserStatus.status}`}>
-          {pcBrowserStatus.message ||
-            "电脑端先运行 npm run build && npm run serve，并确保手机和电脑在同一局域网。"}
-        </div>
-
-        <div className="pc-path-row">
-          <button
-            type="button"
-            className="ghost-action"
-            disabled={!pcCurrentPath}
-            onClick={() => void loadPcDirectory(getPcParentPath(pcCurrentPath))}
-          >
-            <ArrowLeft size={15} />
-            上级
-          </button>
-          <button type="button" className="ghost-action" onClick={() => void loadPcDirectory("")}>
-            磁盘
-          </button>
-          <div title={pcCurrentPath || "电脑磁盘"}>{pcCurrentPath || "电脑磁盘"}</div>
-        </div>
-
-        <div className="pc-entry-list">
-          {pcEntries.map((entry) => (
-            <button
-              type="button"
-              className={`pc-entry ${entry.kind}`}
-              key={entry.path}
-              disabled={entry.kind !== "directory"}
-              onClick={() => {
-                if (entry.kind === "directory") void loadPcDirectory(entry.path);
-              }}
-            >
-              {entry.kind === "directory" ? <FolderOpen size={15} /> : <FileJson size={15} />}
-              <span>{entry.name}</span>
-            </button>
-          ))}
-        </div>
-
-        <div className="crop-actions">
-          <button type="button" className="ghost-action" onClick={() => setPcBrowserOpen(false)}>
-            取消
-          </button>
-          <button
-            type="button"
-            className="small-action"
-            disabled={!pcCurrentPath}
-            onClick={() => selectPcWorkspace()}
-          >
-            <Check size={16} />
-            设为工作区
-          </button>
-        </div>
-      </section>
-    </div>
-  ) : null;
-
   if (!activePersona) {
     return <div className="boot">正在初始化人格工作台...</div>;
   }
@@ -37066,7 +36977,17 @@ export function App() {
           manualUpdateRunning={manualStatusBarUpdateRunning}
           fileBrowserSource={fileBrowserSource}
           onChooseWorkspace={authorizeLocalWorkspace}
-          onConnectPc={openPcBrowser}
+          pcConnection={{
+            serverUrl: pcServerUrl,
+            currentPath: pcCurrentPath,
+            entries: pcEntries,
+            status: pcBrowserStatus,
+            onOpen: openPcBrowser,
+            onServerUrlChange: setPcServerUrl,
+            onLoadDirectory: loadPcDirectory,
+            onNavigateUp: () => loadPcDirectory(getPcParentPath(pcCurrentPath)),
+            onSelectWorkspace: () => selectPcWorkspace(),
+          }}
           onBrowserComment={addBrowserCommentToComposer}
           terminalWorkspaceKey={activeChatSession?.workspaceKey ?? DEFAULT_WORKSPACE_KEY}
           terminalWorkspacePath={activeChatSession?.workspacePath ?? ""}
@@ -37651,13 +37572,11 @@ export function App() {
       {chatWindow}
       {studioWindow}
       {(avatarCropModal ||
-        pcBrowserModal ||
         chatClearConfirmationModal ||
         roleplayGreetingSelectorModal ||
         dataClearConfirmationModal) && (
         <div className="managed-global-overlays portfolio-desktop-shell">
           {avatarCropModal}
-          {pcBrowserModal}
           {chatClearConfirmationModal}
           {roleplayGreetingSelectorModal}
           {dataClearConfirmationModal}

@@ -9421,89 +9421,6 @@ input[type="range"] {
   box-shadow: 0 24px 60px rgba(15, 23, 42, 0.24);
 }
 
-.pc-browser-modal {
-  display: grid;
-  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
-  gap: 12px;
-  width: min(720px, 100%);
-  height: min(760px, calc(100dvh - 36px));
-  max-height: calc(100dvh - 36px);
-  min-height: 0;
-  overflow: hidden;
-  padding: 16px;
-  border: 1px solid #dfe4ec;
-  border-radius: 8px;
-  background: #ffffff;
-  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.24);
-}
-
-.pc-connect-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: end;
-}
-
-.pc-path-row {
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
-  gap: 8px;
-  align-items: center;
-}
-
-.pc-path-row div {
-  overflow: hidden;
-  color: #536074;
-  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
-  font-size: 12px;
-  font-weight: 800;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pc-entry-list {
-  display: grid;
-  align-content: start;
-  gap: 6px;
-  min-height: 0;
-  overflow: auto;
-  padding: 6px;
-  border: 1px solid #dfe4ec;
-  border-radius: 8px;
-  background: #f8fafc;
-}
-
-.pc-entry {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr);
-  gap: 8px;
-  align-items: center;
-  min-height: 34px;
-  padding: 0 9px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  color: #334155;
-  background: #ffffff;
-  text-align: left;
-}
-
-.pc-entry:disabled {
-  cursor: default;
-  opacity: 0.62;
-}
-
-.pc-entry.directory:hover {
-  border-color: #A8EBCB;
-  color: #059B4D;
-  background: #E6F8EF;
-}
-
-.pc-entry span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .crop-header {
   display: flex;
   align-items: center;
@@ -9548,10 +9465,6 @@ input[type="range"] {
   margin-top: 14px;
 }
 
-.pc-browser-modal .crop-actions {
-  margin-top: 0;
-}
-
 @media (max-width: 1180px) {
   .content-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -9577,41 +9490,6 @@ input[type="range"] {
 
   .modal-backdrop {
     padding: 10px;
-  }
-
-  .pc-browser-modal {
-    width: 100%;
-    height: calc(100dvh - 20px);
-    max-height: calc(100dvh - 20px);
-    gap: 8px;
-    padding: 10px;
-  }
-
-  .pc-connect-row {
-    grid-template-columns: 1fr;
-    gap: 7px;
-  }
-
-  .pc-path-row {
-    grid-template-columns: auto auto minmax(0, 1fr);
-    gap: 6px;
-  }
-
-  .pc-entry-list {
-    gap: 5px;
-    padding: 5px;
-  }
-
-  .pc-entry {
-    min-height: 32px;
-    padding: 0 7px;
-    font-size: 12px;
-  }
-
-  .pc-browser-modal .crop-actions {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 8px;
   }
 
   .home-topbar,

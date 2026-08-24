@@ -35,6 +35,10 @@ import { createPortal } from "react-dom";
 import { BrowserSidebarPanel } from "./BrowserSidebarPanel";
 import type { BrowserPageComment } from "./browserSidebarComments";
 import { FilesSidebarPanel, type FileBrowserSource } from "./FilesSidebarPanel";
+import {
+  PcConnectionSidebarPanel,
+  type PcConnectionSidebarControl,
+} from "./PcConnectionSidebarPanel";
 import { TerminalSidebarPanel } from "./TerminalSidebarPanel";
 import { WechatSidebar } from "./WechatSidebar";
 import { registerTerminalSidebarOpener } from "./terminalSidebarRuntime";
@@ -87,7 +91,7 @@ export type StatusBarSidebarProps = {
   manualUpdateRunning?: boolean;
   fileBrowserSource?: FileBrowserSource | null;
   onChooseWorkspace?: () => void | Promise<void>;
-  onConnectPc: () => void;
+  pcConnection: PcConnectionSidebarControl;
   onBrowserComment?: (comment: BrowserPageComment) => void;
   terminalWorkspaceKey?: string;
   terminalWorkspacePath?: string;
@@ -893,7 +897,7 @@ export function StatusBarSidebar({
   manualUpdateRunning = false,
   fileBrowserSource = null,
   onChooseWorkspace,
-  onConnectPc,
+  pcConnection,
   onBrowserComment,
   terminalWorkspaceKey = "default",
   terminalWorkspacePath = "",
@@ -2061,10 +2065,7 @@ export function StatusBarSidebar({
                     <button
                       key={tool.id}
                       onClick={() => {
-                        if (tool.id === "computer") {
-                          onConnectPc();
-                          return;
-                        }
+                        if (tool.id === "computer") pcConnection.onOpen();
                         setActiveToolId(tool.id);
                       }}
                       type="button"
@@ -2085,7 +2086,17 @@ export function StatusBarSidebar({
               </nav>
             </div>
           </section>
-        ) : activeToolId === "browser" ? null : activeToolId === "phone" ? (
+        ) : activeToolId === "browser" ? null : activeToolId === "computer" ? (
+          <PcConnectionSidebarPanel
+            {...pcConnection}
+            onBack={() => setActiveToolId("menu")}
+            onClose={() => onCollapsedChange(true)}
+            onSelectWorkspace={() => {
+              pcConnection.onSelectWorkspace();
+              setActiveToolId("menu");
+            }}
+          />
+        ) : activeToolId === "phone" ? (
           <WechatSidebar
             busy={chatGenerationBusy}
             onBack={() => setActiveToolId("menu")}
