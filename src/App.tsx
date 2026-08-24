@@ -14531,9 +14531,6 @@ export function App() {
     () => mcpServers.filter((server) => server.enabled),
     [mcpServers],
   );
-  const enabledMcpToolCount = mcpTools.filter((tool) =>
-    enabledMcpServers.some((server) => server.id === tool.serverId),
-  ).length;
   const activeSkill = useMemo(
     () => skills.find((skill) => skill.id === activeSkillId) ?? skills[0],
     [activeSkillId, skills],
@@ -35404,18 +35401,56 @@ export function App() {
           )}
 
           {mcpServers.length > 0 && (
-            <div className="mcp-chat-status">
-              <Boxes size={14} />
-              <span>{enabledMcpServers.length} 个 MCP 已启用</span>
-              <span>{enabledMcpToolCount} 个工具</span>
-            </div>
+            <details className="chat-resource-select">
+              <summary title="选择 MCP">
+                <Boxes size={15} />
+                <strong>MCP</strong>
+                <span>{enabledMcpServers.length}</span>
+                <ChevronDown size={14} />
+              </summary>
+              <div className="chat-resource-select-menu" role="group" aria-label="选择 MCP">
+                {mcpServers.map((server) => (
+                  <label key={server.id}>
+                    <input
+                      type="checkbox"
+                      checked={server.enabled}
+                      onChange={(event) =>
+                        updateMcpServer(server.id, { enabled: event.target.checked })
+                      }
+                    />
+                    <span>{server.name || "未命名 MCP"}</span>
+                  </label>
+                ))}
+              </div>
+            </details>
           )}
           {skills.length > 0 && (
-            <div className="mcp-chat-status">
-              <Sparkles size={14} />
-              <span>{enabledSkills.length} 个 Skill 已启用</span>
-              <span>发送时自动匹配</span>
-            </div>
+            <details className="chat-resource-select">
+              <summary title="选择 Skill">
+                <Sparkles size={15} />
+                <strong>Skill</strong>
+                <span>{enabledSkills.length}</span>
+                <ChevronDown size={14} />
+              </summary>
+              <div className="chat-resource-select-menu" role="group" aria-label="选择 Skill">
+                {skills.map((skill) => (
+                  <label
+                    key={skill.id}
+                    title={!skill.piNativeValid ? "请先在设置中转换为 Pi 原生格式" : undefined}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={skill.enabled}
+                      disabled={!skill.piNativeValid}
+                      onChange={(event) =>
+                        updateSkill(skill.id, { enabled: event.target.checked })
+                      }
+                    />
+                    <span>{skill.name || "未命名 Skill"}</span>
+                  </label>
+                ))}
+              </div>
+            </details>
           )}
 
           <div className="chat-session-area">

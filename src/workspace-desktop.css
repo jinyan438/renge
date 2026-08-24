@@ -773,11 +773,53 @@ button.portfolio-window-light.close:hover {
 }
 
 .portfolio-window-body .chat-output-options .tool-toggle,
-.portfolio-window-body .local-workspace-button,
-.portfolio-window-body .mcp-chat-status {
+.portfolio-window-body .local-workspace-button {
   border-color: #d7d7dd;
   background: rgba(255, 255, 255, 0.64);
   color: #626268;
+}
+
+.portfolio-window-body .chat-resource-select {
+  color: #44444a;
+}
+
+.portfolio-window-body .chat-resource-select > summary {
+  border-color: #d7d7dd;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.portfolio-window-body .chat-resource-select > summary:hover,
+.portfolio-window-body .chat-resource-select > summary:focus-visible,
+.portfolio-window-body .chat-resource-select[open] > summary {
+  border-color: rgba(0, 102, 221, 0.35);
+  background: #f4f8ff;
+}
+
+.portfolio-window-body .chat-resource-select > summary:focus-visible {
+  outline-color: rgba(0, 102, 221, 0.24);
+}
+
+.portfolio-window-body .chat-resource-select > summary > span {
+  color: #075bbd;
+  background: #e7f1ff;
+}
+
+.portfolio-window-body .chat-resource-select-menu {
+  border-color: #d7d7dd;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 10px 24px rgba(20, 20, 25, 0.13);
+}
+
+.portfolio-window-body .chat-resource-select-menu label {
+  color: #3d3d42;
+}
+
+.portfolio-window-body .chat-resource-select-menu label:hover {
+  background: #eef5ff;
+}
+
+.portfolio-window-body .chat-resource-select-menu input {
+  accent-color: #0066dd;
 }
 
 .portfolio-window-body .chat-worldbook-control {
