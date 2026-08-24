@@ -35070,6 +35070,7 @@ export function App() {
     (windowState) => windowState.id === "chat",
   );
   const confirmClearActiveChatSession = () => {
+    const sessionId = activeChatSessionIdRef.current;
     const greeting =
       chatMode === "roleplay" && activeSessionRoleplayCard
         ? createRoleplayGreetingMessage(
@@ -35079,10 +35080,24 @@ export function App() {
         : null;
     const nextMessages = greeting ? [greeting] : [];
     commitActiveSessionMessagesAndStatusBar(
-      activeChatSessionIdRef.current,
+      sessionId,
       nextMessages,
       (current) => rebuildStatusBarStateFromMessages(current, nextMessages),
     );
+    const usageKeyPrefix = `${sessionId}\u0000`;
+    setContextRuntimeUsageByKey((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([key]) => !key.startsWith(usageKeyPrefix)),
+      ),
+    );
+    setPiContextUsageByKey((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([key]) => !key.startsWith(usageKeyPrefix)),
+      ),
+    );
+    // The visible messages and Pi's persisted session tree are separate stores.
+    // Reset the tree as well so the next turn cannot resume cleared context.
+    void resetPiSession(sessionId).catch(() => undefined);
     setChatStatus({ status: "idle", message: "" });
     setChatClearConfirmationOpen(false);
   };
