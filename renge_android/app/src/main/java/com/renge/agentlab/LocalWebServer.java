@@ -43,6 +43,7 @@ import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.zip.ZipEntry;
@@ -50,6 +51,7 @@ import java.util.zip.ZipInputStream;
 
 public class LocalWebServer {
     private static final int PREFERRED_PORT = 5191;
+    private static final String PI_KERNEL_ID = "@earendil-works/pi-coding-agent@0.84.3";
     private static final long MAX_COMPLETE_BACKUP_BYTES = 512L * 1024L * 1024L;
     private static final String COMPLETE_BACKUP_MANIFEST_FILE = "backup.json";
     private static final String COMPLETE_BACKUP_ASSET_PREFIX = "renge-backup-asset:";
@@ -73,6 +75,8 @@ public class LocalWebServer {
     private final File appDataBackupFile;
     private final File appDataAssetsDirectory;
     private final File appDataAssetsBackupDirectory;
+    private final Map<String, PiSessionState> piSessions = new ConcurrentHashMap<>();
+    private final Map<String, HttpURLConnection> activePiRuns = new ConcurrentHashMap<>();
 
     private ServerSocket serverSocket;
     private Thread acceptThread;
@@ -811,12 +815,66 @@ public class LocalWebServer {
             return;
         }
 
+        if ("/api/pi/session".equals(request.path)) {
+            if (!"DELETE".equals(request.method)) {
+                sendJson(output, 405, jsonError("Method not allowed"));
+                return;
+            }
+            JSONObject body = parseJson(request.body);
+            String sessionId = body.optString("sessionId", "").trim();
+            if (!sessionId.isEmpty()) piSessions.remove(sessionId);
+            JSONObject payload = new JSONObject();
+            payload.put("ok", true);
+            sendJson(output, 200, payload);
+            return;
+        }
+
         if (!"POST".equals(request.method)) {
             sendJson(output, 405, jsonError("Method not allowed"));
             return;
         }
 
         JSONObject body = parseJson(request.body);
+
+        if ("/api/pi/tool-result".equals(request.path)) {
+            JSONObject payload = new JSONObject();
+            payload.put("ok", true);
+            sendJson(output, 200, payload);
+            return;
+        }
+
+        if ("/api/pi/abort".equals(request.path)) {
+            String runId = body.optString("runId", "").trim();
+            HttpURLConnection connection = activePiRuns.remove(runId);
+            if (connection != null) connection.disconnect();
+            JSONObject payload = new JSONObject();
+            payload.put("ok", true);
+            payload.put("aborted", connection != null);
+            sendJson(output, 200, payload);
+            return;
+        }
+
+        if ("/api/pi/set-auto-compaction".equals(request.path)) {
+            PiSessionState state = getPiSessionState(body);
+            state.autoCompactionEnabled = body.optBoolean("enabled", true);
+            JSONObject payload = new JSONObject();
+            payload.put("ok", true);
+            payload.put("enabled", state.autoCompactionEnabled);
+            sendJson(output, 200, payload);
+            return;
+        }
+
+        if ("/api/pi/compact".equals(request.path)) {
+            PiSessionState state = getPiSessionState(body);
+            state.compactionCount += 1;
+            JSONObject payload = new JSONObject();
+            payload.put("ok", true);
+            payload.put("result", "Android Pi 兼容会话已标记为压缩；下一轮将以客户端整理后的完整上下文继续。");
+            payload.put("contextUsage", state.contextUsage());
+            sendJson(output, 200, payload);
+            return;
+        }
+
         ProviderTarget target = getProviderTarget(body);
 
         if ("/api/providers/models".equals(request.path)) {
@@ -846,7 +904,19 @@ public class LocalWebServer {
             return;
         }
 
+        if ("/api/pi/chat".equals(request.path)) {
+            proxyPiChat(output, target, body);
+            return;
+        }
+
         sendJson(output, 404, jsonError("Not found"));
+    }
+
+    private PiSessionState getPiSessionState(JSONObject body) {
+        String sessionId = body.optString("sessionId", "").trim();
+        if (sessionId.isEmpty()) sessionId = body.optString("runId", "android-pi-session").trim();
+        if (sessionId.isEmpty()) sessionId = "android-pi-session";
+        return piSessions.computeIfAbsent(sessionId, ignored -> new PiSessionState());
     }
 
     private void handleAppData(Request request, OutputStream output) throws IOException, JSONException {
@@ -1310,6 +1380,119 @@ public class LocalWebServer {
         return request;
     }
 
+    private void proxyPiChat(
+            OutputStream output,
+            ProviderTarget target,
+            JSONObject body
+    ) throws IOException, JSONException {
+        JSONObject requestBody = body.optJSONObject("request");
+        if (requestBody == null) {
+            sendJson(output, 400, jsonError("缺少 request"));
+            return;
+        }
+
+        String runId = body.optString("runId", "").trim();
+        if (runId.isEmpty()) runId = "android-pi-" + System.nanoTime();
+        JSONObject streamingRequest = new JSONObject(requestBody.toString());
+        streamingRequest.put("stream", true);
+        JSONObject providerRequest = "responses".equals(target.apiType)
+                ? buildResponsesApiRequest(streamingRequest)
+                : streamingRequest;
+        String endpoint = "responses".equals(target.apiType)
+                ? "/responses"
+                : "/chat/completions";
+
+        HttpURLConnection connection = openConnection(
+                target.apiBaseUrl + endpoint,
+                target.apiKey,
+                "text/event-stream"
+        );
+        connection.setRequestMethod("POST");
+        connection.setDoOutput(true);
+        byte[] requestBytes = providerRequest.toString().getBytes(StandardCharsets.UTF_8);
+        connection.setFixedLengthStreamingMode(requestBytes.length);
+        try (OutputStream upstreamOutput = connection.getOutputStream()) {
+            upstreamOutput.write(requestBytes);
+        }
+
+        activePiRuns.put(runId, connection);
+        try {
+            int status = connection.getResponseCode();
+            if (status < 200 || status >= 300) {
+                sendBytes(
+                        output,
+                        status,
+                        "application/json;charset=utf-8",
+                        readConnectionBody(connection, status)
+                );
+                return;
+            }
+
+            PiSessionState state = getPiSessionState(body);
+            state.estimatedTokens = Math.max(1, requestBody.toString().length() / 4L);
+            long requestedContextWindow = body.optLong("contextWindow", 128000L);
+            state.contextWindow = requestedContextWindow > 0 ? requestedContextWindow : 128000L;
+
+            writeHead(output, 200, "text/event-stream;charset=utf-8", -1);
+            JSONObject runStart = new JSONObject();
+            runStart.put("type", "run_start");
+            runStart.put("runId", runId);
+            runStart.put("sessionId", body.optString("sessionId", runId));
+            runStart.put("kernel", PI_KERNEL_ID);
+            runStart.put("kernelMode", "android-compatible");
+            JSONObject compaction = new JSONObject();
+            compaction.put("engine", "android-pi-session");
+            compaction.put("enabled", state.autoCompactionEnabled);
+            runStart.put("compaction", compaction);
+            runStart.put("nativeTools", new JSONArray());
+            JSONObject mcp = new JSONObject();
+            mcp.put("enabled", false);
+            runStart.put("mcp", mcp);
+            writePiSse(output, wrapPiEvent(runStart));
+
+            String contentType = connection.getContentType();
+            boolean upstreamIsEventStream = contentType != null
+                    && contentType.toLowerCase(Locale.US).contains("text/event-stream");
+            try (InputStream upstreamInput = connection.getInputStream()) {
+                if (upstreamIsEventStream) {
+                    byte[] buffer = new byte[8192];
+                    int count;
+                    while ((count = upstreamInput.read(buffer)) != -1) {
+                        output.write(buffer, 0, count);
+                        output.flush();
+                    }
+                } else {
+                    byte[] responseBody = readAll(upstreamInput);
+                    writePiSse(output, new String(responseBody, StandardCharsets.UTF_8));
+                }
+            }
+
+            JSONObject usage = new JSONObject();
+            usage.put("type", "context_usage");
+            usage.put("runId", runId);
+            usage.put("usage", state.contextUsage());
+            writePiSse(output, wrapPiEvent(usage));
+            writePiSse(output, "[DONE]");
+        } finally {
+            activePiRuns.remove(runId, connection);
+            connection.disconnect();
+        }
+    }
+
+    private JSONObject wrapPiEvent(JSONObject event) throws JSONException {
+        JSONObject payload = new JSONObject();
+        payload.put("pi", event);
+        return payload;
+    }
+
+    private void writePiSse(OutputStream output, Object payload) throws IOException {
+        String serialized = payload instanceof String
+                ? (String) payload
+                : String.valueOf(payload);
+        output.write(("data: " + serialized + "\n\n").getBytes(StandardCharsets.UTF_8));
+        output.flush();
+    }
+
     private void proxyJson(
             OutputStream output,
             String url,
@@ -1559,6 +1742,25 @@ public class LocalWebServer {
             this.apiBaseUrl = apiBaseUrl;
             this.apiKey = apiKey;
             this.apiType = apiType;
+        }
+    }
+
+    private static final class PiSessionState {
+        volatile boolean autoCompactionEnabled = true;
+        volatile long estimatedTokens;
+        volatile long contextWindow = 128000L;
+        volatile int compactionCount;
+
+        JSONObject contextUsage() throws JSONException {
+            JSONObject usage = new JSONObject();
+            usage.put("tokens", estimatedTokens);
+            usage.put("contextWindow", contextWindow);
+            usage.put(
+                    "percent",
+                    contextWindow > 0 ? (estimatedTokens * 100.0d) / contextWindow : JSONObject.NULL
+            );
+            usage.put("compactionCount", compactionCount);
+            return usage;
         }
     }
 }
