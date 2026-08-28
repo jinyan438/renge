@@ -1428,8 +1428,9 @@ type PiStreamEvent = {
   willRetry?: boolean;
   errorMessage?: string;
   attempt?: number;
-  maxAttempts?: number;
+  maxAttempts?: number | null;
   delayMs?: number;
+  continuous?: boolean;
   usage?: {
     tokens: number | null;
     contextWindow: number;
@@ -11010,6 +11011,12 @@ function formatPiRuntimeStatus(event: PiStreamEvent) {
     return "Pi 已完成上下文压缩，正在继续生成...";
   }
   if (event.type === "auto_retry_start") {
+    if (event.continuous) {
+      const delaySeconds = Math.max(0, Math.round((event.delayMs ?? 0) / 1_000));
+      return `Pi 正在持续重试模型请求（第 ${event.attempt ?? 1} 次${
+        delaySeconds > 0 ? `，约 ${delaySeconds} 秒后` : ""
+      }，可点击停止）...`;
+    }
     return `Pi 正在重试模型请求（${event.attempt ?? 1}/${event.maxAttempts ?? "?"}）...`;
   }
   if (event.type === "auto_retry_end") return "Pi 已完成模型请求重试，正在继续生成...";
@@ -25342,10 +25349,9 @@ export function App() {
           streamingTimeline.cancel();
         }
       } else {
-        let toolLoopCompleted = false;
         let reasoningOnlyToolRetryCount = 0;
         let incompleteToolRetryCount = 0;
-        for (let toolRound = 0; toolRound < 999; toolRound += 1) {
+        for (let toolRound = 0; ; toolRound += 1) {
           setChatStatus({
             status: "loading",
             message: `正在推进工具任务，第 ${toolRound + 1} 轮...`,
@@ -25465,7 +25471,6 @@ export function App() {
               assistantMessageContent || presentedChoice.prompt;
             assistantReasoning = assistantMessageReasoning;
             streamingRound?.complete(assistantContent, assistantReasoning);
-            toolLoopCompleted = true;
             break;
           }
           if (hasHiddenAssistantContentTool) {
@@ -25512,7 +25517,7 @@ export function App() {
               assistantReasoning = "";
               continue;
             }
-            if (pendingMcpObservationPrompt && pendingMcpObservationRetries < 2 && toolRound < 998) {
+            if (pendingMcpObservationPrompt && pendingMcpObservationRetries < 2) {
               apiMessages.push({
                 role: "assistant",
                 content: assistantContent || "",
@@ -25547,7 +25552,6 @@ export function App() {
                     completionResult.includedToolCount > 0,
                   ),
                 retryCount: reasoningOnlyToolRetryCount,
-                maxRetries: 6,
                 finishReason: completionResult.finishReason,
               })
             ) {
@@ -25577,7 +25581,6 @@ export function App() {
             if (
               activeLocalToolsEnabled &&
               activeFileToolsWorkspaceHandle &&
-              toolRound < 998 &&
               (isTruncatedChatFinishReason(completionResult.finishReason) ||
                 shouldAutoContinueLocalTask(assistantContent))
             ) {
@@ -25611,7 +25614,6 @@ export function App() {
               continue;
             }
 
-            toolLoopCompleted = true;
             streamingRound?.complete(assistantContent, assistantReasoning);
             break;
           }
@@ -25778,11 +25780,6 @@ export function App() {
             }
           }
           apiMessages.push(...toolVisionMessages);
-        }
-        if (!toolLoopCompleted) {
-          throw new Error(
-            "主 Agent 连续推进了 999 轮工具任务，仍未形成可验收的最终答复。",
-          );
         }
       }
 
@@ -27871,7 +27868,7 @@ export function App() {
         const useStreamingToolCompletion = chatStreamEnabled;
         let reasoningOnlyToolRetryCount = 0;
         let incompleteToolRetryCount = 0;
-        for (let toolRound = 0; toolRound < 999; toolRound += 1) {
+        for (let toolRound = 0; ; toolRound += 1) {
           setChatStatus({
             status: "loading",
             message: `正在推进工具任务，第 ${toolRound + 1} 轮...`,
@@ -27981,7 +27978,7 @@ export function App() {
               assistantReasoning = "";
               continue;
             }
-            if (pendingMcpObservationPrompt && pendingMcpObservationRetries < 2 && toolRound < 998) {
+            if (pendingMcpObservationPrompt && pendingMcpObservationRetries < 2) {
               apiMessages.push({
                 role: "assistant",
                 content: assistantContent || "",
@@ -28016,7 +28013,6 @@ export function App() {
                     completionResult.includedToolCount > 0,
                   ),
                 retryCount: reasoningOnlyToolRetryCount,
-                maxRetries: 6,
                 finishReason: completionResult.finishReason,
               })
             ) {
@@ -28045,7 +28041,6 @@ export function App() {
             if (
               activeLocalToolsEnabled &&
               activeFileToolsWorkspaceHandle &&
-              toolRound < 998 &&
               (isTruncatedChatFinishReason(completionResult.finishReason) ||
                 shouldAutoContinueLocalTask(assistantContent))
             ) {

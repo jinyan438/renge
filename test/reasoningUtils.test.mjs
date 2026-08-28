@@ -288,7 +288,11 @@ test("retries a reasoning-only completion when a local task still requires tools
     false,
   );
   assert.equal(
-    shouldRetryReasoningOnlyToolCompletion({ ...base, retryCount: 2 }),
+    shouldRetryReasoningOnlyToolCompletion({ ...base, retryCount: 20_000 }),
+    true,
+  );
+  assert.equal(
+    shouldRetryReasoningOnlyToolCompletion({ ...base, retryCount: 2, maxRetries: 2 }),
     false,
   );
   assert.equal(

@@ -13,6 +13,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { createPiMcpAdapter, normalizePiMcpConfig } from "./pi-mcp-adapter-bridge.mjs";
+import { installContinuousPiRetry } from "./continuous-retry.mjs";
 import {
   convertOpenAiMessagesToPi,
   filterPiCustomToolDefinitions,
@@ -495,7 +496,13 @@ export function createRengePiHost({
         modelId: provider.modelId,
       });
       const settingsManager = SettingsManager.create(cwd, agentDir);
-      settingsManager.applyOverrides({ compaction });
+      settingsManager.applyOverrides({
+        compaction,
+        // A long reasoning phase can legitimately remain quiet for more than
+        // Pi's five-minute default. Zero selects Pi's effectively-unbounded
+        // idle timeout while the run remains cancellable through its signal.
+        httpIdleTimeoutMs: 0,
+      });
       run.settingsManager = settingsManager;
       const extensionFactories = hasMcpServers
         ? [await createPiMcpAdapter(mcpConfig, { agentDir })]
@@ -555,6 +562,7 @@ export function createRengePiHost({
         sessionManager,
       });
       run.session = session;
+      installContinuousPiRetry(session);
       await session.bindExtensions({
         mode: "json",
         commandContextActions: {

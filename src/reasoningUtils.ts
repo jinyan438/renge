@@ -205,7 +205,7 @@ export function shouldRetryReasoningOnlyToolCompletion({
   includedToolCount,
   requiresTool,
   retryCount,
-  maxRetries = 2,
+  maxRetries = Number.POSITIVE_INFINITY,
   finishReason,
 }: {
   content: string;

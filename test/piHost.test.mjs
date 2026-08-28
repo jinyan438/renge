@@ -5,6 +5,50 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { startRengeServer } from "../server.mjs";
+import {
+  getContinuousRetryDelayMs,
+  installContinuousPiRetry,
+} from "../pi/continuous-retry.mjs";
+
+test("continuous Pi retry uses capped backoff until the run is aborted", async () => {
+  assert.equal(getContinuousRetryDelayMs(1), 2_000);
+  assert.equal(getContinuousRetryDelayMs(2), 4_000);
+  assert.equal(getContinuousRetryDelayMs(8), 30_000);
+  assert.equal(getContinuousRetryDelayMs(10_000), 30_000);
+
+  const events = [];
+  const session = {
+    _prepareRetry() {},
+    _retryAttempt: 0,
+    _retryAbortController: undefined,
+    _emit(event) {
+      events.push(event);
+    },
+    agent: {
+      state: {
+        messages: [
+          { role: "user", content: "continue" },
+          { role: "assistant", stopReason: "error" },
+        ],
+      },
+    },
+  };
+
+  assert.equal(installContinuousPiRetry(session, { baseDelayMs: 0, maxDelayMs: 0 }), true);
+  assert.equal(await session._prepareRetry({ errorMessage: "temporary outage" }), true);
+  assert.equal(events[0].type, "auto_retry_start");
+  assert.equal(events[0].continuous, true);
+  assert.equal(events[0].attempt, 1);
+  assert.equal(events[0].maxAttempts, undefined);
+  assert.equal(session.agent.state.messages.length, 1);
+
+  const cancelledRetry = session._prepareRetry({ errorMessage: "still unavailable" });
+  session._retryAbortController.abort();
+  assert.equal(await cancelledRetry, false);
+  assert.equal(events.at(-1).type, "auto_retry_end");
+  assert.equal(events.at(-1).success, false);
+  assert.equal(session._retryAttempt, 0);
+});
 
 function listen(server) {
   return new Promise((resolve, reject) => {
