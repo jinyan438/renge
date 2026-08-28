@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,10 @@ import {
   getContinuousRetryDelayMs,
   installContinuousPiRetry,
 } from "../pi/continuous-retry.mjs";
+import {
+  createResumableWriteTool,
+  RESUMABLE_WRITE_MAX_CHARS,
+} from "../pi/resumable-write-tool.mjs";
 
 test("continuous Pi retry uses capped backoff until the run is aborted", async () => {
   assert.equal(getContinuousRetryDelayMs(1), 2_000);
@@ -76,6 +80,113 @@ test("continuous Pi retry uses capped backoff until the run is aborted", async (
   assert.equal(events.at(-1).type, "auto_retry_end");
   assert.equal(events.at(-1).success, false);
   assert.equal(session._retryAttempt, 0);
+});
+
+test("continuous Pi retry checkpoints an unfinished tool call instead of replaying it", async () => {
+  const events = [];
+  const steeringMessages = [];
+  const unfinished = {
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: "Stream ended without finish_reason",
+    content: [{
+      type: "toolCall",
+      id: "partial-write",
+      name: "write",
+      arguments: {
+        content: "<!doctype html><title>partial but never executed</title>",
+      },
+    }],
+  };
+  const session = {
+    _prepareRetry() {},
+    _retryAttempt: 0,
+    _emit(event) {
+      events.push(event);
+    },
+    subscribe() {},
+    agent: {
+      steer(message) {
+        steeringMessages.push(message);
+      },
+      state: {
+        thinkingLevel: "high",
+        messages: [{ role: "user", content: "build it" }, unfinished],
+      },
+    },
+  };
+
+  installContinuousPiRetry(session, { baseDelayMs: 0, maxDelayMs: 0 });
+  assert.equal(await session._prepareRetry(unfinished), true);
+  assert.equal(events[0].resumeFromProgress, true);
+  assert.equal(events[0].resumeFromToolCall, true);
+  assert.equal(session.agent.state.messages.length, 2);
+  assert.match(
+    session.agent.state.messages.at(-1).content[0].text,
+    /未完成工具调用断点：该工具尚未执行/,
+  );
+  assert.match(
+    session.agent.state.messages.at(-1).content[0].text,
+    /partial but never executed/,
+  );
+  assert.equal(session.agent.state.thinkingLevel, "off");
+  assert.equal(steeringMessages.length, 1);
+  assert.match(steeringMessages[0].content[0].text, /首块 overwrite/);
+  assert.match(steeringMessages[0].content[0].text, /每块不超过 8000 字符/);
+});
+
+test("resumable write chunks are bounded, offset checked, and idempotent", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "renge-resumable-write-test-"));
+  const tool = createResumableWriteTool(cwd);
+  const signal = new AbortController().signal;
+  try {
+    const first = await tool.execute("write-1", {
+      path: "breakout.html",
+      operation: "overwrite",
+      expected_bytes: 0,
+      content: "alpha",
+    }, signal);
+    assert.equal(first.details.totalBytes, 5);
+
+    const second = await tool.execute("write-2", {
+      path: "breakout.html",
+      operation: "append",
+      expected_bytes: 5,
+      content: "中文",
+    }, signal);
+    assert.equal(second.details.totalBytes, 11);
+    assert.equal(await readFile(join(cwd, "breakout.html"), "utf8"), "alpha中文");
+
+    const duplicate = await tool.execute("write-2-retry", {
+      path: "breakout.html",
+      operation: "append",
+      expected_bytes: 5,
+      content: "中文",
+    }, signal);
+    assert.equal(duplicate.details.status, "already_applied");
+    assert.equal(await readFile(join(cwd, "breakout.html"), "utf8"), "alpha中文");
+
+    await assert.rejects(() => tool.execute("write-overwrite-again", {
+      path: "breakout.html",
+      operation: "overwrite",
+      expected_bytes: 0,
+      content: "different",
+    }, signal), /不要重新 overwrite/);
+    await assert.rejects(() => tool.execute("write-wrong-offset", {
+      path: "breakout.html",
+      operation: "append",
+      expected_bytes: 6,
+      content: "x",
+    }, signal), /偏移不匹配/);
+    await assert.rejects(() => tool.execute("write-too-large", {
+      path: "too-large.txt",
+      operation: "overwrite",
+      expected_bytes: 0,
+      content: "x".repeat(RESUMABLE_WRITE_MAX_CHARS + 1),
+    }, signal), /单次最多/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 function listen(server) {
@@ -181,6 +292,111 @@ test("Pi Host resumes partial reasoning as execution without starting the plan o
     const continuation = upstreamRequests[1].messages.at(-1);
     assert.equal(continuation.role, "user");
     assert.match(JSON.stringify(continuation.content ?? ""), /禁止重新分析、重新规划/);
+  } finally {
+    await close(renge.server);
+    await close(upstream);
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Pi Host closes an interrupted write preview and resumes with the chunk protocol", async () => {
+  const upstreamRequests = [];
+  const upstream = createServer(async (request, response) => {
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    const body = JSON.parse(raw);
+    upstreamRequests.push(body);
+    response.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+    });
+    const base = {
+      id: `partial-write-${upstreamRequests.length}`,
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: "test-model",
+    };
+    if (upstreamRequests.length === 1) {
+      sendChunk(response, {
+        ...base,
+        choices: [{
+          index: 0,
+          delta: {
+            role: "assistant",
+            tool_calls: [{
+              index: 0,
+              id: "call-incomplete-write",
+              type: "function",
+              function: {
+                name: "write",
+                arguments: "{\"content\":\"<html>UNEXECUTED_PARTIAL_PREFIX",
+              },
+            }],
+          },
+          finish_reason: null,
+        }],
+      });
+      response.end("data: [DONE]\n\n");
+      return;
+    }
+    sendChunk(response, {
+      ...base,
+      choices: [{
+        index: 0,
+        delta: { role: "assistant", content: "RESUMED_WITH_CHUNKS" },
+        finish_reason: null,
+      }],
+    });
+    sendChunk(response, {
+      ...base,
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    });
+    response.end("data: [DONE]\n\n");
+  });
+
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-pi-partial-write-test-"));
+  const upstreamPort = await listen(upstream);
+  const renge = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  try {
+    const response = await fetch(`${renge.url}/api/pi/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runId: "pi-partial-write-run",
+        apiBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+        apiKey: "test-key",
+        apiType: "chat-completions",
+        workspace: { kind: "electron", cwd: dataDir },
+        request: {
+          model: "test-model",
+          messages: [{ role: "user", content: "Build breakout.html" }],
+          stream: true,
+        },
+      }),
+    });
+    const streamText = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(streamText, /RESUMED_WITH_CHUNKS/);
+    assert.match(streamText, /"type":"tool_call_incomplete"/);
+    assert.match(streamText, /"willRetry":true/);
+    assert.match(streamText, /"resumeFromToolCall":true/);
+    assert.equal(upstreamRequests.length, 2);
+
+    const writeTool = upstreamRequests[0].tools.find(
+      (tool) => tool.function?.name === "write",
+    );
+    assert.equal(
+      writeTool.function.parameters.properties.content.maxLength,
+      RESUMABLE_WRITE_MAX_CHARS,
+    );
+    assert.match(
+      upstreamRequests[0].messages.find((message) => message.role === "system")?.content ?? "",
+      /Never send more than 8000 characters in one write call/,
+    );
+    assert.match(JSON.stringify(upstreamRequests[1].messages), /UNEXECUTED_PARTIAL_PREFIX/);
+    assert.match(JSON.stringify(upstreamRequests[1].messages), /该工具尚未执行/);
+    assert.match(JSON.stringify(upstreamRequests[1].messages), /首块 overwrite/);
+    await assert.rejects(() => readFile(join(dataDir, "breakout.html"), "utf8"), /ENOENT/);
   } finally {
     await close(renge.server);
     await close(upstream);
@@ -360,6 +576,126 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
       true,
     );
     assert.doesNotMatch(JSON.stringify(upstreamRequests[1].messages), /image_url|QUFB/);
+  } finally {
+    await close(renge.server);
+    await close(upstream);
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Pi Host writes resumable chunks once even when an append call is repeated", async () => {
+  const upstreamRequests = [];
+  const upstream = createServer(async (request, response) => {
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    const body = JSON.parse(raw);
+    upstreamRequests.push(body);
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    const base = {
+      id: `resumable-write-${upstreamRequests.length}`,
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: "test-model",
+    };
+    const toolCalls = [
+      {
+        id: "call-write-first",
+        args: {
+          path: "breakout.html",
+          operation: "overwrite",
+          expected_bytes: 0,
+          content: "alpha",
+        },
+      },
+      {
+        id: "call-write-append",
+        args: {
+          path: "breakout.html",
+          operation: "append",
+          expected_bytes: 5,
+          content: "中文",
+        },
+      },
+      {
+        id: "call-write-append-repeated",
+        args: {
+          path: "breakout.html",
+          operation: "append",
+          expected_bytes: 5,
+          content: "中文",
+        },
+      },
+    ];
+    const requestedCall = toolCalls[upstreamRequests.length - 1];
+    if (requestedCall) {
+      sendChunk(response, {
+        ...base,
+        choices: [{
+          index: 0,
+          delta: {
+            role: "assistant",
+            tool_calls: [{
+              index: 0,
+              id: requestedCall.id,
+              type: "function",
+              function: {
+                name: "write",
+                arguments: JSON.stringify(requestedCall.args),
+              },
+            }],
+          },
+          finish_reason: null,
+        }],
+      });
+      sendChunk(response, {
+        ...base,
+        choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+      });
+    } else {
+      sendChunk(response, {
+        ...base,
+        choices: [{
+          index: 0,
+          delta: { role: "assistant", content: "WRITE_VERIFIED" },
+          finish_reason: null,
+        }],
+      });
+      sendChunk(response, {
+        ...base,
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      });
+    }
+    response.end("data: [DONE]\n\n");
+  });
+
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-pi-resumable-write-host-test-"));
+  const upstreamPort = await listen(upstream);
+  const renge = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  try {
+    const response = await fetch(`${renge.url}/api/pi/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runId: "pi-resumable-write-run",
+        apiBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+        apiKey: "test-key",
+        apiType: "chat-completions",
+        workspace: { kind: "electron", cwd: dataDir },
+        request: {
+          model: "test-model",
+          messages: [{ role: "user", content: "Write breakout.html in chunks" }],
+          stream: true,
+        },
+      }),
+    });
+    const streamText = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(streamText, /WRITE_VERIFIED/);
+    assert.match(streamText, /"type":"tool_start"/);
+    assert.match(streamText, /"type":"tool_end"/);
+    assert.equal(upstreamRequests.length, 4);
+    assert.equal(await readFile(join(dataDir, "breakout.html"), "utf8"), "alpha中文");
+    assert.match(JSON.stringify(upstreamRequests[3].messages), /already_applied/);
   } finally {
     await close(renge.server);
     await close(upstream);

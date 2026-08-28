@@ -1,6 +1,8 @@
 export const PI_CONTINUOUS_RETRY_BASE_DELAY_MS = 2_000;
 export const PI_CONTINUOUS_RETRY_MAX_DELAY_MS = 30_000;
 const PARTIAL_PROGRESS_TAIL_CHARS = 4_000;
+const PARTIAL_TOOL_ARGUMENT_SNAPSHOT_CHARS = 20_000;
+const INTERNAL_CHECKPOINT_MARKER = "【内部已完成思维状态：继续执行时不要复述】";
 
 export function getContinuousRetryDelayMs(
   attempt,
@@ -36,23 +38,70 @@ function waitForRetryDelay(delayMs, signal) {
   });
 }
 
-function getAssistantProgressText(message) {
-  if (!Array.isArray(message?.content)) return "";
-  return message.content
-    .flatMap((part) => {
-      if (part?.type === "thinking" && typeof part.thinking === "string") {
-        return [part.thinking];
-      }
-      if (part?.type === "text" && typeof part.text === "string") {
-        return [part.text];
-      }
-      return [];
-    })
-    .join("\n")
+function compactMiddle(value, limit = PARTIAL_TOOL_ARGUMENT_SNAPSHOT_CHARS) {
+  const text = String(value ?? "");
+  if (text.length <= limit) return text;
+  const headLength = Math.ceil(limit * 0.6);
+  const tailLength = limit - headLength;
+  return [
+    text.slice(0, headLength),
+    `\n... [中间 ${text.length - limit} 个字符已省略；原调用未执行] ...\n`,
+    text.slice(-tailLength),
+  ].join("");
+}
+
+function stringifyToolArguments(part) {
+  if (typeof part?.partialJson === "string" && part.partialJson.trim()) {
+    return part.partialJson;
+  }
+  try {
+    return JSON.stringify(part?.arguments ?? {}, null, 2);
+  } catch {
+    return String(part?.arguments ?? "");
+  }
+}
+
+function cleanCheckpointEcho(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  return text
+    .replaceAll(INTERNAL_CHECKPOINT_MARKER, "")
     .trim();
 }
 
-function buildPartialProgressContinuationMessage(progress) {
+function getAssistantProgress(message) {
+  if (!Array.isArray(message?.content)) {
+    return { text: "", hasIncompleteToolCall: false };
+  }
+  const progress = [];
+  let hasIncompleteToolCall = false;
+  for (const part of message.content) {
+    if (part?.type === "thinking" && typeof part.thinking === "string") {
+      const thinking = cleanCheckpointEcho(part.thinking);
+      if (thinking) progress.push(thinking);
+      continue;
+    }
+    if (part?.type === "text" && typeof part.text === "string") {
+      const text = cleanCheckpointEcho(part.text);
+      if (text) progress.push(text);
+      continue;
+    }
+    if (part?.type !== "toolCall") continue;
+    hasIncompleteToolCall = true;
+    progress.push([
+      "【未完成工具调用断点：该工具尚未执行】",
+      `tool: ${String(part.name ?? "unknown_tool")}`,
+      "模型流在参数闭合前中断。下面只是已接收的参数片段，不是工具结果，也不表示文件已写入：",
+      compactMiddle(stringifyToolArguments(part)),
+    ].join("\n"));
+  }
+  return {
+    text: progress.join("\n\n").trim(),
+    hasIncompleteToolCall,
+  };
+}
+
+function buildPartialProgressContinuationMessage(progress, hasIncompleteToolCall) {
   const tail = progress.slice(-PARTIAL_PROGRESS_TAIL_CHARS);
   return {
     role: "user",
@@ -63,6 +112,9 @@ function buildPartialProgressContinuationMessage(progress) {
         "上一轮模型流在已经产生思考结果后意外结束。上一个 assistant 消息及下面的末尾片段就是已完成进度。",
         "禁止重新分析、重新规划、复述用户需求或再次输出长思维链。直接沿用已有结论，立即执行尚未完成的动作；有可用工具时优先调用工具，否则直接给出尚未完成的最终正文。",
         "不要从“用户想要”、需求清单、设计思路或任务概述重新开始。",
+        hasIncompleteToolCall
+          ? "上一轮未完成的工具调用没有执行。严禁把参数预览当成落盘成功，也不要再次生成整文件巨型调用。写大文件时必须使用 write 的分块协议：首块 overwrite，之后按工具返回的 expected_bytes 逐块 append，每块不超过 8000 字符；最后用 read 或 ls 验证真实文件。"
+          : "",
         "<previous_progress_tail>",
         tail,
         "</previous_progress_tail>",
@@ -86,7 +138,7 @@ function buildPartialProgressAssistantCheckpoint(message, progress) {
     content: [{
       type: "text",
       text: [
-        "【内部已完成思维状态：继续执行时不要复述】",
+        INTERNAL_CHECKPOINT_MARKER,
         progress,
       ].join("\n\n"),
     }],
@@ -127,13 +179,17 @@ export function installContinuousPiRetry(
     session._retryAttempt = Math.max(0, Number(session._retryAttempt) || 0) + 1;
     const attempt = session._retryAttempt;
     const delayMs = getContinuousRetryDelayMs(attempt, { baseDelayMs, maxDelayMs });
-    const partialProgress = getAssistantProgressText(message);
+    const {
+      text: partialProgress,
+      hasIncompleteToolCall,
+    } = getAssistantProgress(message);
     const resumeFromProgress = Boolean(partialProgress);
     session._emit({
       type: "auto_retry_start",
       attempt,
       continuous: true,
       resumeFromProgress,
+      resumeFromToolCall: hasIncompleteToolCall,
       delayMs,
       errorMessage: message?.errorMessage || "Unknown error",
     });
@@ -185,7 +241,10 @@ export function installContinuousPiRetry(
       // Agent.continue() will consume this steering message rather than reject
       // an assistant as the final transcript item.
       session.agent?.steer?.(
-        buildPartialProgressContinuationMessage(partialProgress),
+        buildPartialProgressContinuationMessage(
+          partialProgress,
+          hasIncompleteToolCall,
+        ),
       );
     }
     return true;

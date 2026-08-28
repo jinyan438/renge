@@ -621,6 +621,7 @@ type ToolVisualization = {
   name: string;
   args?: Record<string, unknown>;
   partialArguments?: string;
+  phase?: "arguments" | "execution";
   result?: unknown;
   status: "running" | "done" | "error";
   startedAt?: string;
@@ -702,6 +703,7 @@ function getChatMessageContextSignature(message: ChatMessage) {
           toolCallId: message.toolVisualization.toolCallId ?? "",
           name: message.toolVisualization.name,
           status: message.toolVisualization.status,
+          phase: message.toolVisualization.phase ?? null,
           args: message.toolVisualization.args ?? null,
           result: message.toolVisualization.result ?? null,
         }
@@ -1432,6 +1434,7 @@ type PiStreamEvent = {
   delayMs?: number;
   continuous?: boolean;
   resumeFromProgress?: boolean;
+  resumeFromToolCall?: boolean;
   usage?: {
     tokens: number | null;
     contextWindow: number;
@@ -2443,7 +2446,10 @@ function normalizeChatChoiceRequest(rawRequest: unknown): ChatChoiceRequest | nu
   };
 }
 
-function normalizeChatMessage(rawValue: unknown): ChatMessage {
+function normalizeChatMessage(
+  rawValue: unknown,
+  { restoreRunningAsInterrupted = false } = {},
+): ChatMessage {
   const rawMessage = isObjectRecord(rawValue) ? rawValue : {};
   const role = rawMessage.role === "assistant" ? "assistant" : "user";
   const content = typeof rawMessage.content === "string" ? rawMessage.content : "";
@@ -2465,6 +2471,8 @@ function normalizeChatMessage(rawValue: unknown): ChatMessage {
   const rawToolVisualization = isObjectRecord(rawMessage.toolVisualization)
     ? rawMessage.toolVisualization
     : null;
+  const restoreInterruptedTool =
+    restoreRunningAsInterrupted && rawToolVisualization?.status === "running";
   const toolVisualization =
     rawToolVisualization &&
     typeof rawToolVisualization.name === "string" &&
@@ -2473,7 +2481,9 @@ function normalizeChatMessage(rawValue: unknown): ChatMessage {
       rawToolVisualization.status === "error")
       ? {
           name: rawToolVisualization.name,
-          status: rawToolVisualization.status as ToolVisualization["status"],
+          status: (restoreInterruptedTool
+            ? "error"
+            : rawToolVisualization.status) as ToolVisualization["status"],
           ...(typeof rawToolVisualization.toolCallId === "string"
             ? { toolCallId: rawToolVisualization.toolCallId }
             : {}),
@@ -2483,14 +2493,32 @@ function normalizeChatMessage(rawValue: unknown): ChatMessage {
           ...(typeof rawToolVisualization.partialArguments === "string"
             ? { partialArguments: rawToolVisualization.partialArguments }
             : {}),
+          ...(rawToolVisualization.phase === "arguments" ||
+          rawToolVisualization.phase === "execution"
+            ? { phase: rawToolVisualization.phase as ToolVisualization["phase"] }
+            : restoreInterruptedTool &&
+                typeof rawToolVisualization.partialArguments === "string"
+              ? { phase: "arguments" as const }
+            : {}),
           ...("result" in rawToolVisualization
             ? { result: rawToolVisualization.result }
+            : restoreInterruptedTool
+              ? { result: "上次会话在工具完成前中断，执行结果未确认；请检查工作区后再继续。" }
             : {}),
           ...(typeof rawToolVisualization.startedAt === "string"
             ? { startedAt: rawToolVisualization.startedAt }
             : {}),
           ...(typeof rawToolVisualization.endedAt === "string"
             ? { endedAt: rawToolVisualization.endedAt }
+            : restoreInterruptedTool
+              ? {
+                  endedAt:
+                    typeof rawToolVisualization.startedAt === "string"
+                      ? rawToolVisualization.startedAt
+                      : typeof rawMessage.createdAt === "string"
+                        ? rawMessage.createdAt
+                        : new Date().toISOString(),
+                }
             : {}),
         }
       : undefined;
@@ -2676,7 +2704,9 @@ function createChatSession(
 function normalizeChatSession(rawValue: unknown): ChatSession {
   const rawSession = isObjectRecord(rawValue) ? rawValue : {};
   const messages = Array.isArray(rawSession.messages)
-    ? rawSession.messages.map((message) => normalizeChatMessage(message))
+    ? rawSession.messages.map((message) =>
+        normalizeChatMessage(message, { restoreRunningAsInterrupted: true }),
+      )
     : [];
   const rawTitle =
     typeof rawSession.title === "string" && rawSession.title.trim()
@@ -8857,6 +8887,32 @@ function updateAssistantToolVisualization(
   });
 }
 
+function buildIncompletePiToolVisualization(
+  event: PiStreamEvent,
+  previous?: ToolVisualization,
+) {
+  const toolCallId = event.toolCallId || crypto.randomUUID();
+  const argumentsText = event.argumentsText ?? previous?.partialArguments ?? "";
+  const name = event.toolName || previous?.name || "unknown_tool";
+  const visualization: ToolVisualization = {
+    ...(previous ?? {}),
+    toolCallId,
+    name,
+    args: {
+      ...(previous?.args ?? {}),
+      ...parsePartialToolCallArguments(argumentsText),
+    },
+    partialArguments: argumentsText,
+    phase: "arguments",
+    result: event.willRetry
+      ? "模型流在工具参数完成前中断；该工具尚未执行。系统已保留断点，正在继续。"
+      : "模型流在工具参数完成前中断；该工具尚未执行。",
+    status: "error",
+    endedAt: new Date().toISOString(),
+  };
+  return { toolCallId, argumentsText, name, visualization };
+}
+
 function parseToolCallArgs(toolCall: ChatToolCall) {
   try {
     const parsed = JSON.parse(toolCall.function.arguments) as unknown;
@@ -10978,7 +11034,9 @@ function formatPiNativeToolAction(event: PiStreamEvent) {
     case "ls":
       return `Pi 列出目录：\n${path || "."}`;
     case "write":
-      return `Pi 写入文件：\n${path}`;
+      return event.type === "tool_call_start"
+        ? `Pi 正在准备写入参数：\n${path}`
+        : `Pi 写入文件：\n${path}`;
     case "edit":
       return `Pi 修改文件：\n${path}`;
     case "bash":
@@ -11014,9 +11072,11 @@ function formatPiRuntimeStatus(event: PiStreamEvent) {
   if (event.type === "auto_retry_start") {
     if (event.continuous) {
       const delaySeconds = Math.max(0, Math.round((event.delayMs ?? 0) / 1_000));
-      const action = event.resumeFromProgress
-        ? "从已有思维断点继续执行"
-        : "持续重试模型请求";
+      const action = event.resumeFromToolCall
+        ? "从未完成工具调用断点继续（旧调用未执行）"
+        : event.resumeFromProgress
+          ? "从已有思维断点继续执行"
+          : "持续重试模型请求";
       return `Pi 正在${action}（第 ${event.attempt ?? 1} 次${
         delaySeconds > 0 ? `，约 ${delaySeconds} 秒后` : ""
       }，可点击停止）...`;
@@ -22530,8 +22590,21 @@ export function App() {
     const resultText = toolVisualizationResultText(meta.result);
     const diff = toolVisualizationDiff(meta);
     const lines = resultText.split("\n").slice(0, 400);
-    const statusLabel = meta.status === "running" ? "执行中" : meta.status === "error" ? "失败" : "完成";
-    const title = isRead ? "读取文件" : isShell ? "运行命令" : isMutation ? (normalizedName.includes("write") ? "写入文件" : "修改文件") : meta.name;
+    const unexecutedArguments = meta.phase === "arguments" && meta.status !== "done";
+    const statusLabel = meta.status === "running"
+      ? meta.phase === "arguments" ? "生成参数" : "执行中"
+      : meta.status === "error" ? unexecutedArguments ? "未执行" : "失败" : "完成";
+    const title = isRead
+      ? "读取文件"
+      : isShell
+        ? "运行命令"
+        : isMutation
+          ? normalizedName.includes("write")
+            ? unexecutedArguments
+              ? meta.status === "running" ? "准备写入" : "写入未执行"
+              : "写入文件"
+            : "修改文件"
+          : meta.name;
     const Icon = isRead ? FileCode2 : isShell ? Terminal : isMutation ? FilePenLine : Wrench;
     const additions = diff.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++"));
     const deletions = diff.split("\n").filter((line) => line.startsWith("-") && !line.startsWith("---"));
@@ -22552,10 +22625,13 @@ export function App() {
         </summary>
         <div className="pi-tool-visualization-body">
           {path && <div className="pi-tool-visualization-path"><FileCode2 size={13} /> <code>{path}</code></div>}
+          {meta.status === "error" && resultText ? (
+            <pre className="pi-tool-result-preview">{resultText}</pre>
+          ) : null}
           {isMutation && diff ? (
             <div className="pi-tool-diff">
               <div className="pi-tool-diff-toolbar">
-                <span>{path || "文件变更"}</span>
+                <span>{meta.status === "done" ? path || "文件变更" : "未执行的参数预览"}</span>
                 <span><b className="additions">+{additions.length}</b> <b className="deletions">-{deletions.length}</b></span>
               </div>
               <pre>{diff.split("\n").slice(0, 600).map((line, index) => {
@@ -22571,7 +22647,7 @@ export function App() {
               {command && <div className="command"><b>$</b>{command}</div>}
               <pre>{resultText || (meta.status === "running" ? "等待输出…" : "无输出")}</pre>
             </div>
-          ) : resultText ? (
+          ) : resultText && meta.status !== "error" ? (
             <pre className="pi-tool-result-preview">{resultText}</pre>
           ) : null}
         </div>
@@ -24169,6 +24245,7 @@ export function App() {
               name: event.toolName || "unknown_tool",
               args: {},
               partialArguments: "",
+              phase: "arguments",
               status: "running",
               startedAt: new Date().toISOString(),
             };
@@ -24205,6 +24282,7 @@ export function App() {
               name: event.toolName || previous?.name || "unknown_tool",
               args: { ...(previous?.args ?? {}), ...nextArgs },
               partialArguments,
+              phase: "arguments",
               status: "running",
             };
             piToolVisualizations.set(toolCallId, visualization);
@@ -24226,6 +24304,7 @@ export function App() {
               name: event.toolName || previous?.name || String(rawFunction.name ?? "unknown_tool"),
               args: { ...(previous?.args ?? {}), ...parsePartialToolCallArguments(argumentsText) },
               partialArguments: argumentsText,
+              phase: "arguments",
               status: "running",
             };
             piToolVisualizations.set(toolCallId, visualization);
@@ -24233,25 +24312,21 @@ export function App() {
             return;
           }
           if (event.type === "tool_call_incomplete") {
-            const toolCallId = event.toolCallId || crypto.randomUUID();
-            const previous = piToolVisualizations.get(toolCallId);
-            const argumentsText = event.argumentsText ?? previous?.partialArguments ?? "";
-            const name = event.toolName || previous?.name || "unknown_tool";
+            const previous = event.toolCallId
+              ? piToolVisualizations.get(event.toolCallId)
+              : undefined;
+            const {
+              toolCallId,
+              argumentsText,
+              name,
+              visualization,
+            } = buildIncompletePiToolVisualization(event, previous);
             const incompleteToolCall: ChatToolCall = {
               id: toolCallId,
               type: "function",
               function: { name, arguments: argumentsText },
             };
             piIncompleteToolCalls.set(toolCallId, incompleteToolCall);
-            const visualization: ToolVisualization = {
-              ...(previous ?? {}),
-              toolCallId,
-              name,
-              args: { ...(previous?.args ?? {}), ...parsePartialToolCallArguments(argumentsText) },
-              partialArguments: argumentsText,
-              result: "工具参数未生成完整，尚未执行，正在等待继续补全。",
-              status: "running",
-            };
             piToolVisualizations.set(toolCallId, visualization);
             updateAssistantToolVisualization(commitChatMessages, toolCallId, () => visualization);
             return;
@@ -24264,6 +24339,7 @@ export function App() {
               toolCallId: event.toolCallId,
               name: event.toolName || previous?.name || "unknown_tool",
               args: event.arguments ?? previous?.args ?? {},
+              phase: "execution",
               status: "running",
               startedAt: previous?.startedAt ?? new Date().toISOString(),
             };
@@ -24292,6 +24368,7 @@ export function App() {
               name: event.toolName || previous?.name || "unknown_tool",
               args: previous?.args ?? {},
               result: event.result,
+              phase: "execution",
               status: event.isError ? "error" : "done",
               startedAt: previous?.startedAt,
               endedAt: new Date().toISOString(),
@@ -27415,6 +27492,7 @@ export function App() {
               name: event.toolName || "unknown_tool",
               args: {},
               partialArguments: "",
+              phase: "arguments",
               status: "running",
               startedAt: new Date().toISOString(),
             };
@@ -27443,6 +27521,7 @@ export function App() {
               name: event.toolName || previous?.name || "unknown_tool",
               args: { ...(previous?.args ?? {}), ...parsePartialToolCallArguments(partialArguments) },
               partialArguments,
+              phase: "arguments",
               status: "running",
             };
             piToolVisualizations.set(toolCallId, visualization);
@@ -27464,6 +27543,7 @@ export function App() {
               name: event.toolName || previous?.name || String(rawFunction.name ?? "unknown_tool"),
               args: { ...(previous?.args ?? {}), ...parsePartialToolCallArguments(argumentsText) },
               partialArguments: argumentsText,
+              phase: "arguments",
               status: "running",
             };
             piToolVisualizations.set(toolCallId, visualization);
@@ -27471,24 +27551,20 @@ export function App() {
             return;
           }
           if (event.type === "tool_call_incomplete") {
-            const toolCallId = event.toolCallId || crypto.randomUUID();
-            const previous = piToolVisualizations.get(toolCallId);
-            const argumentsText = event.argumentsText ?? previous?.partialArguments ?? "";
-            const name = event.toolName || previous?.name || "unknown_tool";
+            const previous = event.toolCallId
+              ? piToolVisualizations.get(event.toolCallId)
+              : undefined;
+            const {
+              toolCallId,
+              argumentsText,
+              name,
+              visualization,
+            } = buildIncompletePiToolVisualization(event, previous);
             piIncompleteToolCalls.set(toolCallId, {
               id: toolCallId,
               type: "function",
               function: { name, arguments: argumentsText },
             });
-            const visualization: ToolVisualization = {
-              ...(previous ?? {}),
-              toolCallId,
-              name,
-              args: { ...(previous?.args ?? {}), ...parsePartialToolCallArguments(argumentsText) },
-              partialArguments: argumentsText,
-              result: "工具参数未生成完整，尚未执行，正在等待继续补全。",
-              status: "running",
-            };
             piToolVisualizations.set(toolCallId, visualization);
             updateAssistantToolVisualization(commitChatMessages, toolCallId, () => visualization);
             return;
@@ -27501,6 +27577,7 @@ export function App() {
               toolCallId: event.toolCallId,
               name: event.toolName || previous?.name || "unknown_tool",
               args: event.arguments ?? previous?.args ?? {},
+              phase: "execution",
               status: "running",
               startedAt: previous?.startedAt ?? new Date().toISOString(),
             };
@@ -27521,6 +27598,7 @@ export function App() {
               name: event.toolName || previous?.name || "unknown_tool",
               args: previous?.args ?? {},
               result: event.result,
+              phase: "execution",
               status: event.isError ? "error" : "done",
               startedAt: previous?.startedAt,
               endedAt: new Date().toISOString(),

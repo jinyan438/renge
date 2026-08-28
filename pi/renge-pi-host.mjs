@@ -14,6 +14,7 @@ import {
 import { Type } from "typebox";
 import { createPiMcpAdapter, normalizePiMcpConfig } from "./pi-mcp-adapter-bridge.mjs";
 import { installContinuousPiRetry } from "./continuous-retry.mjs";
+import { createResumableWriteTool } from "./resumable-write-tool.mjs";
 import {
   convertOpenAiMessagesToPi,
   filterPiCustomToolDefinitions,
@@ -122,6 +123,31 @@ function completionChunk(runId, delta, finishReason = null) {
 
 function piEvent(type, payload = {}) {
   return { pi: { type, ...payload } };
+}
+
+function flushIncompleteStreamingToolCalls(
+  run,
+  { finishReason = "error", willRetry = false } = {},
+) {
+  const pendingById = new Map();
+  for (const pendingToolCall of [
+    ...run.streamingToolCalls.values(),
+    ...run.unexecutedToolCalls.values(),
+  ]) {
+    pendingById.set(pendingToolCall.toolCallId, pendingToolCall);
+  }
+  for (const pendingToolCall of pendingById.values()) {
+    writeSse(run.response, piEvent("tool_call_incomplete", {
+      runId: run.id,
+      toolCallId: pendingToolCall.toolCallId,
+      toolName: pendingToolCall.toolName,
+      argumentsText: pendingToolCall.argumentsText,
+      finishReason,
+      willRetry,
+    }));
+  }
+  run.streamingToolCalls.clear();
+  run.unexecutedToolCalls.clear();
 }
 
 function toolContent(result, allowImageInputs = true) {
@@ -422,6 +448,9 @@ export function createRengePiHost({
       response,
       pendingTools: new Map(),
       streamingToolCalls: new Map(),
+      // A toolcall_end event only means the JSON parser closed. Keep the
+      // preview here until tool_execution_start proves the tool really ran.
+      unexecutedToolCalls: new Map(),
       session: null,
       settingsManager: null,
       sessionKey,
@@ -531,8 +560,19 @@ export function createRengePiHost({
         workspace,
         new Set([...nativeTools, ...extensionToolNames]),
       ) : [];
-      const customTools = customDefinitionsForRun.map((definition) => createCustomTool(definition, run));
-      customToolNames = new Set(customTools.map((tool) => tool.name));
+      const bridgedCustomTools = customDefinitionsForRun.map(
+        (definition) => createCustomTool(definition, run),
+      );
+      // Override Pi's whole-file write with a bounded, offset-checked version.
+      // A local gateway that cuts a long stream can no longer leave a giant
+      // write call perpetually "running" or duplicate an already-applied chunk.
+      const localCustomTools = nativeTools.includes("write")
+        ? [createResumableWriteTool(cwd)]
+        : [];
+      const customTools = [...bridgedCustomTools, ...localCustomTools];
+      // Only tools bridged back to the renderer suppress native execution
+      // events. The local resumable write tool must still paint start/end.
+      customToolNames = new Set(bridgedCustomTools.map((tool) => tool.name));
       const sessionFile = sessionKey;
       await ensureSessionFile(sessionFile, piSessionId, cwd);
       const sessionManager = SessionManager.open(sessionFile, sessionDir, cwd);
@@ -580,6 +620,15 @@ export function createRengePiHost({
         if (event.type === "message_end" && event.message?.role === "assistant") {
           run.lastAssistantStopReason = String(event.message.stopReason ?? "");
         }
+        if (event.type === "auto_retry_start") {
+          // Pi may emit toolcall_end after repairing partial JSON even though
+          // no tool_execution_start occurred. Close every unexecuted preview
+          // before the next attempt so the UI never mistakes it for a write.
+          flushIncompleteStreamingToolCalls(run, {
+            finishReason: "error",
+            willRetry: true,
+          });
+        }
         if (event.type === "message_update") {
           if (event.assistantMessageEvent.type === "text_delta") {
             writeSse(response, completionChunk(runId, { content: event.assistantMessageEvent.delta }));
@@ -626,12 +675,27 @@ export function createRengePiHost({
             const key = String(toolCall.contentIndex);
             const current = run.streamingToolCalls.get(key);
             run.streamingToolCalls.delete(key);
+            const endedToolCall = event.assistantMessageEvent.toolCall;
+            const toolCallId = current?.toolCallId ?? String(
+              endedToolCall?.id ?? `stream-tool-call-${toolCall.contentIndex}`,
+            );
+            const toolName = current?.toolName ?? String(
+              endedToolCall?.name ?? "unknown_tool",
+            );
+            const argumentsText = current?.argumentsText || JSON.stringify(
+              endedToolCall?.arguments ?? {},
+            );
+            run.unexecutedToolCalls.set(toolCallId, {
+              toolCallId,
+              toolName,
+              argumentsText,
+            });
             writeSse(response, piEvent("tool_call_end", {
               runId,
-              toolCallId: current?.toolCallId ?? `stream-tool-call-${toolCall.contentIndex}`,
+              toolCallId,
               contentIndex: toolCall.contentIndex,
               toolCall: toolCall.toolCall,
-              ...(current?.argumentsText ? { argumentsText: current.argumentsText } : {}),
+              ...(argumentsText ? { argumentsText } : {}),
             }));
           }
           return;
@@ -640,6 +704,7 @@ export function createRengePiHost({
           event.type === "tool_execution_start" &&
           !customToolNames.has(event.toolName)
         ) {
+          run.unexecutedToolCalls.delete(String(event.toolCallId ?? ""));
           writeSse(response, piEvent("tool_start", {
             runId,
             toolCallId: event.toolCallId,
@@ -647,6 +712,9 @@ export function createRengePiHost({
             arguments: event.args,
           }));
           return;
+        }
+        if (event.type === "tool_execution_start") {
+          run.unexecutedToolCalls.delete(String(event.toolCallId ?? ""));
         }
         if (
           event.type === "tool_execution_end" &&
@@ -716,16 +784,7 @@ export function createRengePiHost({
         if (retryError) throw new Error(retryError);
       }
       const finishReason = getSessionFinishReason(session, run.lastAssistantStopReason);
-      for (const pendingToolCall of run.streamingToolCalls.values()) {
-        writeSse(response, piEvent("tool_call_incomplete", {
-          runId,
-          toolCallId: pendingToolCall.toolCallId,
-          toolName: pendingToolCall.toolName,
-          argumentsText: pendingToolCall.argumentsText,
-          finishReason,
-        }));
-      }
-      run.streamingToolCalls.clear();
+      flushIncompleteStreamingToolCalls(run, { finishReason, willRetry: false });
       // Some local gateways report zero usage, so the SDK cannot run its
       // post-turn threshold check. Re-check Pi's own message estimator here.
       await maybeAutoCompact(session, compaction);
