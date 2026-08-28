@@ -1431,6 +1431,7 @@ type PiStreamEvent = {
   maxAttempts?: number | null;
   delayMs?: number;
   continuous?: boolean;
+  resumeFromProgress?: boolean;
   usage?: {
     tokens: number | null;
     contextWindow: number;
@@ -11013,7 +11014,10 @@ function formatPiRuntimeStatus(event: PiStreamEvent) {
   if (event.type === "auto_retry_start") {
     if (event.continuous) {
       const delaySeconds = Math.max(0, Math.round((event.delayMs ?? 0) / 1_000));
-      return `Pi 正在持续重试模型请求（第 ${event.attempt ?? 1} 次${
+      const action = event.resumeFromProgress
+        ? "从已有思维断点继续执行"
+        : "持续重试模型请求";
+      return `Pi 正在${action}（第 ${event.attempt ?? 1} 次${
         delaySeconds > 0 ? `，约 ${delaySeconds} 秒后` : ""
       }，可点击停止）...`;
     }

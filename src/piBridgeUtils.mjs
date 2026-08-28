@@ -254,10 +254,80 @@ export function getPiSamplingParams(request) {
     "max_tokens",
     "max_completion_tokens",
     "max_output_tokens",
+    // Pi must own thinking controls so a continuation can temporarily turn
+    // reasoning off after a completed long-thinking phase. Leaving these in
+    // samplingParams would merge them last and force every retry to rethink.
+    "reasoning",
+    "reasoning_effort",
+    "reasoning_budget_tokens",
+    "thinking",
+    "thinking_budget_tokens",
+    "enable_thinking",
   ]);
   return Object.fromEntries(
     Object.entries(request).filter(([key, value]) => !omitted.has(key) && value !== undefined),
   );
+}
+
+const PI_REASONING_LEVELS = new Set([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
+export function getPiReasoningModelConfig(request) {
+  const source = request && typeof request === "object" ? request : {};
+  const reasoning = source.reasoning && typeof source.reasoning === "object"
+    ? source.reasoning
+    : {};
+  const thinking = source.thinking && typeof source.thinking === "object"
+    ? source.thinking
+    : {};
+  const rawLevel = String(
+    source.reasoning_effort ?? reasoning.effort ?? "",
+  ).trim().toLowerCase();
+  const explicitlyEnabled =
+    source.enable_thinking === true ||
+    source.include_reasoning === true ||
+    thinking.type === "enabled" ||
+    reasoning.enabled === true ||
+    Boolean(rawLevel && rawLevel !== "none" && rawLevel !== "off");
+  if (!explicitlyEnabled) {
+    return { reasoning: false, thinkingLevel: "off" };
+  }
+
+  let thinkingFormat;
+  if (source.enable_thinking === true) thinkingFormat = "qwen";
+  else if (thinking.type === "enabled" && "clear_thinking" in thinking) thinkingFormat = "zai";
+  else if (thinking.type === "enabled") thinkingFormat = "deepseek";
+  else if (typeof reasoning.enabled === "boolean") thinkingFormat = "together";
+
+  return {
+    reasoning: true,
+    thinkingLevel: PI_REASONING_LEVELS.has(rawLevel) ? rawLevel : "high",
+    // Extended levels are opt-in in Pi. Declare them explicitly so xhigh/max
+    // selected by Renge are not silently clamped back to high.
+    thinkingLevelMap: {
+      off: "none",
+      minimal: "minimal",
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: "max",
+    },
+    ...(thinkingFormat
+      ? {
+          compat: {
+            thinkingFormat,
+            supportsReasoningEffort: "reasoning_effort" in source,
+          },
+        }
+      : {}),
+  };
 }
 
 export function serializePiToolResult(result) {

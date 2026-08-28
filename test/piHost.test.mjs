@@ -17,6 +17,8 @@ test("continuous Pi retry uses capped backoff until the run is aborted", async (
   assert.equal(getContinuousRetryDelayMs(10_000), 30_000);
 
   const events = [];
+  const listeners = [];
+  const steeringMessages = [];
   const session = {
     _prepareRetry() {},
     _retryAttempt: 0,
@@ -24,24 +26,50 @@ test("continuous Pi retry uses capped backoff until the run is aborted", async (
     _emit(event) {
       events.push(event);
     },
+    subscribe(listener) {
+      listeners.push(listener);
+    },
     agent: {
+      steer(message) {
+        steeringMessages.push(message);
+      },
       state: {
+        thinkingLevel: "max",
         messages: [
           { role: "user", content: "continue" },
-          { role: "assistant", stopReason: "error" },
+          {
+            role: "assistant",
+            stopReason: "error",
+            content: [{ type: "thinking", thinking: "finished architecture and implementation plan" }],
+          },
         ],
       },
     },
   };
 
   assert.equal(installContinuousPiRetry(session, { baseDelayMs: 0, maxDelayMs: 0 }), true);
-  assert.equal(await session._prepareRetry({ errorMessage: "temporary outage" }), true);
+  assert.equal(await session._prepareRetry({
+    ...session.agent.state.messages.at(-1),
+    errorMessage: "temporary outage",
+  }), true);
   assert.equal(events[0].type, "auto_retry_start");
   assert.equal(events[0].continuous, true);
+  assert.equal(events[0].resumeFromProgress, true);
   assert.equal(events[0].attempt, 1);
   assert.equal(events[0].maxAttempts, undefined);
-  assert.equal(session.agent.state.messages.length, 1);
+  assert.equal(session.agent.state.messages.length, 2);
+  assert.equal(session.agent.state.messages.at(-1).stopReason, "stop");
+  assert.equal(session.agent.state.messages.at(-1).content[0].type, "text");
+  assert.match(session.agent.state.messages.at(-1).content[0].text, /finished architecture/);
+  assert.equal(session.agent.state.thinkingLevel, "off");
+  assert.equal(steeringMessages.length, 1);
+  assert.match(steeringMessages[0].content[0].text, /禁止重新分析、重新规划/);
+  assert.match(steeringMessages[0].content[0].text, /finished architecture/);
 
+  listeners.forEach((listener) => listener({ type: "auto_retry_end", success: true }));
+  assert.equal(session.agent.state.thinkingLevel, "max");
+
+  session.agent.state.messages.push({ role: "assistant", stopReason: "error", content: [] });
   const cancelledRetry = session._prepareRetry({ errorMessage: "still unavailable" });
   session._retryAbortController.abort();
   assert.equal(await cancelledRetry, false);
@@ -67,6 +95,98 @@ function close(server) {
 function sendChunk(response, payload) {
   response.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
+
+test("Pi Host resumes partial reasoning as execution without starting the plan over", async () => {
+  const upstreamRequests = [];
+  const upstream = createServer(async (request, response) => {
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    const body = JSON.parse(raw);
+    upstreamRequests.push(body);
+    response.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+    });
+    const base = {
+      id: `resume-${upstreamRequests.length}`,
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: "reasoning-model",
+    };
+    if (upstreamRequests.length === 1) {
+      sendChunk(response, {
+        ...base,
+        choices: [{
+          index: 0,
+          delta: {
+            role: "assistant",
+            reasoning_content: "UNIQUE_COMPLETED_PLAN: architecture and code are ready.",
+          },
+          finish_reason: null,
+        }],
+      });
+      // Reproduce the local gateway behavior from the screenshot: all
+      // reasoning arrived, but the stream closed without a terminal reason.
+      response.end("data: [DONE]\n\n");
+      return;
+    }
+    sendChunk(response, {
+      ...base,
+      choices: [{
+        index: 0,
+        delta: { role: "assistant", content: "EXECUTED_FROM_CHECKPOINT" },
+        finish_reason: null,
+      }],
+    });
+    sendChunk(response, {
+      ...base,
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    });
+    response.end("data: [DONE]\n\n");
+  });
+
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-pi-reasoning-resume-test-"));
+  const upstreamPort = await listen(upstream);
+  const renge = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  try {
+    const response = await fetch(`${renge.url}/api/pi/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runId: "pi-partial-reasoning-resume-run",
+        apiBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+        apiKey: "test-key",
+        apiType: "chat-completions",
+        enableTools: false,
+        request: {
+          model: "reasoning-model",
+          messages: [{ role: "user", content: "Build the fixture" }],
+          reasoning_effort: "max",
+          include_reasoning: true,
+          stream: true,
+        },
+      }),
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(text, /EXECUTED_FROM_CHECKPOINT/);
+    assert.match(text, /"resumeFromProgress":true/);
+    assert.equal(upstreamRequests.length, 2);
+    assert.equal(upstreamRequests[0].reasoning_effort, "max");
+    assert.equal(upstreamRequests[1].reasoning_effort, "none");
+    const resumedAssistant = upstreamRequests[1].messages.find(
+      (message) => message.role === "assistant",
+    );
+    assert.match(String(resumedAssistant?.content ?? ""), /UNIQUE_COMPLETED_PLAN/);
+    const continuation = upstreamRequests[1].messages.at(-1);
+    assert.equal(continuation.role, "user");
+    assert.match(JSON.stringify(continuation.content ?? ""), /禁止重新分析、重新规划/);
+  } finally {
+    await close(renge.server);
+    await close(upstream);
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
 
 test("Pi Host bridges a Renge-only tool result and continues the model loop", async () => {
   const upstreamRequests = [];

@@ -4,6 +4,7 @@ import {
   convertOpenAiMessagesToPi,
   filterPiCustomToolDefinitions,
   getPiNativeToolNames,
+  getPiReasoningModelConfig,
   getPiSamplingParams,
   normalizePiCompactionConfig,
   normalizePiSkillPaths,
@@ -27,11 +28,54 @@ test("Pi sampling params leave token-limit field selection to the provider adapt
     temperature: 0.7,
     top_p: 0.9,
     top_k: 40,
+    reasoning_effort: "max",
+    enable_thinking: true,
   }), {
     temperature: 0.7,
     top_p: 0.9,
     top_k: 40,
   });
+});
+
+test("Pi owns reasoning controls so a partial-progress continuation can disable rethinking", () => {
+  assert.deepEqual(getPiReasoningModelConfig({
+    reasoning_effort: "max",
+    include_reasoning: true,
+  }), {
+    reasoning: true,
+    thinkingLevel: "max",
+    thinkingLevelMap: {
+      off: "none",
+      minimal: "minimal",
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: "max",
+    },
+  });
+  assert.deepEqual(getPiReasoningModelConfig({ enable_thinking: true }), {
+    reasoning: true,
+    thinkingLevel: "high",
+    thinkingLevelMap: {
+      off: "none",
+      minimal: "minimal",
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: "max",
+    },
+    compat: {
+      thinkingFormat: "qwen",
+      supportsReasoningEffort: false,
+    },
+  });
+  assert.deepEqual(getPiReasoningModelConfig({ reasoning_effort: "none" }), {
+    reasoning: false,
+    thinkingLevel: "off",
+  });
+  assert.equal(getPiReasoningModelConfig({ include_reasoning: true }).reasoning, true);
 });
 
 test("Electron workspaces use all Pi native coding tools and remove Renge duplicates", () => {

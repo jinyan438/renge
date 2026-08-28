@@ -18,6 +18,7 @@ import {
   convertOpenAiMessagesToPi,
   filterPiCustomToolDefinitions,
   getPiNativeToolNames,
+  getPiReasoningModelConfig,
   getPiSamplingParams,
   normalizePiCompactionConfig,
   normalizePiSkillPaths,
@@ -457,6 +458,7 @@ export function createRengePiHost({
       modelRuntime = await getModelRuntime();
       providerUsers.set(providerId, (providerUsers.get(providerId) ?? 0) + 1);
       const samplingParams = getPiSamplingParams(requestBody);
+      const reasoningConfig = getPiReasoningModelConfig(requestBody);
       const requestedMaxTokens = Number(
         requestBody.max_tokens ??
           requestBody.max_completion_tokens ??
@@ -473,11 +475,11 @@ export function createRengePiHost({
           name: provider.modelId,
           api: provider.piApi,
           baseUrl: provider.apiBaseUrl,
-          reasoning: Boolean(
-            requestBody.reasoning_effort ||
-              requestBody.include_reasoning ||
-              requestBody.enable_thinking,
-          ),
+          reasoning: reasoningConfig.reasoning,
+          ...(reasoningConfig.thinkingLevelMap
+            ? { thinkingLevelMap: reasoningConfig.thinkingLevelMap }
+            : {}),
+          ...(reasoningConfig.compat ? { compat: reasoningConfig.compat } : {}),
           input: provider.allowImageInputs ? ["text", "image"] : ["text"],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           contextWindow,
@@ -540,15 +542,11 @@ export function createRengePiHost({
         }
         for (const message of converted.history) sessionManager.appendMessage(message);
       }
-      const reasoningLevel = String(requestBody.reasoning_effort ?? "").trim();
-      const thinkingLevel = ["minimal", "low", "medium", "high", "xhigh", "max"].includes(reasoningLevel)
-        ? reasoningLevel
-        : "off";
       const { session } = await createAgentSession({
         cwd,
         modelRuntime,
         model,
-        thinkingLevel,
+        thinkingLevel: reasoningConfig.thinkingLevel,
         tools: toolsEnabled
           ? [
               ...nativeTools,
