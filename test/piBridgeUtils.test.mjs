@@ -52,7 +52,6 @@ test("Electron workspaces use all Pi native coding tools and remove Renge duplic
     "ls",
     "write",
     "edit",
-    "bash",
     "powershell",
   ]);
   assert.equal(PI_KERNEL_ID, "@earendil-works/pi-coding-agent@0.84.3");

@@ -5,7 +5,6 @@ const PI_NATIVE_TOOL_NAMES = Object.freeze([
   "ls",
   "write",
   "edit",
-  "bash",
 ]);
 
 export const PI_KERNEL_ID = "@earendil-works/pi-coding-agent@0.84.3";
@@ -66,7 +65,7 @@ export function getPiNativeToolNames(workspace, options = {}) {
     ).toLowerCase();
     return [
       ...PI_NATIVE_TOOL_NAMES,
-      ...(platform === "win32" ? ["powershell"] : []),
+      platform === "win32" ? "powershell" : "bash",
     ];
   }
   return options.skillsEnabled === true ? ["read"] : [];

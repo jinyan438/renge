@@ -291,6 +291,14 @@ test("Pi Host executes Pi native read directly for an Electron workspace", async
       upstreamRequests[0].tools.some((entry) => entry.function?.name === "read"),
       true,
     );
+    const upstreamToolNames = upstreamRequests[0].tools.map((entry) => entry.function?.name);
+    if (process.platform === "win32") {
+      assert.equal(upstreamToolNames.includes("powershell"), true);
+      assert.equal(upstreamToolNames.includes("bash"), false);
+    } else {
+      assert.equal(upstreamToolNames.includes("bash"), true);
+      assert.equal(upstreamToolNames.includes("powershell"), false);
+    }
   } finally {
     await close(renge.server);
     await close(upstream);
