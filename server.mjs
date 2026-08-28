@@ -3039,7 +3039,8 @@ export function startRengeServer(options = {}) {
   const temporaryFilesRoot = options.temporaryFilesRoot
     ? resolve(options.temporaryFilesRoot)
     : "";
-  const piHost = createRengePiHost({ defaultCwd: __dirname, dataDir });
+  const piAgentDir = resolve(options.piAgentDir ?? join(dataDir, ".pi", "agent"));
+  const piHost = createRengePiHost({ defaultCwd: __dirname, dataDir, agentDir: piAgentDir });
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     const isHtmlPreviewOrigin = url.hostname.toLowerCase() === "preview.localhost";

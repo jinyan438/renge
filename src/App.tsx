@@ -1423,6 +1423,9 @@ type PiStreamEvent = {
   result?: unknown;
   isError?: boolean;
   reason?: string;
+  aborted?: boolean;
+  willRetry?: boolean;
+  errorMessage?: string;
   attempt?: number;
   maxAttempts?: number;
   delayMs?: number;
@@ -8781,12 +8784,16 @@ function buildPiNativeToolsSystemPrompt(
   handle: LocalToolsWorkspaceHandle | null,
 ) {
   if (handle?.kind !== "electron") return "";
+  const isWindows = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
   return [
     `当前 Pi 工作目录是用户授权的工作区「${handle.name}」。`,
     "文件和终端操作优先直接使用 Pi 内核原生工具，不要寻找同名 local_* 替代工具：",
     "- read：读取文本文件或指定行段。",
     "- grep：搜索文件内容；find：按路径或文件名查找；ls：列出目录。",
     "- write：创建或覆盖文本文件；edit：精确修改文本文件。",
+    ...(isWindows
+      ? ["- powershell：在 Windows 上直接运行 PowerShell 命令；需要 PowerShell 语法或对象管道时优先使用。"]
+      : []),
     "- bash：运行命令、npm script、Git、创建/移动/删除目录与文件，以及完成项目检测。",
     "相对路径以当前工作区为根；未收到工具成功结果前不得声称已经读取、写入、修改或执行。",
     "Pi 原生工具不处理聊天附件、二进制直传、电脑图片预览或跨设备传输；遇到这些任务时使用当前列出的 Renge 专用工具。",
@@ -11005,7 +11012,12 @@ function formatPiNativeToolResult(event: PiStreamEvent) {
 
 function formatPiRuntimeStatus(event: PiStreamEvent) {
   if (event.type === "compaction_start") return "Pi 正在压缩会话上下文...";
-  if (event.type === "compaction_end") return "Pi 已完成上下文压缩，正在继续生成...";
+  if (event.type === "compaction_end") {
+    if (event.aborted) return "Pi 已取消上下文压缩，正在继续生成...";
+    if (event.errorMessage) return `Pi 上下文压缩失败：${event.errorMessage}`;
+    if (event.willRetry) return "Pi 已完成上下文压缩，正在重试模型请求...";
+    return "Pi 已完成上下文压缩，正在继续生成...";
+  }
   if (event.type === "auto_retry_start") {
     return `Pi 正在重试模型请求（${event.attempt ?? 1}/${event.maxAttempts ?? "?"}）...`;
   }

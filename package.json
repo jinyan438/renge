@@ -17,9 +17,9 @@
     "desktop": "npm run electron"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.84.2",
-    "@earendil-works/pi-coding-agent": "0.84.2",
-    "@earendil-works/pi-tui": "0.84.2",
+    "@earendil-works/pi-ai": "0.84.3",
+    "@earendil-works/pi-coding-agent": "0.84.3",
+    "@earendil-works/pi-tui": "0.84.3",
     "@fortawesome/fontawesome-free": "^6.7.2",
     "@vitejs/plugin-react": "^5.0.0",
     "@xterm/addon-fit": "^0.11.0",

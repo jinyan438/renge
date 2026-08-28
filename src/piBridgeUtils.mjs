@@ -8,6 +8,8 @@ const PI_NATIVE_TOOL_NAMES = Object.freeze([
   "bash",
 ]);
 
+export const PI_KERNEL_ID = "@earendil-works/pi-coding-agent@0.84.3";
+
 const PI_REPLACED_RENGE_TOOLS = new Set([
   "local_list_files",
   "local_read_file",
@@ -56,7 +58,16 @@ export function shouldEnablePiTools(enableTools, skillPaths) {
 
 export function getPiNativeToolNames(workspace, options = {}) {
   if (options.fullToolsEnabled !== false && workspace?.kind === "electron" && workspace.cwd) {
-    return [...PI_NATIVE_TOOL_NAMES];
+    const platform = String(
+      options.platform ??
+        (typeof process === "object" && typeof process.platform === "string"
+          ? process.platform
+          : ""),
+    ).toLowerCase();
+    return [
+      ...PI_NATIVE_TOOL_NAMES,
+      ...(platform === "win32" ? ["powershell"] : []),
+    ];
   }
   return options.skillsEnabled === true ? ["read"] : [];
 }

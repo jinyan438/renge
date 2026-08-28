@@ -8,6 +8,7 @@ import {
   normalizePiCompactionConfig,
   normalizePiSkillPaths,
   normalizePiProviderConfig,
+  PI_KERNEL_ID,
   shouldEnablePiTools,
 } from "../src/piBridgeUtils.mjs";
 
@@ -35,7 +36,7 @@ test("Pi sampling params leave token-limit field selection to the provider adapt
 
 test("Electron workspaces use all Pi native coding tools and remove Renge duplicates", () => {
   const workspace = { kind: "electron", cwd: "E:/project" };
-  assert.deepEqual(getPiNativeToolNames(workspace), [
+  assert.deepEqual(getPiNativeToolNames(workspace, { platform: "linux" }), [
     "read",
     "grep",
     "find",
@@ -44,6 +45,17 @@ test("Electron workspaces use all Pi native coding tools and remove Renge duplic
     "edit",
     "bash",
   ]);
+  assert.deepEqual(getPiNativeToolNames(workspace, { platform: "win32" }), [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "write",
+    "edit",
+    "bash",
+    "powershell",
+  ]);
+  assert.equal(PI_KERNEL_ID, "@earendil-works/pi-coding-agent@0.84.3");
   assert.deepEqual(
     filterPiCustomToolDefinitions([
       tool("local_read_file"),

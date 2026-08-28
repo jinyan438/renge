@@ -21,6 +21,7 @@ import {
   normalizePiCompactionConfig,
   normalizePiSkillPaths,
   normalizePiProviderConfig,
+  PI_KERNEL_ID,
   serializePiToolResult,
   shouldEnablePiTools,
 } from "../src/piBridgeUtils.mjs";
@@ -92,11 +93,11 @@ function extractContextWindowFromError(error) {
   return null;
 }
 
-function getSessionFinishReason(session) {
+function getSessionFinishReason(session, streamedStopReason = "") {
   const lastAssistant = [...(session?.messages ?? [])]
     .reverse()
     .find((message) => message?.role === "assistant");
-  const stopReason = String(lastAssistant?.stopReason ?? "").trim();
+  const stopReason = String(streamedStopReason || lastAssistant?.stopReason || "").trim();
   return /^(?:length|max_tokens|max_output_tokens|token_limit)$/i.test(stopReason)
     ? "length"
     : "stop";
@@ -423,13 +424,14 @@ export function createRengePiHost({
       settingsManager: null,
       sessionKey,
       allowImageInputs: provider.allowImageInputs,
+      lastAssistantStopReason: "",
       completed: false,
     };
     runs.set(runId, run);
     writeSse(response, piEvent("run_start", {
       runId,
       sessionId: piSessionId,
-      kernel: "@earendil-works/pi-coding-agent@0.84.2",
+      kernel: PI_KERNEL_ID,
       kernelMode: "full",
       compaction: { engine: "pi", ...compaction },
       nativeTools,
@@ -496,7 +498,7 @@ export function createRengePiHost({
       settingsManager.applyOverrides({ compaction });
       run.settingsManager = settingsManager;
       const extensionFactories = hasMcpServers
-        ? [await createPiMcpAdapter(mcpConfig)]
+        ? [await createPiMcpAdapter(mcpConfig, { agentDir })]
         : [];
       const resourceLoader = new DefaultResourceLoader({
         cwd,
@@ -569,6 +571,9 @@ export function createRengePiHost({
       });
 
       unsubscribe = session.subscribe((event) => {
+        if (event.type === "message_end" && event.message?.role === "assistant") {
+          run.lastAssistantStopReason = String(event.message.stopReason ?? "");
+        }
         if (event.type === "message_update") {
           if (event.assistantMessageEvent.type === "text_delta") {
             writeSse(response, completionChunk(runId, { content: event.assistantMessageEvent.delta }));
@@ -580,7 +585,9 @@ export function createRengePiHost({
             const toolCall = event.assistantMessageEvent;
             const partialToolCall = toolCall.partial?.content?.[toolCall.contentIndex];
             const toolCallId = String(toolCall.id ?? partialToolCall?.id ?? `stream-tool-call-${toolCall.contentIndex}`);
-            const toolName = String(toolCall.name ?? partialToolCall?.name ?? "unknown_tool");
+            const toolName = String(
+              toolCall.toolName ?? toolCall.name ?? partialToolCall?.name ?? "unknown_tool",
+            );
             run.streamingToolCalls.set(String(toolCall.contentIndex), {
               toolCallId,
               toolName,
@@ -702,7 +709,7 @@ export function createRengePiHost({
         const retryError = session.agent.state.errorMessage;
         if (retryError) throw new Error(retryError);
       }
-      const finishReason = getSessionFinishReason(session);
+      const finishReason = getSessionFinishReason(session, run.lastAssistantStopReason);
       for (const pendingToolCall of run.streamingToolCalls.values()) {
         writeSse(response, piEvent("tool_call_incomplete", {
           runId,

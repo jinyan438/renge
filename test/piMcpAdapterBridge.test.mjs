@@ -143,7 +143,7 @@ test("connects a UI-shaped stdio server through Pi's native mcp tool", async () 
         headers: {},
         lifecycle: "lazy",
       }],
-    });
+    }, { agentDir });
     const settingsManager = SettingsManager.create(process.cwd(), agentDir);
     const resourceLoader = new DefaultResourceLoader({
       cwd: process.cwd(),
@@ -193,7 +193,7 @@ test("loads pi-mcp-adapter as a native Pi extension", async () => {
       mcpServers: {
         lazy: { url: "http://127.0.0.1:1/mcp", lifecycle: "lazy" },
       },
-    });
+    }, { agentDir });
     const settingsManager = SettingsManager.create(process.cwd(), agentDir);
     const resourceLoader = new DefaultResourceLoader({
       cwd: process.cwd(),

@@ -176,6 +176,7 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
     assert.equal(piToolCallDeltas.map((event) => event.delta).join(""), "{\"mode\":\"text\"}");
     assert.equal(piToolCallDeltas.every((event) => !("argumentsText" in event)), true);
     assert.equal(runStart?.kernelMode, "full");
+    assert.equal(runStart?.kernel, "@earendil-works/pi-coding-agent@0.84.3");
     assert.deepEqual(runStart?.compaction, {
       engine: "pi",
       enabled: true,

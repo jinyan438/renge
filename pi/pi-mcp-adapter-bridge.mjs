@@ -123,7 +123,11 @@ async function loadManagerModule() {
   return managerModulePromise;
 }
 
-export async function createPiMcpAdapter(config) {
+export async function createPiMcpAdapter(config, { agentDir } = {}) {
+  // pi-mcp-adapter resolves its cache and OAuth state through this Pi-owned
+  // environment variable rather than the SDK's explicit ResourceLoader path.
+  // Keep embedded Renge sessions isolated from the user's global Pi CLI state.
+  if (agentDir) process.env.PI_CODING_AGENT_DIR = resolve(agentDir);
   const module = await loadAdapterModule();
   return module.createMcpAdapter({ config: normalizePiMcpConfig(config) });
 }
