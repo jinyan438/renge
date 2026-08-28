@@ -262,13 +262,27 @@ export function isTerminalToolName(toolName: string) {
   return TERMINAL_TOOL_NAMES.has(toolName);
 }
 
-export function buildTerminalToolsSystemPrompt() {
+export function buildTerminalToolsSystemPrompt(
+  platform: "windows" | "unix" =
+    typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent)
+      ? "windows"
+      : "unix",
+) {
+  const nativeShell = platform === "windows" ? "powershell" : "bash";
   return [
     "右侧栏终端是严格按需使用的执行工具，不是开始任务时默认检查的环境。",
-    "只有用户明确要求操作终端/运行命令，或软件工程任务确实必须执行测试、构建、开发服务器、版本控制、进程管理或命令行诊断时，才允许调用任何 terminal_* 工具。",
+    "先判断任务是否需要持久、可交互、用户可见的 Shell 会话。只有以下情况才使用 terminal_*：用户明确指定右侧栏或已有终端；用户需要看见或接管命令过程；命令会等待交互式输入或需要 Enter、Ctrl+C 等控制键；开发服务器、监听器等进程需要持续运行并增量读取日志；后续命令必须继承当前目录、环境变量、Shell 函数、登录或 REPL 状态；或者需要操作右侧栏中已经运行的进程。",
+    `如果当前工具列表提供 Pi 原生 ${nativeShell}，一次性、非交互、无需保留会话状态的命令优先使用该原生工具，不要调用任何 terminal_*。测试、单次构建、Git 操作、文件操作、进程检查和普通 CLI 诊断通常都应走 Pi 原生 ${nativeShell}；用户只说“运行命令”或“使用终端”也不等于指定右侧栏。`,
+    ...(platform === "windows"
+      ? [
+          "当前是 Windows 环境：Pi 原生一次性命令使用 powershell；右侧栏终端中的命令也必须遵循该终端实际的 Windows Shell 语法。不得因为路径是盘符路径而改用 bash 或 WSL，除非用户明确指定一个已经存在的 WSL 会话。",
+        ]
+      : [
+          "当前是非 Windows 环境：Pi 原生一次性命令使用 bash；右侧栏终端中的命令必须遵循当前 Unix Shell 语法。",
+        ]),
     "绘图、生成 SVG/HTML、写作、翻译、一般问答、方案设计、普通代码输出，以及可由浏览器或文件工具直接完成的任务，不得调用 terminal_list、terminal_create 或 terminal_run 来查看目录、探索环境或创建内容。能够直接回答时直接回答。",
-    "确认确实需要终端后，先调用 terminal_list；没有当前工作区的合适终端时调用 terminal_create，并在后续调用中使用返回的准确 id。不得复用其他工作区的终端。",
-    "执行普通命令优先调用 terminal_run，它会返回本次新增输出；持续运行的任务可稍后用 terminal_read 增量读取。",
+    "只有已经满足右侧栏终端的路由条件后，才调用 terminal_list；没有当前工作区的合适终端时调用 terminal_create，并在后续调用中使用返回的准确 id。不得为了选择原生工具还是右侧栏终端而先列出终端，也不得复用其他工作区的终端。",
+    "选定右侧栏终端后，执行命令优先调用 terminal_run，它会返回本次新增输出；持续运行的任务可稍后用 terminal_read 增量读取。",
     "需要回答交互式提示、发送控制键或终止前台任务时调用 terminal_write；Ctrl+C 的 data 为 \\u0003，回车为 \\r。",
     "terminal_close 会终止其中的进程。用户要求关闭终端时直接调用，不要只描述操作。",
     "终端输出可能包含命令自身回显和 Shell 提示符；根据 exit 状态和实际输出判断结果，不要虚构成功。",

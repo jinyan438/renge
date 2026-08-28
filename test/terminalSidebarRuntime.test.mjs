@@ -30,6 +30,13 @@ test("exposes the complete terminal control tool set", () => {
   assert.match(buildTerminalToolsSystemPrompt(), /生成 SVG\/HTML/);
   assert.match(buildTerminalToolsSystemPrompt(), /不得调用 terminal_list/);
   assert.match(buildTerminalToolsSystemPrompt(), /terminal_close/);
+  assert.match(buildTerminalToolsSystemPrompt("windows"), /Pi 原生 powershell/);
+  assert.match(buildTerminalToolsSystemPrompt("windows"), /不得因为路径是盘符路径而改用 bash 或 WSL/);
+  assert.match(buildTerminalToolsSystemPrompt("unix"), /Pi 原生 bash/);
+  assert.doesNotMatch(buildTerminalToolsSystemPrompt("unix"), /Pi 原生 powershell/);
+  assert.match(buildTerminalToolsSystemPrompt("unix"), /当前 Unix Shell 语法/);
+  assert.match(buildTerminalToolsSystemPrompt("windows"), /后续命令必须继承当前目录/);
+  assert.match(buildTerminalToolsSystemPrompt("windows"), /用户需要看见或接管命令过程/);
 });
 
 test("removes terminal control sequences while preserving readable output", () => {

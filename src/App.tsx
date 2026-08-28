@@ -361,6 +361,7 @@ import {
   setTerminalWorkspaceContext,
   terminalToolDefinitions,
 } from "./terminalSidebarRuntime";
+import { buildPiNativeToolsSystemPromptText } from "./piNativeToolsPrompt";
 import {
   BROWSER_COMMENT_MIME_TYPE,
   parseBrowserPageComment,
@@ -8785,23 +8786,10 @@ function buildPiNativeToolsSystemPrompt(
 ) {
   if (handle?.kind !== "electron") return "";
   const isWindows = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
-  return [
-    `当前 Pi 工作目录是用户授权的工作区「${handle.name}」。`,
-    "文件和终端操作优先直接使用 Pi 内核原生工具，不要寻找同名 local_* 替代工具：",
-    "- read：读取文本文件或指定行段。",
-    "- grep：搜索文件内容；find：按路径或文件名查找；ls：列出目录。",
-    "- write：创建或覆盖文本文件；edit：精确修改文本文件。",
-    ...(isWindows
-      ? [
-          "- powershell：运行命令、npm script、Git、创建/移动/删除目录与文件，以及完成项目检测。当前 Windows 环境不提供 bash；路径和命令必须使用 PowerShell/Windows 语法，不要调用 WSL。",
-        ]
-      : [
-          "- bash：运行命令、npm script、Git、创建/移动/删除目录与文件，以及完成项目检测。",
-        ]),
-    "相对路径以当前工作区为根；未收到工具成功结果前不得声称已经读取、写入、修改或执行。",
-    "Pi 原生工具不处理聊天附件、二进制直传、电脑图片预览或跨设备传输；遇到这些任务时使用当前列出的 Renge 专用工具。",
-    "用户要求多步骤编码、构建或验证时，持续调用工具推进到完成、真实阻塞或用户中止，不要只汇报计划。",
-  ].join("\n");
+  return buildPiNativeToolsSystemPromptText(
+    handle.name,
+    isWindows ? "windows" : "unix",
+  );
 }
 
 function appendReasoningOnlyToolRetryApiMessages(
