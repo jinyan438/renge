@@ -17,9 +17,9 @@
     "desktop": "npm run electron"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.84.3",
-    "@earendil-works/pi-coding-agent": "0.84.3",
-    "@earendil-works/pi-tui": "0.84.3",
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@earendil-works/pi-tui": "0.84.4",
     "@fortawesome/fontawesome-free": "^6.7.2",
     "@vitejs/plugin-react": "^5.0.0",
     "@xterm/addon-fit": "^0.11.0",
@@ -32,7 +32,7 @@
     "lodash": "^4.18.1",
     "lucide-react": "^0.468.0",
     "node-pty": "^1.1.0",
-    "pi-mcp-adapter": "2.26.1",
+    "pi-mcp-adapter": "2.31.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "tsx": "4.23.12",

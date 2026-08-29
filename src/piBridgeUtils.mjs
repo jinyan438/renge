@@ -7,7 +7,7 @@ const PI_NATIVE_TOOL_NAMES = Object.freeze([
   "edit",
 ]);
 
-export const PI_KERNEL_ID = "@earendil-works/pi-coding-agent@0.84.3";
+export const PI_KERNEL_ID = "@earendil-works/pi-coding-agent@0.84.4";
 
 const PI_REPLACED_RENGE_TOOLS = new Set([
   "local_list_files",

@@ -9,6 +9,9 @@ const serverSourceUrl = new URL(
 
 test("Android local server exposes the complete Pi session HTTP contract", async () => {
   const source = await readFile(serverSourceUrl, "utf8");
+  const packageJson = JSON.parse(
+    await readFile(new URL("../package.json", import.meta.url), "utf8"),
+  );
   for (const endpoint of [
     "/api/pi/chat",
     "/api/pi/session",
@@ -21,6 +24,10 @@ test("Android local server exposes the complete Pi session HTTP contract", async
   }
   assert.match(source, /"DELETE"\.equals\(request\.method\)/);
   assert.match(source, /kernelMode", "android-compatible"/);
+  assert.equal(
+    source.match(/PI_KERNEL_ID = "([^"]+)"/)?.[1],
+    `@earendil-works/pi-coding-agent@${packageJson.dependencies["@earendil-works/pi-coding-agent"]}`,
+  );
   assert.match(source, /activePiRuns\.remove\(runId/);
   assert.match(source, /text\/event-stream;charset=utf-8/);
 });

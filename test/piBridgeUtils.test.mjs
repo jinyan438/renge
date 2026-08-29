@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   convertOpenAiMessagesToPi,
@@ -12,6 +13,8 @@ import {
   PI_KERNEL_ID,
   shouldEnablePiTools,
 } from "../src/piBridgeUtils.mjs";
+
+const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
 const tool = (name) => ({
   type: "function",
@@ -98,7 +101,11 @@ test("Electron workspaces use all Pi native coding tools and remove Renge duplic
     "edit",
     "powershell",
   ]);
-  assert.equal(PI_KERNEL_ID, "@earendil-works/pi-coding-agent@0.84.3");
+  assert.equal(packageJson.dependencies["@earendil-works/pi-coding-agent"], "0.84.4");
+  assert.equal(
+    PI_KERNEL_ID,
+    `@earendil-works/pi-coding-agent@${packageJson.dependencies["@earendil-works/pi-coding-agent"]}`,
+  );
   assert.deepEqual(
     filterPiCustomToolDefinitions([
       tool("local_read_file"),

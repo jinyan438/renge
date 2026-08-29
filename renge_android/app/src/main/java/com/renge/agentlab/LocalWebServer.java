@@ -51,7 +51,7 @@ import java.util.zip.ZipInputStream;
 
 public class LocalWebServer {
     private static final int PREFERRED_PORT = 5191;
-    private static final String PI_KERNEL_ID = "@earendil-works/pi-coding-agent@0.84.3";
+    private static final String PI_KERNEL_ID = "@earendil-works/pi-coding-agent@0.84.4";
     private static final long MAX_COMPLETE_BACKUP_BYTES = 512L * 1024L * 1024L;
     private static final String COMPLETE_BACKUP_MANIFEST_FILE = "backup.json";
     private static final String COMPLETE_BACKUP_ASSET_PREFIX = "renge-backup-asset:";
