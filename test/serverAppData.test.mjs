@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   normalizeUpstreamErrorMessage,
+  parseWindowsProxyServer,
   parsePiSkillMetadata,
   rewriteTavernModuleImports,
   startRengeServer,
@@ -18,6 +19,23 @@ test("reduces HTML upstream failures to a readable error message", () => {
       "Internal Server Error",
     ),
     "Internal Server Error",
+  );
+});
+
+test("parses Windows HTTP proxy settings for upstream requests", () => {
+  assert.deepEqual(
+    parseWindowsProxyServer("http=127.0.0.1:10808;https=127.0.0.1:10809"),
+    {
+      httpProxy: "http://127.0.0.1:10808/",
+      httpsProxy: "http://127.0.0.1:10809/",
+    },
+  );
+  assert.deepEqual(
+    parseWindowsProxyServer("127.0.0.1:10808"),
+    {
+      httpProxy: "http://127.0.0.1:10808/",
+      httpsProxy: "http://127.0.0.1:10808/",
+    },
   );
 });
 

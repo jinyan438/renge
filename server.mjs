@@ -1,12 +1,13 @@
 import { createServer } from "node:http";
 import { createReadStream, createWriteStream } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { homedir, networkInterfaces, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
+import { EnvHttpProxyAgent } from "undici";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   buildResponsesApiRequest,
@@ -21,11 +22,98 @@ import {
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const distDir = resolve(__dirname, "dist");
 const defaultPort = Number(process.env.PORT ?? 5190);
+const windowsInternetSettingsKey = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
 const appDataFileName = "app-data.json";
 const appDataBackupCount = 3;
 const appDataWriteQueues = new Map();
 const tavernModuleProxyVersion = "2";
 const tavernModuleProxyCache = new Map();
+
+function readWindowsInternetSetting(valueName) {
+  if (process.platform !== "win32") return "";
+  try {
+    const output = execFileSync(
+      "reg.exe",
+      ["query", windowsInternetSettingsKey, "/v", valueName],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
+    );
+    const match = output.match(new RegExp(`^\\s*${valueName}\\s+REG_\\w+\\s+(.+?)\\s*$`, "mi"));
+    return match?.[1]?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function normalizeProxyUrl(value) {
+  const text = String(value ?? "").trim();
+  if (!text || /^socks(?:4|5)?:\/\//i.test(text)) return "";
+  const withProtocol = /^[a-z][a-z\d+.-]*:\/\//i.test(text) ? text : `http://${text}`;
+  try {
+    const parsed = new URL(withProtocol);
+    if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname) return "";
+    return parsed.toString();
+  } catch {
+    return "";
+  }
+}
+
+export function parseWindowsProxyServer(value) {
+  const entries = String(value ?? "")
+    .split(";")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const separator = entry.indexOf("=");
+      return separator < 0
+        ? { type: "default", value: entry }
+        : { type: entry.slice(0, separator).trim().toLowerCase(), value: entry.slice(separator + 1).trim() };
+    });
+  const defaultProxy = normalizeProxyUrl(entries.find((entry) => entry.type === "default")?.value);
+  const httpProxy = normalizeProxyUrl(entries.find((entry) => entry.type === "http")?.value);
+  const httpsProxy = normalizeProxyUrl(entries.find((entry) => entry.type === "https")?.value);
+  return {
+    httpProxy: httpProxy || defaultProxy,
+    httpsProxy: httpsProxy || defaultProxy || httpProxy,
+  };
+}
+
+function normalizeWindowsProxyOverride(value) {
+  return String(value ?? "")
+    .split(";")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .flatMap((entry) => entry === "<local>" ? ["localhost", "127.0.0.1"] : [entry])
+    .join(",");
+}
+
+function getUpstreamProxyOptions() {
+  const hasEnvironmentProxy = [
+    process.env.http_proxy,
+    process.env.HTTP_PROXY,
+    process.env.https_proxy,
+    process.env.HTTPS_PROXY,
+  ].some((value) => String(value ?? "").trim());
+  if (hasEnvironmentProxy || process.platform !== "win32") return {};
+
+  const proxyEnabled = /^0x?1$/i.test(readWindowsInternetSetting("ProxyEnable"));
+  if (!proxyEnabled) return {};
+
+  const proxy = parseWindowsProxyServer(readWindowsInternetSetting("ProxyServer"));
+  if (!proxy.httpProxy && !proxy.httpsProxy) return {};
+  const noProxy = normalizeWindowsProxyOverride(readWindowsInternetSetting("ProxyOverride"));
+  return noProxy ? { ...proxy, noProxy } : proxy;
+}
+
+function createUpstreamDispatcher() {
+  try {
+    return new EnvHttpProxyAgent(getUpstreamProxyOptions());
+  } catch (error) {
+    console.warn("[network] invalid proxy configuration; falling back to direct upstream requests", error);
+    return new EnvHttpProxyAgent();
+  }
+}
+
+const upstreamDispatcher = createUpstreamDispatcher();
 
 const mimeTypes = {
   ".html": "text/html;charset=utf-8",
@@ -238,6 +326,7 @@ async function loadTavernModule(remoteUrl, origin) {
           const remoteResponse = await fetch(candidate, {
             signal: AbortSignal.timeout(30_000),
             headers: { Accept: "text/javascript, application/javascript, */*;q=0.8" },
+            dispatcher: upstreamDispatcher,
           });
           if (!remoteResponse.ok) {
             throw new Error(`远程模块返回 ${remoteResponse.status}`);
@@ -1837,6 +1926,7 @@ async function proxyJson({ url, apiKey, method = "GET", body, timeoutMs }) {
       },
       body: body ? JSON.stringify(body) : undefined,
       signal: ac.signal,
+      dispatcher: upstreamDispatcher,
     });
   } catch (err) {
     if (timer) clearTimeout(timer);
@@ -1886,6 +1976,7 @@ async function proxyForm({ url, apiKey, method = "POST", form, timeoutMs }) {
       },
       body: form,
       signal: ac.signal,
+      dispatcher: upstreamDispatcher,
     });
   } catch (err) {
     if (timer) clearTimeout(timer);
@@ -1926,7 +2017,7 @@ async function downloadBinaryWithTimeout(url, timeoutMs = 15000) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(new Error(`download timeout after ${timeoutMs}ms`)), timeoutMs);
   try {
-    const response = await fetch(url, { signal: ac.signal });
+    const response = await fetch(url, { signal: ac.signal, dispatcher: upstreamDispatcher });
     const buffer = response.ok ? Buffer.from(await response.arrayBuffer()) : null;
     return { response, buffer };
   } finally {
@@ -2217,6 +2308,7 @@ async function proxyStream({ url, apiKey, body, response }) {
       },
       body: JSON.stringify(body),
       signal: ac.signal,
+      dispatcher: upstreamDispatcher,
     });
   } catch (error) {
     response.off("close", abortUpstream);
