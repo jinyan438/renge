@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,6 +10,14 @@ import {
   discoverPiMcpTools,
   normalizePiMcpConfig,
 } from "../pi/pi-mcp-adapter-bridge.mjs";
+
+test("uses the Pi 0.85-compatible MCP adapter package", async () => {
+  const packageJson = JSON.parse(
+    await readFile(new URL("../node_modules/pi-mcp-adapter/package.json", import.meta.url), "utf8"),
+  );
+  assert.equal(packageJson.version, "2.32.1");
+  assert.match(packageJson.peerDependencies["@earendil-works/pi-ai"], /\^0\.85\.0/);
+});
 
 test("normalizes Renge MCP servers without dropping Pi adapter fields", () => {
   const config = normalizePiMcpConfig({
