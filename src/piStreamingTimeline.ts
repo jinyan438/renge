@@ -57,6 +57,9 @@ export function createPiStreamingTimeline(options: {
     get segmentCount() {
       return entries.length;
     },
+    get lastSegmentContent() {
+      return entries.at(-1)?.content ?? "";
+    },
     pushContent(delta: string) {
       if (!delta) return;
       const entry = ensureActiveEntry();

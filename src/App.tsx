@@ -25038,11 +25038,16 @@ export function App() {
           throwIfChatAborted(abortSignal);
           const subAgentContent = streamResult.content.trim();
           const subAgentReasoning = streamResult.reasoning;
+          const subAgentContinuationContent =
+            subStreamingTimeline.lastSegmentContent.trim() || subAgentContent;
           if (
             activeLocalToolsEnabled &&
             activeFileToolsWorkspaceHandle &&
             subToolRound < MAX_SUB_AGENT_TOOL_ROUNDS - 1 &&
-            shouldAutoContinueLocalTask(subAgentContent)
+            shouldAutoContinueLocalTask(
+              subAgentContinuationContent,
+              streamResult.finishReason,
+            )
           ) {
             subAgentApiMessages.push({
               role: "assistant",
@@ -25055,7 +25060,7 @@ export function App() {
             subAgentApiMessages.push({
               role: "user",
               content:
-                "继续执行子任务，直接使用可用工具推进，直到满足完成标准或遇到真实阻塞。不要只说明计划。",
+                "【内部自动续执行信号，不是用户发送的新消息】继续执行当前未完成的子任务，直接使用可用工具推进，直到满足完成标准或遇到真实阻塞。不要只说明计划。",
             });
             continue;
           }
@@ -25659,11 +25664,15 @@ export function App() {
               continue;
             }
 
+            const localTaskContinuationContent =
+              streamingRound?.lastSegmentContent.trim() || assistantContent;
             if (
               activeLocalToolsEnabled &&
               activeFileToolsWorkspaceHandle &&
-              (isTruncatedChatFinishReason(completionResult.finishReason) ||
-                shouldAutoContinueLocalTask(assistantContent))
+              shouldAutoContinueLocalTask(
+                localTaskContinuationContent,
+                completionResult.finishReason,
+              )
             ) {
               if (!streamingRound) {
                 appendAssistantTimelineMessage(
@@ -25687,8 +25696,8 @@ export function App() {
               apiMessages.push({
                 role: "user",
                 content: isTruncatedChatFinishReason(completionResult.finishReason)
-                  ? "上一轮因输出长度限制被截断。紧接已有进度继续执行任务，优先调用可用工具完成尚未完成的步骤，不要重做已完成内容，直到任务完成、遇到真实阻塞或需要用户授权。"
-                  : "继续执行上面的任务，直接调用可用工具推进，直到任务完成、遇到真实阻塞或需要用户授权。不要只说明计划。",
+                  ? "【内部自动续执行信号，不是用户发送的新消息】上一轮因输出长度限制被截断。紧接已有进度继续执行任务，优先调用可用工具完成尚未完成的步骤，不要重做已完成内容，直到任务完成、遇到真实阻塞或需要用户授权。"
+                  : "【内部自动续执行信号，不是用户发送的新消息】继续执行当前未完成的任务，直接调用可用工具推进，直到任务完成、遇到真实阻塞或需要用户授权。不要只说明计划。",
               });
               assistantContent = "";
               assistantReasoning = "";
@@ -28120,11 +28129,15 @@ export function App() {
               continue;
             }
 
+            const localTaskContinuationContent =
+              streamingRound?.lastSegmentContent.trim() || assistantContent;
             if (
               activeLocalToolsEnabled &&
               activeFileToolsWorkspaceHandle &&
-              (isTruncatedChatFinishReason(completionResult.finishReason) ||
-                shouldAutoContinueLocalTask(assistantContent))
+              shouldAutoContinueLocalTask(
+                localTaskContinuationContent,
+                completionResult.finishReason,
+              )
             ) {
               if (!streamingRound) {
                 appendAssistantTimelineMessage(
@@ -28147,8 +28160,8 @@ export function App() {
               apiMessages.push({
                 role: "user",
                 content: isTruncatedChatFinishReason(completionResult.finishReason)
-                  ? "上一轮因输出长度限制被截断。紧接已有进度继续执行任务，优先调用可用工具完成尚未完成的步骤，不要重做已完成内容，直到任务完成、遇到真实阻塞或需要用户授权。"
-                  : "继续执行上面的任务，直接调用可用工具推进，直到任务完成、遇到真实阻塞或需要用户授权。不要只说明计划。",
+                  ? "【内部自动续执行信号，不是用户发送的新消息】上一轮因输出长度限制被截断。紧接已有进度继续执行任务，优先调用可用工具完成尚未完成的步骤，不要重做已完成内容，直到任务完成、遇到真实阻塞或需要用户授权。"
+                  : "【内部自动续执行信号，不是用户发送的新消息】继续执行当前未完成的任务，直接调用可用工具推进，直到任务完成、遇到真实阻塞或需要用户授权。不要只说明计划。",
               });
               assistantContent = "";
               assistantReasoning = "";

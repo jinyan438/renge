@@ -65,6 +65,7 @@ test("preserves Pi tool and text event order without merging text segments", asy
     ["tool-a", "文本 A", "tool-b", "文本 B"],
   );
   assert.equal(timeline.segmentCount, 2);
+  assert.equal(timeline.lastSegmentContent, "文本 B");
 });
 
 test("keeps text emitted before a tool ahead of that tool", async () => {
