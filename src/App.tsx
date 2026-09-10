@@ -12752,6 +12752,9 @@ export function App() {
   const appDataClearingRef = useRef(false);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatSendButtonRef = useRef<HTMLButtonElement>(null);
+  const chatThreadRef = useRef<HTMLDivElement>(null);
+  const chatScrollFollowLatestRef = useRef(true);
+  const chatScrollFrameRef = useRef<number | null>(null);
   const renderedEditingDraftRef = useRef<{ messageId: string; content: string } | null>(null);
   const renderedEditingFocusRef = useRef<{
     messageId: string;
@@ -12986,6 +12989,36 @@ export function App() {
   const tavernGlobalVariablesRef = useRef<Record<string, unknown>>(tavernGlobalVariables);
   const tavernExtensionEventBusRef = useRef(createTavernExtensionEventBus());
   const tavernExtensionHooksRef = useRef(createTavernExtensionHooks());
+
+  const scheduleChatScrollToLatest = useCallback(() => {
+    if (!chatScrollFollowLatestRef.current || chatScrollFrameRef.current !== null) return;
+
+    chatScrollFrameRef.current = window.requestAnimationFrame(() => {
+      chatScrollFrameRef.current = null;
+      const thread = chatThreadRef.current;
+      if (!thread || !chatScrollFollowLatestRef.current) return;
+      thread.scrollTop = thread.scrollHeight;
+    });
+  }, []);
+
+  const setChatThreadRef = useCallback(
+    (thread: HTMLDivElement | null) => {
+      chatThreadRef.current = thread;
+      if (!thread) return;
+      chatScrollFollowLatestRef.current = true;
+      scheduleChatScrollToLatest();
+    },
+    [scheduleChatScrollToLatest],
+  );
+
+  useEffect(() => {
+    return () => {
+      if (chatScrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(chatScrollFrameRef.current);
+        chatScrollFrameRef.current = null;
+      }
+    };
+  }, []);
 
   const emitTavernEvent = (eventName: unknown, ...args: unknown[]) => {
     const runtime = tavernScriptRuntimeRef.current;
@@ -13799,6 +13832,7 @@ export function App() {
   const beginChatGeneration = () => {
     const controller = new AbortController();
     activeChatAbortControllerRef.current = controller;
+    chatScrollFollowLatestRef.current = true;
     setChatGenerationState("running");
     return controller;
   };
@@ -19355,6 +19389,20 @@ export function App() {
     },
     [activePersona, activeSessionRoleplayCard, chatMode, effectiveRegexScripts, personas, userProfile.nickname, visibleChatMessages],
   );
+  useEffect(() => {
+    chatScrollFollowLatestRef.current = true;
+    scheduleChatScrollToLatest();
+  }, [activeChatSessionId, scheduleChatScrollToLatest]);
+
+  useEffect(() => {
+    scheduleChatScrollToLatest();
+  }, [
+    chatGenerationState,
+    regexProcessedChatMessages,
+    scheduleChatScrollToLatest,
+    visibleChatMessages,
+  ]);
+
   const htmlPreviewMessages = useMemo(() => {
     const previous = htmlPreviewMessagesCacheRef.current;
     const greetingStateUnchanged =
@@ -26839,6 +26887,7 @@ export function App() {
       sender: currentChatSender,
       ...(attachmentsToSend.length > 0 ? { attachments: attachmentsToSend } : {}),
     };
+    chatScrollFollowLatestRef.current = true;
     let accumulatedMessages = [...chatMessagesRef.current, userMessage];
 
     chatMessagesRef.current = accumulatedMessages;
@@ -27450,6 +27499,7 @@ export function App() {
       sender: currentChatSender,
       ...(attachmentsToSend.length > 0 ? { attachments: attachmentsToSend } : {}),
     };
+    chatScrollFollowLatestRef.current = true;
     const initialMessages = [...chatMessagesRef.current, userMessage];
 
     chatMessagesRef.current = initialMessages;
@@ -36271,7 +36321,17 @@ export function App() {
             </div>
           </header>
 
-          <div id="chat" className="chat-thread" onScroll={() => setChatMessageMenu(null)}>
+          <div
+            id="chat"
+            ref={setChatThreadRef}
+            className="chat-thread"
+            onScroll={(event) => {
+              setChatMessageMenu(null);
+              const thread = event.currentTarget;
+              chatScrollFollowLatestRef.current =
+                thread.scrollHeight - thread.scrollTop - thread.clientHeight <= 64;
+            }}
+          >
             {visibleChatMessages.length === 0 ? (
               <div
                 className={`chat-empty ${
