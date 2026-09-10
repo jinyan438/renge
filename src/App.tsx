@@ -6808,7 +6808,7 @@ type ChatHtmlPreviewProps = {
   frameRegistry: { current: Map<string, HTMLIFrameElement> };
 };
 
-function ChatHtmlPreview({
+const ChatHtmlPreview = memo(function ChatHtmlPreview({
   content,
   context,
   mountReady,
@@ -7105,7 +7105,7 @@ function ChatHtmlPreview({
       )}
     </div>
   );
-}
+});
 
 function measureHtmlPreviewHeight(frame: HTMLIFrameElement) {
   const doc = frame.contentDocument;
@@ -12474,7 +12474,10 @@ export function App() {
   const [extensionRuntimeStates, setExtensionRuntimeStates] = useState<
     Record<string, ExtensionRuntimeState>
   >({});
-  const [chatInput, setChatInput] = useState("");
+  // Keep the live composer draft outside App state. App owns a very large tree,
+  // so a controlled textarea used to re-render the complete desktop for every
+  // keystroke. The surrounding UI only needs the empty/non-empty boundary.
+  const [chatInputHasContent, setChatInputHasContent] = useState(false);
   const [composerModelMenuSection, setComposerModelMenuSection] =
     useState<ComposerModelMenuSection | null>(null);
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
@@ -12614,6 +12617,67 @@ export function App() {
   const chatAttachmentFilesRef = useRef<Map<string, File>>(new Map());
   const chatAttachmentMetadataRef = useRef<Map<string, ChatAttachment>>(new Map());
   const htmlPreviewFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
+  const chatInputValueRef = useRef("");
+  const chatInputHasContentRef = useRef(false);
+  const chatInputContextDirtyRef = useRef(false);
+  const chatInputContextTimerRef = useRef<number | null>(null);
+  const flushChatInputContext = useCallback((force = false) => {
+    if (chatInputContextTimerRef.current !== null) {
+      window.clearTimeout(chatInputContextTimerRef.current);
+      chatInputContextTimerRef.current = null;
+    }
+    if (!chatInputContextDirtyRef.current) return;
+    // HTML cards can react to context updates with arbitrary layout and focus
+    // work. Never let those callbacks interrupt somebody who is still typing.
+    if (!force && document.activeElement === chatInputRef.current) return;
+
+    chatInputContextDirtyRef.current = false;
+    const chatInput = chatInputValueRef.current;
+    htmlPreviewFrameRefs.current.forEach((frame, previewId) => {
+      frame.contentWindow?.postMessage(
+        {
+          type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
+          id: previewId,
+          context: { chatInput },
+        },
+        "*",
+      );
+    });
+  }, []);
+  const setChatInput = useCallback((update: SetStateAction<string>) => {
+    const previous = chatInputValueRef.current;
+    const next = typeof update === "function" ? update(previous) : update;
+    chatInputValueRef.current = next;
+
+    const input = chatInputRef.current;
+    if (input && input.value !== next) input.value = next;
+
+    const hasContent = Boolean(next.trim());
+    if (hasContent !== chatInputHasContentRef.current) {
+      chatInputHasContentRef.current = hasContent;
+      setChatInputHasContent(hasContent);
+    }
+
+    if (next === previous) return;
+    chatInputContextDirtyRef.current = true;
+    if (chatInputContextTimerRef.current === null) {
+      chatInputContextTimerRef.current = window.setTimeout(() => {
+        chatInputContextTimerRef.current = null;
+        flushChatInputContext();
+      }, 180);
+    }
+  }, [flushChatInputContext]);
+  const handleChatInputBlur = useCallback(() => {
+    if (chatInputContextTimerRef.current !== null) {
+      window.clearTimeout(chatInputContextTimerRef.current);
+    }
+    // Let the pointer/keyboard action that caused blur finish before notifying
+    // card scripts, otherwise a script focus handler can swallow that action.
+    chatInputContextTimerRef.current = window.setTimeout(() => {
+      chatInputContextTimerRef.current = null;
+      flushChatInputContext(true);
+    }, 0);
+  }, [flushChatInputContext]);
   const activeUserRequestTextRef = useRef("");
   const activeChatAbortControllerRef = useRef<AbortController | null>(null);
   const piSessionResetPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
@@ -12814,6 +12878,15 @@ export function App() {
   const tavernGlobalVariablesRef = useRef<Record<string, unknown>>(tavernGlobalVariables);
   const tavernExtensionEventBusRef = useRef(createTavernExtensionEventBus());
   const tavernExtensionHooksRef = useRef(createTavernExtensionHooks());
+
+  useEffect(
+    () => () => {
+      if (chatInputContextTimerRef.current !== null) {
+        window.clearTimeout(chatInputContextTimerRef.current);
+      }
+    },
+    [],
+  );
 
   const scheduleChatScrollToLatest = useCallback(() => {
     if (!chatScrollFollowLatestRef.current || chatScrollFrameRef.current !== null) return;
@@ -19352,7 +19425,7 @@ export function App() {
       userName: userProfile.nickname.trim() || "用户",
       characterName: activeSessionRoleplayCard?.name || "Assistant",
       chatId: activeChatSession?.id ?? activeChatSessionId,
-      chatInput,
+      chatInput: chatInputValueRef.current,
       personalization: {
         quoteStyleEnabled: chatPersonalization.quoteStyleEnabled,
         quoteStyleColor: chatPersonalization.quoteStyleColor,
@@ -19365,7 +19438,6 @@ export function App() {
       activeChatSessionId,
       activeSessionRoleplayCard?.name,
       activeSessionRoleplayCard?.tavernVariables,
-      chatInput,
       chatPersonalization.quoteStyleColor,
       chatPersonalization.quoteStyleEnabled,
       extensions,
@@ -27345,7 +27417,9 @@ export function App() {
     attachmentsOverride?: ChatAttachment[],
   ) => {
     const hasContentOverride = contentOverride !== undefined;
-    const content = (hasContentOverride ? contentOverride : chatInput).trim();
+    const content = (
+      hasContentOverride ? contentOverride : chatInputValueRef.current
+    ).trim();
     const requestSessionId = activeChatSessionIdRef.current;
     const attachmentsToSend =
       attachmentsOverride ?? (hasContentOverride ? [] : chatAttachments);
@@ -36890,10 +36964,11 @@ export function App() {
               <textarea
                 id="renge_chat_input"
                 ref={chatInputRef}
-                value={chatInput}
+                defaultValue=""
                 placeholder="输入消息"
                 rows={3}
                 onChange={(event) => setChatInput(event.target.value)}
+                onBlur={handleChatInputBlur}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
@@ -37666,7 +37741,7 @@ export function App() {
                   className={`send-button ${chatGenerationState !== "idle" ? "stop" : ""}`}
                   disabled={
                     chatGenerationState === "idle" &&
-                    ((!chatInput.trim() && chatAttachments.length === 0) ||
+                    ((!chatInputHasContent && chatAttachments.length === 0) ||
                       chatStatus.status === "loading" ||
                       (chatMode === "roleplay" && !activeSessionRoleplayCard))
                   }
