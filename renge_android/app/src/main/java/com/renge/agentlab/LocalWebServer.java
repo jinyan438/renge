@@ -40,6 +40,7 @@ import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -925,10 +926,16 @@ public class LocalWebServer {
             return;
         }
 
-        if ("PUT".equals(request.method) || "POST".equals(request.method)) {
+        if ("PUT".equals(request.method)
+                || "POST".equals(request.method)
+                || "PATCH".equals(request.method)) {
             JSONObject body = parseJson(request.body);
             Object data = body.has("data") ? body.get("data") : body;
-            writeAppData(data);
+            if ("PATCH".equals(request.method)) {
+                patchAppData(data);
+            } else {
+                writeAppData(data);
+            }
 
             JSONObject payload = new JSONObject();
             payload.put("ok", true);
@@ -1067,6 +1074,31 @@ public class LocalWebServer {
                 copyFileAtomically(appDataFile, appDataBackupFile);
             }
             writeJsonAtomically(appDataFile, normalized.toString());
+        } catch (JSONException error) {
+            throw new IOException(error);
+        }
+    }
+
+    private synchronized void patchAppData(Object data) throws IOException {
+        try {
+            JSONObject patch = data instanceof JSONObject
+                    ? (JSONObject) data
+                    : new JSONObject(String.valueOf(data));
+            JSONObject current = new JSONObject();
+            File source = appDataFile.isFile() && appDataFile.length() > 0
+                    ? appDataFile
+                    : appDataBackupFile;
+            if (source.isFile() && source.length() > 0) {
+                try (InputStream input = new BufferedInputStream(new FileInputStream(source))) {
+                    current = new JSONObject(new String(readAll(input), StandardCharsets.UTF_8));
+                }
+            }
+            Iterator<String> keys = patch.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                current.put(key, patch.get(key));
+            }
+            writeAppData(current);
         } catch (JSONException error) {
             throw new IOException(error);
         }

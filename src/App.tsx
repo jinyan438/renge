@@ -71,7 +71,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { createPortal, flushSync } from "react-dom";
+import { createPortal } from "react-dom";
 import { strFromU8, strToU8, unzip, zip } from "fflate";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
@@ -233,6 +233,7 @@ import {
   type ChatLiveStreamEmbed,
   type ChatLiveStreamTextItem,
 } from "./chatLiveStreamUtils";
+import { createChatStreamUpdateBatcher } from "./chatPerformanceUtils";
 import {
   compactToolCallForReplay,
   formatCodexDuration,
@@ -1059,6 +1060,7 @@ const COMPLETE_BACKUP_MANIFEST_FILE = "backup.json";
 const COMPLETE_BACKUP_ASSET_PREFIX = "renge-backup-asset:";
 const RENGE_STORAGE_PREFIX = "renge";
 const APP_DATA_SAVE_DEBOUNCE_MS = 800;
+const APP_DATA_SAVE_IDLE_TIMEOUT_MS = 2_000;
 
 type RengeCompleteBackup = {
   format: typeof COMPLETE_BACKUP_FORMAT;
@@ -3105,9 +3107,13 @@ function setLocalStorageValueSafely(key: string, value: string) {
   }
 }
 
+const localStorageJsonReferenceByKey = new Map<string, unknown>();
+
 function setLocalStorageJsonSafely(key: string, value: unknown) {
+  if (localStorageJsonReferenceByKey.get(key) === value) return true;
   try {
     localStorage.setItem(key, JSON.stringify(value));
+    localStorageJsonReferenceByKey.set(key, value);
     return true;
   } catch {
     // Large chats and images can exceed a browser origin's localStorage quota.
@@ -3126,6 +3132,7 @@ function removeLocalStorageValueSafely(key: string) {
 let lastCharacterCardsForDatabase: CharacterCard[] | null = null;
 let lastCharacterCardsDatabaseSave: Promise<boolean> = Promise.resolve(false);
 let lastCharacterCardsForLocalStorage: CharacterCard[] | null = null;
+let lastPersonasForLocalStorage: AgentPersona[] | null = null;
 
 function persistCharacterCardsToDatabase(
   characterCards: CharacterCard[],
@@ -3156,8 +3163,11 @@ function persistAppDataToLocalStores(
   characterCardsAlreadyStored = false,
 ) {
   const personas = data.personas ?? [];
-  if (personas.length > 0) {
-    void personaStore.save(personas).catch(() => undefined);
+  if (personas.length > 0 && lastPersonasForLocalStorage !== personas) {
+    lastPersonasForLocalStorage = personas;
+    void personaStore.save(personas).catch(() => {
+      if (lastPersonasForLocalStorage === personas) lastPersonasForLocalStorage = null;
+    });
   }
   setLocalStorageJsonSafely(PROVIDER_STORAGE_KEY, data.providers ?? []);
   setLocalStorageValueSafely(ACTIVE_PROVIDER_STORAGE_KEY, data.activeProviderId ?? "");
@@ -3309,6 +3319,9 @@ function replaceRengeLocalStorage(entries: Record<string, string>) {
   Object.entries(entries).forEach(([key, value]) => {
     if (key.startsWith(RENGE_STORAGE_PREFIX)) localStorage.setItem(key, value);
   });
+  localStorageJsonReferenceByKey.clear();
+  lastCharacterCardsForLocalStorage = null;
+  lastPersonasForLocalStorage = null;
 }
 
 function parseCompleteBackup(value: unknown): RengeCompleteBackup {
@@ -9085,15 +9098,13 @@ function updateAssistantToolVisualization(
   toolCallId: string,
   update: (visualization: ToolVisualization) => ToolVisualization,
 ) {
-  flushSync(() => {
-    setChatMessages((current) => current.map((message) => {
-      if (message.toolVisualization?.toolCallId !== toolCallId) return message;
-      return {
-        ...message,
-        toolVisualization: update(message.toolVisualization),
-      };
-    }));
-  });
+  setChatMessages((current) => current.map((message) => {
+    if (message.toolVisualization?.toolCallId !== toolCallId) return message;
+    return {
+      ...message,
+      toolVisualization: update(message.toolVisualization),
+    };
+  }));
 }
 
 function buildIncompletePiToolVisualization(
@@ -10672,185 +10683,6 @@ function throwIfChatAborted(signal?: AbortSignal) {
   if (signal?.aborted) throw createChatAbortError();
 }
 
-type StreamingWordSegment = {
-  segment: string;
-  index: number;
-  isWordLike: boolean;
-};
-
-function createStreamingWordWriter(
-  onWord: (word: string) => void,
-  signal?: AbortSignal,
-) {
-  const segmenter =
-    typeof Intl.Segmenter === "function"
-      ? new Intl.Segmenter(undefined, { granularity: "word" })
-      : null;
-  let pendingText = "";
-  let queuedWords: string[] = [];
-  let frameId: number | undefined;
-  let finished = false;
-  let cancelled = false;
-  let finishPromise: Promise<void> | null = null;
-  let resolveFinish: (() => void) | null = null;
-  let removeActivityListeners: () => void = () => undefined;
-
-  const segmentText = (text: string): StreamingWordSegment[] => {
-    if (segmenter) {
-      return Array.from(segmenter.segment(text), (item) => ({
-        segment: item.segment,
-        index: item.index,
-        isWordLike: item.isWordLike === true,
-      }));
-    }
-
-    return Array.from(text.matchAll(/\s+|[\p{L}\p{N}_]+|./gu), (match) => ({
-      segment: match[0],
-      index: match.index ?? 0,
-      isWordLike: /^[\p{L}\p{N}_]+$/u.test(match[0]),
-    }));
-  };
-
-  const resolveWhenIdle = () => {
-    if (!finished || frameId !== undefined || queuedWords.length > 0 || pendingText) return;
-    removeActivityListeners();
-    signal?.removeEventListener("abort", cancel);
-    resolveFinish?.();
-    resolveFinish = null;
-  };
-
-  const shouldAnimateWords = () =>
-    typeof document === "undefined" ||
-    (document.visibilityState === "visible" && document.hasFocus());
-
-  const flushImmediately = () => {
-    if (frameId !== undefined) window.cancelAnimationFrame(frameId);
-    frameId = undefined;
-    const content = `${queuedWords.join("")}${pendingText}`;
-    queuedWords = [];
-    pendingText = "";
-    if (content) onWord(content);
-    resolveWhenIdle();
-  };
-
-  const scheduleNextWord = () => {
-    if (cancelled || frameId !== undefined || queuedWords.length === 0) {
-      resolveWhenIdle();
-      return;
-    }
-    if (!shouldAnimateWords()) {
-      flushImmediately();
-      return;
-    }
-
-    frameId = window.requestAnimationFrame(() => {
-      frameId = undefined;
-      const batchSize = queuedWords.length > 120
-        ? 48
-        : queuedWords.length > 40
-          ? 20
-          : Math.min(8, queuedWords.length);
-      const words = queuedWords.splice(0, batchSize).join("");
-      if (words) onWord(words);
-      scheduleNextWord();
-    });
-  };
-
-  const enqueueStableWords = (flushAll: boolean) => {
-    if (!pendingText) return;
-    if (!shouldAnimateWords()) {
-      flushImmediately();
-      return;
-    }
-    const segments = segmentText(pendingText);
-    const lastSegment = segments.at(-1);
-    const stableEnd =
-      !flushAll &&
-      lastSegment?.isWordLike &&
-      lastSegment.index + lastSegment.segment.length === pendingText.length
-        ? lastSegment.index
-        : pendingText.length;
-    if (stableEnd <= 0) return;
-
-    const stableSegments = segments.filter(
-      (item) => item.index + item.segment.length <= stableEnd,
-    );
-    const words: string[] = [];
-    stableSegments.forEach((item) => {
-      if (!item.isWordLike && words.length > 0) {
-        words[words.length - 1] += item.segment;
-      } else {
-        words.push(item.segment);
-      }
-    });
-    queuedWords.push(...words.filter(Boolean));
-    pendingText = pendingText.slice(stableEnd);
-    scheduleNextWord();
-  };
-
-  if (typeof document !== "undefined") {
-    const handleActivityChange = () => {
-      if (cancelled) return;
-      if (shouldAnimateWords()) scheduleNextWord();
-      else flushImmediately();
-    };
-    document.addEventListener("visibilitychange", handleActivityChange);
-    window.addEventListener("focus", handleActivityChange);
-    window.addEventListener("blur", handleActivityChange);
-    removeActivityListeners = () => {
-      document.removeEventListener("visibilitychange", handleActivityChange);
-      window.removeEventListener("focus", handleActivityChange);
-      window.removeEventListener("blur", handleActivityChange);
-      removeActivityListeners = () => undefined;
-    };
-  }
-
-  const cancel = () => {
-    if (cancelled) return;
-    cancelled = true;
-    if (frameId !== undefined) window.cancelAnimationFrame(frameId);
-    frameId = undefined;
-    queuedWords = [];
-    pendingText = "";
-    removeActivityListeners();
-    resolveFinish?.();
-    resolveFinish = null;
-    signal?.removeEventListener("abort", cancel);
-  };
-
-  signal?.addEventListener("abort", cancel, { once: true });
-
-  return {
-    push(delta: string) {
-      if (!delta || finished || cancelled) return;
-      pendingText += delta;
-      enqueueStableWords(false);
-    },
-    finish() {
-      if (cancelled) return Promise.resolve();
-      if (!finished) {
-        finished = true;
-        enqueueStableWords(true);
-      }
-      if (frameId === undefined && queuedWords.length === 0 && !pendingText) {
-        removeActivityListeners();
-        signal?.removeEventListener("abort", cancel);
-        return Promise.resolve();
-      }
-      if (!finishPromise) {
-        finishPromise = new Promise<void>((resolve) => {
-          resolveFinish = () => {
-            signal?.removeEventListener("abort", cancel);
-            resolve();
-          };
-        });
-      }
-      return finishPromise;
-    },
-    cancel,
-  };
-}
-
 const CONTEXT_METER_REFRESH_INTERVAL_MS = 160;
 
 function useThrottledValue<T>(value: T, intervalMs: number): T {
@@ -10912,24 +10744,20 @@ function createStreamingAssistantMessage(
     next[index] = updater(current[index]);
     return next;
   };
-  const appendContent = (delta: string) => {
-    setChatMessages((current) =>
-      updateMessage(current, (message) => ({
-        ...message,
-        content: `${message.content}${delta}`,
-      })),
-    );
-  };
-  const appendReasoning = (delta: string) => {
-    setChatMessages((current) =>
-      updateMessage(current, (message) => ({
-        ...message,
-        reasoning: `${message.reasoning ?? ""}${delta}`,
-      })),
-    );
-  };
-  const contentWriter = createStreamingWordWriter(appendContent, signal);
-  const reasoningWriter = createStreamingWordWriter(appendReasoning, signal);
+  const streamUpdates = createChatStreamUpdateBatcher({
+    signal,
+    apply: ({ content, reasoning }) => {
+      setChatMessages((current) =>
+        updateMessage(current, (message) => ({
+          ...message,
+          ...(content ? { content: `${message.content}${content}` } : {}),
+          ...(reasoning
+            ? { reasoning: `${message.reasoning ?? ""}${reasoning}` }
+            : {}),
+        })),
+      );
+    },
+  });
 
   setChatMessages((current) => [
     ...current,
@@ -10944,21 +10772,19 @@ function createStreamingAssistantMessage(
   ]);
 
   const remove = () => {
-    contentWriter.cancel();
-    reasoningWriter.cancel();
+    streamUpdates.cancel();
     setChatMessages((current) => current.filter((message) => message.id !== messageId));
   };
 
   return {
     messageId,
-    pushContent: contentWriter.push,
-    pushReasoning: reasoningWriter.push,
+    pushContent: streamUpdates.pushContent,
+    pushReasoning: streamUpdates.pushReasoning,
     async finish() {
-      await Promise.all([contentWriter.finish(), reasoningWriter.finish()]);
+      streamUpdates.flush();
     },
     complete(content: string, reasoning = "") {
-      contentWriter.cancel();
-      reasoningWriter.cancel();
+      streamUpdates.cancel();
       if (!hasAssistantTimelinePayload(content, reasoning)) {
         setChatMessages((current) => current.filter((message) => message.id !== messageId));
         return false;
@@ -10978,8 +10804,7 @@ function createStreamingAssistantMessage(
       return true;
     },
     cancel() {
-      contentWriter.cancel();
-      reasoningWriter.cancel();
+      streamUpdates.cancel();
     },
     remove,
   };
@@ -13199,6 +13024,9 @@ export function App() {
 
   useEffect(() => {
     chatMessagesRef.current = chatMessages;
+  }, [chatMessages]);
+
+  useEffect(() => {
     chatSessionsRef.current = chatSessions;
     characterCardsRef.current = characterCards;
     personasRef.current = personas;
@@ -13212,7 +13040,7 @@ export function App() {
     userProfileRef.current = userProfile;
     tavernScriptsRef.current = tavernScripts;
     tavernGlobalVariablesRef.current = tavernGlobalVariables;
-  }, [activeChatPresetId, activePersonaId, activeWorldBookIds, characterCards, chatMessages, chatPresetEnabled, chatPresets, chatSessions, personas, regexScripts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeChatPresetId, activePersonaId, activeWorldBookIds, characterCards, chatPresetEnabled, chatPresets, chatSessions, personas, regexScripts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     tavernScriptRuntimeRef.current?.syncPresetCompatibility();
@@ -13939,13 +13767,30 @@ export function App() {
           }
         : {}),
     };
+    const liveSessionId = activeChatSessionIdRef.current;
+    const liveMessages = chatMessagesRef.current;
+    const snapshotUpdatedAt = new Date().toISOString();
+    let snapshotChatSessions = chatSessions;
+    const liveSessionIndex = chatSessions.findIndex((session) => session.id === liveSessionId);
+    const liveSession = chatSessions[liveSessionIndex];
+    if (liveSession && liveSession.messages !== liveMessages) {
+      snapshotChatSessions = chatSessions.slice();
+      snapshotChatSessions[liveSessionIndex] = {
+        ...liveSession,
+        title: liveSession.roleplayCharacterCardId
+          ? liveSession.title
+          : inferChatSessionTitle(liveMessages),
+        messages: liveMessages,
+        updatedAt: snapshotUpdatedAt,
+      };
+    }
     return {
       version: 1,
       personas,
       activePersonaId,
       providers,
       activeProviderId,
-      chatSessions,
+      chatSessions: snapshotChatSessions,
       chatMode,
       multiAgentWorkflow,
       multiAgentPersonaIds,
@@ -13988,7 +13833,7 @@ export function App() {
       skills,
       extensions,
       ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
-      updatedAt: new Date().toISOString(),
+      updatedAt: snapshotUpdatedAt,
     };
   }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, contextCompressionSettings, extensions, llmContextSettings, llmFullAccessEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
@@ -14432,17 +14277,31 @@ export function App() {
 
   useEffect(() => {
     if (!appDataLoaded) return;
+    let idleCallbackId: number | null = null;
     const timer = window.setTimeout(() => {
-      if (appDataClearingRef.current) return;
-      const snapshot = buildCurrentAppData();
-      const characterCardsStored = persistAppDataToLocalStores(snapshot);
-      if (persistentStoreReadyRef.current) {
-        void characterCardsStored.then((stored) =>
-          savePersistentAppData(snapshot, stored),
-        );
+      const persistSnapshot = () => {
+        idleCallbackId = null;
+        if (appDataClearingRef.current) return;
+        const snapshot = buildCurrentAppData();
+        const characterCardsStored = persistAppDataToLocalStores(snapshot);
+        if (persistentStoreReadyRef.current) {
+          void characterCardsStored.then((stored) =>
+            savePersistentAppData(snapshot, stored),
+          );
+        }
+      };
+      if (typeof window.requestIdleCallback === "function") {
+        idleCallbackId = window.requestIdleCallback(persistSnapshot, {
+          timeout: APP_DATA_SAVE_IDLE_TIMEOUT_MS,
+        });
+      } else {
+        persistSnapshot();
       }
     }, APP_DATA_SAVE_DEBOUNCE_MS);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      if (idleCallbackId !== null) window.cancelIdleCallback(idleCallbackId);
+    };
   }, [appDataLoaded, buildCurrentAppData]);
 
   useEffect(() => {
@@ -14650,21 +14509,31 @@ export function App() {
       return;
     }
 
-    setChatSessions((current) =>
-      current.map((session) =>
-        session.id === activeChatSessionId
-          ? {
-              ...session,
-              title: session.roleplayCharacterCardId
-                ? session.title
-                : inferChatSessionTitle(chatMessages),
-              messages: chatMessages,
-              updatedAt: new Date().toISOString(),
-            }
-          : session,
-      ),
-    );
-  }, [activeChatSessionId, appDataLoaded, chatMessages]);
+    // chatMessages is the authoritative live buffer while a response streams.
+    // Mirroring every small delta into chatSessions causes a second App render
+    // and repeatedly invalidates session-derived memoized values. A final sync
+    // runs as soon as generation returns to idle.
+    if (chatGenerationState !== "idle") return;
+
+    setChatSessions((current) => {
+      let changed = false;
+      const nextTitle = inferChatSessionTitle(chatMessages);
+      const updatedAt = new Date().toISOString();
+      const next = current.map((session) => {
+        if (session.id !== activeChatSessionId) return session;
+        const title = session.roleplayCharacterCardId ? session.title : nextTitle;
+        if (session.messages === chatMessages && session.title === title) return session;
+        changed = true;
+        return {
+          ...session,
+          title,
+          messages: chatMessages,
+          updatedAt,
+        };
+      });
+      return changed ? next : current;
+    });
+  }, [activeChatSessionId, appDataLoaded, chatGenerationState, chatMessages]);
 
   const activePersona = useMemo(
     () => personas.find((persona) => persona.id === activePersonaId) ?? personas[0],
@@ -19389,6 +19258,19 @@ export function App() {
     },
     [activePersona, activeSessionRoleplayCard, chatMode, effectiveRegexScripts, personas, userProfile.nickname, visibleChatMessages],
   );
+  const renderedChatItems = useMemo(
+    () =>
+      getRenderedChatItems(
+        regexProcessedChatMessages,
+        chatMultiBubbleEnabled,
+        chatReasoningVisible,
+      ),
+    [chatMultiBubbleEnabled, chatReasoningVisible, regexProcessedChatMessages],
+  );
+  const chatMessageIndexById = useMemo(
+    () => new Map(chatMessages.map((message, index) => [message.id, index])),
+    [chatMessages],
+  );
   useEffect(() => {
     chatScrollFollowLatestRef.current = true;
     scheduleChatScrollToLatest();
@@ -23140,9 +23022,7 @@ export function App() {
     const getHtmlPreviewContext = () => {
       const cached = htmlPreviewContexts.get(sourceMessageId);
       if (cached) return cached;
-      const currentMessageIndex = chatMessages.findIndex(
-        (message) => message.id === sourceMessageId,
-      );
+      const currentMessageIndex = chatMessageIndexById.get(sourceMessageId) ?? -1;
       const context: HtmlPreviewContext = {
         ...htmlPreviewContextBase,
         currentMessageIndex:
@@ -24143,6 +24023,7 @@ export function App() {
     let assistantMessageId = "";
     let streamingAssistantInserted = false;
     let piTimelineHasMultipleTextSegments = false;
+    let streamingMessageUpdates: ReturnType<typeof createChatStreamUpdateBatcher> | null = null;
 
     try {
       const generationPrompt =
@@ -25399,24 +25280,28 @@ export function App() {
         toolName === "multi_agent_delegate_task"
           ? executeMultiAgentDelegation(rawArguments)
           : executeChatTool(toolName, rawArguments, abortSignal, requestSessionId);
-      const appendStreamingAssistant = (delta: string) => {
-        commitChatMessages((current) =>
-          current.map((message) =>
-            message.id === assistantMessageId
-              ? { ...message, content: `${message.content}${delta}` }
-              : message,
-          ),
-        );
-      };
+      streamingMessageUpdates = createChatStreamUpdateBatcher({
+        signal: abortSignal,
+        apply: ({ content, reasoning }) => {
+          commitChatMessages((current) =>
+            current.map((message) =>
+              message.id === assistantMessageId
+                ? {
+                    ...message,
+                    ...(content ? { content: `${message.content}${content}` } : {}),
+                    ...(reasoning
+                      ? { reasoning: `${message.reasoning ?? ""}${reasoning}` }
+                      : {}),
+                  }
+                : message,
+            ),
+          );
+        },
+      });
+      const appendStreamingAssistant = streamingMessageUpdates.pushContent;
       const appendStreamingAssistantReasoning = (delta: string) => {
         assistantReasoning = `${assistantReasoning}${delta}`;
-        commitChatMessages((current) =>
-          current.map((message) =>
-            message.id === assistantMessageId
-              ? { ...message, reasoning: `${message.reasoning ?? ""}${delta}` }
-              : message,
-          ),
-        );
+        streamingMessageUpdates?.pushReasoning(delta);
       };
 
       if (dialogueRewriteTargetMessage) {
@@ -26184,6 +26069,7 @@ export function App() {
         }
       }
 
+      streamingMessageUpdates.flush();
       throwIfChatAborted(abortSignal);
       if (assistantContent && !isDialogueRewrite && !isLocalRewrite) {
         const templateResult = await applyPromptTemplateToRenderedMessage(
@@ -26519,6 +26405,7 @@ export function App() {
       });
       return null;
     } finally {
+      streamingMessageUpdates?.cancel();
       await finishChatGeneration(abortController, assistantMessageId);
       activeAiMessageIdentityRef.current = null;
     }
@@ -27513,6 +27400,7 @@ export function App() {
     let piTimelineHasMultipleTextSegments = false;
     let nextMessages = initialMessages;
     let effectiveContent = content;
+    let streamingMessageUpdates: ReturnType<typeof createChatStreamUpdateBatcher> | null = null;
 
     try {
       setChatStatus({ status: "loading", message: "正在运行发送前酒馆脚本..." });
@@ -28201,24 +28089,28 @@ export function App() {
           includedToolCount: effectiveToolCount,
         };
       };
-      const appendStreamingAssistant = (delta: string) => {
-        commitChatMessages((current) =>
-          current.map((message) =>
-            message.id === assistantMessageId
-              ? { ...message, content: `${message.content}${delta}` }
-              : message,
-          ),
-        );
-      };
+      streamingMessageUpdates = createChatStreamUpdateBatcher({
+        signal: abortSignal,
+        apply: ({ content, reasoning }) => {
+          commitChatMessages((current) =>
+            current.map((message) =>
+              message.id === assistantMessageId
+                ? {
+                    ...message,
+                    ...(content ? { content: `${message.content}${content}` } : {}),
+                    ...(reasoning
+                      ? { reasoning: `${message.reasoning ?? ""}${reasoning}` }
+                      : {}),
+                  }
+                : message,
+            ),
+          );
+        },
+      });
+      const appendStreamingAssistant = streamingMessageUpdates.pushContent;
       const appendStreamingAssistantReasoning = (delta: string) => {
         assistantReasoning = `${assistantReasoning}${delta}`;
-        commitChatMessages((current) =>
-          current.map((message) =>
-            message.id === assistantMessageId
-              ? { ...message, reasoning: `${message.reasoning ?? ""}${delta}` }
-              : message,
-          ),
-        );
+        streamingMessageUpdates?.pushReasoning(delta);
       };
 
       if (isImageGenerationRequest) {
@@ -28621,6 +28513,7 @@ export function App() {
         }
       }
 
+      streamingMessageUpdates.flush();
       throwIfChatAborted(abortSignal);
       if (assistantContent) {
         const templateResult = await applyPromptTemplateToRenderedMessage(
@@ -28762,6 +28655,7 @@ export function App() {
         message: `调用失败：${message}`,
       });
     } finally {
+      streamingMessageUpdates?.cancel();
       if (abortController) {
         await finishChatGeneration(abortController, assistantMessageId);
       }
@@ -36450,11 +36344,7 @@ export function App() {
                 )}
               </div>
             ) : (
-              getRenderedChatItems(
-                regexProcessedChatMessages,
-                chatMultiBubbleEnabled,
-                chatReasoningVisible,
-              ).map((item) => {
+              renderedChatItems.map((item) => {
                 if (item.kind === "toolGroup" || item.kind === "toolOnlyGroup") {
                   const toolGroups =
                     item.kind === "toolOnlyGroup" ? item.toolGroups : [item];
@@ -36482,9 +36372,7 @@ export function App() {
                         : chatMode === "ai"
                           ? getAiChatMessageAvatarImage(message, aiModeAvatarImage)
                           : assistantPersona?.avatarImage ?? "";
-                    const messageIndex = chatMessages.findIndex(
-                      (candidate) => candidate.id === message.id,
-                    );
+                    const messageIndex = chatMessageIndexById.get(message.id) ?? -1;
 
                     return (
                       <article
@@ -36618,9 +36506,7 @@ export function App() {
                       : chatMode === "ai"
                         ? getAiChatMessageAvatarImage(message, aiModeAvatarImage)
                         : assistantPersona?.avatarImage ?? "";
-                const messageIndex = chatMessages.findIndex(
-                  (candidate) => candidate.id === message.id,
-                );
+                const messageIndex = chatMessageIndexById.get(message.id) ?? -1;
                 const bubbleContent = isEditingMessage ? message.content : segment;
                 const containsRenderedHtml =
                   chatHtmlRenderEnabled &&
