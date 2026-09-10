@@ -169,6 +169,12 @@ import {
   getTavernMessageSwipeState,
 } from "./tavernGreetingUtils";
 import {
+  createAiAvatarProfile,
+  getAiModeAvatarImage,
+  normalizeAiAvatarProfiles,
+  type AiAvatarProfile,
+} from "./aiAvatarUtils";
+import {
   createTavernScript,
   exportTavernScriptCollectionJson,
   exportTavernScriptJson,
@@ -870,6 +876,7 @@ type ChatPersonalizationSettings = {
   italicStyleColor: string;
   wallpaperMaskOpacity: number;
   bubbleOpacity: number;
+  aiAvatarProfiles: AiAvatarProfile[];
 };
 
 type PcConnectionData = {
@@ -1535,6 +1542,7 @@ const DEFAULT_CHAT_PERSONALIZATION: ChatPersonalizationSettings = {
   italicStyleColor: "#808080",
   wallpaperMaskOpacity: 70,
   bubbleOpacity: 100,
+  aiAvatarProfiles: [],
 };
 const LLM_CONTEXT_MODE_LABELS: Record<LlmContextMode, string> = {
   ai: "AI",
@@ -2343,6 +2351,7 @@ function normalizeChatPersonalization(
       rawSettings?.bubbleOpacity,
       DEFAULT_CHAT_PERSONALIZATION.bubbleOpacity,
     ),
+    aiAvatarProfiles: normalizeAiAvatarProfiles(rawSettings?.aiAvatarProfiles),
   };
 }
 
@@ -8202,6 +8211,30 @@ function readFileAsDataUrl(file: File) {
     reader.onerror = () => reject(reader.error ?? new Error("文件读取失败"));
     reader.readAsDataURL(file);
   });
+}
+
+async function createAiAvatarImage(file: File) {
+  const source = await readFileAsDataUrl(file);
+  const image = new Image();
+  image.src = source;
+  await image.decode();
+
+  if (!image.naturalWidth || !image.naturalHeight) {
+    throw new Error("图片尺寸无效");
+  }
+
+  const size = AVATAR_OUTPUT_SIZE;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("无法创建头像画布");
+
+  const coverScale = Math.max(size / image.naturalWidth, size / image.naturalHeight);
+  const drawWidth = image.naturalWidth * coverScale;
+  const drawHeight = image.naturalHeight * coverScale;
+  context.drawImage(image, (size - drawWidth) / 2, (size - drawHeight) / 2, drawWidth, drawHeight);
+  return canvas.toDataURL("image/png");
 }
 
 async function createChatAttachmentFromFile(file: File): Promise<ChatAttachment> {
@@ -16516,6 +16549,13 @@ export function App() {
   const effectiveChatModelId = getEffectiveProviderModelId(chatProvider);
   const effectiveChatModelIdRef = useRef(effectiveChatModelId);
   effectiveChatModelIdRef.current = effectiveChatModelId;
+  const aiModeAvatarImage = useMemo(
+    () =>
+      chatMode === "ai"
+        ? getAiModeAvatarImage(chatPersonalization.aiAvatarProfiles, effectiveChatModelId)
+        : "",
+    [chatMode, chatPersonalization.aiAvatarProfiles, effectiveChatModelId],
+  );
   const configuredMultiAgentPersonas =
     multiAgentWorkflow === "supervisor"
       ? multiAgentTeamPersonas
@@ -29916,6 +29956,90 @@ export function App() {
     window.setTimeout(() => setCopied(false), 1400);
   };
 
+  const patchAiAvatarProfile = (
+    profileId: string,
+    patch: Partial<Pick<AiAvatarProfile, "modelId" | "avatarImages" | "activeAvatarIndex">>,
+  ) => {
+    setChatPersonalization((current) => ({
+      ...current,
+      aiAvatarProfiles: current.aiAvatarProfiles.map((profile) =>
+        profile.id === profileId
+          ? { ...profile, ...patch, updatedAt: new Date().toISOString() }
+          : profile,
+      ),
+    }));
+  };
+
+  const addAiAvatarProfile = () => {
+    const profile = createAiAvatarProfile(effectiveChatModelId);
+    setChatPersonalization((current) => ({
+      ...current,
+      aiAvatarProfiles: [...current.aiAvatarProfiles, profile],
+    }));
+  };
+
+  const removeAiAvatarProfile = (profileId: string) => {
+    setChatPersonalization((current) => ({
+      ...current,
+      aiAvatarProfiles: current.aiAvatarProfiles.filter((profile) => profile.id !== profileId),
+    }));
+  };
+
+  const uploadAiAvatarImages = async (profileId: string, fileList: FileList | null) => {
+    const imageFiles = Array.from(fileList ?? []).filter((file) => file.type.startsWith("image/"));
+    if (imageFiles.length === 0) return;
+
+    const results = await Promise.all(
+      imageFiles.map(async (file) => {
+        try {
+          return { image: await createAiAvatarImage(file), error: "" };
+        } catch {
+          return { image: "", error: file.name || "未命名图片" };
+        }
+      }),
+    );
+    const images = results
+      .map((result) => result.image)
+      .filter((image): image is string => Boolean(image));
+    if (images.length > 0) {
+      setChatPersonalization((current) => ({
+        ...current,
+        aiAvatarProfiles: current.aiAvatarProfiles.map((profile) =>
+          profile.id === profileId
+            ? {
+                ...profile,
+                avatarImages: [...profile.avatarImages, ...images],
+                updatedAt: new Date().toISOString(),
+              }
+            : profile,
+        ),
+      }));
+    }
+
+    const failedFiles = results
+      .map((result) => result.error)
+      .filter(Boolean);
+    if (failedFiles.length > 0) {
+      window.alert("部分头像读取失败：" + failedFiles.join("、"));
+    }
+  };
+
+  const removeAiAvatarImage = (profileId: string, imageIndex: number) => {
+    const profile = chatPersonalization.aiAvatarProfiles.find((candidate) => candidate.id === profileId);
+    if (!profile) return;
+    const avatarImages = profile.avatarImages.filter((_, index) => index !== imageIndex);
+    const activeAvatarIndex = avatarImages.length === 0
+      ? 0
+      : Math.min(
+          Math.max(
+            profile.activeAvatarIndex - (imageIndex < profile.activeAvatarIndex ? 1 : 0),
+            0,
+          ),
+          avatarImages.length - 1,
+        );
+    patchAiAvatarProfile(profileId, { avatarImages, activeAvatarIndex });
+  };
+
   const selectAvatarFile = async (file?: File, target: AvatarCropState["target"] = "persona") => {
     if (!file || !file.type.startsWith("image/")) return;
     const src = await new Promise<string>((resolve, reject) => {
@@ -34515,6 +34639,134 @@ export function App() {
                 </article>
               </div>
 
+              <div className="section-heading compact personalization-visual-heading ai-avatar-heading">
+                <div>
+                  <h2>AI 模式头像</h2>
+                  <p>
+                    按模型 ID 为 AI 模式会话配置头像。每条配置可以上传多个头像，点击缩略图指定当前使用的头像。
+                  </p>
+                </div>
+                <button type="button" className="small-action" onClick={addAiAvatarProfile}>
+                  <Plus size={15} />
+                  添加模型头像
+                </button>
+              </div>
+
+              <div className="ai-avatar-profile-list">
+                {chatPersonalization.aiAvatarProfiles.length === 0 ? (
+                  <div className="ai-avatar-empty">
+                    <Bot size={18} />
+                    <span>尚未配置 AI 模式头像，点击“添加模型头像”开始设置。</span>
+                  </div>
+                ) : (
+                  chatPersonalization.aiAvatarProfiles.map((profile, profileIndex) => (
+                    <article className="personalization-style-card ai-avatar-profile-card" key={profile.id}>
+                      <div className="ai-avatar-profile-heading">
+                        <div>
+                          <h3>模型头像 {profileIndex + 1}</h3>
+                          <p>
+                            {profile.avatarImages.length > 0
+                              ? profile.avatarImages.length +
+                                " 张头像 · " +
+                                (profile.modelId.trim() || "尚未填写模型 ID")
+                              : "尚未上传头像"}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          className="icon-button flat danger"
+                          title="删除模型头像配置"
+                          aria-label={"删除模型头像配置 " + (profileIndex + 1)}
+                          onClick={() => removeAiAvatarProfile(profile.id)}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+
+                      <div className="ai-avatar-profile-grid">
+                        <label className="field">
+                          <span>模型 ID</span>
+                          <input
+                            value={profile.modelId}
+                            placeholder="例如：gpt-4o"
+                            onChange={(event) =>
+                              patchAiAvatarProfile(profile.id, {
+                                modelId: event.target.value,
+                              })
+                            }
+                          />
+                          <small className="ai-avatar-model-hint">
+                            仅在聊天模型 ID 与此处匹配时生效。
+                          </small>
+                        </label>
+
+                        <div className="ai-avatar-gallery-field">
+                          <span className="ai-avatar-gallery-label">头像</span>
+                          <div className="ai-avatar-gallery">
+                            {profile.avatarImages.map((image, imageIndex) => (
+                              <div className="ai-avatar-image-item" key={profile.id + "-" + imageIndex}>
+                                <button
+                                  type="button"
+                                  className={
+                                    imageIndex === profile.activeAvatarIndex
+                                      ? "ai-avatar-image-button active"
+                                      : "ai-avatar-image-button"
+                                  }
+                                  title={
+                                    imageIndex === profile.activeAvatarIndex
+                                      ? "当前会话头像"
+                                      : "设为当前会话头像"
+                                  }
+                                  aria-label={
+                                    imageIndex === profile.activeAvatarIndex
+                                      ? "头像 " + (imageIndex + 1) + "，当前使用"
+                                      : "头像 " + (imageIndex + 1) + "，设为当前使用"
+                                  }
+                                  aria-pressed={imageIndex === profile.activeAvatarIndex}
+                                  onClick={() =>
+                                    patchAiAvatarProfile(profile.id, {
+                                      activeAvatarIndex: imageIndex,
+                                    })
+                                  }
+                                >
+                                  <img src={image} alt="" />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="ai-avatar-remove-image"
+                                  title="移除此头像"
+                                  aria-label={"移除头像 " + (imageIndex + 1)}
+                                  onClick={() => removeAiAvatarImage(profile.id, imageIndex)}
+                                >
+                                  <X size={12} />
+                                </button>
+                              </div>
+                            ))}
+                            <label className="ai-avatar-upload-trigger">
+                              <Upload size={18} />
+                              <span>{profile.avatarImages.length > 0 ? "继续上传" : "上传头像"}</span>
+                              <input
+                                className="hidden-input"
+                                type="file"
+                                accept="image/*"
+                                multiple
+                                onChange={(event) => {
+                                  void uploadAiAvatarImages(profile.id, event.currentTarget.files);
+                                  event.currentTarget.value = "";
+                                }}
+                              />
+                            </label>
+                          </div>
+                          <small className="ai-avatar-gallery-hint">
+                            可一次选择多张图片；带绿色边框的头像会用于当前模型。
+                          </small>
+                        </div>
+                      </div>
+                    </article>
+                  ))
+                )}
+              </div>
+
               <div className="section-heading compact personalization-visual-heading">
                 <div>
                   <h2>角色卡视觉效果</h2>
@@ -36000,7 +36252,9 @@ export function App() {
                     const messageAvatarImage =
                       chatMode === "roleplay" && activeSessionRoleplayCard
                         ? activeSessionRoleplayCard.avatarDataUrl
-                        : assistantPersona?.avatarImage ?? "";
+                        : chatMode === "ai"
+                          ? aiModeAvatarImage
+                          : assistantPersona?.avatarImage ?? "";
                     const messageIndex = chatMessages.findIndex(
                       (candidate) => candidate.id === message.id,
                     );
@@ -36128,7 +36382,9 @@ export function App() {
                     ? getChatSenderAvatarImage(messageSender, personas, userProfile)
                     : chatMode === "roleplay" && activeSessionRoleplayCard
                       ? activeSessionRoleplayCard.avatarDataUrl
-                      : assistantPersona?.avatarImage ?? "";
+                      : chatMode === "ai"
+                        ? aiModeAvatarImage
+                        : assistantPersona?.avatarImage ?? "";
                 const messageIndex = chatMessages.findIndex(
                   (candidate) => candidate.id === message.id,
                 );
