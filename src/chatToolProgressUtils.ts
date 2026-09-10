@@ -13,6 +13,19 @@ export type ChatToolProgressBlock = {
   details: string[];
 };
 
+export type ToolProgressTimingEntry = {
+  fallbackAt: string;
+  startedAt?: string;
+  endedAt?: string;
+  completed: boolean;
+};
+
+export type ToolProgressTiming = {
+  startedAt: string;
+  endedAt: string;
+  completed: boolean;
+};
+
 type ReplayableToolCall = {
   function: {
     name: string;
@@ -42,10 +55,40 @@ export function waitForToolProgressPaint(
   });
 }
 
+function parseTimestamp(value: string | undefined) {
+  if (!value) return undefined;
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+export function resolveToolProgressTiming(
+  entries: readonly ToolProgressTimingEntry[],
+): ToolProgressTiming {
+  const startedTimes = entries
+    .map((entry) => parseTimestamp(entry.startedAt) ?? parseTimestamp(entry.fallbackAt))
+    .filter((timestamp): timestamp is number => timestamp !== undefined);
+  const endedTimes = entries
+    .map((entry) => parseTimestamp(entry.endedAt) ?? parseTimestamp(entry.fallbackAt))
+    .filter((timestamp): timestamp is number => timestamp !== undefined);
+  const startedTime = startedTimes.length > 0 ? Math.min(...startedTimes) : Date.now();
+  const endedTime = endedTimes.length > 0
+    ? Math.max(startedTime, Math.max(...endedTimes))
+    : startedTime;
+
+  return {
+    startedAt: new Date(startedTime).toISOString(),
+    endedAt: new Date(endedTime).toISOString(),
+    completed: entries.length > 0 && entries.every((entry) => entry.completed),
+  };
+}
+
 export function formatCodexDuration(startedAt: string, endedAt: string) {
   const startedTime = new Date(startedAt).getTime();
   const endedTime = new Date(endedAt).getTime();
-  const totalSeconds = Math.max(0, Math.round((endedTime - startedTime) / 1000));
+  const elapsedMilliseconds = endedTime - startedTime;
+  const totalSeconds = Number.isFinite(elapsedMilliseconds)
+    ? Math.max(0, Math.round(elapsedMilliseconds / 1000))
+    : 0;
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;

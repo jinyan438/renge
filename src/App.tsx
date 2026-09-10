@@ -227,10 +227,12 @@ import {
   compactToolCallForReplay,
   formatCodexDuration,
   parseToolProgressContent,
+  resolveToolProgressTiming,
   stripMarkdownLinks,
   toolActionTitleMap,
   waitForToolProgressPaint,
   type ChatToolProgressBlock,
+  type ToolProgressTimingEntry,
 } from "./chatToolProgressUtils";
 import { createPiStreamingTimeline } from "./piStreamingTimeline";
 import {
@@ -3761,9 +3763,11 @@ type RenderedChatToolGroup = {
   segments: RenderedChatSegment[];
   blocks: ChatToolProgressBlock[];
   visualizations: ToolVisualization[];
+  progressEntries: ToolProgressTimingEntry[];
   showTime: boolean;
   startedAt: string;
   endedAt: string;
+  completed: boolean;
 };
 
 type RenderedChatToolOnlyGroup = {
@@ -3771,9 +3775,11 @@ type RenderedChatToolOnlyGroup = {
   id: string;
   message: ChatMessage;
   toolGroups: RenderedChatToolGroup[];
+  progressEntries: ToolProgressTimingEntry[];
   showTime: boolean;
   startedAt: string;
   endedAt: string;
+  completed: boolean;
 };
 
 type RenderedChatItem =
@@ -4890,6 +4896,19 @@ function getRenderedChatItems(
       segment.message.role === "assistant" && segment.message.renderAsPlainText !== true
         ? parseToolProgressContent(segment.segment)
         : null;
+    const progressEntry: ToolProgressTimingEntry | null = toolVisualization
+      ? {
+          fallbackAt: segment.message.createdAt,
+          startedAt: toolVisualization.startedAt,
+          endedAt: toolVisualization.endedAt,
+          completed: toolVisualization.status !== "running",
+        }
+      : toolBlock
+        ? {
+            fallbackAt: segment.message.createdAt,
+            completed: toolBlock.variant !== "action",
+          }
+        : null;
 
     if (!toolBlock && !toolVisualization) {
       flushToolGroup();
@@ -4898,6 +4917,8 @@ function getRenderedChatItems(
     }
 
     if (!toolGroup) {
+      const progressEntries = progressEntry ? [progressEntry] : [];
+      const timing = resolveToolProgressTiming(progressEntries);
       toolGroup = {
         kind: "toolGroup",
         id: `tool-group-${segment.id}`,
@@ -4905,9 +4926,11 @@ function getRenderedChatItems(
         segments: [segment],
         blocks: toolBlock ? [toolBlock] : [],
         visualizations: toolVisualization ? [toolVisualization] : [],
+        progressEntries,
         showTime: segment.showTime,
-        startedAt: segment.message.createdAt,
-        endedAt: segment.message.createdAt,
+        startedAt: timing.startedAt,
+        endedAt: timing.endedAt,
+        completed: timing.completed,
       };
       continue;
     }
@@ -4915,7 +4938,11 @@ function getRenderedChatItems(
     toolGroup.segments.push(segment);
     if (toolBlock) toolGroup.blocks.push(toolBlock);
     if (toolVisualization) toolGroup.visualizations.push(toolVisualization);
-    toolGroup.endedAt = segment.message.createdAt;
+    if (progressEntry) toolGroup.progressEntries.push(progressEntry);
+    const timing = resolveToolProgressTiming(toolGroup.progressEntries);
+    toolGroup.startedAt = timing.startedAt;
+    toolGroup.endedAt = timing.endedAt;
+    toolGroup.completed = timing.completed;
   }
 
   flushToolGroup();
@@ -4936,13 +4963,19 @@ function getRenderedChatItems(
           id: `tool-only-group-${item.id}`,
           message: item.message,
           toolGroups: [],
+          progressEntries: [],
           showTime: item.showTime,
           startedAt: item.startedAt,
           endedAt: item.endedAt,
+          completed: item.completed,
         };
       }
       toolOnlyGroup.toolGroups.push(item);
-      toolOnlyGroup.endedAt = item.endedAt;
+      toolOnlyGroup.progressEntries.push(...item.progressEntries);
+      const timing = resolveToolProgressTiming(toolOnlyGroup.progressEntries);
+      toolOnlyGroup.startedAt = timing.startedAt;
+      toolOnlyGroup.endedAt = timing.endedAt;
+      toolOnlyGroup.completed = timing.completed;
       continue;
     }
 
@@ -22794,7 +22827,6 @@ export function App() {
     const hasError =
       item.blocks.some((block) => block.variant === "error") ||
       item.visualizations.some((visualization) => visualization.status === "error");
-    const duration = formatProcessingDuration(item.startedAt, item.endedAt);
     const groupedAttachments = item.segments.flatMap(
       (segment) => segment.message.attachments ?? [],
     );
@@ -22807,9 +22839,12 @@ export function App() {
       ).values(),
     );
     const stepCount = visualizations.length > 0 ? visualizations.length : item.blocks.length;
-    const autoOpen = visualizations.some((visualization) =>
+    const autoOpen = !item.completed || visualizations.some((visualization) =>
       /(?:write|edit|patch)/i.test(visualization.name),
     ) || visualizations.some((visualization) => visualization.status === "running");
+    const statusLabel = item.completed
+      ? `已处理 ${formatProcessingDuration(item.startedAt, item.endedAt)}`
+      : "处理中";
 
     return (
       <details className={`chat-tool-run ${hasError ? "error" : ""}`} open={autoOpen || undefined}>
@@ -22817,7 +22852,7 @@ export function App() {
           <span className="chat-tool-run-icon">
             {hasError ? <X size={15} /> : <Wrench size={15} />}
           </span>
-          <strong>已处理 {duration}</strong>
+          <strong>{statusLabel}</strong>
           {firstPath && <span className="chat-tool-run-path">{firstPath}</span>}
           <span className="chat-tool-run-badge">{stepCount} 步</span>
           <ChevronDown className="chat-tool-run-chevron" size={16} />
@@ -22845,18 +22880,16 @@ export function App() {
         toolGroup.blocks.some((block) => block.variant === "error") ||
         toolGroup.visualizations.some((visualization) => visualization.status === "error"),
     );
-    const hasRunningTool = item.toolGroups.some((toolGroup) =>
-      toolGroup.visualizations.some((visualization) => visualization.status === "running"),
-    );
+    const statusLabel = item.completed ? formatCodexDuration(item.startedAt, item.endedAt) : "处理中";
 
     return (
       <details
         className={`chat-codex-tool-run ${hasError ? "error" : ""}`}
-        open={hasRunningTool || undefined}
+        open={!item.completed || undefined}
       >
         <summary className="chat-codex-tool-run-header">
           <span className="chat-codex-tool-run-duration">
-            {formatCodexDuration(item.startedAt, item.endedAt)}
+            {statusLabel}
           </span>
           <ChevronRight className="chat-codex-tool-run-chevron" size={16} />
         </summary>

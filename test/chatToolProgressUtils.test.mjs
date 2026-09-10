@@ -4,6 +4,7 @@ import {
   compactToolCallForReplay,
   formatCodexDuration,
   parseToolProgressContent,
+  resolveToolProgressTiming,
   waitForToolProgressPaint,
 } from "../src/chatToolProgressUtils.ts";
 
@@ -40,6 +41,49 @@ test("formats the outer Codex tool-run duration in the compact Chinese style", (
     formatCodexDuration(startedAt, startedAt),
     "用时 0秒",
   );
+});
+
+test("uses tool timestamps instead of the containing message timestamp", () => {
+  const timing = resolveToolProgressTiming([
+    {
+      fallbackAt: "2026-09-10T00:00:01.000Z",
+      startedAt: "2026-09-10T00:00:02.000Z",
+      endedAt: "2026-09-10T00:00:08.000Z",
+      completed: true,
+    },
+    {
+      fallbackAt: "2026-09-10T00:00:09.000Z",
+      startedAt: "2026-09-10T00:00:10.000Z",
+      endedAt: "2026-09-10T00:00:15.000Z",
+      completed: true,
+    },
+  ]);
+
+  assert.deepEqual(timing, {
+    startedAt: "2026-09-10T00:00:02.000Z",
+    endedAt: "2026-09-10T00:00:15.000Z",
+    completed: true,
+  });
+});
+
+test("keeps a tool run processing until every entry is complete", () => {
+  const timing = resolveToolProgressTiming([
+    {
+      fallbackAt: "2026-09-10T00:00:01.000Z",
+      startedAt: "2026-09-10T00:00:02.000Z",
+      completed: false,
+    },
+    {
+      fallbackAt: "2026-09-10T00:00:03.000Z",
+      startedAt: "2026-09-10T00:00:04.000Z",
+      endedAt: "2026-09-10T00:00:05.000Z",
+      completed: true,
+    },
+  ]);
+
+  assert.equal(timing.completed, false);
+  assert.equal(timing.startedAt, "2026-09-10T00:00:02.000Z");
+  assert.equal(timing.endedAt, "2026-09-10T00:00:05.000Z");
 });
 
 const browserCases = [
