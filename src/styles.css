@@ -5317,8 +5317,15 @@ summary:focus-visible {
 
 .chat-message {
   display: grid;
+  flex: 0 0 auto;
   gap: 6px;
   width: 100%;
+}
+
+.chat-message.chat-message-virtualized {
+  content-visibility: auto;
+  contain-intrinsic-size:
+    auto var(--chat-message-intrinsic-height, 112px);
 }
 
 .chat-message-time {
