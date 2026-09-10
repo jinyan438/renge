@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   compactToolCallForReplay,
+  formatCodexDuration,
   parseToolProgressContent,
   waitForToolProgressPaint,
 } from "../src/chatToolProgressUtils.ts";
@@ -23,6 +24,22 @@ test("waits for two animation frames before starting visible tool work", async (
   pendingFrames.shift()();
   await progressPaint;
   assert.equal(resolved, true);
+});
+
+test("formats the outer Codex tool-run duration in the compact Chinese style", () => {
+  const startedAt = "2026-09-10T00:00:00.000Z";
+  assert.equal(
+    formatCodexDuration(startedAt, "2026-09-10T00:07:05.000Z"),
+    "用时 7分钟 5秒",
+  );
+  assert.equal(
+    formatCodexDuration(startedAt, "2026-09-10T01:02:03.000Z"),
+    "用时 1小时 2分钟 3秒",
+  );
+  assert.equal(
+    formatCodexDuration(startedAt, startedAt),
+    "用时 0秒",
+  );
 });
 
 const browserCases = [

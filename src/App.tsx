@@ -225,6 +225,7 @@ import {
 } from "./chatLiveStreamUtils";
 import {
   compactToolCallForReplay,
+  formatCodexDuration,
   parseToolProgressContent,
   stripMarkdownLinks,
   toolActionTitleMap,
@@ -3753,19 +3754,32 @@ function getRenderedChatSegments(messages: ChatMessage[], multiBubbleEnabled: bo
 
 type RenderedChatSegment = ReturnType<typeof getRenderedChatSegments>[number];
 
+type RenderedChatToolGroup = {
+  kind: "toolGroup";
+  id: string;
+  message: ChatMessage;
+  segments: RenderedChatSegment[];
+  blocks: ChatToolProgressBlock[];
+  visualizations: ToolVisualization[];
+  showTime: boolean;
+  startedAt: string;
+  endedAt: string;
+};
+
+type RenderedChatToolOnlyGroup = {
+  kind: "toolOnlyGroup";
+  id: string;
+  message: ChatMessage;
+  toolGroups: RenderedChatToolGroup[];
+  showTime: boolean;
+  startedAt: string;
+  endedAt: string;
+};
+
 type RenderedChatItem =
   | ({ kind: "segment" } & RenderedChatSegment)
-  | {
-      kind: "toolGroup";
-      id: string;
-      message: ChatMessage;
-      segments: RenderedChatSegment[];
-      blocks: ChatToolProgressBlock[];
-      visualizations: ToolVisualization[];
-      showTime: boolean;
-      startedAt: string;
-      endedAt: string;
-    };
+  | RenderedChatToolGroup
+  | RenderedChatToolOnlyGroup;
 
 type ChatContentPart =
   | { type: "text"; content: string }
@@ -4856,12 +4870,11 @@ function formatProcessingDuration(startedAt: string, endedAt: string) {
 function getRenderedChatItems(
   messages: ChatMessage[],
   multiBubbleEnabled: boolean,
+  reasoningVisible = true,
 ): RenderedChatItem[] {
   const segments = getRenderedChatSegments(messages, multiBubbleEnabled);
-  const items: RenderedChatItem[] = [];
-  let toolGroup:
-    | Extract<RenderedChatItem, { kind: "toolGroup" }>
-    | null = null;
+  const items: Array<({ kind: "segment" } & RenderedChatSegment) | RenderedChatToolGroup> = [];
+  let toolGroup: RenderedChatToolGroup | null = null;
 
   const flushToolGroup = () => {
     if (!toolGroup) return;
@@ -4906,7 +4919,53 @@ function getRenderedChatItems(
   }
 
   flushToolGroup();
-  return items;
+
+  const groupedItems: RenderedChatItem[] = [];
+  let toolOnlyGroup: RenderedChatToolOnlyGroup | null = null;
+  const flushToolOnlyGroup = () => {
+    if (!toolOnlyGroup) return;
+    groupedItems.push(toolOnlyGroup);
+    toolOnlyGroup = null;
+  };
+
+  for (const item of items) {
+    if (item.kind === "toolGroup") {
+      if (!toolOnlyGroup) {
+        toolOnlyGroup = {
+          kind: "toolOnlyGroup",
+          id: `tool-only-group-${item.id}`,
+          message: item.message,
+          toolGroups: [],
+          showTime: item.showTime,
+          startedAt: item.startedAt,
+          endedAt: item.endedAt,
+        };
+      }
+      toolOnlyGroup.toolGroups.push(item);
+      toolOnlyGroup.endedAt = item.endedAt;
+      continue;
+    }
+
+    if (
+      toolOnlyGroup &&
+      item.kind === "segment" &&
+      item.message.role === "assistant" &&
+      shouldHideEmptyAssistantBubble(
+        item.message.content,
+        reasoningVisible,
+        item.message.attachments?.length ?? 0,
+        Boolean(item.message.choiceRequest || item.message.toolVisualization),
+      )
+    ) {
+      continue;
+    }
+
+    flushToolOnlyGroup();
+    groupedItems.push(item);
+  }
+
+  flushToolOnlyGroup();
+  return groupedItems;
 }
 
 function stripHiddenImageAnnotations(content: string) {
@@ -22780,6 +22839,39 @@ export function App() {
     );
   };
 
+  const renderToolOnlyGroup = (
+    item: Extract<RenderedChatItem, { kind: "toolOnlyGroup" }>,
+    messageId: string,
+  ) => {
+    const hasError = item.toolGroups.some(
+      (toolGroup) =>
+        toolGroup.blocks.some((block) => block.variant === "error") ||
+        toolGroup.visualizations.some((visualization) => visualization.status === "error"),
+    );
+    const hasRunningTool = item.toolGroups.some((toolGroup) =>
+      toolGroup.visualizations.some((visualization) => visualization.status === "running"),
+    );
+
+    return (
+      <details
+        className={`chat-codex-tool-run ${hasError ? "error" : ""}`}
+        open={hasRunningTool || undefined}
+      >
+        <summary className="chat-codex-tool-run-header">
+          <span className="chat-codex-tool-run-duration">
+            {formatCodexDuration(item.startedAt, item.endedAt)}
+          </span>
+          <ChevronRight className="chat-codex-tool-run-chevron" size={16} />
+        </summary>
+        <div className="chat-codex-tool-run-body">
+          {item.toolGroups.map((toolGroup, index) =>
+            renderToolRunGroup(toolGroup, `${messageId}-${index}`),
+          )}
+        </div>
+      </details>
+    );
+  };
+
   const renderChatReasoning = (reasoning: string | undefined, keyPrefix: string) => {
     const trimmedReasoning = reasoning?.trim();
     if (!chatReasoningVisible || !trimmedReasoning) return null;
@@ -35851,10 +35943,18 @@ export function App() {
                 )}
               </div>
             ) : (
-              getRenderedChatItems(regexProcessedChatMessages, chatMultiBubbleEnabled).map((item) => {
-                if (item.kind === "toolGroup") {
-                  const hasEditingMessage = item.segments.some(
-                    (segment) => editingChatMessage?.messageId === segment.message.id,
+              getRenderedChatItems(
+                regexProcessedChatMessages,
+                chatMultiBubbleEnabled,
+                chatReasoningVisible,
+              ).map((item) => {
+                if (item.kind === "toolGroup" || item.kind === "toolOnlyGroup") {
+                  const toolGroups =
+                    item.kind === "toolOnlyGroup" ? item.toolGroups : [item];
+                  const hasEditingMessage = toolGroups.some((toolGroup) =>
+                    toolGroup.segments.some(
+                      (segment) => editingChatMessage?.messageId === segment.message.id,
+                    ),
                   );
                   if (!hasEditingMessage) {
                     const message = item.message;
@@ -35900,8 +36000,16 @@ export function App() {
                               )}
                             </div>
                           </div>
-                          <div className="chat-bubble tool-run-bubble">
-                            {renderToolRunGroup(item, item.id)}
+                          <div
+                            className={`chat-bubble tool-run-bubble ${
+                              item.kind === "toolOnlyGroup"
+                                ? "chat-codex-tool-run-bubble"
+                                : ""
+                            }`}
+                          >
+                            {item.kind === "toolOnlyGroup"
+                              ? renderToolOnlyGroup(item, item.id)
+                              : renderToolRunGroup(item, item.id)}
                           </div>
                         </div>
                       </article>
@@ -35910,8 +36018,15 @@ export function App() {
                 }
 
                 const renderedSegments =
-                  item.kind === "toolGroup"
-                    ? item.segments.map((segment) => ({ kind: "segment" as const, ...segment }))
+                  item.kind === "toolOnlyGroup"
+                    ? item.toolGroups.flatMap((toolGroup) =>
+                        toolGroup.segments.map((segment) => ({
+                          kind: "segment" as const,
+                          ...segment,
+                        })),
+                    )
+                    : item.kind === "toolGroup"
+                      ? item.segments.map((segment) => ({ kind: "segment" as const, ...segment }))
                     : [item];
 
                 return renderedSegments.map((

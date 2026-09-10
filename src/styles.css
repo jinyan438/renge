@@ -5892,6 +5892,11 @@ summary:focus-visible {
   box-shadow: none;
 }
 
+.chat-bubble.tool-run-bubble.chat-codex-tool-run-bubble {
+  width: min(720px, 100%);
+  max-width: 100%;
+}
+
 .chat-rendered-content {
   display: grid;
   gap: 10px;
@@ -6613,6 +6618,67 @@ summary:focus-visible {
   display: grid;
   gap: 8px;
   padding-left: 12px;
+  border-left: 2px solid #e2e8f0;
+}
+
+.chat-codex-tool-run {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  color: #64748b;
+}
+
+.chat-codex-tool-run:not([open]) {
+  gap: 0;
+}
+
+.chat-codex-tool-run:not([open]) > .chat-codex-tool-run-body {
+  display: none;
+}
+
+.chat-codex-tool-run.error .chat-codex-tool-run-header {
+  color: #b42318;
+  border-bottom-color: #fecaca;
+}
+
+.chat-codex-tool-run-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 3px 0 7px;
+  border-bottom: 1px solid #e2e8f0;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.chat-codex-tool-run-header::-webkit-details-marker {
+  display: none;
+}
+
+.chat-codex-tool-run-duration {
+  white-space: nowrap;
+}
+
+.chat-codex-tool-run-chevron {
+  color: #94a3b8;
+  transition: transform 0.16s ease;
+}
+
+.chat-codex-tool-run[open] .chat-codex-tool-run-chevron {
+  transform: rotate(90deg);
+}
+
+.chat-codex-tool-run-body {
+  display: grid;
+  gap: 8px;
+  padding: 8px 0 0 12px;
   border-left: 2px solid #e2e8f0;
 }
 

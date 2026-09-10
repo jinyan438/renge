@@ -42,6 +42,21 @@ export function waitForToolProgressPaint(
   });
 }
 
+export function formatCodexDuration(startedAt: string, endedAt: string) {
+  const startedTime = new Date(startedAt).getTime();
+  const endedTime = new Date(endedAt).getTime();
+  const totalSeconds = Math.max(0, Math.round((endedTime - startedTime) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts: string[] = [];
+
+  if (hours > 0) parts.push(`${hours}小时`);
+  if (hours > 0 || minutes > 0) parts.push(`${minutes}分钟`);
+  parts.push(`${seconds}秒`);
+  return `用时 ${parts.join(" ")}`;
+}
+
 export function compactToolCallForReplay<T extends ReplayableToolCall>(
   toolCall: T,
   workspacePath = "",
