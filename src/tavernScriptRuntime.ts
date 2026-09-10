@@ -35,6 +35,7 @@ export type TavernRuntimeMessage = {
   variables?: Record<string, unknown>;
   extra?: Record<string, unknown>;
   source?: string;
+  aiIdentity?: Record<string, unknown>;
 };
 
 export type TavernRuntimeWorldBookEntry = {
@@ -3756,6 +3757,9 @@ export class TavernScriptRuntime {
       message_id: index,
       mesid: index,
       id: index,
+      ...(isRecord(message.aiIdentity)
+        ? { aiIdentity: cloneValue(message.aiIdentity) }
+        : {}),
       name:
         tavernName || (message.role === "user"
           ? this.adapter.getUserName() || "User"
@@ -3817,6 +3821,7 @@ export class TavernScriptRuntime {
       "swipes",
       "swipes_data",
       "swipes_info",
+      "aiIdentity",
     ]);
     const nextMessages = this.sillyTavernChatCache.map((rawMessage, index) => {
       const previous = previousMessages[index];
@@ -3898,6 +3903,11 @@ export class TavernScriptRuntime {
           : isRecord(rawMessage.data)
             ? rawMessage.data
             : previous?.variables;
+      const aiIdentity = isRecord(rawMessage.aiIdentity)
+        ? cloneValue(rawMessage.aiIdentity)
+        : isRecord(previous?.aiIdentity)
+          ? cloneValue(previous.aiIdentity)
+          : undefined;
       return {
         id: previous?.id ?? crypto.randomUUID(),
         role:
@@ -3909,6 +3919,7 @@ export class TavernScriptRuntime {
         ...(isRecord(variableValue)
           ? { variables: this.restorePlaceholderImages(cloneValue(variableValue)) }
           : {}),
+        ...(aiIdentity ? { aiIdentity } : {}),
         ...(Object.keys(extra).length > 0 ? { extra } : {}),
       };
     });

@@ -17306,6 +17306,7 @@ export function App() {
           message: message.content,
           content: message.content,
           extra: message.extra ?? {},
+          ...(message.aiIdentity ? { aiIdentity: message.aiIdentity } : {}),
           swipe_id: 0,
           swipes: [message.content],
           variables: [message.variables ?? {}],
@@ -17327,6 +17328,7 @@ export function App() {
           "swipe_id",
           "swipes",
           "variables",
+          "aiIdentity",
         ]);
         const nextMessages = chatMessagesRef.current.map((message, index) => {
           const tavernMessage = messages[index];
