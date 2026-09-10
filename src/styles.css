@@ -5367,10 +5367,13 @@ summary:focus-visible {
 }
 
 .chat-identity.ai-model-identity strong {
+  left: 0;
   width: max-content;
   max-width: none;
   overflow: visible;
   text-overflow: clip;
+  text-align: left;
+  transform: none;
 }
 
 .chat-avatar {
