@@ -936,6 +936,13 @@ button.portfolio-window-light.close:hover {
 }
 
 @media (min-width: 821px) {
+  /* The model submenu opens to the left of the composer. Let it cross the
+     workspace column so the chat sidebar does not clip the second-level menu. */
+  .portfolio-window-body.chat-shell:has(.composer-model-config-submenu) > .chat-workspace {
+    z-index: 2;
+    overflow: visible;
+  }
+
   .portfolio-window-body.chat-shell {
     --desktop-chat-sidebar-width: 280px;
     grid-template-columns: var(--desktop-chat-sidebar-width) minmax(0, 1fr);
