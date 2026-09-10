@@ -5366,6 +5366,13 @@ summary:focus-visible {
   white-space: nowrap;
 }
 
+.chat-identity.ai-model-identity strong {
+  width: max-content;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+}
+
 .chat-avatar {
   display: grid;
   width: 46px;

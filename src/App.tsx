@@ -36439,7 +36439,11 @@ export function App() {
                           </time>
                         )}
                         <div className="chat-message-row">
-                          <div className="chat-identity">
+                          <div
+                            className={`chat-identity${
+                              chatMode === "ai" ? " ai-model-identity" : ""
+                            }`}
+                          >
                             <strong>{messageName}</strong>
                             <div className="chat-avatar">
                               {messageAvatarImage ? (
@@ -36584,7 +36588,13 @@ export function App() {
                       </time>
                     )}
                     <div className="chat-message-row">
-                      <div className="chat-identity">
+                      <div
+                        className={`chat-identity${
+                          chatMode === "ai" && message.role === "assistant"
+                            ? " ai-model-identity"
+                            : ""
+                        }`}
+                      >
                         <strong>{messageName}</strong>
                         <div className="chat-avatar">
                           {messageAvatarImage ? (
