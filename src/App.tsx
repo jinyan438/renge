@@ -259,6 +259,7 @@ import {
   normalizeProviderReasoningEffort,
   providerRequiresReasoningContentReplay,
   sanitizeProviderAssistantMessageForReplay,
+  shouldHideEmptyAssistantBubble,
   shouldUseResponsesApiForLocalQwen,
   shouldRetryReasoningOnlyToolCompletion,
   splitSseFrames,
@@ -35917,6 +35918,17 @@ export function App() {
                   { id, message, segment, segmentIndex, showTime },
                   renderedSegmentIndex,
                 ) => {
+                if (
+                  message.role === "assistant" &&
+                  shouldHideEmptyAssistantBubble(
+                    message.content,
+                    chatReasoningVisible,
+                    message.attachments?.length ?? 0,
+                    Boolean(message.choiceRequest || message.toolVisualization),
+                  )
+                ) {
+                  return null;
+                }
                 const isEditingMessage = editingChatMessage?.messageId === message.id;
                 const isRenderedEditingMessage =
                   isEditingMessage && editingChatMessage.mode === "rendered";

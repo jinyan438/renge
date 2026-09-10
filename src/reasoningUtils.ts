@@ -265,6 +265,22 @@ export function hasAssistantTimelinePayload(
   return Boolean(content.trim() || reasoning.trim() || attachmentCount > 0);
 }
 
+// Keep reasoning-only turns in the stored timeline, but avoid rendering an
+// empty chat bubble while the reasoning panel is hidden.
+export function shouldHideEmptyAssistantBubble(
+  content: string,
+  reasoningVisible: boolean,
+  attachmentCount = 0,
+  hasOtherOutput = false,
+) {
+  return (
+    !reasoningVisible &&
+    !content.trim() &&
+    attachmentCount <= 0 &&
+    !hasOtherOutput
+  );
+}
+
 export function buildProviderReasoningRequest(
   provider?: ReasoningProviderConfig,
   options: { stream?: boolean } = {},

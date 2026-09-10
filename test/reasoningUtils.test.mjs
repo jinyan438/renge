@@ -12,6 +12,7 @@ import {
   isLocalProviderEndpoint,
   mergeReasoningStreamChunk,
   sanitizeProviderAssistantMessageForReplay,
+  shouldHideEmptyAssistantBubble,
   shouldUseResponsesApiForLocalQwen,
   shouldRetryReasoningOnlyToolCompletion,
   splitSseFrames,
@@ -309,6 +310,14 @@ test("keeps reasoning-only assistant turns visible in the tool timeline", () => 
   assert.equal(hasAssistantTimelinePayload("", "complete project design"), true);
   assert.equal(hasAssistantTimelinePayload("", "", 1), true);
   assert.equal(hasAssistantTimelinePayload("  ", "\n\t"), false);
+});
+
+test("hides only empty assistant bubbles when reasoning is not visible", () => {
+  assert.equal(shouldHideEmptyAssistantBubble("", false), true);
+  assert.equal(shouldHideEmptyAssistantBubble("", true), false);
+  assert.equal(shouldHideEmptyAssistantBubble("visible reply", false), false);
+  assert.equal(shouldHideEmptyAssistantBubble("", false, 1), false);
+  assert.equal(shouldHideEmptyAssistantBubble("", false, 0, true), false);
 });
 
 test("keeps OpenCode and OpenCode Go DeepSeek request formats distinct", () => {
