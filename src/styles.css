@@ -3460,17 +3460,60 @@ summary:focus-visible {
   align-items: flex-start;
 }
 
-.ai-avatar-heading > button {
+.ai-avatar-library-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.ai-avatar-library-heading h3,
+.ai-avatar-library-heading p {
+  margin: 0;
+}
+
+.ai-avatar-library-heading h3 {
+  color: #172033;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.ai-avatar-library-heading p {
+  margin-top: 5px;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ai-avatar-upload-action {
+  width: auto;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
+.ai-avatar-upload-action input {
+  display: none;
+}
+
+.ai-avatar-model-heading {
+  align-items: flex-start;
+}
+
+.ai-avatar-model-heading > button {
   flex: 0 0 auto;
 }
 
-.ai-avatar-profile-list {
+.ai-avatar-model-list {
   display: grid;
   gap: 14px;
 }
 
-.ai-avatar-profile-card {
+.ai-avatar-model-card {
   gap: 14px;
+}
+
+.ai-avatar-library-gallery {
+  min-height: 78px;
 }
 
 .ai-avatar-profile-heading {
@@ -3589,34 +3632,24 @@ summary:focus-visible {
   background: #971c27;
 }
 
-.ai-avatar-upload-trigger {
-  display: grid;
-  width: 76px;
-  height: 76px;
-  flex: 0 0 76px;
-  place-items: center;
-  align-content: center;
-  gap: 5px;
-  border: 1px dashed #aab5c5;
-  border-radius: 10px;
-  color: #536074;
-  background: #fbfcfe;
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 700;
-  text-align: center;
-}
-
-.ai-avatar-upload-trigger:hover {
-  border-color: #07C160;
-  color: #08783f;
-  background: #f2fbf6;
+.ai-avatar-model-gallery {
+  min-height: 78px;
 }
 
 .ai-avatar-empty {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 14px 16px;
+  border: 1px dashed #cfd6e2;
+  border-radius: 10px;
+  color: #667085;
+  background: #fbfcfe;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ai-avatar-selection-empty {
   padding: 14px 16px;
   border: 1px dashed #cfd6e2;
   border-radius: 10px;
@@ -3817,11 +3850,17 @@ summary:focus-visible {
   }
 
   .ai-avatar-heading {
+    align-items: flex-start;
+  }
+
+  .ai-avatar-library-heading,
+  .ai-avatar-model-heading {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .ai-avatar-heading > button {
+  .ai-avatar-upload-action,
+  .ai-avatar-model-heading > button {
     width: 100%;
   }
 
