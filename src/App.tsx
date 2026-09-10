@@ -12145,10 +12145,7 @@ export function App() {
   const mobileSidebarOpenRef = useRef(false);
   const [chatDesktopSidebarCollapsed, setChatDesktopSidebarCollapsed] =
     useState(false);
-  const [chatStatusSidebarCollapsed, setChatStatusSidebarCollapsed] =
-    useState(() =>
-      typeof window !== "undefined" && window.matchMedia("(max-width: 820px)").matches,
-    );
+  const [chatStatusSidebarCollapsed, setChatStatusSidebarCollapsed] = useState(true);
   const [chatClearConfirmationOpen, setChatClearConfirmationOpen] = useState(false);
   const [mobilePromptPreviewOpen, setMobilePromptPreviewOpen] = useState(false);
 
