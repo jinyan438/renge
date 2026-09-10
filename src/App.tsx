@@ -578,6 +578,12 @@ type ChatSenderIdentity = {
   personaId?: string;
 };
 
+type AiChatMessageIdentity = {
+  modelId: string;
+  modelName: string;
+  avatarImage: string;
+};
+
 type ModelProviderChannel = {
   id: string;
   name: string;
@@ -658,6 +664,7 @@ type ChatMessage = {
   dialoguePlaceholderCount?: number;
   variables?: Record<string, unknown>;
   extra?: Record<string, unknown>;
+  aiIdentity?: AiChatMessageIdentity;
 };
 
 function isTavernSystemMessage(message: Pick<ChatMessage, "extra">) {
@@ -672,6 +679,54 @@ function getTavernMessageName(message: Pick<ChatMessage, "extra">) {
   return typeof message.extra?.tavernName === "string"
     ? message.extra.tavernName.trim()
     : "";
+}
+
+function createAiChatMessageIdentity(
+  modelId: string,
+  avatarImage: string,
+): AiChatMessageIdentity | undefined {
+  const normalizedModelId = modelId.trim();
+  if (!normalizedModelId) return undefined;
+  return {
+    modelId: normalizedModelId,
+    modelName: normalizedModelId,
+    avatarImage,
+  };
+}
+
+function normalizeAiChatMessageIdentity(value: unknown): AiChatMessageIdentity | undefined {
+  if (!isObjectRecord(value)) return undefined;
+  const modelId = typeof value.modelId === "string" ? value.modelId.trim() : "";
+  const modelName = typeof value.modelName === "string" ? value.modelName.trim() : "";
+  const avatarImage = typeof value.avatarImage === "string" ? value.avatarImage : "";
+  if (!modelId && !modelName) return undefined;
+  return {
+    modelId,
+    modelName: modelName || modelId,
+    avatarImage,
+  };
+}
+
+function attachAiIdentityToNewAssistantMessages(
+  currentMessages: ChatMessage[],
+  nextMessages: ChatMessage[],
+  aiIdentity: AiChatMessageIdentity | null,
+) {
+  if (!aiIdentity) return nextMessages;
+  const currentMessageIds = new Set(currentMessages.map((message) => message.id));
+  let changed = false;
+  const decoratedMessages = nextMessages.map((message) => {
+    if (
+      message.role !== "assistant" ||
+      currentMessageIds.has(message.id) ||
+      message.aiIdentity
+    ) {
+      return message;
+    }
+    changed = true;
+    return { ...message, aiIdentity };
+  });
+  return changed ? decoratedMessages : nextMessages;
 }
 
 type ContextRuntimeUsage = {
@@ -2484,6 +2539,8 @@ function normalizeChatMessage(
     : [];
 
   const normalizedSender = normalizeChatSenderIdentity(rawMessage.sender);
+  const normalizedAiIdentity =
+    role === "assistant" ? normalizeAiChatMessageIdentity(rawMessage.aiIdentity) : undefined;
   const choiceRequest = normalizeChatChoiceRequest(rawMessage.choiceRequest);
   const dialoguePlaceholderCount =
     role === "assistant" &&
@@ -2567,6 +2624,7 @@ function normalizeChatMessage(
       : normalizedSender.kind === "persona"
         ? { sender: normalizedSender }
         : {}),
+    ...(normalizedAiIdentity ? { aiIdentity: normalizedAiIdentity } : {}),
     ...(attachments.length > 0 ? { attachments } : {}),
     ...(rawMessage.source === "heartbeat" ||
     rawMessage.source === "roleplay-greeting" ||
@@ -7708,6 +7766,20 @@ function getChatSenderAvatarImage(
   return senderPersona?.avatarImage || (sender?.kind === "user" ? userProfile.avatarImage : "");
 }
 
+function getAiChatMessageName(
+  message: Pick<ChatMessage, "aiIdentity">,
+  fallbackModelName: string,
+) {
+  return message.aiIdentity?.modelName || message.aiIdentity?.modelId || fallbackModelName || "AI";
+}
+
+function getAiChatMessageAvatarImage(
+  message: Pick<ChatMessage, "aiIdentity">,
+  fallbackAvatarImage: string,
+) {
+  return message.aiIdentity ? message.aiIdentity.avatarImage : fallbackAvatarImage;
+}
+
 function getWechatMessageMetadata(message: ChatMessage) {
   if (message.source !== "wechat" || !isObjectRecord(message.extra)) return null;
   const contactId = typeof message.extra.contactId === "string" ? message.extra.contactId : "";
@@ -12734,6 +12806,7 @@ export function App() {
   const chatModeRef = useRef<ChatMode>(chatMode);
   const tavernScriptRuntimeRef = useRef<TavernScriptRuntime | null>(null);
   const chatMessagesRef = useRef<ChatMessage[]>([]);
+  const activeAiMessageIdentityRef = useRef<AiChatMessageIdentity | null>(null);
   const htmlPreviewMessagesCacheRef = useRef<{
     sources: ChatMessage[];
     values: HtmlPreviewContext["messages"];
@@ -12925,10 +12998,16 @@ export function App() {
   };
 
   const commitChatMessages: Dispatch<SetStateAction<ChatMessage[]>> = (update) => {
+    const currentMessages = chatMessagesRef.current;
     const nextMessages =
       typeof update === "function" ? update(chatMessagesRef.current) : update;
-    chatMessagesRef.current = nextMessages;
-    setChatMessages(nextMessages);
+    const decoratedMessages = attachAiIdentityToNewAssistantMessages(
+      currentMessages,
+      nextMessages,
+      activeAiMessageIdentityRef.current,
+    );
+    chatMessagesRef.current = decoratedMessages;
+    setChatMessages(decoratedMessages);
   };
 
   const getSessionStatusBarState = (sessionId = activeChatSessionIdRef.current) => {
@@ -24001,7 +24080,15 @@ export function App() {
       return null;
     }
 
+    const aiMessageIdentity =
+      responseMode === "ai"
+        ? createAiChatMessageIdentity(
+            requestModelId,
+            getAiModeAvatarImage(chatPersonalization.aiAvatarSettings, requestModelId),
+          )
+        : undefined;
     const abortController = beginChatGeneration();
+    activeAiMessageIdentityRef.current = aiMessageIdentity ?? null;
     const abortSignal = abortController.signal;
     let assistantMessageId = "";
     let streamingAssistantInserted = false;
@@ -26383,6 +26470,7 @@ export function App() {
       return null;
     } finally {
       await finishChatGeneration(abortController, assistantMessageId);
+      activeAiMessageIdentityRef.current = null;
     }
   };
 
@@ -27344,6 +27432,13 @@ export function App() {
       });
       return;
     }
+    const aiMessageIdentity =
+      chatMode === "ai"
+        ? createAiChatMessageIdentity(
+            requestModelId,
+            getAiModeAvatarImage(chatPersonalization.aiAvatarSettings, requestModelId),
+          )
+        : undefined;
 
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
@@ -27375,6 +27470,7 @@ export function App() {
       activeUserRequestTextRef.current = effectiveContent;
 
       abortController = beginChatGeneration();
+      activeAiMessageIdentityRef.current = aiMessageIdentity ?? null;
       abortSignal = abortController.signal;
       await emitTavernEvent(
         TAVERN_EVENTS.GENERATION_STARTED,
@@ -28617,6 +28713,7 @@ export function App() {
       if (abortController) {
         await finishChatGeneration(abortController, assistantMessageId);
       }
+      activeAiMessageIdentityRef.current = null;
     }
   };
   sendChatMessageRef.current = sendChatMessage;
@@ -36314,12 +36411,14 @@ export function App() {
                     const messageName =
                       chatMode === "roleplay" && activeSessionRoleplayCard
                         ? activeSessionRoleplayCard.name
-                        : assistantPersona?.name ?? "AI";
+                        : chatMode === "ai"
+                          ? getAiChatMessageName(message, effectiveChatModelId)
+                          : assistantPersona?.name ?? "AI";
                     const messageAvatarImage =
                       chatMode === "roleplay" && activeSessionRoleplayCard
                         ? activeSessionRoleplayCard.avatarDataUrl
                         : chatMode === "ai"
-                          ? aiModeAvatarImage
+                          ? getAiChatMessageAvatarImage(message, aiModeAvatarImage)
                           : assistantPersona?.avatarImage ?? "";
                     const messageIndex = chatMessages.findIndex(
                       (candidate) => candidate.id === message.id,
@@ -36438,7 +36537,9 @@ export function App() {
                     ? getChatSenderName(messageSender, personas, userProfile)
                     : chatMode === "roleplay" && activeSessionRoleplayCard
                       ? activeSessionRoleplayCard.name
-                      : assistantPersona?.name ?? "AI");
+                      : chatMode === "ai"
+                        ? getAiChatMessageName(message, effectiveChatModelId)
+                        : assistantPersona?.name ?? "AI");
                 const messageAvatarImage =
                   wechatMetadata
                     ? message.role === "assistant"
@@ -36449,7 +36550,7 @@ export function App() {
                     : chatMode === "roleplay" && activeSessionRoleplayCard
                       ? activeSessionRoleplayCard.avatarDataUrl
                       : chatMode === "ai"
-                        ? aiModeAvatarImage
+                        ? getAiChatMessageAvatarImage(message, aiModeAvatarImage)
                         : assistantPersona?.avatarImage ?? "";
                 const messageIndex = chatMessages.findIndex(
                   (candidate) => candidate.id === message.id,
