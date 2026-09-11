@@ -9,6 +9,7 @@ type ScheduleChatStreamFlush = (
 ) => () => void;
 
 export const CHAT_STREAM_RENDER_INTERVAL_MS = 32;
+export const ROLEPLAY_CHAT_STREAM_RENDER_INTERVAL_MS = 80;
 
 function defaultScheduleChatStreamFlush(callback: () => void, delayMs: number) {
   let frameId: number | null = null;

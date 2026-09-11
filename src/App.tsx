@@ -235,7 +235,10 @@ import {
   type ChatLiveStreamEmbed,
   type ChatLiveStreamTextItem,
 } from "./chatLiveStreamUtils";
-import { createChatStreamUpdateBatcher } from "./chatPerformanceUtils";
+import {
+  createChatStreamUpdateBatcher,
+  ROLEPLAY_CHAT_STREAM_RENDER_INTERVAL_MS,
+} from "./chatPerformanceUtils";
 import {
   compactToolCallForReplay,
   formatCodexDuration,
@@ -10844,6 +10847,8 @@ function createStreamingAssistantMessage(
   signal?: AbortSignal,
   sender?: ChatSenderIdentity,
   messageId: string = crypto.randomUUID(),
+  intervalMs?: number,
+  deferUpdates = true,
 ) {
   const updateMessage = (
     current: ChatMessage[],
@@ -10863,8 +10868,9 @@ function createStreamingAssistantMessage(
   };
   const streamUpdates = createChatStreamUpdateBatcher({
     signal,
+    intervalMs,
     apply: ({ content, reasoning }) => {
-      startTransition(() => {
+      const applyUpdate = () => {
         setChatMessages((current) =>
           updateMessage(current, (message) => ({
             ...message,
@@ -10874,7 +10880,9 @@ function createStreamingAssistantMessage(
               : {}),
           })),
         );
-      });
+      };
+      if (deferUpdates) startTransition(applyUpdate);
+      else applyUpdate();
     },
   });
 
@@ -11160,6 +11168,8 @@ function createPiStreamingAssistantTimeline(
   sender?: ChatSenderIdentity,
   initialMessageId?: string,
   onSegmentStarted?: (messageId: string) => void,
+  intervalMs?: number,
+  deferUpdates = true,
 ) {
   return createPiStreamingTimeline({
     initialMessageId,
@@ -11170,6 +11180,8 @@ function createPiStreamingAssistantTimeline(
         signal,
         sender,
         messageId,
+        intervalMs,
+        deferUpdates,
       ),
   });
 }
@@ -19405,6 +19417,10 @@ export function App() {
           : null;
       const processed = visibleChatMessages.map((message, index) => {
         if (message.role !== "assistant" || !message.content) return message;
+        // Streaming messages are intentionally displayed as raw text. Running
+        // character regexes and templates against the growing full response on
+        // every fragment makes complex roleplay cards block the main thread.
+        if (message.renderAsPlainText === true) return message;
         const depth = visibleChatMessages.length - index - 1;
         const latestAssistant = index === latestAssistantMessageIndex;
         const cached = cache.entries.get(message.id);
@@ -19445,7 +19461,6 @@ export function App() {
           : applyRegexScripts(displaySource, effectiveRegexScripts, regexOptions);
         const templatedContent =
           characterTemplate &&
-          message.renderAsPlainText !== true &&
           isCharacterRegexTemplateMessageEligible(
             characterTemplate,
             index,
@@ -25499,8 +25514,12 @@ export function App() {
           : executeChatTool(toolName, rawArguments, abortSignal, requestSessionId);
       streamingMessageUpdates = createChatStreamUpdateBatcher({
         signal: abortSignal,
+        intervalMs:
+          responseMode === "roleplay"
+            ? ROLEPLAY_CHAT_STREAM_RENDER_INTERVAL_MS
+            : undefined,
         apply: ({ content, reasoning }) => {
-          startTransition(() => {
+          const applyUpdate = () => {
             commitChatMessages((current) =>
               current.map((message) =>
                 message.id === assistantMessageId
@@ -25514,7 +25533,9 @@ export function App() {
                   : message,
               ),
             );
-          });
+          };
+          if (responseMode === "roleplay") applyUpdate();
+          else startTransition(applyUpdate);
         },
       });
       const appendStreamingAssistant = streamingMessageUpdates.pushContent;
@@ -25818,6 +25839,10 @@ export function App() {
             assistantMessageId = messageId;
             streamingAssistantInserted = true;
           },
+          responseMode === "roleplay"
+            ? ROLEPLAY_CHAT_STREAM_RENDER_INTERVAL_MS
+            : undefined,
+          responseMode !== "roleplay",
         );
         assistantMessageId = streamingTimeline.messageId ?? assistantMessageId;
         try {
@@ -25874,6 +25899,10 @@ export function App() {
                   assistantMessageId = messageId;
                   streamingAssistantInserted = true;
                 },
+                responseMode === "roleplay"
+                  ? ROLEPLAY_CHAT_STREAM_RENDER_INTERVAL_MS
+                  : undefined,
+                responseMode !== "roleplay",
               )
             : null;
           if (streamingRound) {
@@ -28312,8 +28341,12 @@ export function App() {
       };
       streamingMessageUpdates = createChatStreamUpdateBatcher({
         signal: abortSignal,
+        intervalMs:
+          chatMode === "roleplay"
+            ? ROLEPLAY_CHAT_STREAM_RENDER_INTERVAL_MS
+            : undefined,
         apply: ({ content, reasoning }) => {
-          startTransition(() => {
+          const applyUpdate = () => {
             commitChatMessages((current) =>
               current.map((message) =>
                 message.id === assistantMessageId
@@ -28327,7 +28360,9 @@ export function App() {
                   : message,
               ),
             );
-          });
+          };
+          if (chatMode === "roleplay") applyUpdate();
+          else startTransition(applyUpdate);
         },
       });
       const appendStreamingAssistant = streamingMessageUpdates.pushContent;
@@ -28361,6 +28396,10 @@ export function App() {
             assistantMessageId = messageId;
             streamingAssistantInserted = true;
           },
+          chatMode === "roleplay"
+            ? ROLEPLAY_CHAT_STREAM_RENDER_INTERVAL_MS
+            : undefined,
+          chatMode !== "roleplay",
         );
         assistantMessageId = streamingTimeline.messageId ?? assistantMessageId;
         try {
@@ -28418,6 +28457,10 @@ export function App() {
                   assistantMessageId = messageId;
                   streamingAssistantInserted = true;
                 },
+                chatMode === "roleplay"
+                  ? ROLEPLAY_CHAT_STREAM_RENDER_INTERVAL_MS
+                  : undefined,
+                chatMode !== "roleplay",
               )
             : null;
           if (streamingRound) {
