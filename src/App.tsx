@@ -3943,6 +3943,8 @@ const HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD = 512 * 1024;
 const HTML_PREVIEW_HEAVY_MOUNT_GAP = 900;
 const HTML_PREVIEW_FALLBACK_LOAD_DELAY = 600;
 const HTML_PREVIEW_LAZY_ROOT_MARGIN = "900px 0px";
+const HTML_PREVIEW_SUSPEND_DELAY_MS = 900;
+const HTML_PREVIEW_STREAMING_CONTEXT_INTERVAL_MS = 500;
 
 type HeavyHtmlPreviewMountTask = {
   cancelled: boolean;
@@ -3965,6 +3967,12 @@ function activateHeavyHtmlPreview(previewId: string) {
   heavyHtmlPreviewListeners.forEach((listener, candidateId) => {
     listener(activeHeavyHtmlPreviewIds.includes(candidateId));
   });
+}
+
+function deactivateHeavyHtmlPreview(previewId: string) {
+  const existingIndex = activeHeavyHtmlPreviewIds.indexOf(previewId);
+  if (existingIndex >= 0) activeHeavyHtmlPreviewIds.splice(existingIndex, 1);
+  heavyHtmlPreviewListeners.get(previewId)?.(false);
 }
 
 function subscribeHeavyHtmlPreview(
@@ -6250,6 +6258,7 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "let lastMeasuredContentHeight = 0;",
     "let lastMeasuredViewportHeight = 0;",
     "let currentScale = 1;",
+    "let ignoreLayoutResizeUntil = 0;",
     "let naturalLayout = null;",
     "let naturalLayoutDirty = true;",
     "let forceNextPost = false;",
@@ -6262,6 +6271,7 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "const setScale = (scale) => {",
     "  if (Math.abs(currentScale - scale) < 0.001) return;",
     "  currentScale = scale;",
+    "  ignoreLayoutResizeUntil = performance.now() + 200;",
     "  if (document.body) document.body.style.zoom = scale < 0.999 ? String(scale) : \"\";",
     "};",
     "const numberFromStyle = (style, property) => {",
@@ -6497,28 +6507,41 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     'window.addEventListener("resize", schedulePost);',
     'window.addEventListener("orientationchange", schedulePost);',
     'window.addEventListener("renge-html-preview-viewport-updated", requestMeasurementReport);',
+    "let layoutResizeObserver = null;",
+    "let layoutResizeTimer = 0;",
+    "const observedLayoutSizes = new WeakMap();",
+    "const scheduleLayoutResizeInvalidation = (entries) => {",
+    "  let changed = false;",
+    "  entries.forEach((entry) => {",
+    "    const width = Math.round(entry.contentRect.width);",
+    "    const height = Math.round(entry.contentRect.height);",
+    "    const previous = observedLayoutSizes.get(entry.target);",
+    "    observedLayoutSizes.set(entry.target, { width, height });",
+    "    if (!previous || Math.abs(previous.width - width) > 1 || Math.abs(previous.height - height) > 1) changed = true;",
+    "  });",
+    "  if (!changed || performance.now() < ignoreLayoutResizeUntil) return;",
+    "  if (layoutResizeTimer) window.clearTimeout(layoutResizeTimer);",
+    "  layoutResizeTimer = window.setTimeout(() => {",
+    "    layoutResizeTimer = 0;",
+    "    invalidateLayout();",
+    "  }, heavyContent ? 240 : 120);",
+    "};",
     "try {",
-    "  const resizeObserver = new ResizeObserver(schedulePost);",
-    "  resizeObserver.observe(document.documentElement);",
-    "  if (document.body) resizeObserver.observe(document.body);",
+    "  layoutResizeObserver = new ResizeObserver(scheduleLayoutResizeInvalidation);",
+    "  layoutResizeObserver.observe(document.documentElement);",
+    "  if (document.body) layoutResizeObserver.observe(document.body);",
     "  document.addEventListener(\"DOMContentLoaded\", () => {",
-    "    if (document.body) resizeObserver.observe(document.body);",
-    "    schedulePost();",
+    "    if (document.body) layoutResizeObserver.observe(document.body);",
+    "    invalidateLayout();",
     "  }, { once: true });",
-    "  window.addEventListener(\"unload\", () => resizeObserver.disconnect(), { once: true });",
+    "  window.addEventListener(\"unload\", () => layoutResizeObserver?.disconnect(), { once: true });",
     "} catch {}",
     "try {",
     "  const mutationObserver = new MutationObserver((mutations) => {",
-    "    const hasMeaningfulMutation = mutations.some((mutation) => !(mutation.type === \"attributes\" && mutation.attributeName === \"style\" && mutation.target === document.body));",
-    "    if (hasMeaningfulMutation) {",
-    "      watchLayoutAssets();",
-    "      naturalLayoutDirty = true;",
-    "    }",
-    "    schedulePost();",
+    "    if (mutations.some((mutation) => mutation.addedNodes.length > 0)) watchLayoutAssets();",
+    "    if (!layoutResizeObserver) invalidateLayout();",
     "  });",
-    "  mutationObserver.observe(document.documentElement, heavyContent",
-    "    ? { childList: true, subtree: true }",
-    "    : { attributes: true, childList: true, subtree: true, characterData: true });",
+    "  mutationObserver.observe(document.documentElement, { childList: true, subtree: true });",
     "  const visibilityObserver = new MutationObserver((mutations) => {",
     "    const becameVisible = mutations.some((mutation) => {",
     "      const element = mutation.target;",
@@ -6543,6 +6566,7 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "    if (heavyPostTimer) window.clearTimeout(heavyPostTimer);",
     "    if (visibilityResizeRaf) cancelAnimationFrame(visibilityResizeRaf);",
     "    if (visibilityResizeTimer) window.clearTimeout(visibilityResizeTimer);",
+    "    if (layoutResizeTimer) window.clearTimeout(layoutResizeTimer);",
     "  }, { once: true });",
     "} catch {}",
     'document.addEventListener("toggle", () => { naturalLayoutDirty = true; schedulePost(); }, true);',
@@ -6829,6 +6853,9 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
   const containsExpandedDetails =
     /<details\b(?=[^>]*\bopen(?:\s|=|>))[^>]*>/i.test(content);
   const [renderReady, setRenderReady] = useState(false);
+  const [suspendedHeight, setSuspendedHeight] = useState(0);
+  const suspendedHeightRef = useRef(0);
+  const loadSyncTimersRef = useRef<number[]>([]);
   const sourceDocumentRef = useRef<{
     content: string;
     previewId: string;
@@ -6856,6 +6883,8 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
   useEffect(() => {
     if (!mountReady) {
       setRenderReady(false);
+      setSuspendedHeight(0);
+      suspendedHeightRef.current = 0;
       sourceDocumentRef.current = null;
       requestHeavyMountRef.current = () => {};
       return;
@@ -6863,17 +6892,35 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
 
     const container = containerRef.current;
     if (!container) return;
-    const unsubscribeHeavyPreview = heavyContent
-      ? subscribeHeavyHtmlPreview(previewId, setRenderReady)
-      : () => undefined;
     let cancelQueuedMount: (() => void) | null = null;
     let firstFrame = 0;
     let secondFrame = 0;
+    let suspendTimer = 0;
     let queued = false;
+    const clearSuspendTimer = () => {
+      if (!suspendTimer) return;
+      window.clearTimeout(suspendTimer);
+      suspendTimer = 0;
+    };
+    const preserveMountedHeight = () => {
+      const frame = frameRef.current;
+      const measuredHeight =
+        Number.parseFloat(frame?.style.height || "") || frame?.offsetHeight || 0;
+      if (!Number.isFinite(measuredHeight) || measuredHeight <= 0) return;
+      const nextHeight = Math.ceil(measuredHeight);
+      suspendedHeightRef.current = nextHeight;
+      setSuspendedHeight((current) =>
+        Math.abs(current - nextHeight) < 1 ? current : nextHeight,
+      );
+    };
+    const updateHeavyPreviewActivity = (active: boolean) => {
+      if (!active) preserveMountedHeight();
+      setRenderReady(active);
+    };
     const queueMount = () => {
-      if (queued) return;
+      clearSuspendTimer();
+      if (queued || frameRef.current) return;
       queued = true;
-      observer?.disconnect();
       if (heavyContent) {
         cancelQueuedMount = enqueueHeavyHtmlPreviewMount(() => {
           queued = false;
@@ -6889,7 +6936,39 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
         });
       });
     };
+    const suspendMount = () => {
+      suspendTimer = 0;
+      const frame = frameRef.current;
+      if (
+        frame &&
+        (document.activeElement === frame ||
+          frame.classList.contains("renge-html-fullscreen-frame"))
+      ) {
+        suspendTimer = window.setTimeout(
+          suspendMount,
+          HTML_PREVIEW_SUSPEND_DELAY_MS,
+        );
+        return;
+      }
+      preserveMountedHeight();
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+      firstFrame = 0;
+      secondFrame = 0;
+      cancelQueuedMount?.();
+      cancelQueuedMount = null;
+      queued = false;
+      if (heavyContent) deactivateHeavyHtmlPreview(previewId);
+      else setRenderReady(false);
+    };
+    const scheduleSuspend = () => {
+      if (suspendTimer || (!frameRef.current && !queued)) return;
+      suspendTimer = window.setTimeout(suspendMount, HTML_PREVIEW_SUSPEND_DELAY_MS);
+    };
     requestHeavyMountRef.current = queueMount;
+    const unsubscribeHeavyPreview = heavyContent
+      ? subscribeHeavyHtmlPreview(previewId, updateHeavyPreviewActivity)
+      : () => undefined;
 
     let observer: IntersectionObserver | null = null;
     let fallbackTimer = 0;
@@ -6902,6 +6981,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       observer = new IntersectionObserver(
         (entries) => {
           if (entries.some((entry) => entry.isIntersecting)) queueMount();
+          else scheduleSuspend();
         },
         {
           root: container.closest(".chat-thread"),
@@ -6916,6 +6996,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       window.clearTimeout(fallbackTimer);
       window.cancelAnimationFrame(firstFrame);
       window.cancelAnimationFrame(secondFrame);
+      clearSuspendTimer();
       observer?.disconnect();
       requestHeavyMountRef.current = () => {};
       cancelQueuedMount?.();
@@ -6969,8 +7050,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
 
   useEffect(() => {
     sendContextUpdate();
-    requestLayoutMeasurement();
-  }, [requestLayoutMeasurement, sendContextUpdate]);
+  }, [sendContextUpdate]);
 
   useEffect(() => {
     const update = () => sendViewportUpdate();
@@ -7001,6 +7081,10 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
   const registerFrame = useCallback(
     (frame: HTMLIFrameElement | null) => {
       const previousFrame = frameRef.current;
+      if (previousFrame !== frame) {
+        loadSyncTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+        loadSyncTimersRef.current = [];
+      }
       if (
         previousFrame &&
         previousFrame !== frame &&
@@ -7009,7 +7093,14 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
         frameRegistry.current.delete(previewId);
       }
       frameRef.current = frame;
-      if (frame) frameRegistry.current.set(previewId, frame);
+      if (frame) {
+        const restoredHeight = suspendedHeightRef.current;
+        if (restoredHeight > 0) {
+          frame.dataset.restoredHeight = String(restoredHeight);
+          frame.style.height = `${restoredHeight}px`;
+        }
+        frameRegistry.current.set(previewId, frame);
+      }
       else if (frameRegistry.current.get(previewId) === previousFrame) {
         frameRegistry.current.delete(previewId);
       }
@@ -7019,6 +7110,8 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
 
   const handleLoad = useCallback(
     (event: SyntheticEvent<HTMLIFrameElement>) => {
+      loadSyncTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      loadSyncTimersRef.current = [];
       resizeHtmlPreviewFrame(event);
       const loadedFrame = event.currentTarget;
       if (
@@ -7045,9 +7138,9 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       window.requestAnimationFrame(() => {
         synchronizeLoadedFrame();
       });
-      [80, 240, 600, 1200, 2400].forEach((delay) => {
-        window.setTimeout(synchronizeLoadedFrame, delay);
-      });
+      loadSyncTimersRef.current = [80, 240].map((delay) =>
+        window.setTimeout(synchronizeLoadedFrame, delay),
+      );
     },
     [
       isolatedFrame,
@@ -7065,6 +7158,14 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       }`}
       data-preview-id={previewId}
       ref={containerRef}
+      style={
+        !renderReady && suspendedHeight > 0
+          ? {
+              height: `${suspendedHeight}px`,
+              minHeight: `${suspendedHeight}px`,
+            }
+          : undefined
+      }
     >
       {mountReady && renderReady && sourceDocumentRef.current ? (
         <iframe
@@ -7158,6 +7259,8 @@ function fitHtmlPreviewFrame(frame: HTMLIFrameElement) {
 function resizeHtmlPreviewFrame(event: SyntheticEvent<HTMLIFrameElement>) {
   const frame = event.currentTarget;
   const frameWidth = frame.getBoundingClientRect().width || frame.clientWidth || 0;
+  const restoredHeight = Number(frame.dataset.restoredHeight);
+  delete frame.dataset.restoredHeight;
   if (frameWidth > 0) {
     const expandedLayoutMinHeight =
       frame.dataset.expandedLayout === "true"
@@ -7168,12 +7271,13 @@ function resizeHtmlPreviewFrame(event: SyntheticEvent<HTMLIFrameElement>) {
       expandedLayoutMinHeight,
       Math.min(960, Math.round(frameWidth * 0.72)),
     );
-    frame.style.height = `${measuringHeight}px`;
+    frame.style.height = `${
+      Number.isFinite(restoredHeight) && restoredHeight > 0
+        ? Math.max(measuringHeight, restoredHeight)
+        : measuringHeight
+    }px`;
   }
   fitHtmlPreviewFrame(frame);
-  [80, 240, 600].forEach((delay) => {
-    window.setTimeout(() => fitHtmlPreviewFrame(frame), delay);
-  });
 }
 
 function renderInlineText(content: string): ReactNode[] {
@@ -19515,6 +19619,12 @@ export function App() {
     visibleChatMessages,
   ]);
 
+  const htmlPreviewSourceMessages = useThrottledValue(
+    chatMessages,
+    chatMode === "roleplay" && chatGenerationState !== "idle"
+      ? HTML_PREVIEW_STREAMING_CONTEXT_INTERVAL_MS
+      : 0,
+  );
   const htmlPreviewMessages = useMemo(() => {
     const previous = htmlPreviewMessagesCacheRef.current;
     const greetingStateUnchanged =
@@ -19526,7 +19636,7 @@ export function App() {
         { source, value: previous.values[index] },
       ]),
     );
-    const values = chatMessages.map((message) => {
+    const values = htmlPreviewSourceMessages.map((message) => {
       const cached = previousById.get(message.id);
       if (
         cached &&
@@ -19557,13 +19667,13 @@ export function App() {
         ? previous.values
         : values;
     htmlPreviewMessagesCacheRef.current = {
-      sources: chatMessages,
+      sources: htmlPreviewSourceMessages,
       values: stableValues,
       roleplayGreetingIndex: activeRoleplayGreetingIndex,
       roleplayGreetings: activeRoleplayGreetings,
     };
     return stableValues;
-  }, [activeRoleplayGreetingIndex, activeRoleplayGreetings, chatMessages]);
+  }, [activeRoleplayGreetingIndex, activeRoleplayGreetings, htmlPreviewSourceMessages]);
   const htmlPreviewContextBase = useMemo<Omit<HtmlPreviewContext, "currentMessageIndex">>(
     () => ({
       messages: htmlPreviewMessages,

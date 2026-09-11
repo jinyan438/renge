@@ -15,8 +15,8 @@ const TAVERN_PROSE_WRAPPER_TAG_PATTERN =
 const LOCALIZED_QUOTE_PAIR_PATTERN =
   /(["＂])(“[^”\n]+”|〝[^〞\n]+〞|「[^」\n]+」|｢[^｣\n]+｣|『[^』\n]+』)\1/g;
 
-const HTML_PREVIEW_LIGHTWEIGHT_SETTLE_DELAYS = [80, 240, 600, 1200, 2400] as const;
-const HTML_PREVIEW_HEAVY_SETTLE_DELAYS = [240, 1000, 3000, 6000] as const;
+const HTML_PREVIEW_LIGHTWEIGHT_SETTLE_DELAYS = [80, 240, 600] as const;
+const HTML_PREVIEW_HEAVY_SETTLE_DELAYS = [240, 800, 1600] as const;
 
 export function getHtmlPreviewLayoutSettleDelays(heavyContent: boolean) {
   return heavyContent
