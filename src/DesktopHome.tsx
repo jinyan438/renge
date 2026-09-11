@@ -12,6 +12,7 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  memo,
   useCallback,
   useEffect,
   useMemo,
@@ -970,7 +971,7 @@ function PrimaryWindowButton({ children, onClick }: { children: ReactNode; onCli
   );
 }
 
-export function DesktopHome({
+export const DesktopHome = memo(function DesktopHome({
   activePersonaName,
   chatModelLabel,
   chatModelReady,
@@ -1584,4 +1585,4 @@ export function DesktopHome({
       {children}
     </main>
   );
-}
+});

@@ -1,16 +1,19 @@
-import React from "react";
+import React, { lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
-import { App } from "./App";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import "./index.css";
 import "./styles.css";
 import "./settings-desktop.css";
 import "./workspace-desktop.css";
 
+const App = lazy(() => import("./App").then((module) => ({ default: module.App })));
+
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <AppErrorBoundary>
-      <App />
+      <Suspense fallback={<div className="app-boot">正在启动 Renge...</div>}>
+        <App />
+      </Suspense>
     </AppErrorBoundary>
   </React.StrictMode>,
 );

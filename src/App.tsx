@@ -65,6 +65,7 @@ import {
   type SetStateAction,
   type SyntheticEvent,
   memo,
+  startTransition,
   useCallback,
   useEffect,
   useMemo,
@@ -10862,15 +10863,17 @@ function createStreamingAssistantMessage(
   const streamUpdates = createChatStreamUpdateBatcher({
     signal,
     apply: ({ content, reasoning }) => {
-      setChatMessages((current) =>
-        updateMessage(current, (message) => ({
-          ...message,
-          ...(content ? { content: `${message.content}${content}` } : {}),
-          ...(reasoning
-            ? { reasoning: `${message.reasoning ?? ""}${reasoning}` }
-            : {}),
-        })),
-      );
+      startTransition(() => {
+        setChatMessages((current) =>
+          updateMessage(current, (message) => ({
+            ...message,
+            ...(content ? { content: `${message.content}${content}` } : {}),
+            ...(reasoning
+              ? { reasoning: `${message.reasoning ?? ""}${reasoning}` }
+              : {}),
+          })),
+        );
+      });
     },
   });
 
@@ -12712,6 +12715,7 @@ export function App() {
   const sendChatMessageRef = useRef<
     (contentOverride?: string, attachmentsOverride?: ChatAttachment[]) => Promise<void>
   >(async () => {});
+  const openChatSessionRef = useRef<(sessionId: string) => Promise<void>>(async () => {});
   const generateHtmlPreviewTextRef = useRef<
     (config?: unknown, sourceFrame?: HTMLIFrameElement) => Promise<string>
   >(async () => {
@@ -16959,6 +16963,14 @@ export function App() {
     () => normalizeStatusBarState(activeChatSession?.statusBar),
     [activeChatSession?.statusBar],
   );
+  const statusBarProviderOptions = useMemo(
+    () => providers.map((provider) => ({
+      id: provider.id,
+      name: provider.name,
+      models: getProviderModelIds(provider),
+    })),
+    [providers],
+  );
   const activeSessionRoleplayCard = useMemo(
     () => scopedRoleplayCard,
     [scopedRoleplayCard],
@@ -19348,7 +19360,10 @@ export function App() {
         .slice(0, 3),
     [chatSessions],
   );
-  const activeHeartbeat = activeChatSession?.heartbeat ?? createDefaultHeartbeatConfig();
+  const activeHeartbeat = useMemo(
+    () => activeChatSession?.heartbeat ?? createDefaultHeartbeatConfig(),
+    [activeChatSession?.heartbeat],
+  );
   const visibleChatMessages = useMemo(
     () =>
       chatHeartbeatReminderVisible
@@ -20486,6 +20501,7 @@ export function App() {
       message: "这个会话属于浏览器授权工作区，无法自动恢复文件夹，请重新选择文件夹。",
     });
   };
+  openChatSessionRef.current = openChatSession;
 
   useEffect(() => {
     if (!appDataLoaded) return;
@@ -25481,19 +25497,21 @@ export function App() {
       streamingMessageUpdates = createChatStreamUpdateBatcher({
         signal: abortSignal,
         apply: ({ content, reasoning }) => {
-          commitChatMessages((current) =>
-            current.map((message) =>
-              message.id === assistantMessageId
-                ? {
-                    ...message,
-                    ...(content ? { content: `${message.content}${content}` } : {}),
-                    ...(reasoning
-                      ? { reasoning: `${message.reasoning ?? ""}${reasoning}` }
-                      : {}),
-                  }
-                : message,
-            ),
-          );
+          startTransition(() => {
+            commitChatMessages((current) =>
+              current.map((message) =>
+                message.id === assistantMessageId
+                  ? {
+                      ...message,
+                      ...(content ? { content: `${message.content}${content}` } : {}),
+                      ...(reasoning
+                        ? { reasoning: `${message.reasoning ?? ""}${reasoning}` }
+                        : {}),
+                    }
+                  : message,
+              ),
+            );
+          });
         },
       });
       const appendStreamingAssistant = streamingMessageUpdates.pushContent;
@@ -28292,19 +28310,21 @@ export function App() {
       streamingMessageUpdates = createChatStreamUpdateBatcher({
         signal: abortSignal,
         apply: ({ content, reasoning }) => {
-          commitChatMessages((current) =>
-            current.map((message) =>
-              message.id === assistantMessageId
-                ? {
-                    ...message,
-                    ...(content ? { content: `${message.content}${content}` } : {}),
-                    ...(reasoning
-                      ? { reasoning: `${message.reasoning ?? ""}${reasoning}` }
-                      : {}),
-                  }
-                : message,
-            ),
-          );
+          startTransition(() => {
+            commitChatMessages((current) =>
+              current.map((message) =>
+                message.id === assistantMessageId
+                  ? {
+                      ...message,
+                      ...(content ? { content: `${message.content}${content}` } : {}),
+                      ...(reasoning
+                        ? { reasoning: `${message.reasoning ?? ""}${reasoning}` }
+                        : {}),
+                    }
+                  : message,
+              ),
+            );
+          });
         },
       });
       const appendStreamingAssistant = streamingMessageUpdates.pushContent;
@@ -30559,6 +30579,25 @@ export function App() {
     </div>
   ) : null;
 
+  const homeRecentSessions = useMemo(
+    () => recentChatSessions.map((session) => ({
+      id: session.id,
+      title: session.title,
+      workspaceName: session.workspaceName,
+      messageCount: session.messages.length,
+      updatedAt: session.updatedAt,
+    })),
+    [recentChatSessions],
+  );
+  const handleDesktopNavigate = useCallback((destination: HomeDestination) => {
+    if (destination === "settings") setSettingsTab("providers");
+    openWindow(destination);
+  }, [openWindow]);
+  const handleDesktopOpenRecentSession = useCallback((sessionId: string) => {
+    void openChatSessionRef.current(sessionId);
+    openWindow("chat");
+  }, [openWindow]);
+
   if (!activePersona) {
     return <div className="boot">正在初始化人格工作台...</div>;
   }
@@ -30590,21 +30629,9 @@ export function App() {
       sessionCount={chatSessions.length}
       overlayZIndex={desktopOverlayZIndex}
       onOverlayActivate={activateDesktopOverlay}
-      recentSessions={recentChatSessions.map((session) => ({
-        id: session.id,
-        title: session.title,
-        workspaceName: session.workspaceName,
-        messageCount: session.messages.length,
-        updatedAt: session.updatedAt,
-      }))}
-      onNavigate={(destination) => {
-        if (destination === "settings") setSettingsTab("providers");
-        openWindow(destination);
-      }}
-      onOpenRecentSession={(sessionId) => {
-        void openChatSession(sessionId);
-        openWindow("chat");
-      }}
+      recentSessions={homeRecentSessions}
+      onNavigate={handleDesktopNavigate}
+      onOpenRecentSession={handleDesktopOpenRecentSession}
     />
   );
 
@@ -37900,11 +37927,7 @@ export function App() {
           onStateChange={updateActiveStatusBarState}
           onClearValues={clearActiveStatusBarValues}
           onManualUpdate={manuallyUpdateActiveStatusBar}
-          providerOptions={providers.map((provider) => ({
-            id: provider.id,
-            name: provider.name,
-            models: getProviderModelIds(provider),
-          }))}
+          providerOptions={statusBarProviderOptions}
           presets={statusBarPresets}
           onPresetsChange={setStatusBarPresets}
           manualUpdateDisabled={chatGenerationState !== "idle"}

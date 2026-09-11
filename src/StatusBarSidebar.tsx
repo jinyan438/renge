@@ -21,26 +21,24 @@ import {
   X,
 } from "lucide-react";
 import {
+  Suspense,
   type CSSProperties,
   type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent,
   type PointerEvent,
+  lazy,
+  memo,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import { BrowserSidebarPanel } from "./BrowserSidebarPanel";
 import type { BrowserPageComment } from "./browserSidebarComments";
-import { FilesSidebarPanel, type FileBrowserSource } from "./FilesSidebarPanel";
-import {
-  PcConnectionSidebarPanel,
-  type PcConnectionSidebarControl,
-} from "./PcConnectionSidebarPanel";
-import { TerminalSidebarPanel } from "./TerminalSidebarPanel";
-import { WechatSidebar } from "./WechatSidebar";
+import type { FileBrowserSource } from "./FilesSidebarPanel";
+import type { PcConnectionSidebarControl } from "./PcConnectionSidebarPanel";
 import { registerTerminalSidebarOpener } from "./terminalSidebarRuntime";
 import { registerBrowserSidebarOpener } from "./browserSidebarRuntime";
 import {
@@ -66,6 +64,32 @@ import type {
   WechatStoredMessage,
 } from "./wechatSidebarUtils";
 import "./status-bar.css";
+
+const BrowserSidebarPanel = memo(lazy(() =>
+  import("./BrowserSidebarPanel").then((module) => ({
+    default: module.BrowserSidebarPanel,
+  })),
+));
+const FilesSidebarPanel = memo(lazy(() =>
+  import("./FilesSidebarPanel").then((module) => ({
+    default: module.FilesSidebarPanel,
+  })),
+));
+const PcConnectionSidebarPanel = memo(lazy(() =>
+  import("./PcConnectionSidebarPanel").then((module) => ({
+    default: module.PcConnectionSidebarPanel,
+  })),
+));
+const TerminalSidebarPanel = memo(lazy(() =>
+  import("./TerminalSidebarPanel").then((module) => ({
+    default: module.TerminalSidebarPanel,
+  })),
+));
+const WechatSidebar = memo(lazy(() =>
+  import("./WechatSidebar").then((module) => ({
+    default: module.WechatSidebar,
+  })),
+));
 
 type StatusBarItem = StatusBarState["items"][number];
 type StatusBarItemType = StatusBarItem["type"];
@@ -156,6 +180,15 @@ type RightSidebarToolId =
   | "status"
   | "heartbeat";
 type RightSidebarViewId = "menu" | RightSidebarToolId;
+
+function SidebarToolLoading({ label }: { label: string }) {
+  return (
+    <section className="right-tool-loading" role="status" aria-live="polite">
+      <span aria-hidden="true" />
+      <strong>正在加载{label}...</strong>
+    </section>
+  );
+}
 
 const RIGHT_SIDEBAR_DEFAULT_WIDTH = 360;
 const RIGHT_SIDEBAR_WIDTH_STORAGE_KEY = "renge-chat-right-sidebar-width";
@@ -883,7 +916,7 @@ function normalizeDraftForSave(
   } satisfies StatusBarState;
 }
 
-export function StatusBarSidebar({
+const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   state,
   collapsed,
   onCollapsedChange,
@@ -916,6 +949,7 @@ export function StatusBarSidebar({
   onHeartbeatReminderVisibleChange,
 }: StatusBarSidebarProps) {
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
+  const [browserInitialized, setBrowserInitialized] = useState(false);
   const [requestedTerminalId, setRequestedTerminalId] = useState("");
   const [sidebarWidth, setSidebarWidth] = useState(loadRightSidebarWidth);
   const [sidebarMaxWidth, setSidebarMaxWidth] = useState(() =>
@@ -1106,6 +1140,7 @@ export function StatusBarSidebar({
   useEffect(
     () =>
       registerBrowserSidebarOpener(() => {
+        setBrowserInitialized(true);
         setActiveToolId("browser");
         onCollapsedChange(false);
       }),
@@ -2066,6 +2101,7 @@ export function StatusBarSidebar({
                       key={tool.id}
                       onClick={() => {
                         if (tool.id === "computer") pcConnection.onOpen();
+                        if (tool.id === "browser") setBrowserInitialized(true);
                         setActiveToolId(tool.id);
                       }}
                       type="button"
@@ -2087,44 +2123,52 @@ export function StatusBarSidebar({
             </div>
           </section>
         ) : activeToolId === "browser" ? null : activeToolId === "computer" ? (
-          <PcConnectionSidebarPanel
-            {...pcConnection}
-            onBack={() => setActiveToolId("menu")}
-            onClose={() => onCollapsedChange(true)}
-            onSelectWorkspace={() => {
-              pcConnection.onSelectWorkspace();
-              setActiveToolId("menu");
-            }}
-          />
+          <Suspense fallback={<SidebarToolLoading label="电脑连接" />}>
+            <PcConnectionSidebarPanel
+              {...pcConnection}
+              onBack={() => setActiveToolId("menu")}
+              onClose={() => onCollapsedChange(true)}
+              onSelectWorkspace={() => {
+                pcConnection.onSelectWorkspace();
+                setActiveToolId("menu");
+              }}
+            />
+          </Suspense>
         ) : activeToolId === "phone" ? (
-          <WechatSidebar
-            busy={chatGenerationBusy}
-            onBack={() => setActiveToolId("menu")}
-            onClose={() => onCollapsedChange(true)}
-            onQueueMessage={onWechatQueueMessage}
-            onGenerateReply={onWechatGenerateReply}
-            onQueueGroupMessage={onWechatQueueGroupMessage}
-            onGenerateGroupReply={onWechatGenerateGroupReply}
-            personas={personas}
-            sessionId={chatSessionId}
-            syncedMessages={syncedWechatMessages}
-            userProfile={userProfile}
-          />
+          <Suspense fallback={<SidebarToolLoading label="手机" />}>
+            <WechatSidebar
+              busy={chatGenerationBusy}
+              onBack={() => setActiveToolId("menu")}
+              onClose={() => onCollapsedChange(true)}
+              onQueueMessage={onWechatQueueMessage}
+              onGenerateReply={onWechatGenerateReply}
+              onQueueGroupMessage={onWechatQueueGroupMessage}
+              onGenerateGroupReply={onWechatGenerateGroupReply}
+              personas={personas}
+              sessionId={chatSessionId}
+              syncedMessages={syncedWechatMessages}
+              userProfile={userProfile}
+            />
+          </Suspense>
         ) : activeToolId === "terminal" ? (
-          <TerminalSidebarPanel
-            onBack={() => setActiveToolId("menu")}
-            onClose={() => onCollapsedChange(true)}
-            requestedSessionId={requestedTerminalId}
-            workspaceKey={terminalWorkspaceKey}
-            workspacePath={terminalWorkspacePath}
-          />
+          <Suspense fallback={<SidebarToolLoading label="终端" />}>
+            <TerminalSidebarPanel
+              onBack={() => setActiveToolId("menu")}
+              onClose={() => onCollapsedChange(true)}
+              requestedSessionId={requestedTerminalId}
+              workspaceKey={terminalWorkspaceKey}
+              workspacePath={terminalWorkspacePath}
+            />
+          </Suspense>
         ) : activeToolId === "files" ? (
-          <FilesSidebarPanel
-            onBack={() => setActiveToolId("menu")}
-            onChooseWorkspace={onChooseWorkspace}
-            onClose={() => onCollapsedChange(true)}
-            source={fileBrowserSource}
-          />
+          <Suspense fallback={<SidebarToolLoading label="文件" />}>
+            <FilesSidebarPanel
+              onBack={() => setActiveToolId("menu")}
+              onChooseWorkspace={onChooseWorkspace}
+              onClose={() => onCollapsedChange(true)}
+              source={fileBrowserSource}
+            />
+          </Suspense>
         ) : activeToolId === "status" ? (
           <section className="right-tool-content status-tool-content" aria-label="状态栏">
             <header className="status-bar-sidebar-header">
@@ -2404,21 +2448,136 @@ export function StatusBarSidebar({
             </div>
           </section>
         )}
-        <div
-          aria-hidden={activeToolId === "browser" ? undefined : "true"}
-          className={`right-tools-browser-slot ${
-            activeToolId === "browser" ? "is-active" : ""
-          }`}
-          inert={activeToolId === "browser" ? undefined : true}
-        >
-          <BrowserSidebarPanel
-            onBack={() => setActiveToolId("menu")}
-            onClose={() => onCollapsedChange(true)}
-            onBrowserComment={onBrowserComment}
-          />
-        </div>
+        {browserInitialized ? (
+          <div
+            aria-hidden={activeToolId === "browser" ? undefined : "true"}
+            className={`right-tools-browser-slot ${
+              activeToolId === "browser" ? "is-active" : ""
+            }`}
+            inert={activeToolId === "browser" ? undefined : true}
+          >
+            <Suspense fallback={<SidebarToolLoading label="浏览器" />}>
+              <BrowserSidebarPanel
+                onBack={() => setActiveToolId("menu")}
+                onClose={() => onCollapsedChange(true)}
+                onBrowserComment={onBrowserComment}
+              />
+            </Suspense>
+          </div>
+        ) : null}
         {editorModal}
       </aside>
     </>
+  );
+});
+
+function useLatestCallback<T extends (...args: any[]) => any>(callback: T): T {
+  const callbackRef = useRef(callback);
+  callbackRef.current = callback;
+  return useCallback(
+    ((...args: Parameters<T>) => callbackRef.current(...args)) as T,
+    [],
+  );
+}
+
+/**
+ * App owns the full workspace and updates frequently while a response streams.
+ * Keep the large sidebar tree on stable callback identities so unchanged,
+ * hidden tools do not reconcile for every chat fragment.
+ */
+export function StatusBarSidebar(props: StatusBarSidebarProps) {
+  const onCollapsedChange = useLatestCallback((collapsed: boolean) =>
+    props.onCollapsedChange(collapsed));
+  const onStateChange = useLatestCallback((state: StatusBarState) =>
+    props.onStateChange(state));
+  const onClearValues = useLatestCallback(() => props.onClearValues());
+  const onManualUpdate = useLatestCallback(() => props.onManualUpdate());
+  const onPresetsChange = useLatestCallback((presets: StatusBarPreset[]) =>
+    props.onPresetsChange(presets));
+  const onChooseWorkspace = useLatestCallback(() => props.onChooseWorkspace?.());
+  const onBrowserComment = useLatestCallback((comment: BrowserPageComment) =>
+    props.onBrowserComment?.(comment));
+  const onWechatQueueMessage = useLatestCallback(
+    (contact: WechatContact, message: WechatSendMessageInput) =>
+      props.onWechatQueueMessage(contact, message),
+  );
+  const onWechatGenerateReply = useLatestCallback(
+    (contact: WechatContact, proactive: boolean) =>
+      props.onWechatGenerateReply(contact, proactive),
+  );
+  const onWechatQueueGroupMessage = useLatestCallback(
+    (group: WechatGroup, message: WechatSendMessageInput) =>
+      props.onWechatQueueGroupMessage(group, message),
+  );
+  const onWechatGenerateGroupReply = useLatestCallback(
+    (
+      group: WechatGroup,
+      members: WechatContact[],
+      proactive: boolean,
+      onResponderSelected: (responder: WechatContact) => void,
+    ) => props.onWechatGenerateGroupReply(
+      group,
+      members,
+      proactive,
+      onResponderSelected,
+    ),
+  );
+  const onHeartbeatChange = useLatestCallback(
+    (patch: Parameters<StatusBarSidebarProps["onHeartbeatChange"]>[0]) =>
+      props.onHeartbeatChange(patch),
+  );
+  const onHeartbeatReminderVisibleChange = useLatestCallback((visible: boolean) =>
+    props.onHeartbeatReminderVisibleChange(visible));
+  const onPcOpen = useLatestCallback(() => props.pcConnection.onOpen());
+  const onPcServerUrlChange = useLatestCallback((value: string) =>
+    props.pcConnection.onServerUrlChange(value));
+  const onPcLoadDirectory = useLatestCallback((path: string) =>
+    props.pcConnection.onLoadDirectory(path));
+  const onPcNavigateUp = useLatestCallback(() => props.pcConnection.onNavigateUp());
+  const onPcSelectWorkspace = useLatestCallback(() =>
+    props.pcConnection.onSelectWorkspace());
+  const pcConnection = useMemo<PcConnectionSidebarControl>(
+    () => ({
+      serverUrl: props.pcConnection.serverUrl,
+      currentPath: props.pcConnection.currentPath,
+      entries: props.pcConnection.entries,
+      status: props.pcConnection.status,
+      onOpen: onPcOpen,
+      onServerUrlChange: onPcServerUrlChange,
+      onLoadDirectory: onPcLoadDirectory,
+      onNavigateUp: onPcNavigateUp,
+      onSelectWorkspace: onPcSelectWorkspace,
+    }),
+    [
+      onPcLoadDirectory,
+      onPcNavigateUp,
+      onPcOpen,
+      onPcSelectWorkspace,
+      onPcServerUrlChange,
+      props.pcConnection.currentPath,
+      props.pcConnection.entries,
+      props.pcConnection.serverUrl,
+      props.pcConnection.status,
+    ],
+  );
+
+  return (
+    <StatusBarSidebarContent
+      {...props}
+      onCollapsedChange={onCollapsedChange}
+      onStateChange={onStateChange}
+      onClearValues={onClearValues}
+      onManualUpdate={onManualUpdate}
+      onPresetsChange={onPresetsChange}
+      onChooseWorkspace={props.onChooseWorkspace ? onChooseWorkspace : undefined}
+      onBrowserComment={props.onBrowserComment ? onBrowserComment : undefined}
+      pcConnection={pcConnection}
+      onWechatQueueMessage={onWechatQueueMessage}
+      onWechatGenerateReply={onWechatGenerateReply}
+      onWechatQueueGroupMessage={onWechatQueueGroupMessage}
+      onWechatGenerateGroupReply={onWechatGenerateGroupReply}
+      onHeartbeatChange={onHeartbeatChange}
+      onHeartbeatReminderVisibleChange={onHeartbeatReminderVisibleChange}
+    />
   );
 }
