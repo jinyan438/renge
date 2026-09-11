@@ -68,6 +68,7 @@ import {
   startTransition,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -20501,7 +20502,9 @@ export function App() {
       message: "这个会话属于浏览器授权工作区，无法自动恢复文件夹，请重新选择文件夹。",
     });
   };
-  openChatSessionRef.current = openChatSession;
+  useLayoutEffect(() => {
+    openChatSessionRef.current = openChatSession;
+  }, [openChatSession]);
 
   useEffect(() => {
     if (!appDataLoaded) return;

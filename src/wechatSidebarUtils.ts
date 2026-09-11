@@ -55,6 +55,30 @@ export type WechatStoredMessage = {
   failed?: boolean;
 };
 
+export function areWechatMessagesEqual(
+  previous: WechatStoredMessage[],
+  next: WechatStoredMessage[],
+) {
+  return previous === next || (
+    previous.length === next.length
+    && previous.every((message, index) => {
+      const candidate = next[index];
+      return message === candidate || (
+        message.id === candidate.id
+        && message.contactId === candidate.contactId
+        && message.groupId === candidate.groupId
+        && message.senderName === candidate.senderName
+        && message.senderAvatar === candidate.senderAvatar
+        && message.sessionId === candidate.sessionId
+        && message.role === candidate.role
+        && message.content === candidate.content
+        && message.createdAt === candidate.createdAt
+        && message.failed === candidate.failed
+      );
+    })
+  );
+}
+
 export type WechatSendMessageInput = {
   id: string;
   content: string;

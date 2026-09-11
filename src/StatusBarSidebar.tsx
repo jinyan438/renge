@@ -31,6 +31,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -55,13 +56,14 @@ import {
   type StatusBarState,
 } from "./statusBarUtils";
 import type { AgentPersona } from "./types";
-import type {
-  WechatContact,
-  WechatGroup,
-  WechatGroupSendMessageResult,
-  WechatSendMessageInput,
-  WechatSendMessageResult,
-  WechatStoredMessage,
+import {
+  areWechatMessagesEqual,
+  type WechatContact,
+  type WechatGroup,
+  type WechatGroupSendMessageResult,
+  type WechatSendMessageInput,
+  type WechatSendMessageResult,
+  type WechatStoredMessage,
 } from "./wechatSidebarUtils";
 import "./status-bar.css";
 
@@ -950,6 +952,8 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
 }: StatusBarSidebarProps) {
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
   const [browserInitialized, setBrowserInitialized] = useState(false);
+  const handleToolBack = useCallback(() => setActiveToolId("menu"), []);
+  const handleToolClose = useCallback(() => onCollapsedChange(true), [onCollapsedChange]);
   const [requestedTerminalId, setRequestedTerminalId] = useState("");
   const [sidebarWidth, setSidebarWidth] = useState(loadRightSidebarWidth);
   const [sidebarMaxWidth, setSidebarMaxWidth] = useState(() =>
@@ -2126,8 +2130,8 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
           <Suspense fallback={<SidebarToolLoading label="电脑连接" />}>
             <PcConnectionSidebarPanel
               {...pcConnection}
-              onBack={() => setActiveToolId("menu")}
-              onClose={() => onCollapsedChange(true)}
+              onBack={handleToolBack}
+              onClose={handleToolClose}
               onSelectWorkspace={() => {
                 pcConnection.onSelectWorkspace();
                 setActiveToolId("menu");
@@ -2138,8 +2142,8 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
           <Suspense fallback={<SidebarToolLoading label="手机" />}>
             <WechatSidebar
               busy={chatGenerationBusy}
-              onBack={() => setActiveToolId("menu")}
-              onClose={() => onCollapsedChange(true)}
+              onBack={handleToolBack}
+              onClose={handleToolClose}
               onQueueMessage={onWechatQueueMessage}
               onGenerateReply={onWechatGenerateReply}
               onQueueGroupMessage={onWechatQueueGroupMessage}
@@ -2153,8 +2157,8 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
         ) : activeToolId === "terminal" ? (
           <Suspense fallback={<SidebarToolLoading label="终端" />}>
             <TerminalSidebarPanel
-              onBack={() => setActiveToolId("menu")}
-              onClose={() => onCollapsedChange(true)}
+              onBack={handleToolBack}
+              onClose={handleToolClose}
               requestedSessionId={requestedTerminalId}
               workspaceKey={terminalWorkspaceKey}
               workspacePath={terminalWorkspacePath}
@@ -2163,9 +2167,9 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
         ) : activeToolId === "files" ? (
           <Suspense fallback={<SidebarToolLoading label="文件" />}>
             <FilesSidebarPanel
-              onBack={() => setActiveToolId("menu")}
+              onBack={handleToolBack}
               onChooseWorkspace={onChooseWorkspace}
-              onClose={() => onCollapsedChange(true)}
+              onClose={handleToolClose}
               source={fileBrowserSource}
             />
           </Suspense>
@@ -2458,8 +2462,8 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
           >
             <Suspense fallback={<SidebarToolLoading label="浏览器" />}>
               <BrowserSidebarPanel
-                onBack={() => setActiveToolId("menu")}
-                onClose={() => onCollapsedChange(true)}
+                onBack={handleToolBack}
+                onClose={handleToolClose}
                 onBrowserComment={onBrowserComment}
               />
             </Suspense>
@@ -2469,11 +2473,21 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
       </aside>
     </>
   );
+}, (previous, next) => {
+  const keys = Object.keys(previous) as (keyof StatusBarSidebarProps)[];
+  return keys.length === Object.keys(next).length && keys.every((key) =>
+    key === "syncedWechatMessages"
+      // Main-chat fragments recreate this projection even when no phone message changed.
+      ? areWechatMessagesEqual(previous.syncedWechatMessages, next.syncedWechatMessages)
+      : Object.is(previous[key], next[key]),
+  );
 });
 
 function useLatestCallback<T extends (...args: any[]) => any>(callback: T): T {
   const callbackRef = useRef(callback);
-  callbackRef.current = callback;
+  useLayoutEffect(() => {
+    callbackRef.current = callback;
+  }, [callback]);
   return useCallback(
     ((...args: Parameters<T>) => callbackRef.current(...args)) as T,
     [],

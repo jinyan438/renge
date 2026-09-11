@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  areWechatMessagesEqual,
   buildWechatGroupRequestMessages,
   buildWechatGroupSpeakerSelectionMessages,
   buildWechatRequestMessages,
@@ -13,6 +14,52 @@ import {
   syncWechatSessionMessages,
   updateWechatSessionStore,
 } from "../src/wechatSidebarUtils.ts";
+
+test("unchanged phone history stays equal across main-chat stream projections", () => {
+  assert.equal(areWechatMessagesEqual([], []), true);
+  const messages = [{
+    id: "message-1",
+    contactId: "friend-1",
+    role: "assistant",
+    content: "你好",
+    createdAt: "2026-09-11T08:00:00.000Z",
+  }];
+  assert.equal(areWechatMessagesEqual(messages, messages.map((message) => ({ ...message }))), true);
+  assert.equal(areWechatMessagesEqual(messages, []), false);
+  assert.equal(areWechatMessagesEqual([], messages), false);
+});
+
+test("phone history equality detects edits, routing, identity, delivery and ordering changes", () => {
+  const message = {
+    id: "message-1",
+    contactId: "friend-1",
+    groupId: "group-1",
+    senderName: "小知",
+    senderAvatar: "avatar-1",
+    sessionId: "session-1",
+    role: "assistant",
+    content: "你好",
+    createdAt: "2026-09-11T08:00:00.000Z",
+    failed: false,
+  };
+  for (const [field, value] of Object.entries({
+    id: "message-2",
+    contactId: "friend-2",
+    groupId: "group-2",
+    senderName: "小夏",
+    senderAvatar: "avatar-2",
+    sessionId: "session-2",
+    role: "user",
+    content: "修改过的消息",
+    createdAt: "2026-09-11T08:01:00.000Z",
+    failed: true,
+  })) {
+    assert.equal(areWechatMessagesEqual([message], [{ ...message, [field]: value }]), false, field);
+  }
+  assert.equal(areWechatMessagesEqual([message], [{ ...message, contactId: undefined }]), false);
+  const other = { ...message, id: "message-2" };
+  assert.equal(areWechatMessagesEqual([message, other], [other, message]), false);
+});
 
 const contact = {
   id: "friend-1",
