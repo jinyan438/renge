@@ -156,6 +156,7 @@ import {
   saveCharacterCardsToDatabase,
   type CharacterCard,
 } from "./characterCardUtils";
+import { sortCharacterCardsByImportTime } from "./characterCardOrderUtils";
 import {
   getCharacterRegexTemplateConfig,
   isCharacterRegexTemplateMessageEligible,
@@ -14839,13 +14840,13 @@ export function App() {
   );
   const filteredCharacterCards = useMemo(() => {
     const query = characterSearch.trim().toLocaleLowerCase();
-    if (!query) return characterCards;
-    return characterCards.filter((card) =>
+    const matchingCards = query ? characterCards.filter((card) =>
       [card.name, card.description, card.creator, ...card.tags]
         .join("\n")
         .toLocaleLowerCase()
         .includes(query),
-    );
+    ) : characterCards;
+    return sortCharacterCardsByImportTime(matchingCards);
   }, [characterCards, characterSearch]);
   const roleplayPickerCards = useMemo(
     () =>
@@ -16184,21 +16185,34 @@ export function App() {
     });
     const imported: CharacterCard[] = [];
     const errors: string[] = [];
+    const importedAt = new Date().toISOString();
     for (const file of fileList) {
       try {
-        imported.push(await importCharacterCardFile(file));
+        imported.push({ ...(await importCharacterCardFile(file)), importedAt });
       } catch (error) {
         errors.push(`${file.name}：${error instanceof Error ? error.message : "格式无效"}`);
       }
     }
     if (imported.length > 0) {
-      setCharacterCards((current) => [...current, ...imported]);
+      setCharacterCards((current) =>
+        sortCharacterCardsByImportTime([...imported, ...current]),
+      );
       setActiveCharacterCardId(imported[0].id);
+      setCharacterSearch("");
     }
     setCharacterImportState(
       errors.length > 0
-        ? { status: "error", message: `部分文件导入失败：${errors.join("；")}` }
-        : { status: "idle", message: "" },
+        ? {
+            status: "error",
+            message: `${imported.length > 0 ? `成功导入 ${imported.length} 张角色卡；` : ""}部分文件导入失败：${errors.join("；")}`,
+          }
+        : {
+            status: "success",
+            message:
+              imported.length === 1
+                ? "角色卡导入成功。"
+                : `成功导入 ${imported.length} 张角色卡。`,
+          },
     );
     if (characterImportInputRef.current) characterImportInputRef.current.value = "";
   };

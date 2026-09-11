@@ -46,6 +46,7 @@ export type CharacterCard = {
   tavernVariables: Record<string, unknown>;
   extensions: Record<string, unknown>;
   extraData: Record<string, unknown>;
+  importedAt: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -226,6 +227,7 @@ export function createCharacterCard(name = "新角色") : CharacterCard {
     tavernVariables: {},
     extensions: {},
     extraData: {},
+    importedAt: timestamp,
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -239,6 +241,7 @@ export function normalizeCharacterCard(
     sourceFormat?: CharacterCardSourceFormat;
     avatarDataUrl?: string;
     preserveId?: boolean;
+    importedAt?: string;
   } = {},
 ): CharacterCard {
   const { root, data } = getCharacterData(rawValue);
@@ -291,7 +294,7 @@ export function normalizeCharacterCard(
     "alternateGreetings", "group_only_greetings", "groupOnlyGreetings", "tags", "creator",
     "character_version", "characterVersion", "avatar", "avatarDataUrl", "sourceFileName",
     "sourceFormat", "character_book", "characterBook", "regex_scripts", "regexScripts",
-    "extensions", "extraData", "createdAt", "updatedAt", "tavernScripts",
+    "extensions", "extraData", "importedAt", "createdAt", "updatedAt", "tavernScripts",
     "tavernVariables",
   ]);
   const importedExtraData = cloneRecord(data.extraData);
@@ -339,6 +342,7 @@ export function normalizeCharacterCard(
     tavernVariables: storedTavernVariables ?? embeddedTavernVariables,
     extensions: cloneRecord(data.extensions),
     extraData: importedExtraData,
+    importedAt: stringValue(options.importedAt ?? data.importedAt ?? data.createdAt, timestamp),
     createdAt: stringValue(data.createdAt, timestamp),
     updatedAt: stringValue(data.updatedAt, timestamp),
   };
@@ -376,6 +380,7 @@ export function normalizeStoredCharacterCard(rawValue: unknown, index = 0): Char
     isRecord(rawValue.tavernVariables) &&
     isRecord(rawValue.extensions) &&
     isRecord(rawValue.extraData) &&
+    typeof rawValue.importedAt === "string" &&
     typeof rawValue.createdAt === "string" &&
     typeof rawValue.updatedAt === "string"
   ) {
@@ -627,6 +632,7 @@ function readFileAsDataUrl(file: File) {
 
 export async function importCharacterCardFile(file: File) {
   const lowerName = file.name.toLowerCase();
+  const importedAt = new Date().toISOString();
   if (lowerName.endsWith(".png") || file.type === "image/png") {
     const bytes = new Uint8Array(await file.arrayBuffer());
     const metadata = extractCharacterCardMetadataFromPng(bytes);
@@ -635,6 +641,7 @@ export async function importCharacterCardFile(file: File) {
       sourceFormat: "sillytavern-png",
       avatarDataUrl: await readFileAsDataUrl(file),
       preserveId: false,
+      importedAt,
     });
   }
   if (lowerName.endsWith(".json") || file.type.includes("json") || !file.type) {
@@ -648,6 +655,7 @@ export async function importCharacterCardFile(file: File) {
       sourceFileName: file.name,
       sourceFormat: "sillytavern-json",
       preserveId: false,
+      importedAt,
     });
   }
   throw new Error("仅支持 PNG 或 JSON 角色卡。");
