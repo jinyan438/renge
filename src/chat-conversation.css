@@ -15,9 +15,8 @@
 
 .chat-thread .chat-message {
   position: relative;
-  width: min(100%, 1120px);
+  width: 100%;
   min-width: 0;
-  margin-inline: auto;
 }
 
 .chat-thread .chat-message.assistant::before {
