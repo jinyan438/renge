@@ -430,7 +430,7 @@ export async function loadCharacterCardsFromDatabase() {
     database.close();
     return values.map((card, index) => normalizeStoredCharacterCard(card, index));
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -465,7 +465,7 @@ export async function loadCharacterCardAvatarsFromDatabase() {
     });
     database.close();
   } catch {
-    avatars.clear();
+    return null;
   }
   return avatars;
 }
@@ -473,33 +473,32 @@ export async function loadCharacterCardAvatarsFromDatabase() {
 let characterCardDatabaseSaveQueue: Promise<void> = Promise.resolve();
 
 async function saveCharacterCardsToDatabaseImmediately(cards: CharacterCard[]) {
+  let database: IDBDatabase | null = null;
   try {
-    const database = await openCharacterCardDatabase();
+    database = await openCharacterCardDatabase();
+    const openedDatabase = database;
     await new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction(CHARACTER_CARD_STORE_NAME, "readwrite");
-      transaction.objectStore(CHARACTER_CARD_STORE_NAME).clear();
+      const transaction = openedDatabase.transaction(CHARACTER_CARD_STORE_NAME, "readwrite");
+      const store = transaction.objectStore(CHARACTER_CARD_STORE_NAME);
+      try {
+        store.clear();
+        cards.forEach((card) => store.put(card));
+      } catch (error) {
+        transaction.abort();
+        reject(error);
+      }
       transaction.oncomplete = () => resolve();
       transaction.onerror = () =>
         reject(transaction.error ?? new Error("角色卡数据库保存失败。"));
       transaction.onabort = () =>
         reject(transaction.error ?? new Error("角色卡数据库保存已中止。"));
     });
-    for (const card of cards) {
-      await new Promise<void>((resolve, reject) => {
-        const transaction = database.transaction(CHARACTER_CARD_STORE_NAME, "readwrite");
-        transaction.objectStore(CHARACTER_CARD_STORE_NAME).put(card);
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () =>
-          reject(transaction.error ?? new Error("角色卡数据库保存失败。"));
-        transaction.onabort = () =>
-          reject(transaction.error ?? new Error("角色卡数据库保存已中止。"));
-      });
-    }
-    database.close();
     return true;
   } catch {
     // The server-side app-data store and compact localStorage copy remain as fallbacks.
     return false;
+  } finally {
+    database?.close();
   }
 }
 

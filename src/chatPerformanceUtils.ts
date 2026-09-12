@@ -11,6 +11,7 @@ type ScheduleChatStreamFlush = (
 export const CHAT_STREAM_RENDER_INTERVAL_MS = 32;
 export const ROLEPLAY_CHAT_STREAM_RENDER_INTERVAL_MS = 80;
 export const CHAT_SCROLL_SETTLE_MS = 180;
+export const CHAT_INPUT_SETTLE_MS = 420;
 export const CHAT_SCROLL_ACTIVITY_MESSAGE = "renge-chat-scroll-activity";
 
 export function createChatScrollScheduler(options: {
@@ -22,8 +23,8 @@ export function createChatScrollScheduler(options: {
   let scrollUntil = Number.NEGATIVE_INFINITY;
 
   return {
-    markScrolling() {
-      scrollUntil = now() + settleMs;
+    markScrolling(durationMs = settleMs) {
+      scrollUntil = Math.max(scrollUntil, now() + Math.max(0, durationMs));
     },
     isScrolling() {
       return now() < scrollUntil;
@@ -56,7 +57,12 @@ export function createChatScrollScheduler(options: {
 }
 
 export const chatScrollScheduler = createChatScrollScheduler();
+const chatIdleActivityScheduler = createChatScrollScheduler();
 const automaticScrollTargets = new WeakMap<HTMLElement, number>();
+
+export function markChatInputActivity() {
+  chatIdleActivityScheduler.markScrolling(CHAT_INPUT_SETTLE_MS);
+}
 
 export function scrollChatToLatest(thread: HTMLElement) {
   if (chatScrollScheduler.isScrolling()) return;
@@ -93,6 +99,7 @@ export function observeChatScrollActivity(thread: HTMLElement) {
   const markScrolling = () => {
     automaticScrollTargets.delete(thread);
     chatScrollScheduler.markScrolling();
+    chatIdleActivityScheduler.markScrolling();
     if (scrollEndTimer === null) notifyPreviews(true);
     else window.clearTimeout(scrollEndTimer);
     scrollEndTimer = window.setTimeout(() => {
@@ -146,7 +153,7 @@ export function scheduleChatIdleWork(
   delayMs = 0,
   timeoutMs = 1200,
 ) {
-  return chatScrollScheduler.schedule(callback, (attempt, delay) => {
+  return chatIdleActivityScheduler.schedule(callback, (attempt, delay) => {
     let idleId: number | null = null;
     const timerId = window.setTimeout(() => {
       if (typeof window.requestIdleCallback === "function") {

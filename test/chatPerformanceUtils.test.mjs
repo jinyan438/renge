@@ -119,6 +119,25 @@ test("defers background work until scrolling and momentum settle", () => {
   assert.equal(scrolling.isScrolling(), false);
 });
 
+test("extends a pending activity window without shortening it", () => {
+  let now = 0;
+  const scheduler = createFakeScheduler();
+  const activity = createChatScrollScheduler({ now: () => now, settleMs: 100 });
+  let calls = 0;
+
+  activity.markScrolling(500);
+  activity.schedule(() => calls += 1, scheduler.schedule);
+  now = 100;
+  activity.markScrolling(50);
+  scheduler.runNext();
+  assert.equal(calls, 0);
+  assert.equal(scheduler.tasks.at(-1).delayMs, 400);
+
+  now = 500;
+  scheduler.runNext();
+  assert.equal(calls, 1);
+});
+
 test("cancels work that has been rescheduled during scrolling", () => {
   const scheduler = createFakeScheduler();
   const scrolling = createChatScrollScheduler({ now: () => 0 });

@@ -172,11 +172,15 @@ import {
   getTavernMessageSwipeState,
 } from "./tavernGreetingUtils";
 import {
+  compactAiAvatarMessageIdentities,
   createAiAvatarImage as createAiAvatarImageRecord,
   createAiAvatarModelProfile,
   createAiAvatarSettings,
+  getAiModeAvatarId,
   getAiModeAvatarImage,
+  getSelectableAiAvatarImages,
   normalizeAiAvatarSettings,
+  pruneArchivedAiAvatarImages,
   type AiAvatarImage,
   type AiAvatarModelProfile,
   type AiAvatarSettings,
@@ -240,12 +244,21 @@ import {
   CHAT_SCROLL_ACTIVITY_MESSAGE,
   createChatPreviewMountQueue,
   createChatStreamUpdateBatcher,
+  markChatInputActivity,
   observeChatScrollActivity,
   ROLEPLAY_CHAT_STREAM_RENDER_INTERVAL_MS,
   scheduleChatIdleWork,
   scheduleChatFrameWork,
   scrollChatToLatest,
 } from "./chatPerformanceUtils";
+import {
+  areJsonValuesEqual,
+  canPreservePersistentCharacterCards,
+  compactCharacterCardsForPersistentStore,
+  createPersistentReferenceBaseline,
+  createShallowReferencePatch,
+  hasMeaningfulPatchChanges,
+} from "./appDataPersistenceUtils";
 import {
   compactToolCallForReplay,
   formatCodexDuration,
@@ -594,7 +607,8 @@ type ChatSenderIdentity = {
 type AiChatMessageIdentity = {
   modelId: string;
   modelName: string;
-  avatarImage: string;
+  avatarId?: string;
+  avatarImage?: string;
 };
 
 type ModelProviderChannel = {
@@ -696,14 +710,14 @@ function getTavernMessageName(message: Pick<ChatMessage, "extra">) {
 
 function createAiChatMessageIdentity(
   modelId: string,
-  avatarImage: string,
+  avatarId: string,
 ): AiChatMessageIdentity | undefined {
   const normalizedModelId = modelId.trim();
   if (!normalizedModelId) return undefined;
   return {
     modelId: normalizedModelId,
     modelName: normalizedModelId,
-    avatarImage,
+    ...(avatarId ? { avatarId } : {}),
   };
 }
 
@@ -711,12 +725,14 @@ function normalizeAiChatMessageIdentity(value: unknown): AiChatMessageIdentity |
   if (!isObjectRecord(value)) return undefined;
   const modelId = typeof value.modelId === "string" ? value.modelId.trim() : "";
   const modelName = typeof value.modelName === "string" ? value.modelName.trim() : "";
+  const avatarId = typeof value.avatarId === "string" ? value.avatarId.trim() : "";
   const avatarImage = typeof value.avatarImage === "string" ? value.avatarImage : "";
   if (!modelId && !modelName) return undefined;
   return {
     modelId,
     modelName: modelName || modelId,
-    avatarImage,
+    ...(avatarId ? { avatarId } : {}),
+    ...(avatarImage ? { avatarImage } : {}),
   };
 }
 
@@ -771,7 +787,11 @@ function getContextRuntimeUsageKey(sessionId: string, modelId: string) {
   return `${sessionId}\u0000${modelId.trim().toLowerCase()}`;
 }
 
+const chatMessageContextSignatureCache = new WeakMap<ChatMessage, string>();
+
 function getChatMessageContextSignature(message: ChatMessage) {
+  const cached = chatMessageContextSignatureCache.get(message);
+  if (cached) return cached;
   const source = JSON.stringify({
     id: message.id,
     role: message.role,
@@ -810,7 +830,9 @@ function getChatMessageContextSignature(message: ChatMessage) {
     hash ^= source.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
   }
-  return `${(hash >>> 0).toString(16)}:${source.length}`;
+  const signature = `${(hash >>> 0).toString(16)}:${source.length}`;
+  chatMessageContextSignatureCache.set(message, signature);
+  return signature;
 }
 
 function estimateChatMessageRuntimeTokens(message: ChatMessage) {
@@ -3022,12 +3044,13 @@ async function loadPersistentAppData(): Promise<PersistentAppDataLoadResult> {
 
 let persistentAppDataSaveQueue: Promise<void> = Promise.resolve();
 let lastCharacterCardsForPersistentStore: CharacterCard[] | null = null;
+let lastAppDataForPersistentStore: RengeAppData | null = null;
 
 function compactAppDataForPersistentStore(
   data: RengeAppData,
   characterCardsStored: boolean,
 ): RengeAppData {
-  if (!window.rengeAndroid?.isAndroid || !characterCardsStored) return data;
+  if (!characterCardsStored) return data;
   const characterCards = data.characterCards ?? [];
   if (
     !characterCards.some(
@@ -3040,47 +3063,62 @@ function compactAppDataForPersistentStore(
   }
   return {
     ...data,
-    characterCards: characterCards.map((card) =>
-      typeof card.avatarDataUrl === "string" &&
-      card.avatarDataUrl.startsWith("data:image/")
-        ? { ...card, avatarDataUrl: "" }
-        : card,
-    ),
+    characterCards: compactCharacterCardsForPersistentStore(characterCards),
   };
-}
-
-function omitCharacterCards(data: RengeAppData): RengeAppData {
-  const compactData = { ...data };
-  delete compactData.characterCards;
-  return compactData;
 }
 
 async function savePersistentAppData(
   data: RengeAppData,
   characterCardsStored = false,
+  replaceExistingData = false,
+  omitCharacterCards = false,
 ): Promise<boolean> {
   const operation = persistentAppDataSaveQueue.then(async () => {
     try {
       const persistentData = compactAppDataForPersistentStore(data, characterCardsStored);
       const characterCards = data.characterCards ?? [];
       const preserveStoredCharacterCards =
-        lastCharacterCardsForPersistentStore === characterCards;
-      const requestData = preserveStoredCharacterCards
-        ? omitCharacterCards(persistentData)
-        : persistentData;
+        omitCharacterCards || lastCharacterCardsForPersistentStore === characterCards;
+      const requestData = replaceExistingData
+        ? persistentData
+        : createShallowReferencePatch(
+            persistentData,
+            lastAppDataForPersistentStore,
+            preserveStoredCharacterCards
+              ? new Set<keyof RengeAppData>(["characterCards"])
+              : undefined,
+          );
+      const patchExistingData = !replaceExistingData && Boolean(
+        lastAppDataForPersistentStore || preserveStoredCharacterCards,
+      );
+      if (
+        patchExistingData &&
+        !hasMeaningfulPatchChanges(
+          requestData,
+          new Set<keyof RengeAppData>(["updatedAt"]),
+        )
+      ) {
+        lastCharacterCardsForPersistentStore = characterCards;
+        lastAppDataForPersistentStore = data;
+        return true;
+      }
       let response = await fetch("/api/app-data", {
-        method: preserveStoredCharacterCards ? "PATCH" : "PUT",
+        method: patchExistingData ? "PATCH" : "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ data: requestData }),
       });
-      if (preserveStoredCharacterCards && response.status === 405) {
+      if (patchExistingData && response.status === 405) {
+        if (omitCharacterCards) return false;
         response = await fetch("/api/app-data", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ data: persistentData }),
         });
       }
-      if (response.ok) lastCharacterCardsForPersistentStore = characterCards;
+      if (response.ok) {
+        lastCharacterCardsForPersistentStore = characterCards;
+        lastAppDataForPersistentStore = data;
+      }
       return response.ok;
     } catch {
       // The app can still run with localStorage when the persistence API is unavailable.
@@ -3098,7 +3136,10 @@ async function clearPersistentAppData(): Promise<boolean> {
   const operation = persistentAppDataSaveQueue.then(async () => {
     try {
       const response = await fetch("/api/app-data", { method: "DELETE" });
-      if (response.ok) lastCharacterCardsForPersistentStore = null;
+      if (response.ok) {
+        lastCharacterCardsForPersistentStore = null;
+        lastAppDataForPersistentStore = null;
+      }
       return response.ok;
     } catch {
       return false;
@@ -3119,23 +3160,33 @@ function setLocalStorageValueSafely(key: string, value: string) {
   }
 }
 
-const localStorageJsonReferenceByKey = new Map<string, unknown>();
+const localStorageJsonAttemptByKey = new Map<
+  string,
+  { value: unknown; stored: boolean }
+>();
+const blockedLocalStorageJsonKeys = new Set<string>();
 
 function setLocalStorageJsonSafely(key: string, value: unknown) {
-  if (localStorageJsonReferenceByKey.get(key) === value) return true;
+  const previousAttempt = localStorageJsonAttemptByKey.get(key);
+  if (previousAttempt && previousAttempt.value === value) return previousAttempt.stored;
+  if (blockedLocalStorageJsonKeys.has(key)) return false;
+  let stored = false;
   try {
     localStorage.setItem(key, JSON.stringify(value));
-    localStorageJsonReferenceByKey.set(key, value);
-    return true;
+    stored = true;
   } catch {
     // Large chats and images can exceed a browser origin's localStorage quota.
-    return false;
+    blockedLocalStorageJsonKeys.add(key);
   }
+  localStorageJsonAttemptByKey.set(key, { value, stored });
+  return stored;
 }
 
 function removeLocalStorageValueSafely(key: string) {
   try {
     localStorage.removeItem(key);
+    localStorageJsonAttemptByKey.delete(key);
+    blockedLocalStorageJsonKeys.delete(key);
   } catch {
     // Persistence can continue through the server-side app-data store.
   }
@@ -3173,6 +3224,7 @@ function persistCharacterCardsToDatabase(
 function persistAppDataToLocalStores(
   data: RengeAppData,
   characterCardsAlreadyStored = false,
+  characterCardsPersistenceBlocked = false,
 ) {
   const personas = data.personas ?? [];
   if (personas.length > 0 && lastPersonasForLocalStorage !== personas) {
@@ -3235,19 +3287,19 @@ function persistAppDataToLocalStores(
   );
 
   const characterCards = data.characterCards ?? [];
-  const characterCardsStored = persistCharacterCardsToDatabase(
-    characterCards,
-    characterCardsAlreadyStored,
-  );
+  const characterCardsStored = characterCardsPersistenceBlocked
+    ? Promise.resolve(false)
+    : persistCharacterCardsToDatabase(characterCards, characterCardsAlreadyStored);
   if (
+    !characterCardsPersistenceBlocked &&
     !window.rengeAndroid?.isAndroid &&
-    lastCharacterCardsForLocalStorage !== characterCards &&
+    lastCharacterCardsForLocalStorage !== characterCards
+  ) {
+    lastCharacterCardsForLocalStorage = characterCards;
     setLocalStorageJsonSafely(
       CHARACTER_CARDS_STORAGE_KEY,
       characterCards.map((card) => ({ ...card, avatarDataUrl: "" })),
-    )
-  ) {
-    lastCharacterCardsForLocalStorage = characterCards;
+    );
   }
   setLocalStorageValueSafely(
     ACTIVE_CHARACTER_CARD_STORAGE_KEY,
@@ -3331,7 +3383,8 @@ function replaceRengeLocalStorage(entries: Record<string, string>) {
   Object.entries(entries).forEach(([key, value]) => {
     if (key.startsWith(RENGE_STORAGE_PREFIX)) localStorage.setItem(key, value);
   });
-  localStorageJsonReferenceByKey.clear();
+  localStorageJsonAttemptByKey.clear();
+  blockedLocalStorageJsonKeys.clear();
   lastCharacterCardsForLocalStorage = null;
   lastPersonasForLocalStorage = null;
 }
@@ -7863,8 +7916,14 @@ function getAiChatMessageName(
 function getAiChatMessageAvatarImage(
   message: Pick<ChatMessage, "aiIdentity">,
   fallbackAvatarImage: string,
+  settings: AiAvatarSettings,
 ) {
-  return message.aiIdentity ? message.aiIdentity.avatarImage : fallbackAvatarImage;
+  if (!message.aiIdentity) return fallbackAvatarImage;
+  if (message.aiIdentity.avatarId) {
+    return settings.images.find((image) => image.id === message.aiIdentity?.avatarId)?.dataUrl
+      ?? fallbackAvatarImage;
+  }
+  return message.aiIdentity.avatarImage ?? fallbackAvatarImage;
 }
 
 function getWechatMessageMetadata(message: ChatMessage) {
@@ -10757,12 +10816,12 @@ function throwIfChatAborted(signal?: AbortSignal) {
   if (signal?.aborted) throw createChatAbortError();
 }
 
-const CONTEXT_METER_REFRESH_INTERVAL_MS = 160;
+const CONTEXT_METER_REFRESH_INTERVAL_MS = 600;
 
 function useThrottledValue<T>(value: T, intervalMs: number): T {
   const latestValueRef = useRef(value);
   const lastUpdatedAtRef = useRef(0);
-  const timerRef = useRef<number | null>(null);
+  const cancelScheduledRef = useRef<(() => void) | null>(null);
   const [throttledValue, setThrottledValue] = useState(value);
 
   latestValueRef.current = value;
@@ -10770,25 +10829,19 @@ function useThrottledValue<T>(value: T, intervalMs: number): T {
   useEffect(() => {
     const now = performance.now();
     const elapsed = now - lastUpdatedAtRef.current;
-    if (lastUpdatedAtRef.current === 0 || elapsed >= intervalMs) {
-      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-      timerRef.current = null;
-      lastUpdatedAtRef.current = now;
-      setThrottledValue(value);
-      return;
-    }
-    if (timerRef.current !== null) return;
+    if (cancelScheduledRef.current) return;
 
-    timerRef.current = window.setTimeout(() => {
-      timerRef.current = null;
+    cancelScheduledRef.current = scheduleChatIdleWork(() => {
+      cancelScheduledRef.current = null;
       lastUpdatedAtRef.current = performance.now();
-      setThrottledValue(latestValueRef.current);
-    }, intervalMs - elapsed);
+      startTransition(() => setThrottledValue(latestValueRef.current));
+    }, lastUpdatedAtRef.current === 0 ? 0 : Math.max(0, intervalMs - elapsed), 1_500);
   }, [intervalMs, value]);
 
   useEffect(
     () => () => {
-      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      cancelScheduledRef.current?.();
+      cancelScheduledRef.current = null;
     },
     [],
   );
@@ -12675,9 +12728,7 @@ export function App() {
     Record<string, ExtensionRuntimeState>
   >({});
   // Keep the live composer draft outside App state. App owns a very large tree,
-  // so a controlled textarea used to re-render the complete desktop for every
-  // keystroke. The surrounding UI only needs the empty/non-empty boundary.
-  const [chatInputHasContent, setChatInputHasContent] = useState(false);
+  // so the textarea and its enabled state must not re-render it while typing.
   const [composerModelMenuSection, setComposerModelMenuSection] =
     useState<ComposerModelMenuSection | null>(null);
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
@@ -12777,9 +12828,19 @@ export function App() {
   const skillZipInputRef = useRef<HTMLInputElement>(null);
   const completeBackupImportInputRef = useRef<HTMLInputElement>(null);
   const persistentStoreReadyRef = useRef(false);
-  const appDataClearingRef = useRef(false);
+  const pendingPersistentStoreBaselineRef = useRef<{
+    persistedData: RengeAppData;
+    dirtyKeys: ReadonlySet<keyof RengeAppData>;
+  } | null>(null);
+  const characterCardsPersistenceBlockedRef = useRef(false);
+  const appDataPersistenceSuspendedRef = useRef(false);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatSendButtonRef = useRef<HTMLButtonElement>(null);
+  const chatSendAvailabilityRef = useRef({
+    attachmentCount: 0,
+    generationState: "idle" as ChatGenerationState,
+    sendBlocked: false,
+  });
   const chatThreadRef = useRef<HTMLDivElement>(null);
   const chatMessageVirtualizerCleanupRef = useRef<(() => void) | null>(null);
   const chatScrollFollowLatestRef = useRef(true);
@@ -12858,10 +12919,16 @@ export function App() {
     const hasContent = Boolean(next.trim());
     if (hasContent !== chatInputHasContentRef.current) {
       chatInputHasContentRef.current = hasContent;
-      setChatInputHasContent(hasContent);
+      const availability = chatSendAvailabilityRef.current;
+      if (chatSendButtonRef.current) {
+        chatSendButtonRef.current.disabled =
+          availability.generationState === "idle" &&
+          ((!hasContent && availability.attachmentCount === 0) || availability.sendBlocked);
+      }
     }
 
     if (next === previous) return;
+    markChatInputActivity();
     chatInputContextDirtyRef.current = true;
     if (chatInputContextTimerRef.current === null) {
       chatInputContextTimerRef.current = window.setTimeout(() => {
@@ -13331,6 +13398,33 @@ export function App() {
     tavernScriptsRef.current = tavernScripts;
     tavernGlobalVariablesRef.current = tavernGlobalVariables;
   }, [activeChatPresetId, activePersonaId, activeWorldBookIds, characterCards, chatPresetEnabled, chatPresets, chatSessions, personas, regexScripts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+
+  useEffect(() => {
+    setChatPersonalization((current) => {
+      if (!current.aiAvatarSettings.images.some((image) => image.archived)) return current;
+      const referencedImageIds = new Set<string>();
+      chatSessions.forEach((session) => {
+        session.messages.forEach((message) => {
+          if (message.aiIdentity?.avatarId) {
+            referencedImageIds.add(message.aiIdentity.avatarId);
+          }
+        });
+      });
+      chatMessages.forEach((message) => {
+        if (message.aiIdentity?.avatarId) referencedImageIds.add(message.aiIdentity.avatarId);
+      });
+      if (activeAiMessageIdentityRef.current?.avatarId) {
+        referencedImageIds.add(activeAiMessageIdentityRef.current.avatarId);
+      }
+      const aiAvatarSettings = pruneArchivedAiAvatarImages(
+        current.aiAvatarSettings,
+        referencedImageIds,
+      );
+      return aiAvatarSettings === current.aiAvatarSettings
+        ? current
+        : { ...current, aiAvatarSettings };
+    });
+  }, [chatMessages, chatSessions]);
 
   useEffect(() => {
     tavernScriptRuntimeRef.current?.syncPresetCompatibility();
@@ -14047,8 +14141,7 @@ export function App() {
     };
   }, []);
 
-  const buildCurrentAppData = useCallback((): RengeAppData => {
-    const pcConnection: PcConnectionData = {
+  const appDataPcConnection = useMemo<PcConnectionData>(() => ({
       baseUrl: pcTransferWorkspace?.baseUrl ?? pcServerUrl.trim(),
       ...(pcTransferWorkspace
         ? {
@@ -14056,7 +14149,8 @@ export function App() {
             workspaceName: pcTransferWorkspace.name,
           }
         : {}),
-    };
+    }), [pcServerUrl, pcTransferWorkspace]);
+  const buildCurrentAppData = useCallback((): RengeAppData => {
     const liveSessionId = activeChatSessionIdRef.current;
     const liveMessages = chatMessagesRef.current;
     const snapshotUpdatedAt = new Date().toISOString();
@@ -14122,10 +14216,10 @@ export function App() {
       mcpServers,
       skills,
       extensions,
-      ...(pcConnection.baseUrl || pcConnection.workspacePath ? { pcConnection } : {}),
+      pcConnection: appDataPcConnection,
       updatedAt: snapshotUpdatedAt,
     };
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, contextCompressionSettings, extensions, llmContextSettings, llmFullAccessEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, pcServerUrl, pcTransferWorkspace, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataPcConnection, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, contextCompressionSettings, extensions, llmContextSettings, llmFullAccessEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -14137,21 +14231,34 @@ export function App() {
       ]);
       if (cancelled) return;
       const persistentData = persistentResult.data;
+      let pendingPersistentStoreBaseline: {
+        persistedData: RengeAppData;
+        dirtyKeys: ReadonlySet<keyof RengeAppData>;
+      } | null = null;
       const persistentCharacterCards = Array.isArray(persistentData?.characterCards)
         ? persistentData.characterCards
         : [];
       const hasPersistentCharacterCards = persistentCharacterCards.length > 0;
-      const databaseCharacterCards = hasPersistentCharacterCards
+      const persistentCharacterCardsAlreadyCompacted =
+        canPreservePersistentCharacterCards(persistentCharacterCards);
+      const characterCardsNeedMigration =
+        hasPersistentCharacterCards && !persistentCharacterCardsAlreadyCompacted;
+      const loadedDatabaseCharacterCards = hasPersistentCharacterCards
         ? []
         : await loadCharacterCardsFromDatabase();
-      const databaseCharacterCardAvatars =
+      const characterCardDatabaseReadFailed = loadedDatabaseCharacterCards === null;
+      const databaseCharacterCards = loadedDatabaseCharacterCards ?? [];
+      const loadedDatabaseCharacterCardAvatars =
         hasPersistentCharacterCards &&
-        window.rengeAndroid?.isAndroid &&
         persistentCharacterCards.some(
           (card) => isObjectRecord(card) && !String(card.avatarDataUrl ?? ""),
         )
           ? await loadCharacterCardAvatarsFromDatabase()
           : new Map<string, string>();
+      const characterCardAvatarDatabaseReadFailed =
+        loadedDatabaseCharacterCardAvatars === null;
+      const databaseCharacterCardAvatars =
+        loadedDatabaseCharacterCardAvatars ?? new Map<string, string>();
       if (cancelled) return;
       persistentStoreReadyRef.current = persistentResult.available;
 
@@ -14164,7 +14271,7 @@ export function App() {
         persistentData?.providers && persistentData.providers.length > 0
           ? persistentData.providers.map(normalizeProviderChannel)
           : loadProviderChannels();
-      const normalizedChatSessions =
+      let normalizedChatSessions =
         persistentData?.chatSessions && persistentData.chatSessions.length > 0
           ? persistentData.chatSessions.map(normalizeChatSession)
           : loadChatSessions();
@@ -14209,7 +14316,7 @@ export function App() {
         ? persistentCharacterCards
             .map((card, index) => normalizeStoredCharacterCard(card, index))
             .map((card) => {
-              if (card.avatarDataUrl || !window.rengeAndroid?.isAndroid) return card;
+              if (card.avatarDataUrl) return card;
               const databaseAvatar = databaseCharacterCardAvatars.get(card.id);
               return databaseAvatar
                 ? { ...card, avatarDataUrl: databaseAvatar }
@@ -14218,7 +14325,17 @@ export function App() {
         : databaseCharacterCards.length > 0
           ? databaseCharacterCards
           : loadCharacterCardsFromStorage(CHARACTER_CARDS_STORAGE_KEY);
-      lastCharacterCardsForPersistentStore = hasPersistentCharacterCards
+      const characterCardsAlreadyStored =
+        persistentCharacterCardsAlreadyCompacted ||
+        (!hasPersistentCharacterCards && databaseCharacterCards.length > 0);
+      if (characterCardsAlreadyStored) {
+        lastCharacterCardsForDatabase = normalizedCharacterCards;
+        lastCharacterCardsDatabaseSave = Promise.resolve(true);
+      }
+      const characterCardsPersistenceBlocked =
+        characterCardDatabaseReadFailed || characterCardAvatarDatabaseReadFailed;
+      characterCardsPersistenceBlockedRef.current = characterCardsPersistenceBlocked;
+      lastCharacterCardsForPersistentStore = characterCardsPersistenceBlocked
         ? normalizedCharacterCards
         : null;
       const normalizedUserProfile = persistentData?.userProfile
@@ -14320,9 +14437,41 @@ export function App() {
       const nextContextCompressionSettings = normalizeContextCompressionSettings(
         persistentData?.contextCompressionSettings ?? loadContextCompressionSettings(),
       );
-      const nextChatPersonalization = persistentData?.chatPersonalization
+      let nextChatPersonalization = persistentData?.chatPersonalization
         ? normalizeChatPersonalization(persistentData.chatPersonalization)
         : loadChatPersonalization();
+      const compactedAiAvatars = compactAiAvatarMessageIdentities(
+        normalizedChatSessions,
+        nextChatPersonalization.aiAvatarSettings,
+      );
+      const aiAvatarsNeedMigration =
+        compactedAiAvatars.sessions !== normalizedChatSessions ||
+        compactedAiAvatars.settings !== nextChatPersonalization.aiAvatarSettings;
+      normalizedChatSessions = compactedAiAvatars.sessions;
+      if (compactedAiAvatars.settings !== nextChatPersonalization.aiAvatarSettings) {
+        nextChatPersonalization = {
+          ...nextChatPersonalization,
+          aiAvatarSettings: compactedAiAvatars.settings,
+        };
+      }
+      if (
+        persistentData &&
+        Object.keys(persistentData).length > 0 &&
+        (!characterCardsNeedMigration || characterCardsPersistenceBlocked)
+      ) {
+        const dirtyKeys = new Set<keyof RengeAppData>();
+        if (aiAvatarsNeedMigration) {
+          dirtyKeys.add("chatSessions");
+          dirtyKeys.add("chatPersonalization");
+        }
+        if (!hasPersistentCharacterCards && databaseCharacterCards.length > 0) {
+          dirtyKeys.add("characterCards");
+        }
+        pendingPersistentStoreBaseline = {
+          persistedData: persistentData,
+          dirtyKeys,
+        };
+      }
       const nextMcpServers = Array.isArray(persistentData?.mcpServers)
         ? persistentData.mcpServers.map((server, index) =>
             normalizeMcpServerConfig(server as Partial<McpServerConfig> & Record<string, unknown>, `MCP Server ${index + 1}`),
@@ -14525,11 +14674,19 @@ export function App() {
       setChatMessages(normalizedChatSessions[0]?.messages ?? []);
       setPcServerUrl(nextPcServerUrl);
       setPcTransferWorkspace(nextPcWorkspace);
+      pendingPersistentStoreBaselineRef.current = pendingPersistentStoreBaseline;
+      if (characterCardsPersistenceBlocked) {
+        setChatStatus({
+          status: "error",
+          message: "角色卡存储暂时不可用；本次运行不会改写角色卡，其他聊天和设置仍会保存。",
+        });
+      }
       setAppDataLoaded(true);
     }
 
     void loadInitialAppData().catch(async (error) => {
       if (cancelled) return;
+      pendingPersistentStoreBaselineRef.current = null;
       console.error("应用数据加载失败，已回退到本地缓存", error);
       let fallbackPersonas: AgentPersona[];
       try {
@@ -14566,16 +14723,55 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const pendingBaseline = pendingPersistentStoreBaselineRef.current;
+    if (!appDataLoaded || !pendingBaseline) return;
+    pendingPersistentStoreBaselineRef.current = null;
+    const currentData = buildCurrentAppData();
+    const baseline = createPersistentReferenceBaseline(
+      currentData,
+      pendingBaseline.persistedData,
+      pendingBaseline.dirtyKeys,
+    );
+    const currentCharacterCards = currentData.characterCards ?? [];
+    const compactedCharacterCards = compactCharacterCardsForPersistentStore(
+      currentCharacterCards,
+    );
+    const persistedCharacterCards = pendingBaseline.persistedData.characterCards;
+    const preservePersistentCharacterCards =
+      characterCardsPersistenceBlockedRef.current ||
+      (Array.isArray(persistedCharacterCards) &&
+        areJsonValuesEqual(compactedCharacterCards, persistedCharacterCards));
+    if (preservePersistentCharacterCards) {
+      baseline.characterCards = currentCharacterCards;
+      lastCharacterCardsForPersistentStore = currentCharacterCards;
+    } else {
+      lastCharacterCardsForPersistentStore = null;
+    }
+    lastAppDataForPersistentStore = baseline;
+  }, [appDataLoaded, buildCurrentAppData]);
+
+  useEffect(() => {
     if (!appDataLoaded) return;
     return scheduleChatIdleWork(
       () => {
-        if (appDataClearingRef.current) return;
+        if (appDataPersistenceSuspendedRef.current) return;
         const snapshot = buildCurrentAppData();
-        const characterCardsStored = persistAppDataToLocalStores(snapshot);
+        const characterCardsPersistenceBlocked = characterCardsPersistenceBlockedRef.current;
+        const characterCardsStored = persistAppDataToLocalStores(
+          snapshot,
+          false,
+          characterCardsPersistenceBlocked,
+        );
         if (persistentStoreReadyRef.current) {
-          void characterCardsStored.then((stored) =>
-            savePersistentAppData(snapshot, stored),
-          );
+          void characterCardsStored.then((stored) => {
+            if (appDataPersistenceSuspendedRef.current) return false;
+            return savePersistentAppData(
+              snapshot,
+              stored,
+              false,
+              characterCardsPersistenceBlocked,
+            );
+          });
         }
       },
       APP_DATA_SAVE_DEBOUNCE_MS,
@@ -14586,13 +14782,24 @@ export function App() {
   useEffect(() => {
     if (!appDataLoaded) return;
     const flushLatestSnapshot = () => {
-      if (appDataClearingRef.current) return;
+      if (appDataPersistenceSuspendedRef.current) return;
       const snapshot = buildCurrentAppData();
-      const characterCardsStored = persistAppDataToLocalStores(snapshot);
+      const characterCardsPersistenceBlocked = characterCardsPersistenceBlockedRef.current;
+      const characterCardsStored = persistAppDataToLocalStores(
+        snapshot,
+        false,
+        characterCardsPersistenceBlocked,
+      );
       if (persistentStoreReadyRef.current) {
-        void characterCardsStored.then((stored) =>
-          savePersistentAppData(snapshot, stored),
-        );
+        void characterCardsStored.then((stored) => {
+          if (appDataPersistenceSuspendedRef.current) return false;
+          return savePersistentAppData(
+            snapshot,
+            stored,
+            false,
+            characterCardsPersistenceBlocked,
+          );
+        });
       }
     };
     window.addEventListener("pagehide", flushLatestSnapshot);
@@ -14699,13 +14906,17 @@ export function App() {
   }, [appDataLoaded, localWorkspaceHandle]);
 
   useEffect(() => {
-    setChatSender((current) => normalizeChatSenderIdentity(current, personas));
+    setChatSender((current) => {
+      const normalized = normalizeChatSenderIdentity(current, personas);
+      return areJsonValuesEqual(current, normalized) ? current : normalized;
+    });
   }, [personas]);
 
   useEffect(() => {
-    setMultiAgentPersonaIds((current) =>
-      normalizeMultiAgentPersonaIds(current, personas),
-    );
+    setMultiAgentPersonaIds((current) => {
+      const normalized = normalizeMultiAgentPersonaIds(current, personas);
+      return areJsonValuesEqual(current, normalized) ? current : normalized;
+    });
   }, [personas]);
 
   useEffect(() => {
@@ -14715,11 +14926,12 @@ export function App() {
   }, [personas]);
 
   useEffect(() => {
-    setMultiAgentSubPersonaIds((current) =>
-      normalizeMultiAgentPersonaIds(current, personas).filter(
+    setMultiAgentSubPersonaIds((current) => {
+      const normalized = normalizeMultiAgentPersonaIds(current, personas).filter(
         (personaId) => personaId !== multiAgentPrimaryPersonaId,
-      ),
-    );
+      );
+      return areJsonValuesEqual(current, normalized) ? current : normalized;
+    });
   }, [multiAgentPrimaryPersonaId, personas]);
 
   useEffect(() => {
@@ -14728,14 +14940,15 @@ export function App() {
   }, [activeCharacterCardId, characterCards]);
 
   useEffect(() => {
-    setMultiAgentModelConfigs((current) =>
-      normalizeMultiAgentModelConfigs(
+    setMultiAgentModelConfigs((current) => {
+      const normalized = normalizeMultiAgentModelConfigs(
         current,
         personas,
         providers,
         activeProviderId,
-      ),
-    );
+      );
+      return areJsonValuesEqual(current, normalized) ? current : normalized;
+    });
   }, [activeProviderId, personas, providers]);
 
   useEffect(() => {
@@ -15740,6 +15953,7 @@ export function App() {
         }
         return;
       }
+      const previousAppData = buildCurrentAppData();
 
       setDataBackupState({
         status: "loading",
@@ -15750,7 +15964,9 @@ export function App() {
         value: 0,
         label: `阶段 1/3：正在上传 ${formatFileSize(file.size)} 的备份文件`,
       });
+      appDataPersistenceSuspendedRef.current = true;
       try {
+        await persistentAppDataSaveQueue;
         await uploadCompleteBackupWithProgress(
           file,
           (loaded, total) => {
@@ -15781,6 +15997,17 @@ export function App() {
         });
         window.setTimeout(() => window.location.reload(), 450);
       } catch (error) {
+        const previousCharacterCardsStored = await persistAppDataToLocalStores(
+          previousAppData,
+        );
+        if (persistentStoreReadyRef.current) {
+          await savePersistentAppData(
+            previousAppData,
+            previousCharacterCardsStored,
+            true,
+          );
+        }
+        appDataPersistenceSuspendedRef.current = false;
         setDataBackupProgress({ active: false, value: null, label: "" });
         setDataBackupState({
           status: "error",
@@ -15824,6 +16051,7 @@ export function App() {
       previousAppData = buildCurrentAppData();
       previousLocalStorage = collectRengeLocalStorage();
       restoreStarted = true;
+      appDataPersistenceSuspendedRef.current = true;
 
       const restoredPersonas = (backup.appData.personas ?? []).map(normalizePersona);
       const restoredCharacterCards = (backup.appData.characterCards ?? []).map(
@@ -15836,13 +16064,19 @@ export function App() {
         characterCards: restoredCharacterCards,
       };
 
-      await saveCharacterCardsToDatabase(restoredCharacterCards);
-      const appDataSaved = await savePersistentAppData(restoredAppData);
+      const restoredCharacterCardsStored = await saveCharacterCardsToDatabase(
+        restoredCharacterCards,
+      );
+      const appDataSaved = await savePersistentAppData(
+        restoredAppData,
+        restoredCharacterCardsStored,
+        true,
+      );
       if (!appDataSaved) {
         throw new Error("无法写入应用主数据，请确认本地数据服务正在运行。");
       }
       replaceRengeLocalStorage({});
-      void persistAppDataToLocalStores(restoredAppData, true);
+      void persistAppDataToLocalStores(restoredAppData, restoredCharacterCardsStored);
       await personaStore.save(restoredPersonas);
 
       if (
@@ -15863,10 +16097,12 @@ export function App() {
       window.setTimeout(() => window.location.reload(), 450);
     } catch (error) {
       if (restoreStarted && previousAppData && previousLocalStorage) {
-        await Promise.allSettled([
-          savePersistentAppData(previousAppData),
-          saveCharacterCardsToDatabase(characterCards),
-        ]);
+        const previousCharacterCardsStored = await saveCharacterCardsToDatabase(characterCards);
+        await savePersistentAppData(
+          previousAppData,
+          previousCharacterCardsStored,
+          true,
+        );
         try {
           replaceRengeLocalStorage(previousLocalStorage);
           await personaStore.save(previousAppData.personas ?? personas);
@@ -15874,6 +16110,7 @@ export function App() {
           // Keep the original restore error visible even if a local rollback also fails.
         }
       }
+      appDataPersistenceSuspendedRef.current = false;
       setDataBackupProgress({ active: false, value: null, label: "" });
       setDataBackupState({
         status: "error",
@@ -15907,12 +16144,12 @@ export function App() {
       return;
     }
     setDataClearConfirmationOpen(false);
-    appDataClearingRef.current = true;
+    appDataPersistenceSuspendedRef.current = true;
     setDataBackupProgress({ active: false, value: null, label: "" });
     setDataBackupState({ status: "loading", message: "正在清除全部应用数据，请勿关闭应用..." });
     const persistentDataCleared = await clearPersistentAppData();
     if (!persistentDataCleared) {
-      appDataClearingRef.current = false;
+      appDataPersistenceSuspendedRef.current = false;
       setDataBackupState({
         status: "error",
         message: "清除失败：无法连接应用数据服务，当前数据未被删除。",
@@ -16840,6 +17077,10 @@ export function App() {
         ? getAiModeAvatarImage(chatPersonalization.aiAvatarSettings, effectiveChatModelId)
         : "",
     [chatMode, chatPersonalization.aiAvatarSettings, effectiveChatModelId],
+  );
+  const selectableAiAvatarImages = useMemo(
+    () => getSelectableAiAvatarImages(chatPersonalization.aiAvatarSettings),
+    [chatPersonalization.aiAvatarSettings],
   );
   const configuredMultiAgentPersonas =
     multiAgentWorkflow === "supervisor"
@@ -24328,7 +24569,7 @@ export function App() {
       responseMode === "ai"
         ? createAiChatMessageIdentity(
             requestModelId,
-            getAiModeAvatarImage(chatPersonalization.aiAvatarSettings, requestModelId),
+            getAiModeAvatarId(chatPersonalization.aiAvatarSettings, requestModelId),
           )
         : undefined;
     const abortController = beginChatGeneration();
@@ -27706,7 +27947,7 @@ export function App() {
       chatMode === "ai"
         ? createAiChatMessageIdentity(
             requestModelId,
-            getAiModeAvatarImage(chatPersonalization.aiAvatarSettings, requestModelId),
+            getAiModeAvatarId(chatPersonalization.aiAvatarSettings, requestModelId),
           )
         : undefined;
 
@@ -30420,7 +30661,15 @@ export function App() {
         ...current,
         aiAvatarSettings: {
           ...current.aiAvatarSettings,
-          images: [...current.aiAvatarSettings.images, ...images],
+          images: [
+            ...current.aiAvatarSettings.images,
+            ...images.filter(
+              (image, index) =>
+                !current.aiAvatarSettings.images.some(
+                  (existing) => existing.dataUrl === image.dataUrl,
+                ) && images.findIndex((candidate) => candidate.dataUrl === image.dataUrl) === index,
+            ),
+          ],
         },
       }));
     }
@@ -30434,11 +30683,21 @@ export function App() {
   };
 
   const removeAiAvatarImage = (imageId: string) => {
+    const usedByHistory =
+      chatSessionsRef.current.some((session) =>
+        session.messages.some((message) => message.aiIdentity?.avatarId === imageId),
+      ) ||
+      chatMessagesRef.current.some((message) => message.aiIdentity?.avatarId === imageId) ||
+      activeAiMessageIdentityRef.current?.avatarId === imageId;
     setChatPersonalization((current) => ({
       ...current,
       aiAvatarSettings: {
         ...current.aiAvatarSettings,
-        images: current.aiAvatarSettings.images.filter((image) => image.id !== imageId),
+        images: usedByHistory
+          ? current.aiAvatarSettings.images.map((image) =>
+              image.id === imageId ? { ...image, archived: true } : image,
+            )
+          : current.aiAvatarSettings.images.filter((image) => image.id !== imageId),
         modelProfiles: current.aiAvatarSettings.modelProfiles.map((profile) =>
           profile.avatarId === imageId
             ? {
@@ -30766,7 +31025,7 @@ export function App() {
   const extensionsWindowState = openWindows.find(
     (windowState) => windowState.id === "extensions",
   );
-  const extensionsWindow = extensionsWindowState ? (
+  const extensionsWindow = extensionsWindowState && !extensionsWindowState.minimized ? (
       <PortfolioDesktopWindow
         title="扩展管理器"
         bodyClassName="extension-manager-shell"
@@ -31187,7 +31446,7 @@ export function App() {
   const charactersWindowState = openWindows.find(
     (windowState) => windowState.id === "characters",
   );
-  const charactersWindow = charactersWindowState ? (
+  const charactersWindow = charactersWindowState && !charactersWindowState.minimized ? (
       <PortfolioDesktopWindow
         title="角色卡管理器"
         bodyClassName="character-manager-shell"
@@ -32030,7 +32289,7 @@ export function App() {
       </PortfolioDesktopWindow>
   ) : null;
 
-  const settingsWindow = settingsWindowState ? (
+  const settingsWindow = settingsWindowState && !settingsWindowState.minimized ? (
       <main
         className={`settings-shell settings-desktop managed-window-layer ${
           settingsWindowState.minimized ? "is-minimized" : ""
@@ -35091,13 +35350,13 @@ export function App() {
                 </div>
 
                 <div className="ai-avatar-library-gallery ai-avatar-gallery">
-                  {chatPersonalization.aiAvatarSettings.images.length === 0 ? (
+                  {selectableAiAvatarImages.length === 0 ? (
                     <div className="ai-avatar-empty">
                       <Bot size={18} />
                       <span>头像库为空，请先上传至少一张头像。</span>
                     </div>
                   ) : (
-                    chatPersonalization.aiAvatarSettings.images.map((image, imageIndex) => (
+                    selectableAiAvatarImages.map((image, imageIndex) => (
                       <div className="ai-avatar-image-item" key={image.id}>
                         <button
                           type="button"
@@ -35183,7 +35442,7 @@ export function App() {
 
                         <div className="ai-avatar-gallery-field">
                           <span className="ai-avatar-gallery-label">选择头像（单选）</span>
-                          {chatPersonalization.aiAvatarSettings.images.length === 0 ? (
+                          {selectableAiAvatarImages.length === 0 ? (
                             <div className="ai-avatar-selection-empty">
                               请先在上方头像库上传头像。
                             </div>
@@ -35193,7 +35452,7 @@ export function App() {
                               role="radiogroup"
                               aria-label={"为模型绑定 " + (profileIndex + 1) + " 选择头像"}
                             >
-                              {chatPersonalization.aiAvatarSettings.images.map((image, imageIndex) => (
+                              {selectableAiAvatarImages.map((image, imageIndex) => (
                                 <button
                                   type="button"
                                   className={
@@ -36000,6 +36259,13 @@ export function App() {
   const chatWindowState = openWindows.find(
     (windowState) => windowState.id === "chat",
   );
+  chatSendAvailabilityRef.current = {
+    attachmentCount: chatAttachments.length,
+    generationState: chatGenerationState,
+    sendBlocked:
+      chatStatus.status === "loading" ||
+      (chatMode === "roleplay" && !activeSessionRoleplayCard),
+  };
   const confirmClearActiveChatSession = () => {
     const sessionId = activeChatSessionIdRef.current;
     const greeting =
@@ -36728,7 +36994,11 @@ export function App() {
                       chatMode === "roleplay" && activeSessionRoleplayCard
                         ? activeSessionRoleplayCard.avatarDataUrl
                         : chatMode === "ai"
-                          ? getAiChatMessageAvatarImage(message, aiModeAvatarImage)
+                          ? getAiChatMessageAvatarImage(
+                              message,
+                              aiModeAvatarImage,
+                              chatPersonalization.aiAvatarSettings,
+                            )
                           : assistantPersona?.avatarImage ?? "";
                     const messageIndex = chatMessageIndexById.get(message.id) ?? -1;
 
@@ -36862,7 +37132,11 @@ export function App() {
                     : chatMode === "roleplay" && activeSessionRoleplayCard
                       ? activeSessionRoleplayCard.avatarDataUrl
                       : chatMode === "ai"
-                        ? getAiChatMessageAvatarImage(message, aiModeAvatarImage)
+                        ? getAiChatMessageAvatarImage(
+                            message,
+                            aiModeAvatarImage,
+                            chatPersonalization.aiAvatarSettings,
+                          )
                         : assistantPersona?.avatarImage ?? "";
                 const messageIndex = chatMessageIndexById.get(message.id) ?? -1;
                 const bubbleContent = isEditingMessage ? message.content : segment;
@@ -37248,7 +37522,7 @@ export function App() {
               <textarea
                 id="renge_chat_input"
                 ref={chatInputRef}
-                defaultValue=""
+                defaultValue={chatInputValueRef.current}
                 placeholder="输入消息"
                 rows={3}
                 onChange={(event) => setChatInput(event.target.value)}
@@ -38025,7 +38299,7 @@ export function App() {
                   className={`send-button ${chatGenerationState !== "idle" ? "stop" : ""}`}
                   disabled={
                     chatGenerationState === "idle" &&
-                    ((!chatInputHasContent && chatAttachments.length === 0) ||
+                    ((!chatInputHasContentRef.current && chatAttachments.length === 0) ||
                       chatStatus.status === "loading" ||
                       (chatMode === "roleplay" && !activeSessionRoleplayCard))
                   }
@@ -38095,7 +38369,7 @@ export function App() {
   const studioWindowState = openWindows.find(
     (windowState) => windowState.id === "studio",
   );
-  const studioWindow = studioWindowState ? (
+  const studioWindow = studioWindowState && !studioWindowState.minimized ? (
     <PortfolioDesktopWindow
       title="人格工作室"
       bodyClassName={`app-shell ${

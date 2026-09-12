@@ -232,6 +232,157 @@ test("PATCH app-data preserves stored character cards", async (t) => {
   const storedPayload = await storedResponse.json();
   assert.deepEqual(storedPayload.data.characterCards, characterCards);
   assert.deepEqual(storedPayload.data.chatSessions, [{ id: "session-1" }]);
+
+  const backup = JSON.parse(
+    await readFile(join(dataDir, "app-data.backup-1.json"), "utf8"),
+  );
+  assert.deepEqual(backup.characterCards, characterCards);
+  assert.deepEqual(backup.chatSessions, []);
+});
+
+test("rejects app-data payloads that are not JSON objects", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-app-data-shape-test-"));
+  const controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  t.after(async () => {
+    await new Promise((resolve, reject) => {
+      controller.server.close((error) => (error ? reject(error) : resolve()));
+    });
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const response = await fetch(`${controller.url}/api/app-data`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data: "invalid" }),
+  });
+
+  assert.equal(response.status, 500);
+  assert.match((await response.json()).error, /JSON 对象/);
+});
+
+test("backup rotation preserves an older generation when an intermediate file is missing", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-app-data-gap-test-"));
+  await Promise.all([
+    writeFile(join(dataDir, "app-data.json"), JSON.stringify({ generation: 0 }), "utf8"),
+    writeFile(join(dataDir, "app-data.backup-1.json"), JSON.stringify({ generation: 1 }), "utf8"),
+    writeFile(join(dataDir, "app-data.backup-3.json"), JSON.stringify({ generation: 3 }), "utf8"),
+  ]);
+  const controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  t.after(async () => {
+    await new Promise((resolve, reject) => {
+      controller.server.close((error) => (error ? reject(error) : resolve()));
+    });
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const response = await fetch(`${controller.url}/api/app-data`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data: { generation: "new" } }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(
+    JSON.parse(await readFile(join(dataDir, "app-data.backup-3.json"), "utf8")),
+    { generation: 3 },
+  );
+});
+
+test("does not rotate a malformed primary file into valid backups", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-app-data-corrupt-test-"));
+  await Promise.all([
+    writeFile(join(dataDir, "app-data.json"), "{truncated", "utf8"),
+    writeFile(join(dataDir, "app-data.backup-1.json"), JSON.stringify({ generation: 1 }), "utf8"),
+    writeFile(join(dataDir, "app-data.backup-2.json"), JSON.stringify({ generation: 2 }), "utf8"),
+    writeFile(join(dataDir, "app-data.backup-3.json"), JSON.stringify({ generation: 3 }), "utf8"),
+  ]);
+  const controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  t.after(async () => {
+    await new Promise((resolve, reject) => {
+      controller.server.close((error) => (error ? reject(error) : resolve()));
+    });
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const response = await fetch(`${controller.url}/api/app-data`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data: { generation: "new" } }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(
+    JSON.parse(await readFile(join(dataDir, "app-data.backup-1.json"), "utf8")),
+    { generation: 1 },
+  );
+  assert.deepEqual(
+    JSON.parse(await readFile(join(dataDir, "app-data.backup-3.json"), "utf8")),
+    { generation: 3 },
+  );
+});
+
+test("does not rotate a malformed backup over an older valid generation", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-app-data-corrupt-backup-test-"));
+  await Promise.all([
+    writeFile(join(dataDir, "app-data.json"), JSON.stringify({ generation: 0 }), "utf8"),
+    writeFile(join(dataDir, "app-data.backup-1.json"), JSON.stringify({ generation: 1 }), "utf8"),
+    writeFile(join(dataDir, "app-data.backup-2.json"), "{truncated", "utf8"),
+    writeFile(join(dataDir, "app-data.backup-3.json"), JSON.stringify({ generation: 3 }), "utf8"),
+  ]);
+  const controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  t.after(async () => {
+    await new Promise((resolve, reject) => {
+      controller.server.close((error) => (error ? reject(error) : resolve()));
+    });
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const response = await fetch(`${controller.url}/api/app-data`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data: { generation: "new" } }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(
+    JSON.parse(await readFile(join(dataDir, "app-data.backup-3.json"), "utf8")),
+    { generation: 3 },
+  );
+  assert.deepEqual(
+    JSON.parse(await readFile(join(dataDir, "app-data.backup-2.json"), "utf8")),
+    { generation: 1 },
+  );
+});
+
+test("revalidates a primary file changed outside the server before backup", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-app-data-revalidation-test-"));
+  const dataFile = join(dataDir, "app-data.json");
+  const controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  t.after(async () => {
+    await new Promise((resolve, reject) => {
+      controller.server.close((error) => (error ? reject(error) : resolve()));
+    });
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const firstResponse = await fetch(`${controller.url}/api/app-data`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data: { generation: "first" } }),
+  });
+  assert.equal(firstResponse.status, 200);
+  await writeFile(dataFile, "{truncated-external-change", "utf8");
+
+  const secondResponse = await fetch(`${controller.url}/api/app-data`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data: { generation: "second" } }),
+  });
+  assert.equal(secondResponse.status, 200);
+  assert.deepEqual(JSON.parse(await readFile(dataFile, "utf8")), {
+    generation: "second",
+  });
+  await assert.rejects(
+    readFile(join(dataDir, "app-data.backup-1.json"), "utf8"),
+    (error) => error?.code === "ENOENT",
+  );
 });
 
 test("serves temporary files on the isolated preview origin", async (t) => {

@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { createReadStream, createWriteStream } from "node:fs";
-import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { homedir, networkInterfaces, tmpdir } from "node:os";
@@ -26,6 +26,7 @@ const windowsInternetSettingsKey = "HKCU\\Software\\Microsoft\\Windows\\CurrentV
 const appDataFileName = "app-data.json";
 const appDataBackupCount = 3;
 const appDataWriteQueues = new Map();
+const validatedAppDataFiles = new Map();
 const tavernModuleProxyVersion = "2";
 const tavernModuleProxyCache = new Map();
 
@@ -463,40 +464,94 @@ function getAppDataBackupPath(dataFilePath, index) {
 }
 
 async function readAppDataFile(dataFilePath) {
-  return parseAppDataContent(await readFile(dataFilePath, "utf8"));
+  const parsed = parseAppDataContent(await readFile(dataFilePath, "utf8"));
+  validatedAppDataFiles.set(dataFilePath, await getAppDataFileSignature(dataFilePath));
+  return parsed;
 }
 
-async function writeAppDataFileAtomically(dataFilePath, payload) {
+async function getAppDataFileSignature(dataFilePath) {
+  const fileStat = await stat(dataFilePath);
+  return `${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`;
+}
+
+async function ensureAppDataFileValidated(dataFilePath) {
+  const signature = await getAppDataFileSignature(dataFilePath);
+  if (validatedAppDataFiles.get(dataFilePath) === signature) return signature;
+  await readAppDataFile(dataFilePath);
+  return validatedAppDataFiles.get(dataFilePath);
+}
+
+function serializeAppData(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("应用数据必须是 JSON 对象");
+  }
   const serialized = JSON.stringify(payload, null, 2);
-  parseAppDataContent(serialized);
+  if (!serialized) throw new Error("应用数据无法序列化");
+  return serialized;
+}
+
+async function writeSerializedAppDataAtomically(dataFilePath, serialized) {
   await mkdir(dirname(dataFilePath), { recursive: true });
   const temporaryPath = `${dataFilePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   try {
     await writeFile(temporaryPath, serialized, "utf8");
-    await readAppDataFile(temporaryPath);
     await rename(temporaryPath, dataFilePath);
+    validatedAppDataFiles.set(dataFilePath, await getAppDataFileSignature(dataFilePath));
+  } finally {
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+}
+
+async function writeAppDataFileAtomically(dataFilePath, payload) {
+  await writeSerializedAppDataAtomically(dataFilePath, serializeAppData(payload));
+}
+
+async function copyAppDataFileAtomically(sourcePath, destinationPath) {
+  await mkdir(dirname(destinationPath), { recursive: true });
+  const temporaryPath = `${destinationPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  try {
+    await copyFile(sourcePath, temporaryPath);
+    await rm(destinationPath, { force: true });
+    await rename(temporaryPath, destinationPath);
+    validatedAppDataFiles.set(
+      destinationPath,
+      await getAppDataFileSignature(destinationPath),
+    );
   } finally {
     await rm(temporaryPath, { force: true }).catch(() => undefined);
   }
 }
 
 async function rotateAppDataBackups(dataFilePath) {
+  try {
+    await ensureAppDataFileValidated(dataFilePath);
+  } catch {
+    return;
+  }
   for (let index = appDataBackupCount; index >= 2; index -= 1) {
+    const sourcePath = getAppDataBackupPath(dataFilePath, index - 1);
+    const destinationPath = getAppDataBackupPath(dataFilePath, index);
     try {
-      const previous = await readAppDataFile(getAppDataBackupPath(dataFilePath, index - 1));
-      await writeAppDataFileAtomically(getAppDataBackupPath(dataFilePath, index), previous);
+      await ensureAppDataFileValidated(sourcePath);
+      await rm(destinationPath, { force: true });
+      await rename(sourcePath, destinationPath);
+      validatedAppDataFiles.delete(sourcePath);
+      validatedAppDataFiles.set(
+        destinationPath,
+        await getAppDataFileSignature(destinationPath),
+      );
     } catch (error) {
+      validatedAppDataFiles.delete(sourcePath);
       if (!isMissingFileError(error)) {
-        // A broken backup is skipped so it cannot replace an older valid generation.
+        // Invalid backups cannot replace an older valid recovery generation.
       }
     }
   }
   try {
-    const current = await readAppDataFile(dataFilePath);
-    await writeAppDataFileAtomically(getAppDataBackupPath(dataFilePath, 1), current);
+    await copyAppDataFileAtomically(dataFilePath, getAppDataBackupPath(dataFilePath, 1));
   } catch (error) {
     if (!isMissingFileError(error)) {
-      // Never copy a truncated or malformed primary file into the backup chain.
+      // A failed backup must not prevent the new primary snapshot from being saved.
     }
   }
 }
@@ -528,11 +583,12 @@ async function writeAppData(dataFilePath, payloadOrUpdater) {
   const operation = previousWrite
     .catch(() => undefined)
     .then(async () => {
-      await rotateAppDataBackups(dataFilePath);
       const payload = typeof payloadOrUpdater === "function"
         ? await payloadOrUpdater(await readAppData(dataFilePath))
         : payloadOrUpdater;
-      await writeAppDataFileAtomically(dataFilePath, payload);
+      const serialized = serializeAppData(payload);
+      await rotateAppDataBackups(dataFilePath);
+      await writeSerializedAppDataAtomically(dataFilePath, serialized);
     });
   appDataWriteQueues.set(dataFilePath, operation);
   try {
@@ -567,6 +623,7 @@ async function clearAppData(dataFilePath) {
       await Promise.all(
         ownedFiles.map((filePath) => rm(filePath, { force: true })),
       );
+      ownedFiles.forEach((filePath) => validatedAppDataFiles.delete(filePath));
       await Promise.all(
         [".pi", "extensions", "generated-images", "session-images", "skills"].map((name) =>
           rm(join(dataDirectory, name), { recursive: true, force: true }),

@@ -2,6 +2,7 @@ export type AiAvatarImage = {
   id: string;
   dataUrl: string;
   updatedAt: string;
+  archived?: boolean;
 };
 
 export type AiAvatarModelProfile = {
@@ -14,6 +15,13 @@ export type AiAvatarModelProfile = {
 export type AiAvatarSettings = {
   images: AiAvatarImage[];
   modelProfiles: AiAvatarModelProfile[];
+};
+
+export type StoredAiAvatarIdentity = {
+  modelId: string;
+  modelName: string;
+  avatarId?: string;
+  avatarImage?: string;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -124,18 +132,23 @@ export function normalizeAiAvatarSettings(rawValue: unknown): AiAvatarSettings {
     const dataUrl = getImageDataUrl(value);
     if (!dataUrl) return "";
     const existingId = imageIdBySource.get(dataUrl);
-    if (existingId) return existingId;
+    const explicitId = getString(isRecord(value) ? value.id : "");
+    // Explicit IDs can already be referenced by historical messages. Preserve
+    // both records even when their image bytes happen to be identical.
+    if (existingId && !explicitId) return existingId;
 
     const imageId = getUniqueId(
-      getString(isRecord(value) ? value.id : "") || fallbackId,
+      explicitId || fallbackId,
       usedImageIds,
     );
+    const archived = isRecord(value) && value.archived === true;
     images.push({
       id: imageId,
       dataUrl,
       updatedAt: normalizeTimestamp(isRecord(value) ? value.updatedAt : undefined),
+      ...(archived ? { archived: true } : {}),
     });
-    imageIds.add(imageId);
+    if (!archived) imageIds.add(imageId);
     imageIdBySource.set(dataUrl, imageId);
     return imageId;
   };
@@ -209,6 +222,14 @@ export function getAiModeAvatarImage(
   settings: AiAvatarSettings,
   modelId: string,
 ) {
+  const avatarId = getAiModeAvatarId(settings, modelId);
+  return settings.images.find((image) => image.id === avatarId)?.dataUrl ?? "";
+}
+
+export function getAiModeAvatarId(
+  settings: AiAvatarSettings,
+  modelId: string,
+) {
   const normalizedModelId = modelId.trim().toLowerCase();
   if (!normalizedModelId) return "";
 
@@ -219,5 +240,79 @@ export function getAiModeAvatarImage(
   );
   if (!profile) return "";
 
-  return settings.images.find((image) => image.id === profile.avatarId)?.dataUrl ?? "";
+  return settings.images.some(
+    (image) => image.id === profile.avatarId && !image.archived,
+  )
+    ? profile.avatarId
+    : "";
+}
+
+export function getSelectableAiAvatarImages(settings: AiAvatarSettings) {
+  return settings.images.filter((image) => !image.archived);
+}
+
+export function pruneArchivedAiAvatarImages(
+  settings: AiAvatarSettings,
+  referencedImageIds: ReadonlySet<string>,
+) {
+  if (!settings.images.some((image) => image.archived)) return settings;
+  const images = settings.images.filter(
+    (image) => !image.archived || referencedImageIds.has(image.id),
+  );
+  return images.length === settings.images.length ? settings : { ...settings, images };
+}
+
+export function compactAiAvatarMessageIdentities<
+  Message extends { aiIdentity?: StoredAiAvatarIdentity },
+  Session extends { messages: Message[] },
+>(sessions: Session[], settings: AiAvatarSettings) {
+  let images = settings.images;
+  let settingsChanged = false;
+  let sessionsChanged = false;
+  const imageIdBySource = new Map(images.map((image) => [image.dataUrl, image.id]));
+  const validImageIds = new Set(images.map((image) => image.id));
+
+  const nextSessions = sessions.map((session) => {
+    let messagesChanged = false;
+    const messages = session.messages.map((message) => {
+      const identity = message.aiIdentity;
+      if (!identity) return message;
+
+      let avatarId = identity.avatarId && validImageIds.has(identity.avatarId)
+        ? identity.avatarId
+        : "";
+      if (!avatarId && identity.avatarImage) {
+        avatarId = imageIdBySource.get(identity.avatarImage) ?? "";
+        if (!avatarId) {
+          const image = createAiAvatarImage(identity.avatarImage);
+          images = [...images, image];
+          imageIdBySource.set(image.dataUrl, image.id);
+          validImageIds.add(image.id);
+          avatarId = image.id;
+          settingsChanged = true;
+        }
+      }
+
+      if (identity.avatarImage === undefined && identity.avatarId === avatarId) {
+        return message;
+      }
+      messagesChanged = true;
+      return {
+        ...message,
+        aiIdentity: {
+          modelId: identity.modelId,
+          modelName: identity.modelName,
+          ...(avatarId ? { avatarId } : {}),
+        },
+      } as Message;
+    });
+    if (!messagesChanged) return session;
+    sessionsChanged = true;
+    return { ...session, messages };
+  });
+
+  return {
+    sessions: sessionsChanged ? nextSessions : sessions,
+    settings: settingsChanged ? { ...settings, images } : settings,
+  };
 }
