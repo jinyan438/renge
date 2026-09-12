@@ -1245,6 +1245,7 @@ type SidebarTerminalReadResult = Omit<SidebarTerminalSession, "buffer"> & {
 type RengeDesktopApi = {
   isElectron: boolean;
   clearAppStorage?(): Promise<{ ok: boolean }>;
+  showTextContextMenu?(options: { hasSelection: boolean }): Promise<{ ok: boolean }>;
   loadDesktopProjectPositions?(): Promise<unknown>;
   saveDesktopProjectPositions?(positions: unknown): Promise<{ ok: boolean }>;
   listSidebarFiles(options: {
@@ -37464,6 +37465,16 @@ export function App() {
                 rows={3}
                 onChange={(event) => setChatInput(event.target.value)}
                 onBlur={handleChatInputBlur}
+                onContextMenu={(event) => {
+                  const showTextContextMenu = window.rengeDesktop?.showTextContextMenu;
+                  if (!showTextContextMenu) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const input = event.currentTarget;
+                  void showTextContextMenu({
+                    hasSelection: input.selectionStart !== input.selectionEnd,
+                  }).catch((error) => console.error("打开文本右键菜单失败", error));
+                }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();

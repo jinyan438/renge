@@ -55,6 +55,7 @@ import {
 } from "./sidebar-files.mjs";
 import { createSidebarTerminalManager } from "./sidebar-terminal.mjs";
 import { shouldDisableHardwareAcceleration } from "./hardware-acceleration.mjs";
+import { createTextContextMenuTemplate } from "./text-context-menu.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const appIconPath = join(
@@ -1123,6 +1124,20 @@ function registerIpcHandlers() {
       origin: serverController.url,
       storages: ["localstorage", "indexdb", "cachestorage", "serviceworkers"],
     });
+    return { ok: true };
+  });
+
+  ipcMain.handle("text-context-menu:show", (event, options = {}) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
+      throw new Error("文本菜单操作来源无效");
+    }
+    const menu = Menu.buildFromTemplate(
+      createTextContextMenuTemplate({
+        hasSelection: Boolean(options.hasSelection),
+        hasClipboardText: Boolean(clipboard.readText()),
+      }),
+    );
+    menu.popup({ window: mainWindow });
     return { ok: true };
   });
 

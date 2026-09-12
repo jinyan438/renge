@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("rengeDesktop", {
   isElectron: true,
   clearAppStorage: () => ipcRenderer.invoke("app-data:clear-storage"),
+  showTextContextMenu: (options) => ipcRenderer.invoke("text-context-menu:show", options),
   loadDesktopProjectPositions: () => ipcRenderer.invoke("desktop-layout:load"),
   saveDesktopProjectPositions: (positions) => ipcRenderer.invoke("desktop-layout:save", positions),
   listSidebarFiles: (options) => ipcRenderer.invoke("sidebar-files:list", options),
