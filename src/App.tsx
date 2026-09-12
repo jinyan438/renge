@@ -277,6 +277,14 @@ import {
 } from "./chatToolProgressUtils";
 import { createPiStreamingTimeline } from "./piStreamingTimeline";
 import {
+  chatBubbleStatusLabels,
+  getChatBubbleStatus,
+  getChatCompletionStatus,
+  getToolBubbleStatus,
+  normalizeChatOutputStatus,
+  type ChatBubbleStatus,
+} from "./chatBubbleStatusUtils";
+import {
   createPiStreamEventQueue,
   splitLargePiToolCallDelta,
 } from "./piStreamEventQueue";
@@ -685,6 +693,7 @@ type ChatMessage = {
   role: ChatRole;
   content: string;
   reasoning?: string;
+  outputStatus?: ChatBubbleStatus;
   renderAsPlainText?: boolean;
   createdAt: string;
   sender?: ChatSenderIdentity;
@@ -2581,6 +2590,10 @@ function normalizeChatMessage(
     : [];
 
   const normalizedSender = normalizeChatSenderIdentity(rawMessage.sender);
+  const outputStatus = normalizeChatOutputStatus(
+    rawMessage.outputStatus ?? (rawMessage.renderAsPlainText === true ? "running" : undefined),
+    restoreRunningAsInterrupted,
+  );
   const normalizedAiIdentity =
     role === "assistant" ? normalizeAiChatMessageIdentity(rawMessage.aiIdentity) : undefined;
   const choiceRequest = normalizeChatChoiceRequest(rawMessage.choiceRequest);
@@ -2657,6 +2670,7 @@ function normalizeChatMessage(
       ? { reasoning: rawMessage.reasoning }
       : {}),
     ...(rawMessage.renderAsPlainText === true ? { renderAsPlainText: true } : {}),
+    ...(outputStatus ? { outputStatus } : {}),
     createdAt:
       typeof rawMessage.createdAt === "string"
         ? rawMessage.createdAt
@@ -10906,6 +10920,7 @@ function createStreamingAssistantMessage(
       role: "assistant",
       content: "",
       renderAsPlainText: true,
+      outputStatus: "running",
       ...(sender ? { sender } : {}),
       createdAt: new Date().toISOString(),
     },
@@ -10923,7 +10938,7 @@ function createStreamingAssistantMessage(
     async finish() {
       streamUpdates.flush();
     },
-    complete(content: string, reasoning = "") {
+    complete(content: string, reasoning = "", outputStatus: ChatBubbleStatus = "complete") {
       streamUpdates.cancel();
       if (!hasAssistantTimelinePayload(content, reasoning)) {
         setChatMessages((current) => current.filter((message) => message.id !== messageId));
@@ -10936,6 +10951,7 @@ function createStreamingAssistantMessage(
                 ...message,
                 content,
                 renderAsPlainText: false,
+                outputStatus,
                 ...(reasoning.trim() ? { reasoning } : {}),
               }
             : message,
@@ -10945,6 +10961,11 @@ function createStreamingAssistantMessage(
     },
     cancel() {
       streamUpdates.cancel();
+      setChatMessages((current) => updateMessage(current, (message) =>
+        message.outputStatus === "running"
+          ? { ...message, outputStatus: signal?.aborted ? "incomplete" : "error" }
+          : message,
+      ));
     },
     remove,
   };
@@ -11063,7 +11084,11 @@ async function readChatStream(
   };
 
   const applyStreamPayload = (data: string) => {
-    if (!data || data.trim() === "[DONE]") return true;
+    if (!data) return true;
+    if (data.trim() === "[DONE]") {
+      finishReason ||= "stop";
+      return true;
+    }
 
     let payload: unknown;
     try {
@@ -13941,6 +13966,18 @@ export function App() {
     messageId?: string,
   ) => {
     if (activeChatAbortControllerRef.current !== controller) return;
+    commitChatMessages((current) => current.map((message) => {
+      if (message.outputStatus === "running") {
+        return { ...message, outputStatus: controller.signal.aborted ? "incomplete" : "error" };
+      }
+      if (message.role === "assistant" && (
+        message.toolVisualization?.status === "running" ||
+        (!message.toolVisualization && parseToolProgressContent(message.content)?.variant === "action")
+      )) {
+        return { ...message, outputStatus: "incomplete" };
+      }
+      return message;
+    }));
     activeChatAbortControllerRef.current = null;
     setChatGenerationState("idle");
     const messageIndex = messageId
@@ -23388,6 +23425,15 @@ export function App() {
     );
   };
 
+  const renderChatBubbleDot = (status: ChatBubbleStatus) => (
+    <span
+      className={`chat-bubble-dot ${status}`}
+      role="img"
+      aria-label={chatBubbleStatusLabels[status]}
+      title={chatBubbleStatusLabels[status]}
+    />
+  );
+
   const renderToolRunGroup = (
     item: Extract<RenderedChatItem, { kind: "toolGroup" }>,
     messageId: string,
@@ -23426,28 +23472,31 @@ export function App() {
       : item.completed ? "工具执行已结束" : "正在执行工具";
 
     return (
-      <details className={`chat-tool-run ${hasError ? "error" : ""}`} key={messageId} open={autoOpen || undefined}>
-        <summary className="chat-tool-run-header">
-          <span className="chat-tool-run-icon">
-            {hasError ? <X size={23} /> : <Wrench size={23} />}
-          </span>
-          <span className="chat-tool-heading"><strong>{statusLabel}</strong><span className="chat-tool-description">{description}</span></span>
-          <span className={`chat-tool-run-path ${firstPath ? "" : "empty"}`} title={firstPath}>
-            {firstPath && <><FileCode2 size={18} /><span>{firstPath}</span></>}
-          </span>
-          <span className="chat-tool-run-badge">{stepCount} 步<ChevronDown className="chat-tool-run-chevron" size={16} /></span>
-        </summary>
-        <div className="chat-tool-run-body">
-          {visualizations.length > 0
-            ? visualizations.map((visualization, index) =>
-                renderPiToolVisualization(visualization, `${messageId}-pi-tool-${index}`),
-              )
-            : item.blocks.map((block, index) =>
-                renderToolProgressBlock(block, `${messageId}-tool-run-${index}`),
-              )}
-          {groupedAttachments.length > 0 && renderChatAttachments(groupedAttachments)}
-        </div>
-      </details>
+      <div className="chat-bubble-row" key={messageId}>
+        {renderChatBubbleDot(getToolBubbleStatus(item, chatGenerationState !== "idle"))}
+        <details className={`chat-tool-run ${hasError ? "error" : ""}`} open={autoOpen || undefined}>
+          <summary className="chat-tool-run-header">
+            <span className="chat-tool-run-icon">
+              {hasError ? <X size={23} /> : <Wrench size={23} />}
+            </span>
+            <span className="chat-tool-heading"><strong>{statusLabel}</strong><span className="chat-tool-description">{description}</span></span>
+            <span className={`chat-tool-run-path ${firstPath ? "" : "empty"}`} title={firstPath}>
+              {firstPath && <><FileCode2 size={18} /><span>{firstPath}</span></>}
+            </span>
+            <span className="chat-tool-run-badge">{stepCount} 步<ChevronDown className="chat-tool-run-chevron" size={16} /></span>
+          </summary>
+          <div className="chat-tool-run-body">
+            {visualizations.length > 0
+              ? visualizations.map((visualization, index) =>
+                  renderPiToolVisualization(visualization, `${messageId}-pi-tool-${index}`),
+                )
+              : item.blocks.map((block, index) =>
+                  renderToolProgressBlock(block, `${messageId}-tool-run-${index}`),
+                )}
+            {groupedAttachments.length > 0 && renderChatAttachments(groupedAttachments)}
+          </div>
+        </details>
+      </div>
     );
   };
 
@@ -24526,6 +24575,7 @@ export function App() {
     activeAiMessageIdentityRef.current = aiMessageIdentity ?? null;
     const abortSignal = abortController.signal;
     let assistantMessageId = "";
+    let assistantOutputStatus: ChatBubbleStatus = "complete";
     let streamingAssistantInserted = false;
     let piTimelineHasMultipleTextSegments = false;
     let streamingMessageUpdates: ReturnType<typeof createChatStreamUpdateBatcher> | null = null;
@@ -24885,6 +24935,11 @@ export function App() {
         dialogueRewriteTargetMessage?.id ??
         continuationTargetMessage?.id ??
         crypto.randomUUID();
+      if (localRewriteTargetMessage || dialogueRewriteTargetMessage) {
+        commitChatMessages((current) => current.map((message) =>
+          message.id === assistantMessageId ? { ...message, outputStatus: "running" } : message,
+        ));
+      }
       const requestChatCompletion = async (messages: ChatApiMessage[], options: {
         includeTools: boolean;
         stream: boolean;
@@ -25305,6 +25360,7 @@ export function App() {
                   }],
                   output_text: streamResult.content,
                 };
+            assistantOutputStatus = getChatCompletionStatus(streamResult.finishReason);
             return {
               payload,
               content: streamResult.content,
@@ -25329,6 +25385,7 @@ export function App() {
             options.onReasoningDelta ?? (() => undefined),
             abortSignal,
           );
+          assistantOutputStatus = getChatCompletionStatus(streamResult.finishReason);
           return {
             payload: null,
             content: streamResult.content,
@@ -25354,6 +25411,7 @@ export function App() {
           throw new Error(errorMessage ? `请求失败：${response.status} ${errorMessage}` : `请求失败：${response.status}`);
         }
 
+        assistantOutputStatus = getChatCompletionStatus(payload.choices?.[0]?.finish_reason ?? "stop");
         return {
           payload,
           content: "",
@@ -25725,7 +25783,7 @@ export function App() {
               handleSubAgentPiEvent,
             );
             await subStreamingTimeline.finish();
-            subStreamingTimeline.complete(streamResult.content, streamResult.reasoning);
+            subStreamingTimeline.complete(streamResult.content, streamResult.reasoning, getChatCompletionStatus(streamResult.finishReason));
           } catch (error) {
             subStreamingTimeline.cancel();
             throw error;
@@ -25968,7 +26026,7 @@ export function App() {
         commitChatMessages((current) =>
           current.map((message) =>
             message.id === continuationTargetMessage.id
-              ? { ...message, renderAsPlainText: true }
+              ? { ...message, renderAsPlainText: true, outputStatus: "running" }
               : message,
           ),
         );
@@ -26140,7 +26198,7 @@ export function App() {
             assistantChoiceRequest = presentedChoice.choiceRequest;
             assistantContent = streamResult.content.trim() || presentedChoice.prompt;
           }
-          streamingTimeline.complete(assistantContent, assistantReasoning);
+          streamingTimeline.complete(assistantContent, assistantReasoning, getChatCompletionStatus(streamResult.finishReason));
           if (streamingTimeline.segmentCount > 1) {
             piTimelineHasMultipleTextSegments = true;
           }
@@ -26273,7 +26331,7 @@ export function App() {
             assistantContent =
               assistantMessageContent || presentedChoice.prompt;
             assistantReasoning = assistantMessageReasoning;
-            streamingRound?.complete(assistantContent, assistantReasoning);
+            streamingRound?.complete(assistantContent, assistantReasoning, getChatCompletionStatus(completionResult.finishReason));
             break;
           }
           if (hasHiddenAssistantContentTool) {
@@ -26299,7 +26357,7 @@ export function App() {
                   assistantSender,
                 );
               } else {
-                streamingRound.complete("", assistantMessageReasoning);
+                streamingRound.complete("", assistantMessageReasoning, getChatCompletionStatus(completionResult.finishReason));
               }
               const partialTool = completionResult.incompleteToolCalls[0];
               apiMessages.push({
@@ -26367,7 +26425,7 @@ export function App() {
                   assistantSender,
                 );
               } else {
-                streamingRound.complete("", assistantMessageReasoning);
+                streamingRound.complete("", assistantMessageReasoning, getChatCompletionStatus(completionResult.finishReason));
               }
               appendReasoningOnlyToolRetryApiMessages(
                 apiMessages,
@@ -26400,7 +26458,7 @@ export function App() {
                   assistantSender,
                 );
               } else {
-                streamingRound.complete(assistantContent, assistantReasoning);
+                streamingRound.complete(assistantContent, assistantReasoning, getChatCompletionStatus(completionResult.finishReason));
               }
               apiMessages.push({
                 role: "assistant",
@@ -26421,7 +26479,7 @@ export function App() {
               continue;
             }
 
-            streamingRound?.complete(assistantContent, assistantReasoning);
+            streamingRound?.complete(assistantContent, assistantReasoning, getChatCompletionStatus(completionResult.finishReason));
             break;
           }
 
@@ -26438,7 +26496,7 @@ export function App() {
                 assistantSender,
               );
             } else {
-              streamingRound.complete(assistantMessageContent, assistantMessageReasoning);
+              streamingRound.complete(assistantMessageContent, assistantMessageReasoning, getChatCompletionStatus(completionResult.finishReason));
             }
           } else {
             streamingRound?.remove();
@@ -26668,7 +26726,7 @@ export function App() {
           getChatApiMessageReasoning(summaryMessage) ||
           summaryResult.reasoning ||
           assistantReasoning;
-        summaryStreamingRound?.complete(assistantContent, assistantReasoning);
+        summaryStreamingRound?.complete(assistantContent, assistantReasoning, getChatCompletionStatus(summaryResult.finishReason));
         if (assistantContent) {
           const summaryTemplateResult = await applyPromptTemplateToRenderedMessage(
             assistantContent,
@@ -26741,6 +26799,7 @@ export function App() {
           id: assistantMessageId,
           role: "assistant",
           content: assistantContent,
+          ...(!streamingAssistantInserted ? { outputStatus: assistantOutputStatus } : {}),
           ...(Object.keys(assistantMessageVariables).length > 0
             ? { variables: assistantMessageVariables }
             : {}),
@@ -26755,6 +26814,13 @@ export function App() {
             : {}),
           createdAt: new Date().toISOString(),
         };
+      }
+
+      if (continuationTargetMessage || dialogueRewriteTargetMessage || localRewriteTargetMessage) {
+        finalAssistantMessage.outputStatus =
+          continuationReachedLimit || dialogueRewriteReachedLimit || localRewriteReachedLimit
+            ? "incomplete"
+            : "complete";
       }
 
       if (streamingAssistantInserted) {
@@ -26909,6 +26975,7 @@ export function App() {
             id: crypto.randomUUID(),
             role: "assistant",
             content: `调用失败：${message}`,
+            outputStatus: "error",
             ...(assistantSender ? { sender: assistantSender } : {}),
             createdAt: new Date().toISOString(),
           },
@@ -27919,6 +27986,7 @@ export function App() {
     let abortController: AbortController | null = null;
     let abortSignal: AbortSignal | undefined;
     let assistantMessageId = "";
+    let assistantOutputStatus: ChatBubbleStatus = "complete";
     let streamingAssistantInserted = false;
     let piTimelineHasMultipleTextSegments = false;
     let nextMessages = initialMessages;
@@ -28551,6 +28619,7 @@ export function App() {
                   }],
                   output_text: streamResult.content,
                 };
+            assistantOutputStatus = getChatCompletionStatus(streamResult.finishReason);
             return {
               payload,
               content: streamResult.content,
@@ -28575,6 +28644,7 @@ export function App() {
             options.onReasoningDelta ?? (() => undefined),
             abortSignal,
           );
+          assistantOutputStatus = getChatCompletionStatus(streamResult.finishReason);
           return {
             payload: null,
             content: streamResult.content,
@@ -28600,6 +28670,7 @@ export function App() {
           throw new Error(errorMessage ? `请求失败：${response.status} ${errorMessage}` : `请求失败：${response.status}`);
         }
 
+        assistantOutputStatus = getChatCompletionStatus(payload.choices?.[0]?.finish_reason ?? "stop");
         return {
           payload,
           content: "",
@@ -28697,7 +28768,7 @@ export function App() {
             assistantChoiceRequest = presentedChoice.choiceRequest;
             assistantContent = streamResult.content.trim() || presentedChoice.prompt;
           }
-          streamingTimeline.complete(assistantContent, assistantReasoning);
+          streamingTimeline.complete(assistantContent, assistantReasoning, getChatCompletionStatus(streamResult.finishReason));
           if (streamingTimeline.segmentCount > 1) {
             piTimelineHasMultipleTextSegments = true;
           }
@@ -28785,7 +28856,7 @@ export function App() {
             assistantContent =
               assistantMessageContent || presentedChoice.prompt;
             assistantReasoning = assistantMessageReasoning;
-            streamingRound?.complete(assistantContent, assistantReasoning);
+            streamingRound?.complete(assistantContent, assistantReasoning, getChatCompletionStatus(completionResult.finishReason));
             break;
           }
           if (hasHiddenAssistantContentTool) {
@@ -28802,7 +28873,7 @@ export function App() {
               if (incompleteToolRetryCount >= 2) {
                 throw new Error("工具调用参数连续被输出长度截断，已停止重复重做；请减少单次文件内容或继续当前任务。");
               }
-              streamingRound?.complete("", assistantMessageReasoning);
+              streamingRound?.complete("", assistantMessageReasoning, getChatCompletionStatus(completionResult.finishReason));
               const partialTool = completionResult.incompleteToolCalls[0];
               apiMessages.push({
                 role: "assistant",
@@ -28868,7 +28939,7 @@ export function App() {
                   assistantMessageReasoning,
                 );
               } else {
-                streamingRound.complete("", assistantMessageReasoning);
+                streamingRound.complete("", assistantMessageReasoning, getChatCompletionStatus(completionResult.finishReason));
               }
               appendReasoningOnlyToolRetryApiMessages(
                 apiMessages,
@@ -28900,7 +28971,7 @@ export function App() {
                   assistantReasoning,
                 );
               } else {
-                streamingRound.complete(assistantContent, assistantReasoning);
+                streamingRound.complete(assistantContent, assistantReasoning, getChatCompletionStatus(completionResult.finishReason));
               }
               apiMessages.push({
                 role: "assistant",
@@ -28921,7 +28992,7 @@ export function App() {
               continue;
             }
 
-            streamingRound?.complete(assistantContent, assistantReasoning);
+            streamingRound?.complete(assistantContent, assistantReasoning, getChatCompletionStatus(completionResult.finishReason));
             break;
           }
 
@@ -28937,7 +29008,7 @@ export function App() {
                 assistantMessageReasoning,
               );
             } else {
-              streamingRound.complete(assistantMessageContent, assistantMessageReasoning);
+              streamingRound.complete(assistantMessageContent, assistantMessageReasoning, getChatCompletionStatus(completionResult.finishReason));
             }
           } else {
             streamingRound?.remove();
@@ -29119,6 +29190,7 @@ export function App() {
               id: assistantMessageId,
               role: "assistant",
               content: assistantContent,
+              outputStatus: assistantOutputStatus,
               ...(Object.keys(assistantMessageVariables).length > 0
                 ? { variables: assistantMessageVariables }
                 : {}),
@@ -29186,6 +29258,7 @@ export function App() {
           id: crypto.randomUUID(),
           role: "assistant",
           content: `调用失败：${message}`,
+          outputStatus: "error",
           createdAt: new Date().toISOString(),
         },
       ]);
@@ -37125,220 +37198,227 @@ export function App() {
                       </div>
                       <div className="chat-message-bubble-stack">
                         {renderChatMessageHeader(message, messageName)}
-                        <div
-                          className={`chat-bubble ${
-                            isEditingMessage
-                              ? isRenderedEditingMessage
-                                ? "rendered-editing"
-                                : "editing"
-                              : ""
-                          } ${
-                            showGreetingSwitch ? "roleplay-greeting-bubble" : ""
-                          } ${
-                            containsRenderedHtml ? "html-preview-bubble" : ""
-                          }`}
-                          style={
-                            isEditingMessage && !isRenderedEditingMessage
-                              ? undefined
-                              : message.role === "user"
-                                ? CHAT_USER_BUBBLE_OPACITY_STYLE
-                                : CHAT_ASSISTANT_BUBBLE_OPACITY_STYLE
-                          }
-                          onContextMenu={(event) =>
-                            handleChatBubbleContextMenu(message.id, event)
-                          }
-                        >
+                        <div className="chat-bubble-row">
+                          {(message.role === "assistant" || tavernSystemMessage) &&
+                            renderChatBubbleDot(getChatBubbleStatus(message, isLastMessageSegment))}
                           <div
-                            aria-hidden="true"
-                            className="chat-bubble-context-edges"
-                            onContextMenu={(event) => openChatMessageMenu(message.id, event)}
+                            className={`chat-bubble ${
+                              isEditingMessage
+                                ? isRenderedEditingMessage
+                                  ? "rendered-editing"
+                                  : "editing"
+                                : ""
+                            } ${
+                              showGreetingSwitch ? "roleplay-greeting-bubble" : ""
+                            } ${
+                              containsRenderedHtml ? "html-preview-bubble" : ""
+                            }`}
+                            style={
+                              isEditingMessage && !isRenderedEditingMessage
+                                ? undefined
+                                : message.role === "user"
+                                  ? CHAT_USER_BUBBLE_OPACITY_STYLE
+                                  : CHAT_ASSISTANT_BUBBLE_OPACITY_STYLE
+                            }
+                            onContextMenu={(event) =>
+                              handleChatBubbleContextMenu(message.id, event)
+                            }
                           >
-                            <span className="chat-bubble-context-edge top" />
-                            <span className="chat-bubble-context-edge right" />
-                            <span className="chat-bubble-context-edge bottom" />
-                            <span className="chat-bubble-context-edge left" />
-                          </div>
-                          {isEditingMessage ? (
                             <div
-                              className={`chat-inline-editor ${
-                                isRenderedEditingMessage ? "rendered" : ""
-                              }`}
+                              aria-hidden="true"
+                              className="chat-bubble-context-edges"
+                              onContextMenu={(event) => openChatMessageMenu(message.id, event)}
                             >
-                              {isRenderedEditingMessage ? (
-                                <div
-                                  aria-label="直接编辑渲染后的消息"
-                                  aria-multiline="true"
-                                  className="chat-rendered-message-editor"
-                                  contentEditable
-                                  onInput={(event) => {
-                                    const content = serializeRenderedChatEditor(event.currentTarget);
-                                    renderedEditingDraftRef.current = {
-                                      messageId: message.id,
-                                      content,
-                                    };
-                                  }}
-                                  onKeyDown={(event) => {
-                                    if (event.key === "Escape") {
-                                      event.preventDefault();
-                                      cancelEditingChatMessage();
-                                    }
-                                  }}
-                                  ref={(editor) => {
-                                    if (!editor || editor.dataset.rengeEditorReady === "true") return;
-                                    editor.dataset.rengeEditorReady = "true";
-                                    window.requestAnimationFrame(() => {
-                                      const focusState =
-                                        renderedEditingFocusRef.current?.messageId === message.id
-                                          ? renderedEditingFocusRef.current
-                                          : null;
-                                      editor.focus({ preventScroll: true });
-                                      placeCaretAtTextOffset(editor, focusState?.textOffset ?? null);
-                                      if (focusState) {
-                                        const chatThread = document.getElementById("chat");
-                                        if (chatThread) {
-                                          chatThread.scrollLeft = focusState.threadScrollLeft;
-                                          chatThread.scrollTop = focusState.threadScrollTop;
-                                        }
-                                        window.scrollTo(
-                                          focusState.windowScrollX,
-                                          focusState.windowScrollY,
-                                        );
+                              <span className="chat-bubble-context-edge top" />
+                              <span className="chat-bubble-context-edge right" />
+                              <span className="chat-bubble-context-edge bottom" />
+                              <span className="chat-bubble-context-edge left" />
+                            </div>
+                            {isEditingMessage ? (
+                              <div
+                                className={`chat-inline-editor ${
+                                  isRenderedEditingMessage ? "rendered" : ""
+                                }`}
+                              >
+                                {isRenderedEditingMessage ? (
+                                  <div
+                                    aria-label="直接编辑渲染后的消息"
+                                    aria-multiline="true"
+                                    className="chat-rendered-message-editor"
+                                    contentEditable
+                                    onInput={(event) => {
+                                      const content = serializeRenderedChatEditor(event.currentTarget);
+                                      renderedEditingDraftRef.current = {
+                                        messageId: message.id,
+                                        content,
+                                      };
+                                    }}
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Escape") {
+                                        event.preventDefault();
+                                        cancelEditingChatMessage();
                                       }
-                                      renderedEditingFocusRef.current = null;
-                                    });
-                                  }}
-                                  role="textbox"
-                                  suppressContentEditableWarning
-                                >
-                                  <div className="mes_text">
-                                    {renderChatContent(
-                                      message.content,
-                                      `${id}-rendered-editor`,
-                                      message.id,
-                                      false,
-                                    )}
+                                    }}
+                                    ref={(editor) => {
+                                      if (!editor || editor.dataset.rengeEditorReady === "true") return;
+                                      editor.dataset.rengeEditorReady = "true";
+                                      window.requestAnimationFrame(() => {
+                                        const focusState =
+                                          renderedEditingFocusRef.current?.messageId === message.id
+                                            ? renderedEditingFocusRef.current
+                                            : null;
+                                        editor.focus({ preventScroll: true });
+                                        placeCaretAtTextOffset(editor, focusState?.textOffset ?? null);
+                                        if (focusState) {
+                                          const chatThread = document.getElementById("chat");
+                                          if (chatThread) {
+                                            chatThread.scrollLeft = focusState.threadScrollLeft;
+                                            chatThread.scrollTop = focusState.threadScrollTop;
+                                          }
+                                          window.scrollTo(
+                                            focusState.windowScrollX,
+                                            focusState.windowScrollY,
+                                          );
+                                        }
+                                        renderedEditingFocusRef.current = null;
+                                      });
+                                    }}
+                                    role="textbox"
+                                    suppressContentEditableWarning
+                                  >
+                                    <div className="mes_text">
+                                      {renderChatContent(
+                                        message.content,
+                                        `${id}-rendered-editor`,
+                                        message.id,
+                                        false,
+                                      )}
+                                    </div>
                                   </div>
-                                </div>
-                              ) : (
-                                <textarea
-                                  value={editingChatMessage.content}
-                                  rows={Math.min(10, Math.max(3, editingChatMessage.content.split("\n").length + 1))}
-                                  onChange={(event) =>
-                                    setEditingChatMessage((current) =>
-                                      current?.messageId === message.id
-                                        ? { ...current, content: event.target.value }
-                                        : current,
-                                    )
-                                  }
-                                  onKeyDown={(event) => {
-                                    if (event.key === "Escape") {
-                                      event.preventDefault();
-                                      cancelEditingChatMessage();
+                                ) : (
+                                  <textarea
+                                    value={editingChatMessage.content}
+                                    rows={Math.min(10, Math.max(3, editingChatMessage.content.split("\n").length + 1))}
+                                    onChange={(event) =>
+                                      setEditingChatMessage((current) =>
+                                        current?.messageId === message.id
+                                          ? { ...current, content: event.target.value }
+                                          : current,
+                                      )
                                     }
-                                  }}
-                                />
-                              )}
-                              <div className="chat-inline-editor-actions">
-                                <button type="button" onClick={cancelEditingChatMessage}>
-                                  取消
-                                </button>
-                                {message.role === "user" ? (
-                                  <>
-                                    <button
-                                      type="button"
-                                      disabled={!editingChatMessage.content.trim() || chatStatus.status === "loading"}
-                                      onClick={saveEditedUserMessage}
-                                    >
-                                      保存
-                                    </button>
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Escape") {
+                                        event.preventDefault();
+                                        cancelEditingChatMessage();
+                                      }
+                                    }}
+                                  />
+                                )}
+                                <div className="chat-inline-editor-actions">
+                                  <button type="button" onClick={cancelEditingChatMessage}>
+                                    取消
+                                  </button>
+                                  {message.role === "user" ? (
+                                    <>
+                                      <button
+                                        type="button"
+                                        disabled={!editingChatMessage.content.trim() || chatStatus.status === "loading"}
+                                        onClick={saveEditedUserMessage}
+                                      >
+                                        保存
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="primary"
+                                        disabled={!editingChatMessage.content.trim() || chatStatus.status === "loading"}
+                                        onClick={() => void resendEditedUserMessage()}
+                                      >
+                                        发送
+                                      </button>
+                                    </>
+                                  ) : (
                                     <button
                                       type="button"
                                       className="primary"
                                       disabled={!editingChatMessage.content.trim() || chatStatus.status === "loading"}
-                                      onClick={() => void resendEditedUserMessage()}
+                                      onClick={saveEditedAssistantMessage}
                                     >
-                                      发送
+                                      保存
                                     </button>
-                                  </>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    className="primary"
-                                    disabled={!editingChatMessage.content.trim() || chatStatus.status === "loading"}
-                                    onClick={saveEditedAssistantMessage}
-                                  >
-                                    保存
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          ) : (
-                            <>
-                              {segmentIndex === 0 &&
-                                message.role === "assistant" &&
-                                renderChatReasoning(message.reasoning, id)}
-                              <div className="mes_text">
-                                {renderChatContent(
-                                  segment,
-                                  id,
-                                  message.id,
-                                  message.renderAsPlainText === true,
-                                )}
-                              </div>
-                              {segmentIndex === 0 &&
-                                renderChatAttachments(message.attachments ?? [])}
-                              {showGreetingSwitch && (
-                                <div
-                                  className="roleplay-greeting-controls"
-                                  onContextMenu={(event) => {
-                                    event.preventDefault();
-                                    event.stopPropagation();
-                                  }}
-                                >
-                                  <button
-                                    type="button"
-                                    className="roleplay-greeting-next"
-                                    disabled={chatStatus.status === "loading"}
-                                    title="切换到下一条开场白"
-                                    aria-label={`切换到下一条开场白，当前第 ${activeRoleplayGreetingIndex + 1} 个，共 ${activeRoleplayGreetings.length} 个`}
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      setChatMessageMenu(null);
-                                      setRoleplayGreetingSelectorOpen(false);
-                                      cycleRoleplayGreeting();
-                                    }}
-                                  >
-                                    <RefreshCw size={13} />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="roleplay-greeting-count"
-                                    disabled={chatStatus.status === "loading"}
-                                    title="选择开场白"
-                                    aria-haspopup="dialog"
-                                    aria-expanded={roleplayGreetingSelectorOpen}
-                                    aria-label={`选择开场白，当前第 ${activeRoleplayGreetingIndex + 1} 个，共 ${activeRoleplayGreetings.length} 个`}
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      setChatMessageMenu(null);
-                                      setRoleplayGreetingSelectorOpen(true);
-                                    }}
-                                  >
-                                    {activeRoleplayGreetingIndex + 1}/{activeRoleplayGreetings.length}
-                                  </button>
+                                  )}
                                 </div>
-                              )}
-                            </>
-                          )}
+                              </div>
+                            ) : (
+                              <>
+                                {segmentIndex === 0 &&
+                                  message.role === "assistant" &&
+                                  renderChatReasoning(message.reasoning, id)}
+                                <div className="mes_text">
+                                  {renderChatContent(
+                                    segment,
+                                    id,
+                                    message.id,
+                                    message.renderAsPlainText === true,
+                                  )}
+                                </div>
+                                {segmentIndex === 0 &&
+                                  renderChatAttachments(message.attachments ?? [])}
+                                {showGreetingSwitch && (
+                                  <div
+                                    className="roleplay-greeting-controls"
+                                    onContextMenu={(event) => {
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                    }}
+                                  >
+                                    <button
+                                      type="button"
+                                      className="roleplay-greeting-next"
+                                      disabled={chatStatus.status === "loading"}
+                                      title="切换到下一条开场白"
+                                      aria-label={`切换到下一条开场白，当前第 ${activeRoleplayGreetingIndex + 1} 个，共 ${activeRoleplayGreetings.length} 个`}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        setChatMessageMenu(null);
+                                        setRoleplayGreetingSelectorOpen(false);
+                                        cycleRoleplayGreeting();
+                                      }}
+                                    >
+                                      <RefreshCw size={13} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="roleplay-greeting-count"
+                                      disabled={chatStatus.status === "loading"}
+                                      title="选择开场白"
+                                      aria-haspopup="dialog"
+                                      aria-expanded={roleplayGreetingSelectorOpen}
+                                      aria-label={`选择开场白，当前第 ${activeRoleplayGreetingIndex + 1} 个，共 ${activeRoleplayGreetings.length} 个`}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        setChatMessageMenu(null);
+                                        setRoleplayGreetingSelectorOpen(true);
+                                      }}
+                                    >
+                                      {activeRoleplayGreetingIndex + 1}/{activeRoleplayGreetings.length}
+                                    </button>
+                                  </div>
+                                )}
+                              </>
+                            )}
+                          </div>
                         </div>
                         {!isEditingMessage &&
                           isLastMessageSegment &&
                           message.choiceRequest && (
-                            <div
-                              className="chat-bubble chat-choice-bubble"
-                              style={CHAT_ASSISTANT_BUBBLE_OPACITY_STYLE}
-                            >
-                              {renderChatChoiceRequest(message, messageIndex)}
+                            <div className="chat-bubble-row">
+                              {renderChatBubbleDot(getChatBubbleStatus(message))}
+                              <div
+                                className="chat-bubble chat-choice-bubble"
+                                style={CHAT_ASSISTANT_BUBBLE_OPACITY_STYLE}
+                              >
+                                {renderChatChoiceRequest(message, messageIndex)}
+                              </div>
                             </div>
                           )}
                       </div>

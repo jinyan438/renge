@@ -1,9 +1,11 @@
+import type { ChatBubbleStatus } from "./chatBubbleStatusUtils.ts";
+
 export type PiStreamingMessageSegment = {
   messageId: string;
   pushContent: (delta: string) => void;
   pushReasoning: (delta: string) => void;
   finish: () => Promise<void>;
-  complete: (content: string, reasoning?: string) => boolean;
+  complete: (content: string, reasoning?: string, status?: ChatBubbleStatus) => boolean;
   cancel: () => void;
   remove: () => void;
 };
@@ -13,6 +15,7 @@ type PiStreamingTimelineEntry = {
   content: string;
   reasoning: string;
   finishPromise?: Promise<void>;
+  completedBeforeTool?: boolean;
 };
 
 export function createPiStreamingTimeline(options: {
@@ -38,11 +41,15 @@ export function createPiStreamingTimeline(options: {
     return activeEntry;
   };
 
-  const sealActiveEntry = () => {
+  const sealActiveEntry = (completed = false) => {
     const entry = activeEntry;
     activeEntry = null;
     if (!entry || entry.finishPromise) return;
     entry.finishPromise = entry.segment.finish();
+    if (completed) {
+      entry.completedBeforeTool = true;
+      entry.segment.complete(entry.content, entry.reasoning);
+    }
   };
 
   const finishEntries = async () => {
@@ -73,16 +80,16 @@ export function createPiStreamingTimeline(options: {
       entry.segment.pushReasoning(delta);
     },
     beforeTool() {
-      sealActiveEntry();
+      sealActiveEntry(true);
     },
     finish: finishEntries,
-    complete(content: string, reasoning = "") {
+    complete(content: string, reasoning = "", status: ChatBubbleStatus = "complete") {
       if (entries.length === 0) {
         if (!content.trim() && !reasoning.trim()) return false;
         const entry = ensureActiveEntry();
         entry.content = content;
         entry.reasoning = reasoning;
-        entry.segment.complete(content, reasoning);
+        entry.segment.complete(content, reasoning, status);
         activeEntry = null;
         return true;
       }
@@ -91,8 +98,12 @@ export function createPiStreamingTimeline(options: {
         entries[0].content = content;
         entries[0].reasoning = reasoning;
       }
-      entries.forEach((entry) => {
-        entry.segment.complete(entry.content, entry.reasoning);
+      entries.forEach((entry, index) => {
+        entry.segment.complete(
+          entry.content,
+          entry.reasoning,
+          index === entries.length - 1 && !entry.completedBeforeTool ? status : "complete",
+        );
       });
       return entries.some(
         (entry) => entry.content.trim() || entry.reasoning.trim(),
