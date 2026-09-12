@@ -255,6 +255,7 @@ import {
   scheduleChatFrameWork,
   scrollChatToLatest,
 } from "./chatPerformanceUtils";
+import { getChatBubbleCopyContent, writeTextToClipboard } from "./chatClipboardUtils";
 import {
   areJsonValuesEqual,
   canPreservePersistentCharacterCards,
@@ -12635,6 +12636,8 @@ export function App() {
   );
   const [chatMessageMenu, setChatMessageMenu] = useState<{
     messageId: string;
+    copyText: string;
+    copySource: "selection" | "bubble";
     x: number;
     y: number;
   } | null>(null);
@@ -20442,8 +20445,19 @@ export function App() {
     event.preventDefault();
     event.stopPropagation();
 
-    const bubble = event.currentTarget.closest<HTMLElement>(".chat-bubble");
+    const bubble =
+      event.currentTarget.closest<HTMLElement>(".chat-bubble") ??
+      event.currentTarget
+        .closest<HTMLElement>(".chat-message-bubble-stack")
+        ?.querySelector<HTMLElement>(".chat-bubble") ??
+      null;
     const messageText = bubble?.querySelector<HTMLElement>(".mes_text") ?? null;
+    const message = chatMessagesRef.current.find((item) => item.id === messageId);
+    const copyContent = getChatBubbleCopyContent(
+      bubble,
+      message?.content ?? "",
+      window.getSelection(),
+    );
     const chatThread = document.getElementById("chat");
     renderedEditingFocusRef.current = {
       messageId,
@@ -20461,8 +20475,10 @@ export function App() {
       : null;
     setChatMessageMenu({
       messageId,
+      copyText: copyContent.text,
+      copySource: copyContent.source,
       x: clamp(menuAnchor ? menuAnchor.right - 180 : event.clientX, 8, window.innerWidth - 180),
-      y: clamp(menuAnchor ? menuAnchor.bottom + 4 : event.clientY, 8, Math.max(8, window.innerHeight - 208)),
+      y: clamp(menuAnchor ? menuAnchor.bottom + 4 : event.clientY, 8, Math.max(8, window.innerHeight - 248)),
     });
   };
 
@@ -20473,6 +20489,31 @@ export function App() {
     const bubble = event.currentTarget;
     if (bubble.querySelector(".chat-html-preview") && event.target !== bubble) return;
     openChatMessageMenu(messageId, event);
+  };
+
+  const copyChatMessageMenuText = async () => {
+    const menu = chatMessageMenu;
+    if (!menu?.copyText) return;
+
+    try {
+      await writeTextToClipboard(menu.copyText);
+      setChatMessageMenu(null);
+      if (chatStatus.status !== "loading") {
+        setChatStatus({
+          status: "success",
+          message: menu.copySource === "selection" ? "已复制所选文本。" : "已复制气泡文本。",
+        });
+      }
+    } catch (error) {
+      if (chatStatus.status === "loading") {
+        console.error("复制气泡文本失败", error);
+      } else {
+        setChatStatus({
+          status: "error",
+          message: error instanceof Error ? `复制失败：${error.message}` : "复制失败。",
+        });
+      }
+    }
   };
 
   const deleteChatMessage = (messageId: string) => {
@@ -37327,6 +37368,14 @@ export function App() {
                       续写
                     </button>
                   )}
+                  <button
+                    type="button"
+                    disabled={!chatMessageMenu.copyText}
+                    onClick={() => void copyChatMessageMenuText()}
+                  >
+                    <Copy size={14} />
+                    {chatMessageMenu.copySource === "selection" ? "复制所选文本" : "复制气泡文本"}
+                  </button>
                   {chatMessageMenuMessage.role === "assistant" &&
                     countDialoguePlaceholders(chatMessageMenuMessage.content) > 0 && (
                       <button
