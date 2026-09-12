@@ -242,7 +242,6 @@ import {
 } from "./chatLiveStreamUtils";
 import {
   CHAT_SCROLL_ACTIVITY_MESSAGE,
-  createChatMessageVirtualizer,
   createChatPreviewMountQueue,
   createChatStreamUpdateBatcher,
   markChatInputActivity,
@@ -12728,7 +12727,7 @@ export function App() {
     sendBlocked: false,
   });
   const chatThreadRef = useRef<HTMLDivElement>(null);
-  const chatMessageVirtualizerCleanupRef = useRef<(() => void) | null>(null);
+  const chatScrollActivityCleanupRef = useRef<(() => void) | null>(null);
   const chatScrollFollowLatestRef = useRef(true);
   const chatScrollFrameRef = useRef<(() => void) | null>(null);
   const chatScrollStateFrameRef = useRef<number | null>(null);
@@ -13057,16 +13056,11 @@ export function App() {
 
   const setChatThreadRef = useCallback(
     (thread: HTMLDivElement | null) => {
-      chatMessageVirtualizerCleanupRef.current?.();
-      chatMessageVirtualizerCleanupRef.current = null;
+      chatScrollActivityCleanupRef.current?.();
+      chatScrollActivityCleanupRef.current = null;
       chatThreadRef.current = thread;
       if (!thread) return;
-      const stopVirtualizing = createChatMessageVirtualizer(thread);
-      const stopObservingScroll = observeChatScrollActivity(thread);
-      chatMessageVirtualizerCleanupRef.current = () => {
-        stopVirtualizing();
-        stopObservingScroll();
-      };
+      chatScrollActivityCleanupRef.current = observeChatScrollActivity(thread);
       chatScrollFollowLatestRef.current = true;
       scheduleChatScrollToLatest();
     },
@@ -13075,8 +13069,8 @@ export function App() {
 
   useEffect(() => {
     return () => {
-      chatMessageVirtualizerCleanupRef.current?.();
-      chatMessageVirtualizerCleanupRef.current = null;
+      chatScrollActivityCleanupRef.current?.();
+      chatScrollActivityCleanupRef.current = null;
       if (chatScrollFrameRef.current !== null) {
         chatScrollFrameRef.current();
         chatScrollFrameRef.current = null;

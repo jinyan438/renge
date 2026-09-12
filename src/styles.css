@@ -5322,12 +5322,6 @@ summary:focus-visible {
   width: 100%;
 }
 
-.chat-message.chat-message-virtualized {
-  content-visibility: auto;
-  contain-intrinsic-size:
-    auto var(--chat-message-intrinsic-height, 112px);
-}
-
 .chat-message-time {
   justify-self: center;
   color: #8a94a6;
