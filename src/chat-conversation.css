@@ -50,6 +50,7 @@
   position: absolute;
   top: 24px;
   left: -47px;
+  box-sizing: content-box;
   width: 10px;
   height: 10px;
   border: 2px solid #f6f8fc;
