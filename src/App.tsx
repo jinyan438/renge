@@ -12637,7 +12637,6 @@ export function App() {
   const [chatMessageMenu, setChatMessageMenu] = useState<{
     messageId: string;
     copyText: string;
-    copySource: "selection" | "bubble";
     x: number;
     y: number;
   } | null>(null);
@@ -20476,7 +20475,6 @@ export function App() {
     setChatMessageMenu({
       messageId,
       copyText: copyContent.text,
-      copySource: copyContent.source,
       x: clamp(menuAnchor ? menuAnchor.right - 180 : event.clientX, 8, window.innerWidth - 180),
       y: clamp(menuAnchor ? menuAnchor.bottom + 4 : event.clientY, 8, Math.max(8, window.innerHeight - 248)),
     });
@@ -20501,7 +20499,7 @@ export function App() {
       if (chatStatus.status !== "loading") {
         setChatStatus({
           status: "success",
-          message: menu.copySource === "selection" ? "已复制所选文本。" : "已复制气泡文本。",
+          message: "已复制。",
         });
       }
     } catch (error) {
@@ -37374,7 +37372,7 @@ export function App() {
                     onClick={() => void copyChatMessageMenuText()}
                   >
                     <Copy size={14} />
-                    {chatMessageMenu.copySource === "selection" ? "复制所选文本" : "复制气泡文本"}
+                    复制
                   </button>
                   {chatMessageMenuMessage.role === "assistant" &&
                     countDialoguePlaceholders(chatMessageMenuMessage.content) > 0 && (
