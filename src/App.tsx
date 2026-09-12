@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronRight,
   Check,
+  CircleCheck,
   Clock3,
   Copy,
   Crown,
@@ -27,6 +28,7 @@ import {
   ListPlus,
   Languages,
   MessageSquare,
+  MoreHorizontal,
   Menu,
   MapPin,
   Palette,
@@ -54,6 +56,7 @@ import {
   UserRound,
   Users,
   Wrench,
+  LoaderCircle,
   X,
 } from "lucide-react";
 import {
@@ -74,6 +77,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { ChatToolDiffPreview } from "./ChatToolDiffPreview";
 import { strFromU8, strToU8, unzip, zip } from "fflate";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
@@ -20452,10 +20456,13 @@ export function App() {
       windowScrollY: window.scrollY,
     };
 
+    const menuAnchor = event.currentTarget.classList.contains("chat-message-more")
+      ? event.currentTarget.getBoundingClientRect()
+      : null;
     setChatMessageMenu({
       messageId,
-      x: clamp(event.clientX, 8, window.innerWidth - 180),
-      y: clamp(event.clientY, 8, Math.max(8, window.innerHeight - 208)),
+      x: clamp(menuAnchor ? menuAnchor.right - 180 : event.clientX, 8, window.innerWidth - 180),
+      y: clamp(menuAnchor ? menuAnchor.bottom + 4 : event.clientY, 8, Math.max(8, window.innerHeight - 208)),
     });
   };
 
@@ -23159,6 +23166,23 @@ export function App() {
     setChatStatus({ status: "success", message: "命令块执行完成。" });
   };
 
+  const renderChatMessageHeader = (message: ChatMessage, name: string, duration?: string) => (
+    <header className="chat-message-header">
+      <div className="chat-message-meta">
+        <strong>{name}</strong>
+        <div className="chat-message-metadata">
+          {duration && <><span>{duration}</span><span aria-hidden="true">·</span></>}
+          <time dateTime={message.createdAt}>
+            {new Date(message.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+          </time>
+        </div>
+      </div>
+      <button type="button" className="chat-message-more" title="消息操作" aria-label={`${name}的消息操作`} onClick={(event) => openChatMessageMenu(message.id, event)}>
+        <MoreHorizontal size={20} />
+      </button>
+    </header>
+  );
+
   const renderPiToolVisualization = (meta: ToolVisualization, key: string) => {
     const normalizedName = meta.name.trim().toLocaleLowerCase().replace(/[\s.-]+/g, "_");
     const args = meta.args ?? {};
@@ -23169,7 +23193,7 @@ export function App() {
       normalizedName.includes("read_file");
     const isShell =
       ["bash", "shell", "exec", "exec_command", "command"].includes(normalizedName) ||
-      normalizedName.includes("run_command");
+      normalizedName.includes("run_command") || normalizedName.includes("execute_script");
     const isMutation =
       ["write", "edit", "write_file", "apply_patch"].includes(normalizedName) ||
       normalizedName.includes("write_file") ||
@@ -23193,40 +23217,49 @@ export function App() {
             : "修改文件"
           : meta.name;
     const Icon = isRead ? FileCode2 : isShell ? Terminal : isMutation ? FilePenLine : Wrench;
-    const additions = diff.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++"));
-    const deletions = diff.split("\n").filter((line) => line.startsWith("-") && !line.startsWith("---"));
+    const result = isObjectRecord(meta.result) ? meta.result : {};
+    const resultDetails = isObjectRecord(result.details) ? result.details : result;
+    const description = meta.status === "error"
+      ? unexecutedArguments ? "操作尚未执行" : "执行遇到问题"
+      : isMutation
+        ? unexecutedArguments ? "正在生成文件内容" : "文件变更"
+        : isShell ? "执行脚本与命令" : isRead ? "读取文件内容" : "工具执行记录";
     return (
       <details
-        className={`pi-tool-visualization ${meta.status} ${isMutation ? "mutation" : ""}`}
+        className={`pi-tool-visualization ${meta.status} ${isMutation ? "mutation" : ""} ${isShell ? "shell" : ""}`}
         key={key}
         open={meta.status === "running" || isMutation}
       >
         <summary className="pi-tool-visualization-header">
-          <span className="pi-tool-visualization-icon"><Icon size={14} /></span>
-          <strong>{title}</strong>
-          <span className="pi-tool-visualization-summary" title={path || command || meta.name}>
-            {path || command || meta.name}
+          <span className="pi-tool-visualization-icon"><Icon size={21} /></span>
+          <span className="chat-tool-heading">
+            <span className="chat-tool-heading-line">
+              <strong>{title}</strong>
+              <span className="pi-tool-visualization-summary" title={path || command || meta.name}>
+                {path || command || meta.name}
+              </span>
+            </span>
+            <span className="chat-tool-description">{description}</span>
           </span>
-          <span className="pi-tool-visualization-status">{statusLabel}</span>
+          <span className="pi-tool-visualization-status">
+            {meta.status === "done" ? <CircleCheck size={14} /> : meta.status === "error" ? <X size={14} /> : <LoaderCircle className="chat-status-spinner" size={14} />}
+            {statusLabel}
+          </span>
           <ChevronDown className="pi-tool-visualization-chevron" size={15} />
         </summary>
         <div className="pi-tool-visualization-body">
-          {path && <div className="pi-tool-visualization-path"><FileCode2 size={13} /> <code>{path}</code></div>}
+          {path && !diff && <div className="pi-tool-visualization-path"><FileCode2 size={13} /> <code>{path}</code></div>}
           {meta.status === "error" && resultText ? (
             <pre className="pi-tool-result-preview">{resultText}</pre>
           ) : null}
           {isMutation && diff ? (
-            <div className="pi-tool-diff">
-              <div className="pi-tool-diff-toolbar">
-                <span>{meta.status === "done" ? path || "文件变更" : "未执行的参数预览"}</span>
-                <span><b className="additions">+{additions.length}</b> <b className="deletions">-{deletions.length}</b></span>
-              </div>
-              <pre>{diff.split("\n").slice(0, 600).map((line, index) => {
-                const addition = line.startsWith("+") && !line.startsWith("+++");
-                const deletion = line.startsWith("-") && !line.startsWith("---");
-                return <span key={`${key}-line-${index}`} className={addition ? "addition" : deletion ? "deletion" : "context"}>{line || " "}</span>;
-              })}</pre>
-            </div>
+            <ChatToolDiffPreview
+              diff={diff}
+              path={path}
+              numbered={normalizedName === "edit" && typeof resultDetails.diff === "string"}
+              completed={meta.status === "done"}
+              onCopy={copyChatCodeBlock}
+            />
           ) : isRead && resultText ? (
             <div className="pi-tool-code-preview"><pre>{lines.map((line, index) => <span key={`${key}-read-${index}`}><i>{index + 1}</i>{line || " "}</span>)}</pre></div>
           ) : isShell ? (
@@ -23256,7 +23289,7 @@ export function App() {
     });
 
     return (
-      <details className={`chat-tool-card ${block.variant}`}>
+      <details className={`chat-tool-card ${block.variant}`} key={messageId}>
         <summary className="chat-tool-card-header">
           <span className="chat-tool-icon">
             {block.variant === "success" ? (
@@ -23267,9 +23300,14 @@ export function App() {
               <Wrench size={14} />
             )}
           </span>
-          <strong>{block.title}</strong>
-          {summaryPath && <span className="chat-tool-summary-path">{summaryPath}</span>}
-          <span className="chat-tool-badge">{block.badge}</span>
+          <span className="chat-tool-heading">
+            <strong>{block.title}</strong>
+            {summaryPath && <span className="chat-tool-summary-path" title={summaryPath}>{summaryPath}</span>}
+          </span>
+          <span className="chat-tool-badge">
+            {block.variant === "success" ? <CircleCheck size={14} /> : block.variant === "error" ? <X size={14} /> : <LoaderCircle className="chat-status-spinner" size={14} />}
+            {block.badge}
+          </span>
           <ChevronDown className="chat-tool-chevron" size={15} />
         </summary>
 
@@ -23340,19 +23378,24 @@ export function App() {
       /(?:write|edit|patch)/i.test(visualization.name),
     ) || visualizations.some((visualization) => visualization.status === "running");
     const statusLabel = item.completed
-      ? `已处理 ${formatProcessingDuration(item.startedAt, item.endedAt)}`
+      ? `${hasError ? "处理异常" : "已处理"} ${formatProcessingDuration(item.startedAt, item.endedAt)}`
       : "处理中";
+    const hasFileChanges = visualizations.some((visualization) => /(?:write|edit|patch)/i.test(visualization.name));
+    const description = hasError ? "部分操作未能完成"
+      : hasFileChanges ? item.completed ? "文件修改与工具执行已结束" : "正在修改文件并执行工具"
+      : item.completed ? "工具执行已结束" : "正在执行工具";
 
     return (
-      <details className={`chat-tool-run ${hasError ? "error" : ""}`} open={autoOpen || undefined}>
+      <details className={`chat-tool-run ${hasError ? "error" : ""}`} key={messageId} open={autoOpen || undefined}>
         <summary className="chat-tool-run-header">
           <span className="chat-tool-run-icon">
-            {hasError ? <X size={15} /> : <Wrench size={15} />}
+            {hasError ? <X size={23} /> : <Wrench size={23} />}
           </span>
-          <strong>{statusLabel}</strong>
-          {firstPath && <span className="chat-tool-run-path">{firstPath}</span>}
-          <span className="chat-tool-run-badge">{stepCount} 步</span>
-          <ChevronDown className="chat-tool-run-chevron" size={16} />
+          <span className="chat-tool-heading"><strong>{statusLabel}</strong><span className="chat-tool-description">{description}</span></span>
+          <span className={`chat-tool-run-path ${firstPath ? "" : "empty"}`} title={firstPath}>
+            {firstPath && <><FileCode2 size={18} /><span>{firstPath}</span></>}
+          </span>
+          <span className="chat-tool-run-badge">{stepCount} 步<ChevronDown className="chat-tool-run-chevron" size={16} /></span>
         </summary>
         <div className="chat-tool-run-body">
           {visualizations.length > 0
@@ -23372,30 +23415,12 @@ export function App() {
     item: Extract<RenderedChatItem, { kind: "toolOnlyGroup" }>,
     messageId: string,
   ) => {
-    const hasError = item.toolGroups.some(
-      (toolGroup) =>
-        toolGroup.blocks.some((block) => block.variant === "error") ||
-        toolGroup.visualizations.some((visualization) => visualization.status === "error"),
-    );
-    const statusLabel = item.completed ? formatCodexDuration(item.startedAt, item.endedAt) : "处理中";
-
     return (
-      <details
-        className={`chat-codex-tool-run ${hasError ? "error" : ""}`}
-        open={!item.completed || undefined}
-      >
-        <summary className="chat-codex-tool-run-header">
-          <span className="chat-codex-tool-run-duration">
-            {statusLabel}
-          </span>
-          <ChevronRight className="chat-codex-tool-run-chevron" size={16} />
-        </summary>
-        <div className="chat-codex-tool-run-body">
-          {item.toolGroups.map((toolGroup, index) =>
-            renderToolRunGroup(toolGroup, `${messageId}-${index}`),
-          )}
-        </div>
-      </details>
+      <div className="chat-tool-groups">
+        {item.toolGroups.map((toolGroup, index) =>
+          renderToolRunGroup(toolGroup, `${messageId}-${index}`),
+        )}
+      </div>
     );
   };
 
@@ -23410,8 +23435,13 @@ export function App() {
     return (
       <details className="chat-reasoning" open>
         <summary className="chat-reasoning-header">
-          <Sparkles size={14} />
-          <strong>思维链</strong>
+          <span className="chat-reasoning-icon"><Sparkles size={24} /></span>
+          <span className="chat-reasoning-heading">
+            <strong>思维链</strong>
+            <span className="chat-reasoning-expanded">已展开思考过程</span>
+            <span className="chat-reasoning-collapsed">已收起思考过程</span>
+          </span>
+          <ChevronRight className="chat-reasoning-chevron" size={18} />
         </summary>
         <div className="chat-reasoning-body">
           <ChatMarkdown
@@ -36884,25 +36914,16 @@ export function App() {
 
                     return (
                       <article
-                        className="chat-message assistant mes"
+                        className="chat-message assistant mes tool-message"
                         key={item.id}
                         {...{ mesid: messageIndex, is_user: "false", is_system: "false" }}
                       >
-                        {item.showTime && (
-                          <time className="chat-message-time">
-                            {new Date(message.createdAt).toLocaleTimeString("zh-CN", {
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            })}
-                          </time>
-                        )}
                         <div className="chat-message-row">
                           <div
                             className={`chat-identity${
                               chatMode === "ai" ? " ai-model-identity" : ""
                             }`}
                           >
-                            <strong>{messageName}</strong>
                             <div className="chat-avatar">
                               {messageAvatarImage ? (
                                 <img src={messageAvatarImage} alt={`${messageName} 头像`} />
@@ -36911,16 +36932,13 @@ export function App() {
                               )}
                             </div>
                           </div>
-                          <div
-                            className={`chat-bubble tool-run-bubble ${
-                              item.kind === "toolOnlyGroup"
-                                ? "chat-codex-tool-run-bubble"
-                                : ""
-                            }`}
-                          >
-                            {item.kind === "toolOnlyGroup"
-                              ? renderToolOnlyGroup(item, item.id)
-                              : renderToolRunGroup(item, item.id)}
+                          <div className="chat-message-bubble-stack">
+                            {renderChatMessageHeader(message, messageName, item.completed ? formatCodexDuration(item.startedAt, item.endedAt) : "处理中")}
+                            <div className="chat-bubble tool-run-bubble" onContextMenu={(event) => handleChatBubbleContextMenu(message.id, event)}>
+                              {item.kind === "toolOnlyGroup"
+                                ? renderToolOnlyGroup(item, item.id)
+                                : renderToolRunGroup(item, item.id)}
+                            </div>
                           </div>
                         </div>
                       </article>
@@ -36941,7 +36959,7 @@ export function App() {
                     : [item];
 
                 return renderedSegments.map((
-                  { id, message, segment, segmentIndex, showTime },
+                  { id, message, segment, segmentIndex },
                   renderedSegmentIndex,
                 ) => {
                 if (
@@ -37039,14 +37057,6 @@ export function App() {
                       is_hidden: tavernHiddenMessage ? "true" : "false",
                     }}
                   >
-                    {showTime && (
-                      <time className="chat-message-time">
-                        {new Date(message.createdAt).toLocaleTimeString("zh-CN", {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
-                      </time>
-                    )}
                     <div className="chat-message-row">
                       <div
                         className={`chat-identity${
@@ -37055,7 +37065,6 @@ export function App() {
                             : ""
                         }`}
                       >
-                        <strong>{messageName}</strong>
                         <div className="chat-avatar">
                           {messageAvatarImage ? (
                             <img src={messageAvatarImage} alt={`${messageName} 头像`} />
@@ -37075,6 +37084,7 @@ export function App() {
                         </div>
                       </div>
                       <div className="chat-message-bubble-stack">
+                        {renderChatMessageHeader(message, messageName)}
                         <div
                           className={`chat-bubble ${
                             isEditingMessage

@@ -5,6 +5,7 @@ import "./index.css";
 import "./styles.css";
 import "./settings-desktop.css";
 import "./workspace-desktop.css";
+import "./chat-conversation.css";
 
 const App = lazy(() => import("./App").then((module) => ({ default: module.App })));
 
