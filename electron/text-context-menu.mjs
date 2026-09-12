@@ -5,17 +5,17 @@ export function createTextContextMenuTemplate({
   return [
     {
       label: "复制",
-      role: "copy",
+      action: "copy",
       enabled: Boolean(hasSelection),
     },
     {
       label: "粘贴",
-      role: "paste",
+      action: "paste",
       enabled: Boolean(hasClipboardText),
     },
     {
       label: "剪切",
-      role: "cut",
+      action: "cut",
       enabled: Boolean(hasSelection),
     },
   ];

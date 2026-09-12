@@ -1131,12 +1131,16 @@ function registerIpcHandlers() {
     if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
       throw new Error("文本菜单操作来源无效");
     }
-    const menu = Menu.buildFromTemplate(
-      createTextContextMenuTemplate({
-        hasSelection: Boolean(options.hasSelection),
-        hasClipboardText: Boolean(clipboard.readText()),
-      }),
-    );
+    const actions = {
+      copy: () => event.sender.copy(),
+      paste: () => event.sender.paste(),
+      cut: () => event.sender.cut(),
+    };
+    const template = createTextContextMenuTemplate({
+      hasSelection: Boolean(options.hasSelection),
+      hasClipboardText: Boolean(clipboard.readText()),
+    }).map(({ action, ...item }) => ({ ...item, click: actions[action] }));
+    const menu = Menu.buildFromTemplate(template);
     menu.popup({ window: mainWindow });
     return { ok: true };
   });
