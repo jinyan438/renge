@@ -242,6 +242,7 @@ import {
 } from "./chatLiveStreamUtils";
 import {
   CHAT_SCROLL_ACTIVITY_MESSAGE,
+  createChatMessageVirtualizer,
   createChatPreviewMountQueue,
   createChatStreamUpdateBatcher,
   markChatInputActivity,
@@ -10847,121 +10848,6 @@ function useThrottledValue<T>(value: T, intervalMs: number): T {
   );
 
   return throttledValue;
-}
-
-const CHAT_MESSAGE_VIRTUALIZED_CLASS = "chat-message-virtualized";
-
-/**
- * Enables native offscreen rendering skips only after each message has a real
- * measured height. A fixed guessed intrinsic height makes the chat scrollbar
- * jump as long messages enter the viewport; priming the fallback from layout
- * keeps the scroll range stable while Chromium culls distant message contents.
- */
-function createChatMessageVirtualizer(thread: HTMLElement) {
-  if (
-    typeof CSS === "undefined" ||
-    typeof CSS.supports !== "function" ||
-    !CSS.supports("content-visibility", "auto")
-  ) {
-    return () => undefined;
-  }
-
-  const pendingMessages = new Set<HTMLElement>();
-  const observedMessages = new Set<HTMLElement>();
-  let frameId: number | null = null;
-  let resizeObserver: ResizeObserver | null = null;
-
-  const flush = () => {
-    frameId = null;
-    const candidates = Array.from(pendingMessages).filter(
-      (message) =>
-        message.isConnected &&
-        thread.contains(message) &&
-        !message.classList.contains(CHAT_MESSAGE_VIRTUALIZED_CLASS),
-    );
-    pendingMessages.clear();
-
-    // Read every height before writing styles so this costs one layout pass.
-    const measurements = candidates.map((message) => ({
-      message,
-      height: message.getBoundingClientRect().height,
-    }));
-    measurements.forEach(({ message, height }) => {
-      if (!Number.isFinite(height) || height <= 0) return;
-      message.style.setProperty("--chat-message-intrinsic-height", `${height}px`);
-      message.classList.add(CHAT_MESSAGE_VIRTUALIZED_CLASS);
-      resizeObserver?.unobserve(message);
-      observedMessages.delete(message);
-    });
-  };
-
-  const schedule = () => {
-    if (frameId !== null) return;
-    frameId = window.requestAnimationFrame(flush);
-  };
-
-  resizeObserver =
-    typeof ResizeObserver === "function"
-      ? new ResizeObserver((entries) => {
-          entries.forEach((entry) => {
-            const message = entry.target as HTMLElement;
-            if (!message.classList.contains(CHAT_MESSAGE_VIRTUALIZED_CLASS)) {
-              pendingMessages.add(message);
-            }
-          });
-          if (pendingMessages.size > 0) schedule();
-        })
-      : null;
-
-  const observeMessage = (message: HTMLElement) => {
-    pendingMessages.add(message);
-    if (!resizeObserver || observedMessages.has(message)) return;
-    observedMessages.add(message);
-    resizeObserver.observe(message);
-  };
-
-  const collect = (node: Node) => {
-    if (!(node instanceof HTMLElement)) return;
-    if (node.matches(".chat-message")) observeMessage(node);
-    node
-      .querySelectorAll<HTMLElement>(`.chat-message:not(.${CHAT_MESSAGE_VIRTUALIZED_CLASS})`)
-      .forEach(observeMessage);
-    if (pendingMessages.size > 0) schedule();
-  };
-
-  const release = (node: Node) => {
-    if (!(node instanceof HTMLElement)) return;
-    const messages = [
-      ...(node.matches(".chat-message") ? [node] : []),
-      ...node.querySelectorAll<HTMLElement>(".chat-message"),
-    ];
-    messages.forEach((message) => {
-      pendingMessages.delete(message);
-      resizeObserver?.unobserve(message);
-      observedMessages.delete(message);
-    });
-  };
-
-  collect(thread);
-  const observer =
-    typeof MutationObserver === "function"
-      ? new MutationObserver((records) => {
-          records.forEach((record) => {
-            record.removedNodes.forEach(release);
-            record.addedNodes.forEach(collect);
-          });
-        })
-      : null;
-  observer?.observe(thread, { childList: true });
-
-  return () => {
-    observer?.disconnect();
-    resizeObserver?.disconnect();
-    if (frameId !== null) window.cancelAnimationFrame(frameId);
-    frameId = null;
-    pendingMessages.clear();
-    observedMessages.clear();
-  };
 }
 
 function createStreamingAssistantMessage(

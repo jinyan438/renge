@@ -7,6 +7,7 @@ import {
   CHAT_SCROLL_ACTIVITY_MESSAGE,
   CHAT_SCROLL_SETTLE_MS,
   chatScrollScheduler,
+  createChatMessageVirtualizer,
   createChatPreviewMountQueue,
   createChatScrollScheduler,
   createChatStreamUpdateBatcher,
@@ -235,6 +236,111 @@ test("scroll events distinguish automatic following from iframe-originated scrol
   } finally {
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
+  }
+});
+
+test("keeps the newest growing message out of content-visibility virtualization", () => {
+  const previousGlobals = {
+    CSS: globalThis.CSS,
+    HTMLElement: globalThis.HTMLElement,
+    MutationObserver: globalThis.MutationObserver,
+    ResizeObserver: globalThis.ResizeObserver,
+    window: globalThis.window,
+  };
+  const frames = [];
+  let notifyMutation = () => {};
+
+  class FakeClassList {
+    values = new Set();
+    add(value) { this.values.add(value); }
+    remove(value) { this.values.delete(value); }
+    contains(value) { return this.values.has(value); }
+  }
+
+  class FakeHTMLElement {
+    constructor({ chatMessage = false, height = 0 } = {}) {
+      this.chatMessage = chatMessage;
+      this.height = height;
+      this.children = [];
+      this.classList = new FakeClassList();
+      this.styleValues = new Map();
+      this.style = {
+        setProperty: (name, value) => this.styleValues.set(name, value),
+        removeProperty: (name) => this.styleValues.delete(name),
+      };
+      this.isConnected = true;
+    }
+    append(child) { this.children.push(child); }
+    contains(candidate) {
+      return this === candidate || this.children.some((child) => child.contains(candidate));
+    }
+    matches(selector) { return selector === ".chat-message" && this.chatMessage; }
+    querySelectorAll(selector) {
+      const includeVirtualized = selector === ".chat-message";
+      const results = [];
+      const visit = (node) => {
+        for (const child of node.children) {
+          if (
+            child.chatMessage &&
+            (includeVirtualized || !child.classList.contains("chat-message-virtualized"))
+          ) results.push(child);
+          visit(child);
+        }
+      };
+      visit(this);
+      results.item = (index) => results[index] ?? null;
+      return results;
+    }
+    getBoundingClientRect() { return { height: this.height }; }
+  }
+
+  class FakeMutationObserver {
+    constructor(callback) { notifyMutation = callback; }
+    observe() {}
+    disconnect() {}
+  }
+
+  class FakeResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+
+  globalThis.CSS = { supports: () => true };
+  globalThis.HTMLElement = FakeHTMLElement;
+  globalThis.MutationObserver = FakeMutationObserver;
+  globalThis.ResizeObserver = FakeResizeObserver;
+  globalThis.window = {
+    requestAnimationFrame: (callback) => { frames.push(callback); return frames.length; },
+    cancelAnimationFrame: () => {},
+  };
+
+  try {
+    const thread = new FakeHTMLElement();
+    const firstMessage = new FakeHTMLElement({ chatMessage: true, height: 80 });
+    thread.append(firstMessage);
+    const dispose = createChatMessageVirtualizer(thread);
+
+    firstMessage.height = 420;
+    assert.equal(firstMessage.classList.contains("chat-message-virtualized"), false);
+    assert.equal(frames.length, 0);
+
+    const secondMessage = new FakeHTMLElement({ chatMessage: true, height: 60 });
+    thread.append(secondMessage);
+    notifyMutation([{ addedNodes: [secondMessage], removedNodes: [] }]);
+    assert.equal(frames.length, 1);
+    frames.shift()();
+
+    assert.equal(firstMessage.styleValues.get("--chat-message-intrinsic-height"), "420px");
+    assert.equal(firstMessage.classList.contains("chat-message-virtualized"), true);
+    assert.equal(secondMessage.classList.contains("chat-message-virtualized"), false);
+    assert.equal(secondMessage.styleValues.has("--chat-message-intrinsic-height"), false);
+    dispose();
+  } finally {
+    for (const [name, value] of Object.entries(previousGlobals)) {
+      if (value === undefined) delete globalThis[name];
+      else globalThis[name] = value;
+    }
   }
 });
 

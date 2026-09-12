@@ -13,6 +13,140 @@ export const ROLEPLAY_CHAT_STREAM_RENDER_INTERVAL_MS = 80;
 export const CHAT_SCROLL_SETTLE_MS = 180;
 export const CHAT_INPUT_SETTLE_MS = 420;
 export const CHAT_SCROLL_ACTIVITY_MESSAGE = "renge-chat-scroll-activity";
+const CHAT_MESSAGE_VIRTUALIZED_CLASS = "chat-message-virtualized";
+
+/**
+ * Keeps the newest message in normal layout while it can still grow, then
+ * records its final height before enabling native offscreen rendering skips.
+ */
+export function createChatMessageVirtualizer(thread: HTMLElement) {
+  if (
+    typeof CSS === "undefined" ||
+    typeof CSS.supports !== "function" ||
+    !CSS.supports("content-visibility", "auto")
+  ) {
+    return () => undefined;
+  }
+
+  const pendingMessages = new Set<HTMLElement>();
+  const observedMessages = new Set<HTMLElement>();
+  let frameId: number | null = null;
+  let resizeObserver: ResizeObserver | null = null;
+
+  const getLatestMessage = () => {
+    const messages = thread.querySelectorAll<HTMLElement>(".chat-message");
+    return messages.item(messages.length - 1);
+  };
+
+  const keepLatestMessageLive = () => {
+    const latestMessage = getLatestMessage();
+    if (!latestMessage) return null;
+    pendingMessages.delete(latestMessage);
+    resizeObserver?.unobserve(latestMessage);
+    observedMessages.delete(latestMessage);
+    latestMessage.classList.remove(CHAT_MESSAGE_VIRTUALIZED_CLASS);
+    latestMessage.style.removeProperty("--chat-message-intrinsic-height");
+    return latestMessage;
+  };
+
+  const flush = () => {
+    frameId = null;
+    const latestMessage = keepLatestMessageLive();
+    const candidates = Array.from(pendingMessages).filter(
+      (message) =>
+        message !== latestMessage &&
+        message.isConnected &&
+        thread.contains(message) &&
+        !message.classList.contains(CHAT_MESSAGE_VIRTUALIZED_CLASS),
+    );
+    pendingMessages.clear();
+
+    // Read every height before writing styles so this costs one layout pass.
+    const measurements = candidates.map((message) => ({
+      message,
+      height: message.getBoundingClientRect().height,
+    }));
+    measurements.forEach(({ message, height }) => {
+      if (!Number.isFinite(height) || height <= 0) return;
+      message.style.setProperty("--chat-message-intrinsic-height", `${height}px`);
+      message.classList.add(CHAT_MESSAGE_VIRTUALIZED_CLASS);
+      resizeObserver?.unobserve(message);
+      observedMessages.delete(message);
+    });
+  };
+
+  const schedule = () => {
+    if (frameId !== null) return;
+    frameId = window.requestAnimationFrame(flush);
+  };
+
+  resizeObserver =
+    typeof ResizeObserver === "function"
+      ? new ResizeObserver((entries) => {
+          const latestMessage = getLatestMessage();
+          entries.forEach((entry) => {
+            const message = entry.target as HTMLElement;
+            if (
+              message !== latestMessage &&
+              !message.classList.contains(CHAT_MESSAGE_VIRTUALIZED_CLASS)
+            ) {
+              pendingMessages.add(message);
+            }
+          });
+          if (pendingMessages.size > 0) schedule();
+        })
+      : null;
+
+  const observeMessage = (message: HTMLElement, latestMessage: HTMLElement | null) => {
+    if (message === latestMessage) return;
+    pendingMessages.add(message);
+    if (!resizeObserver || observedMessages.has(message)) return;
+    observedMessages.add(message);
+    resizeObserver.observe(message);
+  };
+
+  const collect = (node: Node) => {
+    if (!(node instanceof HTMLElement)) return;
+    const latestMessage = keepLatestMessageLive();
+    if (node.matches(".chat-message")) observeMessage(node, latestMessage);
+    node
+      .querySelectorAll<HTMLElement>(`.chat-message:not(.${CHAT_MESSAGE_VIRTUALIZED_CLASS})`)
+      .forEach((message) => observeMessage(message, latestMessage));
+    if (pendingMessages.size > 0) schedule();
+  };
+
+  const release = (node: Node) => {
+    if (!(node instanceof HTMLElement)) return;
+    const messages = [
+      ...(node.matches(".chat-message") ? [node] : []),
+      ...node.querySelectorAll<HTMLElement>(".chat-message"),
+    ];
+    messages.forEach((message) => {
+      pendingMessages.delete(message);
+      resizeObserver?.unobserve(message);
+      observedMessages.delete(message);
+    });
+  };
+
+  collect(thread);
+  const observer =
+    typeof MutationObserver === "function"
+      ? new MutationObserver((records) => {
+          records.forEach((record) => record.removedNodes.forEach(release));
+          collect(thread);
+        })
+      : null;
+  observer?.observe(thread, { childList: true });
+
+  return () => {
+    observer?.disconnect();
+    resizeObserver?.disconnect();
+    if (frameId !== null) window.cancelAnimationFrame(frameId);
+    frameId = null;
+    pendingMessages.clear();
+    observedMessages.clear();
+  };
+}
 
 export function createChatScrollScheduler(options: {
   now?: () => number;
