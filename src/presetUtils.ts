@@ -131,9 +131,38 @@ function normalizeRole(value: unknown): ChatPresetPromptRole {
   return value === "user" || value === "assistant" ? value : "system";
 }
 
+function getTavernInChatRoleRank(role: ChatPresetPromptRole) {
+  // SillyTavern builds system, user, assistant groups before reversing the
+  // chat, so the final API order is assistant, user, system.
+  return role === "assistant" ? 0 : role === "user" ? 1 : 2;
+}
+
 function normalizeInjectionPosition(value: unknown): 0 | 1 | 2 {
   const position = finiteNumber(value, 0);
   return position === 2 ? 2 : position === 1 ? 1 : 0;
+}
+
+function normalizeSillyTavernPrompt(
+  rawPrompt: unknown,
+  index: number,
+  enabledOverride?: boolean,
+) {
+  const prompt = isRecord(rawPrompt) ? { ...rawPrompt } : {};
+  const injectionPosition = finiteNumber(
+    prompt.injectionPosition ?? prompt.injection_position,
+    0,
+  );
+  if (injectionPosition === 1) {
+    // SillyTavern uses 1 for an in-chat (depth-based) injection. Renge keeps
+    // the internal value 2 so older Renge presets remain readable.
+    prompt.injectionPosition = 2;
+    prompt.injection_position = 2;
+  }
+  if (prompt.injectionOrder == null && prompt.injection_order == null) {
+    prompt.injectionOrder = 100;
+    prompt.injection_order = 100;
+  }
+  return normalizeChatPresetPrompt(prompt, index, enabledOverride);
 }
 
 function fileNameWithoutExtension(fileName: string) {
@@ -202,13 +231,17 @@ export function normalizeChatPresetPrompt(
 export function normalizeChatPreset(rawPreset: unknown, index = 0): ChatPreset {
   const raw = isRecord(rawPreset) ? rawPreset : {};
   const fallback = createDefaultChatPreset(`预设 ${index + 1}`);
+  const normalizePrompt =
+    raw.sourceFormat === "sillytavern"
+      ? normalizeSillyTavernPrompt
+      : normalizeChatPresetPrompt;
   const prompts = Array.isArray(raw.prompts)
-    ? raw.prompts.map((prompt, promptIndex) => normalizeChatPresetPrompt(prompt, promptIndex))
+    ? raw.prompts.map((prompt, promptIndex) => normalizePrompt(prompt, promptIndex))
     : [];
   const rawBackupPrompts = raw.backupPrompts ?? raw.backup_prompts;
   const backupPrompts = Array.isArray(rawBackupPrompts)
     ? rawBackupPrompts.map((prompt, promptIndex) =>
-        normalizeChatPresetPrompt(prompt, promptIndex),
+        normalizePrompt(prompt, promptIndex),
       )
     : [];
   const rawRegexScripts = raw.regexScripts ?? raw.regexes ?? raw.regex_scripts;
@@ -326,7 +359,7 @@ export function importSillyTavernPreset(rawPreset: unknown, fileName: string): C
     const prompt = promptMap.get(identifier);
     if (!identifier || !prompt) return;
     orderedPrompts.push(
-      normalizeChatPresetPrompt(
+      normalizeSillyTavernPrompt(
         prompt,
         index,
         typeof rawOrderItem.enabled === "boolean" ? rawOrderItem.enabled : undefined,
@@ -337,7 +370,7 @@ export function importSillyTavernPreset(rawPreset: unknown, fileName: string): C
 
   if (orderedPrompts.length === 0) {
     rawPrompts.forEach((prompt, index) => {
-      orderedPrompts.push(normalizeChatPresetPrompt(prompt, index));
+      orderedPrompts.push(normalizeSillyTavernPrompt(prompt, index));
       const promptRecord = isRecord(prompt) ? prompt : {};
       usedIdentifiers.add(
         String(promptRecord.identifier ?? promptRecord.id ?? `prompt-${index + 1}`),
@@ -351,7 +384,7 @@ export function importSillyTavernPreset(rawPreset: unknown, fileName: string): C
       const identifier = String(prompt.identifier ?? prompt.id ?? `prompt-${index + 1}`);
       return !usedIdentifiers.has(identifier);
     })
-    .map((prompt, index) => normalizeChatPresetPrompt(prompt, index));
+    .map((prompt, index) => normalizeSillyTavernPrompt(prompt, index));
   const fallback = createDefaultChatPreset(fileNameWithoutExtension(fileName));
   const timestamp = new Date().toISOString();
   const regexScripts = extractSillyTavernPresetRegexScripts(rawPreset, fileName);
@@ -495,14 +528,43 @@ export function applyChatPresetToMessages<T extends PresetCompatibleMessage>(
   }
   appendHistory();
 
-  inChatPrompts
-    .sort((first, second) => first.injectionOrder - second.injectionOrder)
-    .forEach((prompt) => {
-      const content = expandPromptContent(prompt.content, macroContext, variables);
-      if (!content) return;
-      const insertionIndex = Math.max(0, messages.length - prompt.injectionDepth);
-      messages.splice(insertionIndex, 0, { role: prompt.role, content });
-    });
+  // Tavern chat depth is measured against the message list before any in-chat
+  // injections are added. Build each depth bucket first so one injection does
+  // not shift the insertion point of another prompt.
+  const baseMessages = messages.splice(0, messages.length);
+  const injectionsByBoundary = new Map<
+    number,
+    Array<{ prompt: ChatPresetPrompt; content: string; index: number }>
+  >();
+  inChatPrompts.forEach((prompt, index) => {
+    const content = expandPromptContent(prompt.content, macroContext, variables);
+    if (!content) return;
+    const depth = Number.isFinite(prompt.injectionDepth)
+      ? Math.max(0, Math.floor(prompt.injectionDepth))
+      : 0;
+    const boundary = Math.max(0, baseMessages.length - depth);
+    const bucket = injectionsByBoundary.get(boundary) ?? [];
+    bucket.push({ prompt, content, index });
+    injectionsByBoundary.set(boundary, bucket);
+  });
+
+  for (let boundary = 0; boundary <= baseMessages.length; boundary += 1) {
+    const bucket = injectionsByBoundary.get(boundary);
+    if (bucket) {
+      bucket
+        .sort(
+          (first, second) =>
+            first.prompt.injectionOrder - second.prompt.injectionOrder ||
+            getTavernInChatRoleRank(first.prompt.role) -
+              getTavernInChatRoleRank(second.prompt.role) ||
+            first.index - second.index,
+        )
+        .forEach(({ prompt, content }) => {
+          messages.push({ role: prompt.role, content });
+        });
+    }
+    if (boundary < baseMessages.length) messages.push(baseMessages[boundary]);
+  }
 
   return preset.squashSystemMessages
     ? mergeSystemMessagesAtBeginning(messages)
@@ -540,7 +602,7 @@ function serializeChatPresetPrompt(prompt: ChatPresetPrompt) {
     enabled: prompt.enabled,
     marker: prompt.marker,
     system_prompt: prompt.systemPrompt,
-    injection_position: prompt.injectionPosition,
+    injection_position: prompt.injectionPosition === 2 ? 1 : 0,
     injection_depth: prompt.injectionDepth,
     injection_order: prompt.injectionOrder,
   };

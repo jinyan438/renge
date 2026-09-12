@@ -33551,7 +33551,6 @@ export function App() {
                                 type="number"
                                 min="0"
                                 value={selectedChatPresetPrompt.injectionDepth}
-                                disabled={selectedChatPresetPrompt.injectionPosition !== 2}
                                 onChange={(event) =>
                                   updateChatPresetPrompt(selectedChatPresetPrompt.identifier, {
                                     injectionDepth: Math.max(0, Number(event.target.value)),
