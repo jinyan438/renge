@@ -1,4 +1,6 @@
 import test from "node:test";
+import { EnvHttpProxyAgent } from "undici";
+import { createUpstreamDispatcherCache, describeUpstreamNetworkError } from "../src/upstreamNetworkUtils.mjs";
 import assert from "node:assert/strict";
 import { createServer, request } from "node:http";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -13,6 +15,42 @@ import {
   normalizeTavernFileName,
   startRengeServer,
 } from "../server.mjs";
+
+test("upstream routing follows proxy changes without restarting the app", async (t) => {
+  const upstream = createServer((_request, response) => response.end("reachable"));
+  await new Promise(resolve => upstream.listen(0, "127.0.0.1", resolve));
+  const unused = createServer();
+  await new Promise(resolve => unused.listen(0, "127.0.0.1", resolve));
+  const proxyPort = unused.address().port;
+  await new Promise(resolve => unused.close(resolve));
+  let options = { httpProxy: `http://127.0.0.1:${proxyPort}`, httpsProxy: "", noProxy: "" };
+  let clock = 0;
+  const agents = [];
+  const current = createUpstreamDispatcherCache({
+    readOptions: () => options, now: () => clock, refreshMs: 1000,
+    createDispatcher: value => { const agent = new EnvHttpProxyAgent(value); agents.push(agent); return agent; },
+  });
+  t.after(async () => {
+    await Promise.allSettled(agents.map(agent => agent.close()));
+    await new Promise(resolve => upstream.close(resolve));
+  });
+  const url = `http://127.0.0.1:${upstream.address().port}`;
+  await assert.rejects(fetch(url, { dispatcher: current() }), error => error.cause?.code === "ECONNREFUSED");
+  options = { httpProxy: "", httpsProxy: "", noProxy: "" };
+  clock += 1000;
+  assert.equal(await (await fetch(url, { dispatcher: current() })).text(), "reachable");
+  assert.equal(current(), agents[1]);
+  assert.equal(agents.length, 2);
+});
+
+test("network errors expose actionable codes without leaking proxy credentials", () => {
+  const error = new TypeError("fetch failed", { cause: new AggregateError([
+    Object.assign(new Error("http://secret:password@proxy.test"), { code: "ECONNREFUSED" }),
+  ]) });
+  const message = describeUpstreamNetworkError(error);
+  assert.match(message, /连接被拒绝.*ECONNREFUSED/);
+  assert.doesNotMatch(message, /secret|password|proxy.test/);
+});
 
 test("Xinghe custom API skips empty proxy fields and uses YAML authorization", () => {
   assert.deepEqual(getTavernProviderTarget({

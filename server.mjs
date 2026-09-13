@@ -8,6 +8,7 @@ import { basename, dirname, extname, isAbsolute, join, normalize, relative, reso
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { EnvHttpProxyAgent } from "undici";
+import { createUpstreamDispatcherCache, describeUpstreamNetworkError } from "./src/upstreamNetworkUtils.mjs";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   buildResponsesApiRequest,
@@ -94,27 +95,35 @@ function getUpstreamProxyOptions() {
     process.env.https_proxy,
     process.env.HTTPS_PROXY,
   ].some((value) => String(value ?? "").trim());
-  if (hasEnvironmentProxy || process.platform !== "win32") return {};
+  const environmentOptions = {
+    httpProxy: process.env.http_proxy ?? process.env.HTTP_PROXY ?? "",
+    httpsProxy: process.env.https_proxy ?? process.env.HTTPS_PROXY ?? "",
+    noProxy: process.env.no_proxy ?? process.env.NO_PROXY ?? "",
+  };
+  if (hasEnvironmentProxy || process.platform !== "win32") return environmentOptions;
 
   const proxyEnabled = /^0x?1$/i.test(readWindowsInternetSetting("ProxyEnable"));
-  if (!proxyEnabled) return {};
+  if (!proxyEnabled) return environmentOptions;
 
   const proxy = parseWindowsProxyServer(readWindowsInternetSetting("ProxyServer"));
-  if (!proxy.httpProxy && !proxy.httpsProxy) return {};
+  if (!proxy.httpProxy && !proxy.httpsProxy) return environmentOptions;
   const noProxy = normalizeWindowsProxyOverride(readWindowsInternetSetting("ProxyOverride"));
   return noProxy ? { ...proxy, noProxy } : proxy;
 }
 
-function createUpstreamDispatcher() {
+function createUpstreamDispatcher(options) {
   try {
-    return new EnvHttpProxyAgent(getUpstreamProxyOptions());
+    return new EnvHttpProxyAgent(options);
   } catch (error) {
     console.warn("[network] invalid proxy configuration; falling back to direct upstream requests", error);
     return new EnvHttpProxyAgent();
   }
 }
 
-const upstreamDispatcher = createUpstreamDispatcher();
+const getUpstreamDispatcher = createUpstreamDispatcherCache({
+  readOptions: getUpstreamProxyOptions,
+  createDispatcher: createUpstreamDispatcher,
+});
 
 const mimeTypes = {
   ".html": "text/html;charset=utf-8",
@@ -337,7 +346,7 @@ async function loadTavernModule(remoteUrl, origin) {
           const remoteResponse = await fetch(candidate, {
             signal: AbortSignal.timeout(30_000),
             headers: { Accept: "text/javascript, application/javascript, */*;q=0.8" },
-            dispatcher: upstreamDispatcher,
+            dispatcher: getUpstreamDispatcher(),
           });
           if (!remoteResponse.ok) {
             throw new Error(`远程模块返回 ${remoteResponse.status}`);
@@ -2012,14 +2021,14 @@ async function proxyJson({ url, apiKey, method = "GET", body, timeoutMs, headers
       },
       body: body ? JSON.stringify(body) : undefined,
       signal: ac.signal,
-      dispatcher: upstreamDispatcher,
+      dispatcher: getUpstreamDispatcher(),
     });
   } catch (err) {
     if (timer) clearTimeout(timer);
     return {
       ok: false,
       status: 504,
-      payload: { error: { message: err && err.message ? err.message : "upstream request failed" } },
+      payload: { error: { message: describeUpstreamNetworkError(err) } },
     };
   }
   if (timer) clearTimeout(timer);
@@ -2062,14 +2071,14 @@ async function proxyForm({ url, apiKey, method = "POST", form, timeoutMs }) {
       },
       body: form,
       signal: ac.signal,
-      dispatcher: upstreamDispatcher,
+      dispatcher: getUpstreamDispatcher(),
     });
   } catch (err) {
     if (timer) clearTimeout(timer);
     return {
       ok: false,
       status: 504,
-      payload: { error: { message: err && err.message ? err.message : "upstream request failed" } },
+      payload: { error: { message: describeUpstreamNetworkError(err) } },
     };
   }
   if (timer) clearTimeout(timer);
@@ -2103,7 +2112,7 @@ async function downloadBinaryWithTimeout(url, timeoutMs = 15000) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(new Error(`download timeout after ${timeoutMs}ms`)), timeoutMs);
   try {
-    const response = await fetch(url, { signal: ac.signal, dispatcher: upstreamDispatcher });
+    const response = await fetch(url, { signal: ac.signal, dispatcher: getUpstreamDispatcher() });
     const buffer = response.ok ? Buffer.from(await response.arrayBuffer()) : null;
     return { response, buffer };
   } finally {
@@ -2395,12 +2404,12 @@ async function proxyStream({ url, apiKey, body, response, headers = {} }) {
       },
       body: JSON.stringify(body),
       signal: ac.signal,
-      dispatcher: upstreamDispatcher,
+      dispatcher: getUpstreamDispatcher(),
     });
   } catch (error) {
     response.off("close", abortUpstream);
     if (ac.signal.aborted && response.destroyed) return;
-    throw error;
+    throw new Error(describeUpstreamNetworkError(error), { cause: error });
   }
 
   if (!upstreamResponse.ok || !upstreamResponse.body) {
