@@ -12891,6 +12891,59 @@ export function App() {
       }, 180);
     }
   }, [flushChatInputContext]);
+
+  type ScriptCompatibleTextarea = HTMLTextAreaElement & {
+    _acuOriginalActionText?: string | null;
+  };
+
+  const clearScriptedActionMarker = useCallback((element: HTMLTextAreaElement) => {
+    const scriptedTextarea = element as ScriptCompatibleTextarea;
+    scriptedTextarea._acuOriginalActionText = null;
+    const jquery = (window as Window & {
+      jQuery?: (target: unknown) => { removeData?: (key: string) => unknown };
+    }).jQuery;
+    try {
+      jquery?.(element).removeData?.("acu-original-action-text");
+    } catch {
+      // The compatibility bridge may be unavailable during runtime teardown.
+    }
+  }, []);
+
+  const scheduleScriptedActionAutoSend = useCallback((element: HTMLTextAreaElement) => {
+    if (scriptedActionAutoSendTimerRef.current !== null) {
+      window.clearTimeout(scriptedActionAutoSendTimerRef.current);
+    }
+    scriptedActionAutoSendTimerRef.current = window.setTimeout(() => {
+      scriptedActionAutoSendTimerRef.current = null;
+      const scriptedTextarea = element as ScriptCompatibleTextarea;
+      const actionText = String(scriptedTextarea._acuOriginalActionText ?? "").trim();
+      const resolvedText = String(element.value ?? "").trim();
+      if (!actionText || !resolvedText || !resolvedText.includes(actionText)) return;
+
+      // A skill/check action opens this panel and must wait for its roll
+      // result before the composer can be submitted.
+      if (
+        document.querySelector(
+          ".acu-dice-panel, .acu-dice-overlay, .acu-contest-panel, .acu-contest-overlay",
+        )
+      ) {
+        return;
+      }
+
+      const sendKey = `${actionText}\u0000${resolvedText}`;
+      if (scriptedActionAutoSendKeyRef.current === sendKey) return;
+      scriptedActionAutoSendKeyRef.current = sendKey;
+
+      const sendPromise = sendChatMessageRef.current(resolvedText, []);
+      void Promise.resolve(sendPromise).finally(() => {
+        clearScriptedActionMarker(element);
+        if (scriptedActionAutoSendKeyRef.current === sendKey) {
+          scriptedActionAutoSendKeyRef.current = "";
+        }
+      });
+    }, 0);
+  }, [clearScriptedActionMarker]);
+
   const setChatInputElementRef = useCallback((element: HTMLTextAreaElement | null) => {
     chatInputRef.current = element;
     if (scriptedActionAutoSendTimerRef.current !== null) {
@@ -12900,70 +12953,32 @@ export function App() {
     scriptedActionAutoSendKeyRef.current = "";
     if (!element) return;
 
-    type ScriptCompatibleTextarea = HTMLTextAreaElement & {
-      _acuOriginalActionText?: string | null;
-    };
-
-    const clearScriptedActionMarker = () => {
-      const scriptedTextarea = element as ScriptCompatibleTextarea;
-      scriptedTextarea._acuOriginalActionText = null;
-      const jquery = (window as Window & {
-        jQuery?: (target: unknown) => { removeData?: (key: string) => unknown };
-      }).jQuery;
-      try {
-        jquery?.(element).removeData?.("acu-original-action-text");
-      } catch {
-        // The compatibility bridge may be torn down while a send is finishing.
-      }
-    };
-
-    const scheduleScriptedActionAutoSend = (event?: Event) => {
-      // Script-generated input/change events are not trusted. Trusted events
-      // are ordinary user editing and must never trigger an automatic send.
-      if (event?.isTrusted) return;
-      if (scriptedActionAutoSendTimerRef.current !== null) {
-        window.clearTimeout(scriptedActionAutoSendTimerRef.current);
-      }
-      scriptedActionAutoSendTimerRef.current = window.setTimeout(() => {
-        scriptedActionAutoSendTimerRef.current = null;
-        const scriptedTextarea = element as ScriptCompatibleTextarea;
-        const actionText = String(scriptedTextarea._acuOriginalActionText ?? "").trim();
-        const resolvedText = String(element.value ?? "").trim();
-        if (!actionText || !resolvedText || !resolvedText.includes(actionText)) return;
-
-        // A skill/check action opens this panel and must wait for its roll
-        // result before the composer can be submitted.
-        if (
-          document.querySelector(
-            ".acu-dice-panel, .acu-dice-overlay, .acu-contest-panel, .acu-contest-overlay",
-          )
-        ) {
-          return;
-        }
-
-        const sendKey = `${actionText}\u0000${resolvedText}`;
-        if (scriptedActionAutoSendKeyRef.current === sendKey) return;
-        scriptedActionAutoSendKeyRef.current = sendKey;
-
-        const sendPromise = sendChatMessageRef.current(resolvedText, []);
-        void Promise.resolve(sendPromise).finally(() => {
-          clearScriptedActionMarker();
-          if (scriptedActionAutoSendKeyRef.current === sendKey) {
-            scriptedActionAutoSendKeyRef.current = "";
-          }
-        });
-      }, 0);
-    };
-
     const syncScriptedInput = (event?: Event) => {
       setChatInput(element.value);
-      scheduleScriptedActionAutoSend(event);
+      // Script-generated input/change events are not trusted. Trusted events
+      // are ordinary user editing and must never trigger an automatic send.
+      if (!event?.isTrusted) scheduleScriptedActionAutoSend(element);
     };
     // jQuery's .trigger("input") calls DOM event properties but does not reach
     // React's delegated onChange listener. Tavern scripts rely on that pattern.
     element.oninput = syncScriptedInput;
     element.onchange = syncScriptedInput;
-  }, [setChatInput]);
+  }, [scheduleScriptedActionAutoSend, setChatInput]);
+
+  useEffect(() => {
+    const handleDiceActionClick = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element) || !target.closest(".acu-action-item")) return;
+      const textarea = chatInputRef.current;
+      if (textarea) scheduleScriptedActionAutoSend(textarea);
+    };
+
+    // The database script handles these buttons through delegated jQuery
+    // handlers. Capture the click first, then submit after that handler has
+    // written the action into the composer.
+    document.addEventListener("click", handleDiceActionClick, true);
+    return () => document.removeEventListener("click", handleDiceActionClick, true);
+  }, [scheduleScriptedActionAutoSend]);
   const handleChatInputBlur = useCallback(() => {
     if (chatInputContextTimerRef.current !== null) {
       window.clearTimeout(chatInputContextTimerRef.current);
