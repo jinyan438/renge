@@ -5,6 +5,7 @@ import {
   createTavernErrorCatched,
   installLegacyTavernSendControls,
   installTavernPresetManagerControls,
+  proxyTavernModuleUrl,
   proxyTavernModuleUrls,
   resolveTavernButtonOwnerId,
   resolveTavernCallerScriptId,
@@ -1892,6 +1893,13 @@ export class TavernScriptRuntime {
     // them directly in the browser, so expose the standard feature flags in
     // the iframe realm before any dependency or user module is evaluated.
     installVueEsmBundlerFeatureFlags(this.runtimeWindow);
+    // Dynamic imports used by Tavern auto-updaters (for example
+    // import(`https://testingcf.jsdelivr.net/...@${version}/stable.js`))
+    // need the same-origin module proxy as static imports. Expose the resolver
+    // in the iframe realm so the rewritten import can evaluate its template
+    // literal first and proxy the concrete URL afterwards.
+    this.runtimeWindow.__rengeTavernModuleUrl = (remoteUrl: unknown) =>
+      proxyTavernModuleUrl(String(remoteUrl ?? ""), window.location.origin);
     this.runtimeWindow.addEventListener("error", (event: ErrorEvent) => {
       this.writeRuntimeLog("error", event.message || "脚本运行时发生错误。");
     });

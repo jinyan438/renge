@@ -627,12 +627,49 @@ const JSDELIVR_MODULE_URL_PATTERN =
   /https:\/\/(?:testingcf|cdn|fastly|gcore)\.jsdelivr\.net\/[^'"`\s)]+/g;
 const TAVERN_MODULE_PROXY_VERSION = "2";
 
+const isJsDelivrModuleUrl = (value: string) => {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" &&
+      /^(?:testingcf|cdn|fastly|gcore)\.jsdelivr\.net$/i.test(parsed.hostname);
+  } catch {
+    return false;
+  }
+};
+
+/** Converts a resolved jsDelivr module URL into the same-origin proxy URL. */
+export function proxyTavernModuleUrl(remoteUrl: string, origin: string) {
+  if (!isJsDelivrModuleUrl(remoteUrl)) return remoteUrl;
+  const normalizedOrigin = origin.replace(/\/+$/, "");
+  return `${normalizedOrigin}/api/tavern-module-proxy?url=${encodeURIComponent(remoteUrl)}&v=${TAVERN_MODULE_PROXY_VERSION}`;
+}
+
 /** Routes jsDelivr ES-module graphs through Renge's server-side loader. */
 export function proxyTavernModuleUrls(source: string, origin: string) {
-  const normalizedOrigin = origin.replace(/\/+$/, "");
-  return source.replace(JSDELIVR_MODULE_URL_PATTERN, (remoteUrl) =>
-    `${normalizedOrigin}/api/tavern-module-proxy?url=${encodeURIComponent(remoteUrl)}&v=${TAVERN_MODULE_PROXY_VERSION}`,
+  // A number of Tavern auto-updaters use a template-literal dynamic import,
+  // e.g. import(`https://testingcf.jsdelivr.net/...@${version}/dist/stable.js`).
+  // Replacing the URL text directly would encode the literal `${version}` and
+  // make the proxy request an invalid module. Keep these imports as templates
+  // and resolve the URL through the runtime helper after interpolation.
+  const dynamicTemplates: string[] = [];
+  const dynamicMarkerPrefix = "__RENGE_TAVERN_DYNAMIC_IMPORT_";
+  const sourceWithDynamicMarkers = source.replace(
+    /import\s*\(\s*`(https:\/\/(?:testingcf|cdn|fastly|gcore)\.jsdelivr\.net\/[^`]+)`\s*\)/g,
+    (_match, template: string) => {
+      const marker = `${dynamicMarkerPrefix}${dynamicTemplates.length}__`;
+      dynamicTemplates.push(template);
+      return `import(window.__rengeTavernModuleUrl(\`${marker}\`))`;
+    },
   );
+  let transformed = sourceWithDynamicMarkers.replace(
+    JSDELIVR_MODULE_URL_PATTERN,
+    (remoteUrl) => proxyTavernModuleUrl(remoteUrl, origin),
+  );
+  dynamicTemplates.forEach((template, index) => {
+    const marker = `${dynamicMarkerPrefix}${index}__`;
+    transformed = transformed.split(marker).join(template);
+  });
+  return transformed;
 }
 
 export type TavernEventSubscription = ((...args: unknown[]) => unknown) & {

@@ -352,7 +352,13 @@ async function loadTavernModule(remoteUrl, origin) {
             throw new Error(`远程模块返回 ${remoteResponse.status}`);
           }
           const source = await remoteResponse.text();
-          return rewriteTavernModuleImports(source, origin, candidate);
+          const contentType = String(remoteResponse.headers.get("content-type") ?? "");
+          return {
+            source: contentType.toLowerCase().includes("text/css")
+              ? source
+              : rewriteTavernModuleImports(source, origin, candidate),
+            contentType,
+          };
         } catch (error) {
           lastError = error;
         }
@@ -377,14 +383,17 @@ async function serveTavernModuleProxy(request, response, url) {
   try {
     getTavernModuleCandidates(remoteUrl);
     const origin = `${url.protocol}//${url.host}`;
-    const source = await loadTavernModule(remoteUrl, origin);
+    const module = await loadTavernModule(remoteUrl, origin);
+    const contentType = String(module?.contentType ?? "").toLowerCase();
     response.writeHead(200, {
-      "Content-Type": "text/javascript;charset=utf-8",
+      "Content-Type": contentType.includes("text/css")
+        ? "text/css;charset=utf-8"
+        : "text/javascript;charset=utf-8",
       "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": "*",
       "X-Content-Type-Options": "nosniff",
     });
-    response.end(source);
+    response.end(module.source);
   } catch (error) {
     sendJson(response, 502, { error: compactError(error) });
   }

@@ -9,6 +9,7 @@ import {
   installLegacyTavernSendControls,
   installTavernPresetManagerControls,
   parseTavernSlashCommand,
+  proxyTavernModuleUrl,
   proxyTavernModuleUrls,
   resolveTavernButtonOwnerId,
   resolveTavernCallerScriptId,
@@ -441,6 +442,32 @@ const image = "https://files.example.test/card.png";
   assert.match(transformed, /url=https%3A%2F%2Fgcore\.jsdelivr\.net/);
   assert.equal((transformed.match(/&v=2/g) ?? []).length, 3);
   assert.match(transformed, /https:\/\/files\.example\.test\/card\.png/);
+});
+
+test("versioned Tavern auto-updater imports resolve templates before proxying", () => {
+  const source = `
+const version = "v3.2.1";
+import(\`https://testingcf.jsdelivr.net/gh/example/card@\${version}/dist/stable.js\`);
+`;
+
+  const transformed = proxyTavernModuleUrls(source, "http://127.0.0.1:5190/");
+
+  assert.match(
+    transformed,
+    /import\(window\.__rengeTavernModuleUrl\(`https:\/\/testingcf\.jsdelivr\.net\/gh\/example\/card@\$\{version\}\/dist\/stable\.js`\)\)/,
+  );
+  assert.doesNotMatch(transformed, /%24%7Bversion%7D/);
+  assert.equal(
+    proxyTavernModuleUrl(
+      "https://testingcf.jsdelivr.net/gh/example/card@v3.2.1/dist/stable.js",
+      "http://127.0.0.1:5190/",
+    ),
+    "http://127.0.0.1:5190/api/tavern-module-proxy?url=https%3A%2F%2Ftestingcf.jsdelivr.net%2Fgh%2Fexample%2Fcard%40v3.2.1%2Fdist%2Fstable.js&v=2",
+  );
+  assert.equal(
+    proxyTavernModuleUrl("https://files.example.test/card.js", "http://127.0.0.1:5190"),
+    "https://files.example.test/card.js",
+  );
 });
 
 test("event subscriptions expose TavernHelper stop controls", () => {
