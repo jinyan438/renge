@@ -10996,6 +10996,15 @@ input[type="range"] {
   font-size: 18px;
 }
 
+/* The dice UI fixes every database record to a narrow card in horizontal mode.
+   Let a lone record use the available panel width so long fields stay visible. */
+.acu-wrapper.acu-dice-ui-root .acu-card-grid > .acu-data-card:only-child {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  flex: 1 1 100% !important;
+}
+
 @media (max-width: 720px) {
   #renge-tavern-extension-host {
     right: 10px;
