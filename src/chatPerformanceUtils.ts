@@ -100,7 +100,7 @@ export function centerChatBubble(dot: HTMLElement) {
     if (scaleY <= 0) return;
     const top = thread.scrollTop
       + (bubble.getBoundingClientRect().top - threadRect.top) / scaleY
-      - thread.clientTop - thread.clientHeight / 2;
+      - thread.clientTop;
     const target = Math.max(0, Math.min(top, thread.scrollHeight - thread.clientHeight));
     if (Math.abs(thread.scrollTop - target) > 0.5) thread.scrollTo({ top: target, behavior });
   };

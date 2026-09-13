@@ -53,7 +53,7 @@ function mockReducedMotion(context, matches) {
   };
 }
 
-test("bubble navigation aligns the selected bubble top to the chat viewport center regardless of height", (context) => {
+test("bubble navigation aligns the selected bubble top to the chat viewport top regardless of height", (context) => {
   mockReducedMotion(context, false);
   let focused = false;
   let scrollOptions;
@@ -71,12 +71,11 @@ test("bubble navigation aligns the selected bubble top to the chat viewport cent
     ? thread : { querySelector: () => bubble } };
   assert.equal(centerChatBubble(dot), true);
   assert.equal(focused, true);
-  // The bubble top starts 82 px above the reading viewport's center.
-  assert.deepEqual(scrollOptions, { top: 618, behavior: "smooth" });
+  assert.deepEqual(scrollOptions, { top: 918, behavior: "smooth" });
 
   bubble.getBoundingClientRect = () => ({ top: 400, height: 1000 });
   centerChatBubble(dot);
-  assert.equal(scrollOptions.top, 618, "expanding a tool card does not move the reading target");
+  assert.equal(scrollOptions.top, 918, "expanding a tool card does not move the reading target");
   thread.dispatchEvent(new Event("wheel"));
 });
 
@@ -121,17 +120,17 @@ test("bubble navigation corrects late layout shifts and stops holding position a
   const dot = { closest: (selector) => selector === ".chat-thread"
     ? thread : { querySelector: () => bubble } };
   centerChatBubble(dot);
-  assert.equal(thread.scrollTop, 800);
+  assert.equal(thread.scrollTop, 1100);
   contentTop += 150;
   scheduler.resize();
   scheduler.paint();
   assert.equal(calls.length, 1, "layout changes do not interrupt the initial smooth scroll");
   scheduler.settle();
-  assert.deepEqual(calls.at(-1), { top: 950, behavior: "instant" });
+  assert.deepEqual(calls.at(-1), { top: 1250, behavior: "instant" });
   contentTop += 120;
   scheduler.resize();
   scheduler.paint();
-  assert.equal(thread.scrollTop, 1070, "late preview loading keeps the target top centered");
+  assert.equal(thread.scrollTop, 1370, "late preview loading keeps the target top aligned");
   thread.dispatchEvent(new Event("wheel"));
   const count = calls.length;
   contentTop += 200;
@@ -154,7 +153,7 @@ test("bubble navigation accounts for a scaled chat window and cancels when follo
   const dot = { closest: (selector) => selector === ".chat-thread"
     ? thread : { querySelector: () => bubble } };
   centerChatBubble(dot);
-  assert.equal(scrollOptions.top, 618);
+  assert.equal(scrollOptions.top, 918);
   scrollChatToLatest(thread);
   assert.ok(scheduler.observers.every((observer) => !observer.active));
 });

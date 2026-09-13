@@ -23435,7 +23435,7 @@ export function App() {
       type="button"
       className={`chat-bubble-dot ${status}`}
       aria-label={`定位到此气泡（${chatBubbleStatusLabels[status]}）`}
-      title={`${chatBubbleStatusLabels[status]} · 点击将气泡顶端定位到阅读区中央`}
+      title={`${chatBubbleStatusLabels[status]} · 点击将气泡顶端定位到阅读区顶部`}
       onClick={(event) => {
         if (!centerChatBubble(event.currentTarget)) return;
         chatReadingFocusRef.current = true;
@@ -38994,5 +38994,4 @@ export function App() {
     </>
   );
 }
-
 
