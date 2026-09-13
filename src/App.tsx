@@ -12966,7 +12966,7 @@ export function App() {
   }, [scheduleScriptedActionAutoSend, setChatInput]);
 
   useEffect(() => {
-    const handleDiceActionClick = (event: MouseEvent) => {
+    const handleDiceActionClick = (event: globalThis.MouseEvent) => {
       const target = event.target;
       if (!(target instanceof Element) || !target.closest(".acu-action-item")) return;
       const textarea = chatInputRef.current;
