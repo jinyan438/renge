@@ -115,8 +115,8 @@ function createUpstreamDispatcher(options) {
   try {
     return new EnvHttpProxyAgent(options);
   } catch (error) {
-    console.warn("[network] invalid proxy configuration; falling back to direct upstream requests", error);
-    return new EnvHttpProxyAgent();
+    console.warn("[network] invalid proxy configuration; falling back to direct upstream requests", describeUpstreamNetworkError(error));
+    return new EnvHttpProxyAgent({ httpProxy: "", httpsProxy: "", noProxy: "*" });
   }
 }
 
