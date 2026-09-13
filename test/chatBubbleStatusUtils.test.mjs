@@ -141,6 +141,7 @@ test("each grouped tool bubble renders its own status even when collapsed", () =
   const toolGroups = ["done", "error", "running"].map(makeGroup);
   const markup = renderToStaticMarkup(renderGroups({ toolGroups }, "tools"));
   assert.equal((markup.match(/class="chat-bubble-dot /g) ?? []).length, 3);
+  assert.equal((markup.match(/<button type="button" class="chat-bubble-dot /g) ?? []).length, 3);
   for (const status of ["complete", "error", "running"]) {
     assert.ok(markup.includes(`class="chat-bubble-dot ${status}"`));
   }
@@ -149,4 +150,28 @@ test("each grouped tool bubble renders its own status even when collapsed", () =
     ...makeGroup("running"), segments: [{ message: { outputStatus: "incomplete" } }],
   }, true), "incomplete");
   assert.equal(getToolBubbleStatus({ completed: true, visualizations: [], blocks: [{ variant: "error" }] }, true), "error");
+});
+
+test("clicking a status dot centers its bubble and pauses automatic output following", () => {
+  const chatReadingFocusRef = { current: false };
+  const chatScrollFollowLatestRef = { current: true };
+  let clickedDot;
+  const renderDot = loadAppCode(
+    "  const renderChatBubbleDot =",
+    "  const renderToolRunGroup =",
+    "renderChatBubbleDot",
+    {
+      React, chatBubbleStatusLabels, chatReadingFocusRef, chatScrollFollowLatestRef,
+      centerChatBubble: (dot) => { clickedDot = dot; return true; },
+    },
+  );
+  const button = renderDot("complete");
+  assert.equal(button.type, "button");
+  assert.equal(button.props.type, "button");
+  assert.equal(button.props["aria-label"], "定位到此气泡（已完成）");
+  const target = {};
+  button.props.onClick({ currentTarget: target });
+  assert.equal(clickedDot, target);
+  assert.equal(chatReadingFocusRef.current, true);
+  assert.equal(chatScrollFollowLatestRef.current, false);
 });

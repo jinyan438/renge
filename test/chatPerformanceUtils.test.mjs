@@ -6,6 +6,7 @@ import ts from "typescript";
 import {
   CHAT_SCROLL_ACTIVITY_MESSAGE,
   CHAT_SCROLL_SETTLE_MS,
+  centerChatBubble,
   chatScrollScheduler,
   createChatPreviewMountQueue,
   createChatScrollScheduler,
@@ -14,6 +15,62 @@ import {
   scrollChatToLatest,
 } from "../src/chatPerformanceUtils.ts";
 import { getHtmlPreviewLayoutSettleDelays } from "../src/htmlPreviewUtils.ts";
+
+function mockReducedMotion(context, matches) {
+  const previousWindow = globalThis.window;
+  globalThis.window = { matchMedia: () => ({ matches }) };
+  context.after(() => {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  });
+}
+
+test("bubble navigation centers only the selected bubble inside the chat viewport", (context) => {
+  mockReducedMotion(context, false);
+  let focused = false;
+  let scrollOptions;
+  const bubble = {
+    getBoundingClientRect: () => ({ top: 400, height: 100 }),
+    focus: (options) => { focused = options.preventScroll; },
+  };
+  const thread = {
+    scrollTop: 700, clientTop: 2, clientHeight: 600, scrollHeight: 3000,
+    getBoundingClientRect: () => ({ top: 180 }),
+    scrollTo: (options) => { scrollOptions = options; },
+  };
+  const dot = { closest: (selector) => selector === ".chat-thread"
+    ? thread : { querySelector: () => bubble } };
+  assert.equal(centerChatBubble(dot), true);
+  assert.equal(focused, true);
+  // The bubble center starts 32 px above the reading viewport's center.
+  assert.deepEqual(scrollOptions, { top: 668, behavior: "smooth" });
+
+  bubble.getBoundingClientRect = () => ({ top: 400, height: 1000 });
+  centerChatBubble(dot);
+  assert.equal(scrollOptions.top, 1118, "expanded tool cards use their own full height");
+});
+
+test("bubble navigation handles scroll boundaries, reduced motion and missing targets", (context) => {
+  mockReducedMotion(context, true);
+  let top = 0;
+  let scrollOptions;
+  const bubble = {
+    getBoundingClientRect: () => ({ top, height: 100 }), focus() {},
+  };
+  const thread = {
+    scrollTop: 0, clientTop: 0, clientHeight: 600, scrollHeight: 2000,
+    getBoundingClientRect: () => ({ top: 0 }),
+    scrollTo: (options) => { scrollOptions = options; },
+  };
+  const dot = { closest: (selector) => selector === ".chat-thread"
+    ? thread : { querySelector: () => bubble } };
+  centerChatBubble(dot);
+  assert.deepEqual(scrollOptions, { top: 0, behavior: "instant" });
+  top = 1900;
+  centerChatBubble(dot);
+  assert.equal(scrollOptions.top, 1400);
+  assert.equal(centerChatBubble({ closest: () => null }), false);
+});
 
 function createFakeScheduler() {
   const tasks = [];

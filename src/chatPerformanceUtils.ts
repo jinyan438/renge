@@ -72,6 +72,24 @@ export function scrollChatToLatest(thread: HTMLElement) {
   thread.scrollTop = scrollTop;
 }
 
+export function centerChatBubble(dot: HTMLElement) {
+  const row = dot.closest(".chat-bubble-row");
+  const thread = dot.closest<HTMLElement>(".chat-thread");
+  const bubble = row?.querySelector<HTMLElement>(":scope > .chat-bubble, :scope > .chat-tool-run");
+  if (!thread || !bubble) return false;
+
+  const bubbleRect = bubble.getBoundingClientRect();
+  const threadRect = thread.getBoundingClientRect();
+  const top = thread.scrollTop + bubbleRect.top + bubbleRect.height / 2
+    - threadRect.top - thread.clientTop - thread.clientHeight / 2;
+  bubble.focus({ preventScroll: true });
+  thread.scrollTo({
+    top: Math.max(0, Math.min(top, thread.scrollHeight - thread.clientHeight)),
+    behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth",
+  });
+  return true;
+}
+
 export function scheduleChatFrameWork(callback: () => void, delayMs = 0) {
   return chatScrollScheduler.schedule(callback, (attempt, delay) => {
     let frameId: number | null = null;

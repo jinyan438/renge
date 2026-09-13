@@ -246,6 +246,7 @@ import {
 } from "./chatLiveStreamUtils";
 import {
   CHAT_SCROLL_ACTIVITY_MESSAGE,
+  centerChatBubble,
   createChatPreviewMountQueue,
   createChatStreamUpdateBatcher,
   markChatInputActivity,
@@ -12761,6 +12762,7 @@ export function App() {
   const chatThreadRef = useRef<HTMLDivElement>(null);
   const chatScrollActivityCleanupRef = useRef<(() => void) | null>(null);
   const chatScrollFollowLatestRef = useRef(true);
+  const chatReadingFocusRef = useRef(false);
   const chatScrollFrameRef = useRef<(() => void) | null>(null);
   const chatScrollStateFrameRef = useRef<number | null>(null);
   const renderedEditingDraftRef = useRef<{ messageId: string; content: string } | null>(null);
@@ -13093,6 +13095,7 @@ export function App() {
       chatThreadRef.current = thread;
       if (!thread) return;
       chatScrollActivityCleanupRef.current = observeChatScrollActivity(thread);
+      chatReadingFocusRef.current = false;
       chatScrollFollowLatestRef.current = true;
       scheduleChatScrollToLatest();
     },
@@ -13956,6 +13959,7 @@ export function App() {
   const beginChatGeneration = () => {
     const controller = new AbortController();
     activeChatAbortControllerRef.current = controller;
+    chatReadingFocusRef.current = false;
     chatScrollFollowLatestRef.current = true;
     setChatGenerationState("running");
     return controller;
@@ -19743,6 +19747,7 @@ export function App() {
     [chatMessages],
   );
   useEffect(() => {
+    chatReadingFocusRef.current = false;
     chatScrollFollowLatestRef.current = true;
     scheduleChatScrollToLatest();
   }, [activeChatSessionId, scheduleChatScrollToLatest]);
@@ -23426,11 +23431,16 @@ export function App() {
   };
 
   const renderChatBubbleDot = (status: ChatBubbleStatus) => (
-    <span
+    <button
+      type="button"
       className={`chat-bubble-dot ${status}`}
-      role="img"
-      aria-label={chatBubbleStatusLabels[status]}
-      title={chatBubbleStatusLabels[status]}
+      aria-label={`定位到此气泡（${chatBubbleStatusLabels[status]}）`}
+      title={`${chatBubbleStatusLabels[status]} · 点击居中阅读`}
+      onClick={(event) => {
+        if (!centerChatBubble(event.currentTarget)) return;
+        chatReadingFocusRef.current = true;
+        chatScrollFollowLatestRef.current = false;
+      }}
     />
   );
 
@@ -23474,7 +23484,7 @@ export function App() {
     return (
       <div className="chat-bubble-row" key={messageId}>
         {renderChatBubbleDot(getToolBubbleStatus(item, chatGenerationState !== "idle"))}
-        <details className={`chat-tool-run ${hasError ? "error" : ""}`} open={autoOpen || undefined}>
+        <details className={`chat-tool-run ${hasError ? "error" : ""}`} tabIndex={-1} open={autoOpen || undefined}>
           <summary className="chat-tool-run-header">
             <span className="chat-tool-run-icon">
               {hasError ? <X size={23} /> : <Wrench size={23} />}
@@ -27362,6 +27372,7 @@ export function App() {
       sender: currentChatSender,
       ...(attachmentsToSend.length > 0 ? { attachments: attachmentsToSend } : {}),
     };
+    chatReadingFocusRef.current = false;
     chatScrollFollowLatestRef.current = true;
     let accumulatedMessages = [...chatMessagesRef.current, userMessage];
 
@@ -27976,6 +27987,7 @@ export function App() {
       sender: currentChatSender,
       ...(attachmentsToSend.length > 0 ? { attachments: attachmentsToSend } : {}),
     };
+    chatReadingFocusRef.current = false;
     chatScrollFollowLatestRef.current = true;
     const initialMessages = [...chatMessagesRef.current, userMessage];
 
@@ -36862,12 +36874,21 @@ export function App() {
             id="chat"
             ref={setChatThreadRef}
             className="chat-thread"
+            onWheelCapture={() => { chatReadingFocusRef.current = false; }}
+            onTouchMoveCapture={() => { chatReadingFocusRef.current = false; }}
+            onPointerDownCapture={() => { chatReadingFocusRef.current = false; }}
+            onKeyDownCapture={(event) => {
+              if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
+                chatReadingFocusRef.current = false;
+              }
+            }}
             onScroll={(event) => {
               if (chatMessageMenu) setChatMessageMenu(null);
               const thread = event.currentTarget;
               if (chatScrollStateFrameRef.current !== null) return;
               chatScrollStateFrameRef.current = window.requestAnimationFrame(() => {
                 chatScrollStateFrameRef.current = null;
+                if (chatReadingFocusRef.current) return;
                 chatScrollFollowLatestRef.current =
                   thread.scrollHeight - thread.scrollTop - thread.clientHeight <= 64;
               });
@@ -37202,6 +37223,7 @@ export function App() {
                           {(message.role === "assistant" || tavernSystemMessage) &&
                             renderChatBubbleDot(getChatBubbleStatus(message, isLastMessageSegment))}
                           <div
+                            tabIndex={-1}
                             className={`chat-bubble ${
                               isEditingMessage
                                 ? isRenderedEditingMessage
@@ -37414,6 +37436,7 @@ export function App() {
                             <div className="chat-bubble-row">
                               {renderChatBubbleDot(getChatBubbleStatus(message))}
                               <div
+                                tabIndex={-1}
                                 className="chat-bubble chat-choice-bubble"
                                 style={CHAT_ASSISTANT_BUBBLE_OPACITY_STYLE}
                               >
