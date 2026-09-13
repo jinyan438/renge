@@ -49,7 +49,7 @@
 .chat-thread .chat-bubble-dot {
   position: absolute;
   top: 24px;
-  left: -47px;
+  left: -49px;
   box-sizing: content-box;
   width: 10px;
   height: 10px;
@@ -631,7 +631,7 @@
   .chat-thread .chat-avatar { width: 34px; height: 34px; }
   .chat-thread .chat-avatar > svg { width: 18px; height: 18px; }
   .chat-thread .chat-message.assistant::before { left: 16px; top: 40px; }
-  .chat-thread .chat-bubble-dot { left: -32px; }
+  .chat-thread .chat-bubble-dot { left: -34px; }
   .chat-message-meta > strong { font-size: 13px; }
   .chat-message-metadata { font-size: 11px; }
   .chat-thread .chat-message-bubble-stack { gap: 10px; }
