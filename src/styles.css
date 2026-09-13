@@ -7504,6 +7504,10 @@ summary:focus-visible {
   background: transparent;
 }
 
+.chat-html-preview.inactive:not(.renge-html-fullscreen-ancestor) .chat-html-frame {
+  content-visibility: hidden;
+}
+
 html.renge-html-fullscreen,
 html.renge-html-fullscreen body {
   overflow: hidden !important;

@@ -390,7 +390,25 @@ test("keeps every asynchronously growing chat message in normal layout", () => {
   assert.doesNotMatch(stylesSource, /--chat-message-intrinsic-height/);
 });
 
-test("preview startup reports reuse layout and measurements pause during scrolling", () => {
+test("keeps mounted HTML previews alive and freezes their rendering offscreen", () => {
+  const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const stylesSource = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const start = appSource.indexOf("const ChatHtmlPreview = memo(");
+  const end = appSource.indexOf("\nfunction measureHtmlPreviewHeight(", start);
+  const component = appSource.slice(start, end);
+
+  assert.ok(start >= 0 && end > start);
+  assert.match(component, /mountStartedRef\.current = true;\s+setRenderReady\(true\)/);
+  assert.doesNotMatch(component, /setRenderReady\(active\)/);
+  assert.doesNotMatch(component, /deactivateHeavyHtmlPreview|subscribeHeavyHtmlPreview/);
+  assert.match(component, /renderReady && !previewActive \? "inactive" : ""/);
+  assert.match(
+    stylesSource,
+    /\.chat-html-preview\.inactive[^{}]*\.chat-html-frame\s*\{[^}]*content-visibility:\s*hidden/,
+  );
+});
+
+test("preview measurements pause during scrolling or while offscreen", () => {
   const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
   const start = appSource.indexOf("function buildHtmlPreviewScript(");
   const end = appSource.indexOf("\nfunction injectHtmlPreviewHead(", start);
@@ -401,6 +419,7 @@ test("preview startup reports reuse layout and measurements pause during scrolli
   const markup = vm.runInNewContext(`${builder}; buildHtmlPreviewScript('preview', false)`, {
     HTML_PREVIEW_RESIZE_MESSAGE: "resize",
     HTML_PREVIEW_REMEASURE_MESSAGE: "remeasure",
+    HTML_PREVIEW_ACTIVITY_MESSAGE: "preview-activity",
     CHAT_SCROLL_ACTIVITY_MESSAGE,
     HTML_PREVIEW_MAX_HEIGHT: 12000,
     HTML_PREVIEW_MEASURED_MIN_HEIGHT: 64,
@@ -471,6 +490,14 @@ test("preview startup reports reuse layout and measurements pause during scrolli
   assert.equal(scans, 1);
   window.innerWidth = 360;
   send({ type: "remeasure", id: "preview" });
+  runFrame();
+  assert.equal(scans, 2);
+  send({ type: "preview-activity", id: "preview", active: false });
+  send({ type: "remeasure", id: "preview" });
+  assert.equal(frames.length, 0);
+  send({ type: "preview-activity", id: "preview", active: true }, {});
+  assert.equal(frames.length, 0);
+  send({ type: "preview-activity", id: "preview", active: true });
   runFrame();
   assert.equal(scans, 2);
 });

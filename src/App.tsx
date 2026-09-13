@@ -4028,44 +4028,11 @@ const HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD = 512 * 1024;
 const HTML_PREVIEW_HEAVY_MOUNT_GAP = 900;
 const HTML_PREVIEW_FALLBACK_LOAD_DELAY = 600;
 const HTML_PREVIEW_LAZY_ROOT_MARGIN = "240px 0px";
-const HTML_PREVIEW_SUSPEND_DELAY_MS = 900;
+const HTML_PREVIEW_FREEZE_DELAY_MS = 900;
+const HTML_PREVIEW_ACTIVITY_MESSAGE = "renge-html-preview-activity";
 const HTML_PREVIEW_STREAMING_CONTEXT_INTERVAL_MS = 500;
 
 const htmlPreviewMountQueue = createChatPreviewMountQueue();
-const HTML_PREVIEW_HEAVY_ACTIVE_LIMIT = 3;
-const activeHeavyHtmlPreviewIds: string[] = [];
-const heavyHtmlPreviewListeners = new Map<string, (active: boolean) => void>();
-
-function activateHeavyHtmlPreview(previewId: string) {
-  const existingIndex = activeHeavyHtmlPreviewIds.indexOf(previewId);
-  if (existingIndex >= 0) activeHeavyHtmlPreviewIds.splice(existingIndex, 1);
-  activeHeavyHtmlPreviewIds.push(previewId);
-  while (activeHeavyHtmlPreviewIds.length > HTML_PREVIEW_HEAVY_ACTIVE_LIMIT) {
-    activeHeavyHtmlPreviewIds.shift();
-  }
-  heavyHtmlPreviewListeners.forEach((listener, candidateId) => {
-    listener(activeHeavyHtmlPreviewIds.includes(candidateId));
-  });
-}
-
-function deactivateHeavyHtmlPreview(previewId: string) {
-  const existingIndex = activeHeavyHtmlPreviewIds.indexOf(previewId);
-  if (existingIndex >= 0) activeHeavyHtmlPreviewIds.splice(existingIndex, 1);
-  heavyHtmlPreviewListeners.get(previewId)?.(false);
-}
-
-function subscribeHeavyHtmlPreview(
-  previewId: string,
-  listener: (active: boolean) => void,
-) {
-  heavyHtmlPreviewListeners.set(previewId, listener);
-  listener(activeHeavyHtmlPreviewIds.includes(previewId));
-  return () => {
-    heavyHtmlPreviewListeners.delete(previewId);
-    const index = activeHeavyHtmlPreviewIds.indexOf(previewId);
-    if (index >= 0) activeHeavyHtmlPreviewIds.splice(index, 1);
-  };
-}
 
 const htmlPreviewStyle = [
   '<style data-renge-html-preview="true">',
@@ -6287,6 +6254,7 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     `const messageType = ${messageTypeLiteral};`,
     `const remeasureMessageType = ${remeasureMessageTypeLiteral};`,
     `const scrollActivityMessageType = ${JSON.stringify(CHAT_SCROLL_ACTIVITY_MESSAGE)};`,
+    `const previewActivityMessageType = ${JSON.stringify(HTML_PREVIEW_ACTIVITY_MESSAGE)};`,
     `const settleDelays = ${settleDelaysLiteral};`,
     `const maxHeight = ${HTML_PREVIEW_MAX_HEIGHT};`,
     `const heavyContent = ${heavyContent ? "true" : "false"};`,
@@ -6297,6 +6265,7 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "let rafFallbackTimer = 0;",
     "let heavyPostTimer = 0;",
     "let parentScrolling = false;",
+    "let previewActive = true;",
     "let measurementPending = false;",
     "let visibilityResizeRaf = 0;",
     "let visibilityResizeTimer = 0;",
@@ -6476,7 +6445,7 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "  if (rafFallbackTimer) window.clearTimeout(rafFallbackTimer);",
     "  rafFallbackTimer = 0;",
     "  rafId = 0;",
-    "  if (parentScrolling) { measurementPending = true; return; }",
+    "  if (!previewActive || parentScrolling) { measurementPending = true; return; }",
     "  measurementPending = false;",
     "  const measurement = measure();",
     "  let height = measurement.height;",
@@ -6495,7 +6464,7 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "  } catch {}",
     "};",
     "const requestPostFrame = () => {",
-    "  if (parentScrolling) { measurementPending = true; return; }",
+    "  if (!previewActive || parentScrolling) { measurementPending = true; return; }",
     "  if (rafId || rafFallbackTimer) return;",
     "  rafId = requestAnimationFrame(postHeight);",
     "  rafFallbackTimer = window.setTimeout(() => {",
@@ -6507,6 +6476,7 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "  }, 120);",
     "};",
     "const schedulePost = () => {",
+    "  if (!previewActive || parentScrolling) { measurementPending = true; return; }",
     "  if (!heavyContent) {",
     "    requestPostFrame();",
     "    return;",
@@ -6553,6 +6523,11 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "  if (event.source === parent && payload?.type === scrollActivityMessageType) {",
     "    parentScrolling = payload.scrolling === true;",
     "    if (!parentScrolling && measurementPending) schedulePost();",
+    "    return;",
+    "  }",
+    "  if (event.source === parent && payload?.type === previewActivityMessageType && payload.id === previewId) {",
+    "    previewActive = payload.active !== false;",
+    "    if (previewActive && measurementPending) schedulePost();",
     "    return;",
     "  }",
     "  if (!payload || payload.type !== remeasureMessageType || payload.id !== previewId) return;",
@@ -6905,12 +6880,13 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const requestHeavyMountRef = useRef<() => void>(() => {});
   const initializedFrameRef = useRef<HTMLIFrameElement | null>(null);
+  const mountStartedRef = useRef(false);
+  const previewActiveRef = useRef(false);
   const heavyContent = content.trim().length >= HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD;
   const containsExpandedDetails =
     /<details\b(?=[^>]*\bopen(?:\s|=|>))[^>]*>/i.test(content);
   const [renderReady, setRenderReady] = useState(false);
-  const [suspendedHeight, setSuspendedHeight] = useState(0);
-  const suspendedHeightRef = useRef(0);
+  const [previewActive, setPreviewActive] = useState(false);
   const loadSyncTimersRef = useRef<(() => void)[]>([]);
   const sourceDocumentRef = useRef<{
     content: string;
@@ -6939,8 +6915,9 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
   useEffect(() => {
     if (!mountReady) {
       setRenderReady(false);
-      setSuspendedHeight(0);
-      suspendedHeightRef.current = 0;
+      setPreviewActive(false);
+      mountStartedRef.current = false;
+      previewActiveRef.current = false;
       sourceDocumentRef.current = null;
       requestHeavyMountRef.current = () => {};
       return;
@@ -6949,74 +6926,61 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
     const container = containerRef.current;
     if (!container) return;
     let cancelQueuedMount: (() => void) | null = null;
-    let suspendTimer = 0;
+    let freezeTimer = 0;
     let queued = false;
-    const clearSuspendTimer = () => {
-      if (!suspendTimer) return;
-      window.clearTimeout(suspendTimer);
-      suspendTimer = 0;
+    const clearFreezeTimer = () => {
+      if (!freezeTimer) return;
+      window.clearTimeout(freezeTimer);
+      freezeTimer = 0;
     };
-    const preserveMountedHeight = () => {
-      const frame = frameRef.current;
-      const measuredHeight =
-        Number.parseFloat(frame?.style.height || "") || frame?.offsetHeight || 0;
-      if (!Number.isFinite(measuredHeight) || measuredHeight <= 0) return;
-      const nextHeight = Math.ceil(measuredHeight);
-      suspendedHeightRef.current = nextHeight;
-      setSuspendedHeight((current) =>
-        Math.abs(current - nextHeight) < 1 ? current : nextHeight,
+    const updatePreviewActivity = (active: boolean) => {
+      if (previewActiveRef.current === active) return;
+      previewActiveRef.current = active;
+      setPreviewActive(active);
+      frameRef.current?.contentWindow?.postMessage(
+        { type: HTML_PREVIEW_ACTIVITY_MESSAGE, id: previewId, active },
+        "*",
       );
     };
-    const updateHeavyPreviewActivity = (active: boolean) => {
-      if (!active) preserveMountedHeight();
-      setRenderReady(active);
-    };
     const queueMount = () => {
-      clearSuspendTimer();
-      if (queued || frameRef.current) return;
+      clearFreezeTimer();
+      updatePreviewActivity(true);
+      if (queued || mountStartedRef.current) return;
       queued = true;
       cancelQueuedMount = htmlPreviewMountQueue.enqueue(
         () => {
           queued = false;
           cancelQueuedMount = null;
-          if (heavyContent) activateHeavyHtmlPreview(previewId);
-          else setRenderReady(true);
+          mountStartedRef.current = true;
+          setRenderReady(true);
         },
         heavyContent ? HTML_PREVIEW_HEAVY_MOUNT_GAP : 120,
       );
     };
-    const suspendMount = () => {
-      suspendTimer = 0;
+    const freezePreview = () => {
+      freezeTimer = 0;
       const frame = frameRef.current;
       if (
         frame &&
         (document.activeElement === frame ||
           frame.classList.contains("renge-html-fullscreen-frame"))
       ) {
-        suspendTimer = window.setTimeout(
-          suspendMount,
-          HTML_PREVIEW_SUSPEND_DELAY_MS,
+        freezeTimer = window.setTimeout(
+          freezePreview,
+          HTML_PREVIEW_FREEZE_DELAY_MS,
         );
         return;
       }
-      preserveMountedHeight();
-      cancelQueuedMount?.();
-      cancelQueuedMount = null;
-      queued = false;
-      if (heavyContent) deactivateHeavyHtmlPreview(previewId);
-      else setRenderReady(false);
+      updatePreviewActivity(false);
     };
-    const scheduleSuspend = () => {
+    const scheduleFreeze = () => {
       cancelQueuedMount?.();
       cancelQueuedMount = null;
       queued = false;
-      if (suspendTimer || !frameRef.current) return;
-      suspendTimer = window.setTimeout(suspendMount, HTML_PREVIEW_SUSPEND_DELAY_MS);
+      if (freezeTimer || !mountStartedRef.current) return;
+      freezeTimer = window.setTimeout(freezePreview, HTML_PREVIEW_FREEZE_DELAY_MS);
     };
     requestHeavyMountRef.current = queueMount;
-    const unsubscribeHeavyPreview = heavyContent
-      ? subscribeHeavyHtmlPreview(previewId, updateHeavyPreviewActivity)
-      : () => undefined;
 
     let observer: IntersectionObserver | null = null;
     let fallbackTimer = 0;
@@ -7029,7 +6993,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       observer = new IntersectionObserver(
         (entries) => {
           if (entries.some((entry) => entry.isIntersecting)) queueMount();
-          else scheduleSuspend();
+          else scheduleFreeze();
         },
         {
           root: container.closest(".chat-thread"),
@@ -7042,11 +7006,10 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
 
     return () => {
       window.clearTimeout(fallbackTimer);
-      clearSuspendTimer();
+      clearFreezeTimer();
       observer?.disconnect();
       requestHeavyMountRef.current = () => {};
       cancelQueuedMount?.();
-      unsubscribeHeavyPreview();
     };
   }, [heavyContent, mountReady, previewId]);
 
@@ -7140,11 +7103,6 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       }
       frameRef.current = frame;
       if (frame) {
-        const restoredHeight = suspendedHeightRef.current;
-        if (restoredHeight > 0) {
-          frame.dataset.restoredHeight = String(restoredHeight);
-          frame.style.height = `${restoredHeight}px`;
-        }
         frameRegistry.current.set(previewId, frame);
       }
       else if (frameRegistry.current.get(previewId) === previousFrame) {
@@ -7160,6 +7118,14 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       loadSyncTimersRef.current = [];
       resizeHtmlPreviewFrame(event);
       const loadedFrame = event.currentTarget;
+      loadedFrame.contentWindow?.postMessage(
+        {
+          type: HTML_PREVIEW_ACTIVITY_MESSAGE,
+          id: previewId,
+          active: previewActiveRef.current,
+        },
+        "*",
+      );
       if (
         isolatedFrame &&
         initializedFrameRef.current !== loadedFrame &&
@@ -7177,6 +7143,14 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       }
       const synchronizeLoadedFrame = () => {
         if (frameRef.current !== loadedFrame) return;
+        loadedFrame.contentWindow?.postMessage(
+          {
+            type: HTML_PREVIEW_ACTIVITY_MESSAGE,
+            id: previewId,
+            active: previewActiveRef.current,
+          },
+          "*",
+        );
         sendContextUpdate();
         sendViewportUpdate();
         requestLayoutMeasurement();
@@ -7198,17 +7172,9 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
     <div
       className={`chat-html-preview ${heavyContent ? "heavy" : ""} ${
         mountReady && renderReady ? "" : "pending"
-      }`}
+      } ${renderReady && !previewActive ? "inactive" : ""}`}
       data-preview-id={previewId}
       ref={containerRef}
-      style={
-        !renderReady && suspendedHeight > 0
-          ? {
-              height: `${suspendedHeight}px`,
-              minHeight: `${suspendedHeight}px`,
-            }
-          : undefined
-      }
     >
       {mountReady && renderReady && sourceDocumentRef.current ? (
         <iframe
@@ -7242,7 +7208,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
             {!mountReady
               ? "正在同步角色卡会话与脚本环境…"
               : heavyContent
-                ? "大型 HTML 已排队加载；最多同时保留 3 个运行实例。"
+                ? "大型 HTML 已排队加载。"
                 : "正在安全挂载角色卡 HTML…"}
           </span>
           {mountReady && (
