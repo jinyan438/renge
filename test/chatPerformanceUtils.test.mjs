@@ -18,14 +18,42 @@ import { getHtmlPreviewLayoutSettleDelays } from "../src/htmlPreviewUtils.ts";
 
 function mockReducedMotion(context, matches) {
   const previousWindow = globalThis.window;
-  globalThis.window = { matchMedia: () => ({ matches }) };
+  const previousResizeObserver = globalThis.ResizeObserver;
+  const previousMutationObserver = globalThis.MutationObserver;
+  const timers = new Set();
+  const frames = new Set();
+  const observers = [];
+  globalThis.window = {
+    matchMedia: () => ({ matches }),
+    setTimeout(callback) { timers.add(callback); return callback; },
+    clearTimeout(callback) { timers.delete(callback); },
+    requestAnimationFrame(callback) { frames.add(callback); return callback; },
+    cancelAnimationFrame(callback) { frames.delete(callback); },
+  };
+  class Observer {
+    constructor(callback) { this.callback = callback; this.active = false; observers.push(this); }
+    observe() { this.active = true; }
+    disconnect() { this.active = false; }
+  }
+  globalThis.ResizeObserver = Observer;
+  globalThis.MutationObserver = Observer;
   context.after(() => {
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
+    if (previousResizeObserver === undefined) delete globalThis.ResizeObserver;
+    else globalThis.ResizeObserver = previousResizeObserver;
+    if (previousMutationObserver === undefined) delete globalThis.MutationObserver;
+    else globalThis.MutationObserver = previousMutationObserver;
   });
+  return {
+    settle() { const pending = [...timers]; timers.clear(); pending.forEach((callback) => callback()); },
+    resize() { observers.filter((observer) => observer.active).forEach((observer) => observer.callback()); },
+    paint() { const pending = [...frames]; frames.clear(); pending.forEach((callback) => callback()); },
+    observers,
+  };
 }
 
-test("bubble navigation centers only the selected bubble inside the chat viewport", (context) => {
+test("bubble navigation aligns the selected bubble top to the chat viewport center regardless of height", (context) => {
   mockReducedMotion(context, false);
   let focused = false;
   let scrollOptions;
@@ -33,21 +61,23 @@ test("bubble navigation centers only the selected bubble inside the chat viewpor
     getBoundingClientRect: () => ({ top: 400, height: 100 }),
     focus: (options) => { focused = options.preventScroll; },
   };
-  const thread = {
+  const thread = Object.assign(new EventTarget(), {
+    children: [], contains: (element) => element === bubble,
     scrollTop: 700, clientTop: 2, clientHeight: 600, scrollHeight: 3000,
     getBoundingClientRect: () => ({ top: 180 }),
     scrollTo: (options) => { scrollOptions = options; },
-  };
+  });
   const dot = { closest: (selector) => selector === ".chat-thread"
     ? thread : { querySelector: () => bubble } };
   assert.equal(centerChatBubble(dot), true);
   assert.equal(focused, true);
-  // The bubble center starts 32 px above the reading viewport's center.
-  assert.deepEqual(scrollOptions, { top: 668, behavior: "smooth" });
+  // The bubble top starts 82 px above the reading viewport's center.
+  assert.deepEqual(scrollOptions, { top: 618, behavior: "smooth" });
 
   bubble.getBoundingClientRect = () => ({ top: 400, height: 1000 });
   centerChatBubble(dot);
-  assert.equal(scrollOptions.top, 1118, "expanded tool cards use their own full height");
+  assert.equal(scrollOptions.top, 618, "expanding a tool card does not move the reading target");
+  thread.dispatchEvent(new Event("wheel"));
 });
 
 test("bubble navigation handles scroll boundaries, reduced motion and missing targets", (context) => {
@@ -57,19 +87,76 @@ test("bubble navigation handles scroll boundaries, reduced motion and missing ta
   const bubble = {
     getBoundingClientRect: () => ({ top, height: 100 }), focus() {},
   };
-  const thread = {
+  const thread = Object.assign(new EventTarget(), {
+    children: [], contains: (element) => element === bubble,
     scrollTop: 0, clientTop: 0, clientHeight: 600, scrollHeight: 2000,
     getBoundingClientRect: () => ({ top: 0 }),
     scrollTo: (options) => { scrollOptions = options; },
-  };
+  });
   const dot = { closest: (selector) => selector === ".chat-thread"
     ? thread : { querySelector: () => bubble } };
   centerChatBubble(dot);
-  assert.deepEqual(scrollOptions, { top: 0, behavior: "instant" });
+  assert.equal(scrollOptions, undefined, "a bubble already at the scroll boundary does not scroll");
   top = 1900;
   centerChatBubble(dot);
-  assert.equal(scrollOptions.top, 1400);
+  assert.deepEqual(scrollOptions, { top: 1400, behavior: "instant" });
   assert.equal(centerChatBubble({ closest: () => null }), false);
+  thread.dispatchEvent(new Event("wheel"));
+});
+
+test("bubble navigation corrects late layout shifts and stops holding position after manual scrolling", (context) => {
+  const scheduler = mockReducedMotion(context, false);
+  let contentTop = 1100;
+  const calls = [];
+  const bubble = {
+    getBoundingClientRect: () => ({ top: 182 + contentTop - thread.scrollTop, height: 100 }),
+    focus() {},
+  };
+  const thread = Object.assign(new EventTarget(), {
+    children: [{}], contains: (element) => element === bubble,
+    scrollTop: 700, clientTop: 2, clientHeight: 600, scrollHeight: 4000,
+    getBoundingClientRect: () => ({ top: 180 }),
+    scrollTo(options) { calls.push(options); this.scrollTop = options.top; },
+  });
+  const dot = { closest: (selector) => selector === ".chat-thread"
+    ? thread : { querySelector: () => bubble } };
+  centerChatBubble(dot);
+  assert.equal(thread.scrollTop, 800);
+  contentTop += 150;
+  scheduler.resize();
+  scheduler.paint();
+  assert.equal(calls.length, 1, "layout changes do not interrupt the initial smooth scroll");
+  scheduler.settle();
+  assert.deepEqual(calls.at(-1), { top: 950, behavior: "instant" });
+  contentTop += 120;
+  scheduler.resize();
+  scheduler.paint();
+  assert.equal(thread.scrollTop, 1070, "late preview loading keeps the target top centered");
+  thread.dispatchEvent(new Event("wheel"));
+  const count = calls.length;
+  contentTop += 200;
+  scheduler.resize();
+  scheduler.paint();
+  assert.equal(calls.length, count);
+  assert.ok(scheduler.observers.every((observer) => !observer.active));
+});
+
+test("bubble navigation accounts for a scaled chat window and cancels when following new output", (context) => {
+  const scheduler = mockReducedMotion(context, false);
+  let scrollOptions;
+  const bubble = { getBoundingClientRect: () => ({ top: 620 }), focus() {} };
+  const thread = Object.assign(new EventTarget(), {
+    children: [], contains: (element) => element === bubble,
+    scrollTop: 700, clientTop: 2, clientHeight: 600, offsetHeight: 604, scrollHeight: 3000,
+    getBoundingClientRect: () => ({ top: 180, height: 1208 }),
+    scrollTo(options) { scrollOptions = options; },
+  });
+  const dot = { closest: (selector) => selector === ".chat-thread"
+    ? thread : { querySelector: () => bubble } };
+  centerChatBubble(dot);
+  assert.equal(scrollOptions.top, 618);
+  scrollChatToLatest(thread);
+  assert.ok(scheduler.observers.every((observer) => !observer.active));
 });
 
 function createFakeScheduler() {

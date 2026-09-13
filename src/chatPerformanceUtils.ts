@@ -59,12 +59,18 @@ export function createChatScrollScheduler(options: {
 export const chatScrollScheduler = createChatScrollScheduler();
 const chatIdleActivityScheduler = createChatScrollScheduler();
 const automaticScrollTargets = new WeakMap<HTMLElement, number>();
+const bubbleFocusCleanups = new WeakMap<HTMLElement, () => void>();
+
+function clearChatBubbleFocus(thread: HTMLElement) {
+  bubbleFocusCleanups.get(thread)?.();
+}
 
 export function markChatInputActivity() {
   chatIdleActivityScheduler.markScrolling(CHAT_INPUT_SETTLE_MS);
 }
 
 export function scrollChatToLatest(thread: HTMLElement) {
+  clearChatBubbleFocus(thread);
   if (chatScrollScheduler.isScrolling()) return;
   const scrollTop = Math.max(0, thread.scrollHeight - thread.clientHeight);
   if (Math.abs(thread.scrollTop - scrollTop) < 1) return;
@@ -78,15 +84,84 @@ export function centerChatBubble(dot: HTMLElement) {
   const bubble = row?.querySelector<HTMLElement>(":scope > .chat-bubble, :scope > .chat-tool-run");
   if (!thread || !bubble) return false;
 
-  const bubbleRect = bubble.getBoundingClientRect();
-  const threadRect = thread.getBoundingClientRect();
-  const top = thread.scrollTop + bubbleRect.top + bubbleRect.height / 2
-    - threadRect.top - thread.clientTop - thread.clientHeight / 2;
-  bubble.focus({ preventScroll: true });
-  thread.scrollTo({
-    top: Math.max(0, Math.min(top, thread.scrollHeight - thread.clientHeight)),
-    behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth",
+  clearChatBubbleFocus(thread);
+  let settling = true;
+  let disposed = false;
+  let settleTimer: number | null = null;
+  let correctionFrame: number | null = null;
+
+  const alignBubbleTop = (behavior: ScrollBehavior) => {
+    if (!thread.contains(bubble)) {
+      cleanup();
+      return;
+    }
+    const threadRect = thread.getBoundingClientRect();
+    const scaleY = thread.offsetHeight > 0 ? threadRect.height / thread.offsetHeight : 1;
+    if (scaleY <= 0) return;
+    const top = thread.scrollTop
+      + (bubble.getBoundingClientRect().top - threadRect.top) / scaleY
+      - thread.clientTop - thread.clientHeight / 2;
+    const target = Math.max(0, Math.min(top, thread.scrollHeight - thread.clientHeight));
+    if (Math.abs(thread.scrollTop - target) > 0.5) thread.scrollTo({ top: target, behavior });
+  };
+  const scheduleCorrection = () => {
+    if (disposed || settling || correctionFrame !== null) return;
+    correctionFrame = window.requestAnimationFrame(() => {
+      correctionFrame = null;
+      if (!disposed) alignBubbleTop("instant");
+    });
+  };
+  const handleScroll = () => {
+    if (!settling) return;
+    if (settleTimer !== null) window.clearTimeout(settleTimer);
+    settleTimer = window.setTimeout(() => {
+      settleTimer = null;
+      settling = false;
+      alignBubbleTop("instant");
+    }, CHAT_SCROLL_SETTLE_MS);
+  };
+  const resizeObserver = new ResizeObserver(scheduleCorrection);
+  const observeLayout = () => {
+    resizeObserver.disconnect();
+    resizeObserver.observe(thread);
+    // Earlier messages can move the target without changing the target's own size.
+    Array.from(thread.children).forEach((child) => resizeObserver.observe(child));
+    resizeObserver.observe(bubble);
+  };
+  const mutationObserver = new MutationObserver(() => {
+    observeLayout();
+    scheduleCorrection();
   });
+  const handleKeyDown = (event: KeyboardEvent) => {
+    if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
+      cleanup();
+    }
+  };
+  const cleanup = () => {
+    disposed = true;
+    resizeObserver.disconnect();
+    mutationObserver.disconnect();
+    if (settleTimer !== null) window.clearTimeout(settleTimer);
+    if (correctionFrame !== null) window.cancelAnimationFrame(correctionFrame);
+    thread.removeEventListener("scroll", handleScroll);
+    thread.removeEventListener("wheel", cleanup);
+    thread.removeEventListener("touchmove", cleanup);
+    thread.removeEventListener("pointerdown", cleanup);
+    thread.removeEventListener("keydown", handleKeyDown);
+    bubbleFocusCleanups.delete(thread);
+  };
+
+  bubbleFocusCleanups.set(thread, cleanup);
+  observeLayout();
+  mutationObserver.observe(thread, { childList: true });
+  thread.addEventListener("scroll", handleScroll, { passive: true });
+  thread.addEventListener("wheel", cleanup, { passive: true });
+  thread.addEventListener("touchmove", cleanup, { passive: true });
+  thread.addEventListener("pointerdown", cleanup, { passive: true });
+  thread.addEventListener("keydown", handleKeyDown);
+  bubble.focus({ preventScroll: true });
+  alignBubbleTop(window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth");
+  handleScroll();
   return true;
 }
 
@@ -152,6 +227,7 @@ export function observeChatScrollActivity(thread: HTMLElement) {
   thread.addEventListener("keydown", handleKeyDown);
   thread.addEventListener("scroll", handleScroll, { passive: true });
   return () => {
+    clearChatBubbleFocus(thread);
     automaticScrollTargets.delete(thread);
     if (scrollEndTimer !== null) {
       window.clearTimeout(scrollEndTimer);
