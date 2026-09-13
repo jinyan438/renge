@@ -12826,6 +12826,7 @@ export function App() {
   >(async () => {
     throw new Error("酒馆命令生成接口尚未初始化。");
   });
+  const triggerTavernGenerationRef = useRef<() => Promise<boolean>>(async () => false);
   const selectRoleplayGreetingRef = useRef<
     (requestedIndex: number) => boolean | Promise<boolean>
   >(() => false);
@@ -13554,9 +13555,8 @@ export function App() {
       if (parsed.type === "trigger") {
         const input = chatInputRef.current?.value ?? "";
         focusChatInput();
-        window.requestAnimationFrame(() => {
-          void sendChatMessageRef.current(input, []);
-        });
+        if (!input.trim()) return await triggerTavernGenerationRef.current();
+        await sendChatMessageRef.current(input, []);
         return true;
       }
       return writeChatInput(parsed.text, parsed.append, parsed.submit);
@@ -13961,6 +13961,7 @@ export function App() {
       generateTavernCommandMessageRef.current = async () => {
         throw new Error("酒馆命令生成接口尚未初始化。");
       };
+      triggerTavernGenerationRef.current = async () => false;
     };
   }, []);
 
@@ -27062,7 +27063,7 @@ export function App() {
 
   generateTavernCommandMessageRef.current = async (messages, triggerMessage) => {
     const requestSessionId = activeChatSessionIdRef.current;
-    // Tavern /sys generation treats the messages supplied by the card script
+    // Tavern command generation treats the messages supplied by the card script
     // as authoritative. Rebuild Pi from those messages instead of resuming a
     // stale tree that may predate a role-card binding or greeting replacement.
     await resetPiSession(requestSessionId);
@@ -27070,9 +27071,9 @@ export function App() {
       automaticTrigger: true,
       generationPrompt: triggerMessage.content,
       requestSessionId,
-      statusMessage: "酒馆系统消息已写入，正在生成回复...",
-      streamingStatusMessage: "正在根据酒馆系统消息生成回复...",
-      successMessage: "酒馆系统消息已处理，回复生成完成。",
+      statusMessage: "酒馆消息已写入，正在生成回复...",
+      streamingStatusMessage: "正在根据酒馆消息生成回复...",
+      successMessage: "酒馆消息已处理，回复生成完成。",
     });
     if (!generatedMessage) return null;
     const currentMessage = getMessagesForSession(requestSessionId).find(
@@ -27090,13 +27091,33 @@ export function App() {
       setChatStatus({
         status: statusBarResult.error ? "warning" : "success",
         message: statusBarResult.error
-          ? `酒馆系统消息已生成回复，但状态栏未更新：${statusBarResult.error}`
+          ? `酒馆消息已生成回复，但状态栏未更新：${statusBarResult.error}`
           : statusBarResult.updated > 0
-            ? `酒馆系统消息已生成回复，状态栏已更新 ${statusBarResult.updated} 项。`
-            : "酒馆系统消息已处理，回复生成完成。",
+            ? `酒馆消息已生成回复，状态栏已更新 ${statusBarResult.updated} 项。`
+            : "酒馆消息已处理，回复生成完成。",
       });
     }
     return currentMessage;
+  };
+
+  triggerTavernGenerationRef.current = async () => {
+    if (activeChatAbortControllerRef.current) {
+      throw new Error("已有生成任务正在运行，请等待完成或先停止当前生成。");
+    }
+    const triggerMessage = chatMessagesRef.current.at(-1);
+    if (!triggerMessage || triggerMessage.role !== "user" || !triggerMessage.content.trim()) {
+      return false;
+    }
+    const prepared = await runTavernPreSendHooks(triggerMessage, triggerMessage.content);
+    const preparedTriggerMessage = prepared.messages.find(
+      (message) => message.id === triggerMessage.id,
+    );
+    if (!preparedTriggerMessage) return false;
+    const generatedMessage = await generateTavernCommandMessageRef.current(
+      prepared.messages,
+      { ...preparedTriggerMessage, content: prepared.content },
+    );
+    return Boolean(generatedMessage);
   };
 
   const handleChatAttachmentChange = async (files: FileList | null) => {

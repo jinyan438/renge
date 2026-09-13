@@ -7,6 +7,7 @@ import {
   installTavernPresetManagerControls,
   proxyTavernModuleUrl,
   proxyTavernModuleUrls,
+  resolveTavernCreateMessageInsertionIndex,
   resolveTavernButtonOwnerId,
   resolveTavernCallerScriptId,
   type TavernCompatibilityErrorReporter,
@@ -2387,7 +2388,7 @@ export class TavernScriptRuntime {
       return succeeded;
     };
 
-    const createChatMessages = async (values: unknown, position = -1) => {
+    const createChatMessages = async (values: unknown, positionOrOptions: unknown = -1) => {
       if (!Array.isArray(values)) return false;
       const messages = this.adapter.getMessages().map((message) => cloneValue(message));
       const created = values
@@ -2399,8 +2400,11 @@ export class TavernScriptRuntime {
           createdAt: new Date().toISOString(),
           ...(isRecord(value.data) ? { variables: cloneValue(value.data) } : {}),
         }));
-      if (position < 0 || position >= messages.length) messages.push(...created);
-      else messages.splice(position, 0, ...created);
+      const insertionIndex = resolveTavernCreateMessageInsertionIndex(
+        positionOrOptions,
+        messages.length,
+      );
+      messages.splice(insertionIndex, 0, ...created);
       this.adapter.setMessages(messages);
       this.refreshSillyTavernChatCache();
       await this.adapter.flushPersistence?.();

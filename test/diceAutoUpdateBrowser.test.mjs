@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright";
@@ -27,6 +28,25 @@ const launchOptions = {
   channel: process.env.PLAYWRIGHT_CHANNEL || undefined,
 };
 const now = new Date().toISOString();
+const optionText = "fixture option action";
+const assistantReply = "The option was received by the model.";
+const requests = [];
+const upstream = createServer(async (request, response) => {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
+  const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  requests.push({ path: request.url, body });
+  response.writeHead(200, { "Content-Type": "text/event-stream" });
+  response.end([
+    `data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant", content: assistantReply }, finish_reason: null }] })}`,
+    `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}`,
+    "data: [DONE]",
+    "",
+  ].join("\n\n"));
+});
+await new Promise(resolve => upstream.listen(0, "127.0.0.1", resolve));
+const upstreamAddress = upstream.address();
+assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
 const seed = {
   version: 1,
   tavernScripts: [
@@ -47,6 +67,18 @@ const seed = {
   ],
   chatMode: "roleplay",
   activeCharacterCardId: "fixture-card",
+  activeProviderId: "fixture-provider",
+  providers: [{
+    id: "fixture-provider",
+    name: "Fixture API",
+    apiBaseUrl: `http://127.0.0.1:${upstreamAddress.port}/v1`,
+    apiKey: "fixture-key",
+    modelId: "fixture-model",
+    models: ["fixture-model"],
+    apiType: "chat-completions",
+    updatedAt: now,
+  }],
+  llmContextSettings: { skills: false, mcpTools: false, workspaceTools: false },
   chatSessions: [{
     id: "fixture-chat",
     title: "Dice compatibility fixture",
@@ -199,6 +231,50 @@ try {
     dicePanelCount: 1,
   });
 
+  await page.evaluate(async action => {
+    const api = window.AutoCardUpdaterAPI;
+    const tables = structuredClone(api.exportTableAsJson());
+    const options = tables.sheet_OptionsNew;
+    options.content = [
+      options.content[0],
+      ["1", action, "Wait and observe", "Offer assistance", "Leave the area"],
+    ];
+    await api.importTableAsJson(JSON.stringify(tables));
+    const config = JSON.parse(localStorage.getItem("acu_ui_config_v19") ?? "{}");
+    localStorage.setItem("acu_ui_config_v19", JSON.stringify({
+      ...config,
+      clickOptionToAutoSend: true,
+    }));
+    window.TavernHelper.setInput("");
+  }, optionText);
+  await page.getByText("选项表", { exact: true }).last()
+    .evaluate(element => element.closest("button")?.click());
+  await page.evaluate(() => {
+    document.querySelectorAll(".acu-tutorial-overlay").forEach(element => element.remove());
+  });
+  const option = page.locator(".acu-option-table-row", { hasText: optionText });
+  await option.waitFor({ state: "visible" });
+  await option.click();
+  await page.waitForFunction(expected => {
+    const chat = window.SillyTavern.getContext().chat;
+    return chat.at(-1)?.role === "assistant" && chat.at(-1)?.mes === expected;
+  }, assistantReply, { timeout: 60_000 });
+  assert.deepEqual(await page.evaluate(() =>
+    window.SillyTavern.getContext().chat.map(message => ({ role: message.role, mes: message.mes })),
+  ), [
+    { role: "assistant", mes: "The story begins." },
+    { role: "user", mes: optionText },
+    { role: "assistant", mes: assistantReply },
+  ]);
+  assert.equal(requests.length >= 1, true);
+  assert.equal(requests[0].path, "/v1/chat/completions");
+  assert.equal(
+    requests[0].body.messages.some(
+      message => message.role === "user" && String(message.content).includes(optionText),
+    ),
+    true,
+  );
+
   assert.equal(await page.evaluate(async () => {
     let calls = 0;
     const context = window.SillyTavern.getContext();
@@ -254,5 +330,6 @@ try {
 } finally {
   await context?.close();
   await closeServer();
+  await new Promise(resolve => upstream.close(resolve));
   await rm(root, { recursive: true, force: true });
 }

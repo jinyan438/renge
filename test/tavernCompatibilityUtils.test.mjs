@@ -11,10 +11,19 @@ import {
   parseTavernSlashCommand,
   proxyTavernModuleUrl,
   proxyTavernModuleUrls,
+  resolveTavernCreateMessageInsertionIndex,
   resolveTavernButtonOwnerId,
   resolveTavernCallerScriptId,
   splitTavernContextHeaders,
 } from "../src/tavernCompatibilityUtils.ts";
+
+test("appends createChatMessages when TavernHelper passes refresh options", () => {
+  assert.equal(resolveTavernCreateMessageInsertionIndex({ refresh: "affected" }, 3), 3);
+  assert.equal(resolveTavernCreateMessageInsertionIndex(undefined, 3), 3);
+  assert.equal(resolveTavernCreateMessageInsertionIndex(-1, 3), 3);
+  assert.equal(resolveTavernCreateMessageInsertionIndex(1, 3), 1);
+  assert.equal(resolveTavernCreateMessageInsertionIndex("2", 3), 2);
+});
 
 test("parses system narrator commands with Markdown payloads and options", () => {
   assert.deepEqual(

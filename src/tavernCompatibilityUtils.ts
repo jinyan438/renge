@@ -188,6 +188,19 @@ export function parseTavernSlashCommand(command: string): ParsedTavernSlashComma
   return null;
 }
 
+/** Resolves TavernHelper's legacy numeric position without coercing its options object. */
+export function resolveTavernCreateMessageInsertionIndex(
+  positionOrOptions: unknown,
+  messageCount: number,
+) {
+  const count = Math.max(0, Math.trunc(messageCount));
+  const position =
+    typeof positionOrOptions === "number" || typeof positionOrOptions === "string"
+      ? Number(positionOrOptions)
+      : Number.NaN;
+  return Number.isInteger(position) && position >= 0 && position < count ? position : count;
+}
+
 export type TavernContextHeaderSegment =
   | { type: "text"; content: string }
   | {
