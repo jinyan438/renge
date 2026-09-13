@@ -76,6 +76,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createTavernSettingsStore } from "./tavernPersistenceUtils";
 import { createPortal } from "react-dom";
 import { ChatToolDiffPreview } from "./ChatToolDiffPreview";
 import { strFromU8, strToU8, unzip, zip } from "fflate";
@@ -1078,6 +1079,7 @@ type RengeAppData = {
   regexScripts?: RegexScript[];
   tavernScripts?: TavernScript[];
   tavernGlobalVariables?: Record<string, unknown>;
+  tavernExtensionSettings?: Record<string, unknown>;
   characterCards?: CharacterCard[];
   activeCharacterCardId?: string;
   characterTranslationAdditionalPrompt?: string;
@@ -1610,6 +1612,7 @@ const MCP_SERVERS_STORAGE_KEY = "renge_mcp_servers";
 const SKILLS_STORAGE_KEY = "renge_skills";
 const EXTENSIONS_STORAGE_KEY = "renge_extensions";
 const EXTENSION_SETTINGS_STORAGE_KEY = "renge_sillytavern_extension_settings";
+const EXTENSION_SETTINGS_PENDING_STORAGE_KEY = "renge_sillytavern_extension_settings_pending";
 const PC_SERVER_URL_STORAGE_KEY = "renge_pc_server_url";
 const PC_WORKSPACE_PATH_STORAGE_KEY = "renge_pc_workspace_path";
 const PC_WORKSPACE_NAME_STORAGE_KEY = "renge_pc_workspace_name";
@@ -3302,6 +3305,7 @@ function persistAppDataToLocalStores(
   setLocalStorageJsonSafely(ACTIVE_WORLD_BOOKS_STORAGE_KEY, data.activeWorldBookIds ?? []);
   setLocalStorageJsonSafely(REGEX_SCRIPTS_STORAGE_KEY, data.regexScripts ?? []);
   setLocalStorageJsonSafely(TAVERN_SCRIPTS_STORAGE_KEY, data.tavernScripts ?? []);
+  setLocalStorageJsonSafely(EXTENSION_SETTINGS_STORAGE_KEY, data.tavernExtensionSettings ?? {});
   setLocalStorageJsonSafely(
     TAVERN_GLOBAL_VARIABLES_STORAGE_KEY,
     data.tavernGlobalVariables ?? {},
@@ -12489,6 +12493,35 @@ export function App() {
       return {};
     }
   });
+  const [tavernSettingsStore] = useState(() => {
+    try {
+      return createTavernSettingsStore(JSON.parse(localStorage.getItem(EXTENSION_SETTINGS_STORAGE_KEY) ?? "{}"));
+    } catch {
+      return createTavernSettingsStore({});
+    }
+  });
+  const [tavernExtensionSettings, setTavernExtensionSettings] = useState(tavernSettingsStore.snapshot);
+  const flushTavernPersistenceRef = useRef<() => Promise<void>>(async () => {});
+  const saveTavernExtensionSettings = (settings: unknown = tavernSettingsStore.root) => {
+    const snapshot = tavernSettingsStore.capture(settings);
+    setTavernExtensionSettings(snapshot);
+    const revision = crypto.randomUUID();
+    if (setLocalStorageJsonSafely(EXTENSION_SETTINGS_STORAGE_KEY, snapshot)) {
+      setLocalStorageValueSafely(EXTENSION_SETTINGS_PENDING_STORAGE_KEY, revision);
+    }
+    const operation = flushTavernPersistenceRef.current();
+    void operation.then(() => {
+      try {
+        if (persistentStoreReadyRef.current && localStorage.getItem(EXTENSION_SETTINGS_PENDING_STORAGE_KEY) === revision) {
+          removeLocalStorageValueSafely(EXTENSION_SETTINGS_PENDING_STORAGE_KEY);
+        }
+      } catch {}
+    }, () => {});
+    void operation.catch((error: unknown) => {
+      setTavernRuntimeStatus({ state: "error", message: error instanceof Error ? error.message : String(error) });
+    });
+    return operation;
+  };
   const [tavernRuntimeStatus, setTavernRuntimeStatus] =
     useState<TavernRuntimeStatus>({ state: "idle", message: "" });
   const tavernRuntimeConfigurationKeyRef = useRef("");
@@ -13780,10 +13813,8 @@ export function App() {
               : {};
             if (valuesEqual(settings[extensionId] ?? {}, nextVariables)) return;
             settings[extensionId] = nextVariables;
-            host.extension_settings = settings;
-            try {
-              localStorage.setItem(EXTENSION_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
-            } catch {}
+            host.extension_settings = tavernSettingsStore.root;
+            void saveTavernExtensionSettings(settings);
             htmlPreviewFrameRefs.current.forEach((candidateFrame, candidateId) => {
               candidateFrame.contentWindow?.postMessage(
                 {
@@ -13987,6 +14018,9 @@ export function App() {
     const messageIndex = messageId
       ? chatMessagesRef.current.findIndex((message) => message.id === messageId)
       : chatMessagesRef.current.length - 1;
+    if (controller.signal.aborted) {
+      await emitTavernEvent(TAVERN_EVENTS.GENERATION_STOPPED);
+    }
     await emitTavernEvent(TAVERN_EVENTS.GENERATION_ENDED, messageIndex);
   };
 
@@ -14082,11 +14116,11 @@ export function App() {
     const liveSessionId = activeChatSessionIdRef.current;
     const liveMessages = chatMessagesRef.current;
     const snapshotUpdatedAt = new Date().toISOString();
-    let snapshotChatSessions = chatSessions;
-    const liveSessionIndex = chatSessions.findIndex((session) => session.id === liveSessionId);
-    const liveSession = chatSessions[liveSessionIndex];
+    let snapshotChatSessions = chatSessionsRef.current;
+    const liveSessionIndex = snapshotChatSessions.findIndex((session) => session.id === liveSessionId);
+    const liveSession = snapshotChatSessions[liveSessionIndex];
     if (liveSession && liveSession.messages !== liveMessages) {
-      snapshotChatSessions = chatSessions.slice();
+      snapshotChatSessions = snapshotChatSessions.slice();
       snapshotChatSessions[liveSessionIndex] = {
         ...liveSession,
         title: liveSession.roleplayCharacterCardId
@@ -14115,16 +14149,17 @@ export function App() {
       systemPrompts,
       activeSystemPromptId,
       activeSystemPromptIds,
-      chatPresets,
+      chatPresets: chatPresetsRef.current,
       statusBarPresets,
       activeChatPresetId,
       chatPresetEnabled,
-      worldBooks,
-      activeWorldBookIds,
+      worldBooks: worldBooksRef.current,
+      activeWorldBookIds: activeWorldBookIdsRef.current,
       regexScripts,
-      tavernScripts,
-      tavernGlobalVariables,
-      characterCards,
+      tavernScripts: tavernScriptsRef.current,
+      tavernGlobalVariables: tavernGlobalVariablesRef.current,
+      tavernExtensionSettings: tavernSettingsStore.snapshot(),
+      characterCards: characterCardsRef.current,
       activeCharacterCardId,
       characterTranslationAdditionalPrompt,
       characterTranslationPromptEnabled,
@@ -14147,7 +14182,27 @@ export function App() {
       pcConnection: appDataPcConnection,
       updatedAt: snapshotUpdatedAt,
     };
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataPcConnection, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, contextCompressionSettings, extensions, llmContextSettings, llmFullAccessEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataPcConnection, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, contextCompressionSettings, extensions, llmContextSettings, llmFullAccessEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, tavernExtensionSettings, tavernSettingsStore, userProfile, worldBooks]);
+
+  flushTavernPersistenceRef.current = async () => {
+    if (!appDataLoaded || appDataPersistenceSuspendedRef.current) {
+      throw new Error("应用数据尚未就绪，无法保存酒馆脚本数据。");
+    }
+    // Capture synchronous adapter writes before React commits its next render.
+    const snapshot = buildCurrentAppData();
+    const blocked = characterCardsPersistenceBlockedRef.current;
+    const cardsStored = persistAppDataToLocalStores(snapshot, false, blocked);
+    if (persistentStoreReadyRef.current) {
+      if (!await savePersistentAppData(snapshot, await cardsStored, false, blocked)) {
+        throw new Error("酒馆脚本数据写入磁盘失败，请重试保存。");
+      }
+    } else if (
+      !setLocalStorageJsonSafely(CHAT_SESSIONS_STORAGE_KEY, snapshot.chatSessions ?? []) ||
+      !setLocalStorageJsonSafely(EXTENSION_SETTINGS_STORAGE_KEY, snapshot.tavernExtensionSettings ?? {})
+    ) {
+      throw new Error("酒馆脚本数据保存失败：本地存储空间不足且数据服务不可用。");
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -14566,6 +14621,11 @@ export function App() {
         normalizedTavernScripts[0] ? `global:${normalizedTavernScripts[0].id}` : "",
       );
       setTavernGlobalVariables(nextTavernGlobalVariables);
+      setTavernExtensionSettings(tavernSettingsStore.restore(
+        localStorage.getItem(EXTENSION_SETTINGS_PENDING_STORAGE_KEY)
+          ? tavernSettingsStore.snapshot()
+          : persistentData?.tavernExtensionSettings ?? tavernSettingsStore.snapshot(),
+      ));
       setCharacterCards(normalizedCharacterCards);
       setActiveCharacterCardId(nextActiveCharacterCardId);
       setCharacterTranslationAdditionalPrompt(nextCharacterTranslationAdditionalPrompt);
@@ -17442,8 +17502,8 @@ export function App() {
             ? stored
             : {};
         extensionSettingAliases.forEach((alias) => delete settings[alias]);
-        host.extension_settings = settings;
-        localStorage.setItem(EXTENSION_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+        host.extension_settings = tavernSettingsStore.root;
+        void saveTavernExtensionSettings(settings);
       } catch {}
       setExtensions((current) => current.filter((item) => item.id !== extension.id));
       setExtensionRuntimeStates((current) => {
@@ -17889,22 +17949,8 @@ export function App() {
       eventSource: eventBus,
       event_types: eventTypes,
     };
-    let storedExtensionSettings: Record<string, unknown> = {};
-    try {
-      const stored = JSON.parse(
-        localStorage.getItem(EXTENSION_SETTINGS_STORAGE_KEY) ?? "{}",
-      ) as unknown;
-      if (isObjectRecord(stored)) storedExtensionSettings = stored;
-    } catch {}
-    host.extension_settings = storedExtensionSettings;
-    host.saveSettingsDebounced = () => {
-      try {
-        localStorage.setItem(
-          EXTENSION_SETTINGS_STORAGE_KEY,
-          JSON.stringify(host.extension_settings ?? {}),
-        );
-      } catch {}
-    };
+    host.extension_settings = tavernSettingsStore.root;
+    host.saveSettingsDebounced = () => saveTavernExtensionSettings();
     let saveChatTimer: number | undefined;
     host.saveChatDebounced = () => {
       window.clearTimeout(saveChatTimer);
@@ -18690,21 +18736,14 @@ export function App() {
           ),
         );
       },
-      getExtensionSettings: () => {
-        const host = window as Window & {
-          extension_settings?: Record<string, unknown>;
-        };
-        return normalizeTavernVariables(host.extension_settings);
-      },
+      getExtensionSettings: () => tavernSettingsStore.root,
       setExtensionSettings: (settings) => {
         const host = window as Window & {
           extension_settings?: Record<string, unknown>;
         };
-        const next = normalizeTavernVariables(settings);
+        const next = tavernSettingsStore.root;
         host.extension_settings = next;
-        try {
-          localStorage.setItem(EXTENSION_SETTINGS_STORAGE_KEY, JSON.stringify(next));
-        } catch {}
+        const saved = saveTavernExtensionSettings(settings);
         htmlPreviewFrameRefs.current.forEach((frame, previewId) => {
           frame.contentWindow?.postMessage(
             {
@@ -18715,7 +18754,9 @@ export function App() {
             "*",
           );
         });
+        return saved;
       },
+      flushPersistence: () => flushTavernPersistenceRef.current(),
       getChatMetadata: () => {
         const session = chatSessionsRef.current.find(
           (candidate) => candidate.id === activeChatSessionIdRef.current,
@@ -18834,6 +18875,7 @@ export function App() {
             : null,
         };
       },
+      getCharacterSummaries: () => characterCardsRef.current.map(({ id, name, avatarDataUrl }) => ({ id, name, avatarDataUrl })),
       getWorldBooks: () =>
         worldBooksRef.current.map((book) =>
           toTavernRuntimeWorldBook(
@@ -38994,4 +39036,3 @@ export function App() {
     </>
   );
 }
-

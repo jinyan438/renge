@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createTavernSettingsStore } from "../src/tavernPersistenceUtils.ts";
 import {
   areJsonValuesEqual,
   canPreservePersistentCharacterCards,
@@ -8,6 +9,30 @@ import {
   createShallowReferencePatch,
   hasMeaningfulPatchChanges,
 } from "../src/appDataPersistenceUtils.ts";
+
+test("Tavern settings retain their exported root across restore and repeated saves", () => {
+  const store = createTavernSettingsStore({ __userscripts: { database: { model: "legacy" } } });
+  const importedRoot = store.root;
+  store.restore({ __userscripts: { database: { model: "restored" } } });
+  assert.equal(store.root, importedRoot);
+  assert.equal(importedRoot.__userscripts.database.model, "restored");
+  importedRoot.__userscripts.database.model = "first";
+  const first = store.capture();
+  importedRoot.__userscripts.database.model = "second";
+  const second = store.capture();
+  assert.equal(first.__userscripts.database.model, "first");
+  assert.equal(second.__userscripts.database.model, "second");
+  assert.deepEqual(createTavernSettingsStore(JSON.parse(JSON.stringify(second))).root, second);
+});
+
+test("Tavern settings snapshots detect mutations and persist deletions", () => {
+  const store = createTavernSettingsStore({ obsolete: true });
+  const previous = { tavernExtensionSettings: store.snapshot() };
+  delete store.root.obsolete;
+  const current = { tavernExtensionSettings: store.capture() };
+  assert.deepEqual(createShallowReferencePatch(current, previous), current);
+  assert.deepEqual(current.tavernExtensionSettings, {});
+});
 
 test("creates a reference-based patch without unchanged large values", () => {
   const sessions = [{ id: "session-1" }];

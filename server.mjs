@@ -183,6 +183,7 @@ export const eventSource = globalThis.eventSource ?? compat.eventSource;
 export const event_types = globalThis.event_types ?? compat.event_types ?? {};
 export const extension_settings = globalThis.extension_settings ?? compat.extension_settings ?? {};
 export const saveSettingsDebounced = (...args) => globalThis.saveSettingsDebounced?.(...args);
+export const saveSettings = saveSettingsDebounced;
 export const saveChatDebounced = (...args) => globalThis.saveChatDebounced?.(...args);
 export const getRequestHeaders = (...args) => globalThis.getRequestHeaders?.(...args) ?? { "Content-Type": "application/json" };
 export const oai_settings = globalThis.chatCompletionSettings
@@ -281,13 +282,21 @@ function getTavernModuleProxyUrl(origin, remoteUrl) {
 
 export function rewriteTavernModuleImports(source, origin, remoteUrl) {
   const rewrittenSource = source.replace(
-    /https:\/\/(?:testingcf|cdn|fastly)\.jsdelivr\.net\/[^'"`\s)]+/g,
+    /https:\/\/(?:testingcf|cdn|fastly|gcore)\.jsdelivr\.net\/[^'"`\s)]+/g,
     (remoteUrl) => getTavernModuleProxyUrl(origin, remoteUrl),
   );
   return rewrittenSource.replace(
     /(\b(?:from|import)\s*(?:\(\s*)?)(['"])((?:\/|\.{1,2}\/)[^'"\s]+)\2/g,
     (match, prefix, quote, modulePath) => {
       try {
+        const compatPath = modulePath.endsWith("/data/storage/script.js") || modulePath === "./data/storage/script.js"
+          ? "/script.js"
+          : modulePath.endsWith("/data/storage/scripts/extensions.js") || modulePath === "./data/storage/scripts/extensions.js"
+            ? "/scripts/extensions.js"
+            : modulePath;
+        if (tavernCompatModulePaths.has(compatPath)) {
+          return `${prefix}${quote}${origin}${compatPath}${quote}`;
+        }
         return `${prefix}${quote}${getTavernModuleProxyUrl(
           origin,
           new URL(modulePath, remoteUrl).href,
@@ -305,6 +314,7 @@ function getTavernModuleCandidates(remoteUrl) {
     "testingcf.jsdelivr.net",
     "cdn.jsdelivr.net",
     "fastly.jsdelivr.net",
+    "gcore.jsdelivr.net",
   ].includes(parsed.hostname.toLowerCase())) {
     throw new Error("仅支持 jsDelivr 角色卡模块。");
   }
@@ -467,6 +477,13 @@ async function readAppDataFile(dataFilePath) {
   const parsed = parseAppDataContent(await readFile(dataFilePath, "utf8"));
   validatedAppDataFiles.set(dataFilePath, await getAppDataFileSignature(dataFilePath));
   return parsed;
+}
+
+export function normalizeTavernFileName(value) {
+  const name = String(value ?? "").replace(/^\/?(?:user\/)?files\//, "");
+  if (!name || name.length > 200 || /[\\/<>:"|?*\x00-\x1f]/.test(name) || /^\./.test(name) || /[. ]$/.test(name)) return null;
+  if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) return null;
+  return name;
 }
 
 async function getAppDataFileSignature(dataFilePath) {
@@ -1859,17 +1876,28 @@ function normalizeCompatibleApiBaseUrl(value) {
   return normalized.replace(/\/(?:chat\/completions|models)$/i, "");
 }
 
-function getTavernProviderTarget(body) {
+export function getTavernProviderTarget(body) {
   const apiBaseUrl = normalizeCompatibleApiBaseUrl(
-    body.reverse_proxy ?? body.custom_url ?? body.apiBaseUrl ?? body.apiurl,
+    [body.reverse_proxy, body.custom_url, body.apiBaseUrl, body.apiurl].find(
+      (value) => typeof value === "string" && value.trim(),
+    ),
   );
   if (!apiBaseUrl) {
     throw new Error("第三方插件没有提供可接管的供应商 API 地址");
   }
-  const apiKey = String(
-    body.proxy_password ?? body.apiKey ?? body.api_key ?? body.key ?? "",
-  );
+  const headers = parseTavernObject(body.custom_include_headers, "附加请求头");
+  const authorization = Object.entries(headers).find(([key]) => key.toLowerCase() === "authorization")?.[1];
+  const apiKey = String([
+    body.proxy_password, body.apiKey, body.api_key, body.key,
+    typeof authorization === "string" ? authorization.replace(/^Bearer\s+/i, "") : "",
+  ].find((value) => typeof value === "string" && value.trim()) ?? "");
   return { apiBaseUrl, apiKey };
+}
+
+function getTavernRequestHeaders(body) {
+  return Object.fromEntries(Object.entries(parseTavernObject(body.custom_include_headers, "附加请求头"))
+    .filter(([name]) => !/^(?:host|content-length|connection|transfer-encoding|cookie)$/i.test(name))
+    .map(([name, value]) => [name, String(value)]));
 }
 
 function buildTavernChatCompletionRequest(body) {
@@ -1969,7 +1997,7 @@ function shouldRetryImageGenerationWithSmallerSize(upstream, imageRequestBody, r
   return /timeout/i.test(message);
 }
 
-async function proxyJson({ url, apiKey, method = "GET", body, timeoutMs }) {
+async function proxyJson({ url, apiKey, method = "GET", body, timeoutMs, headers = {} }) {
   const ac = new AbortController();
   const timer = timeoutMs ? setTimeout(() => ac.abort(new Error(`upstream timeout after ${timeoutMs}ms`)), timeoutMs) : null;
   let upstreamResponse;
@@ -1980,6 +2008,7 @@ async function proxyJson({ url, apiKey, method = "GET", body, timeoutMs }) {
         Accept: "application/json",
         ...(body ? { "Content-Type": "application/json" } : {}),
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        ...headers,
       },
       body: body ? JSON.stringify(body) : undefined,
       signal: ac.signal,
@@ -2347,7 +2376,7 @@ export function normalizeUpstreamErrorMessage(text, statusText = "") {
     .trim() || String(statusText || "Upstream request failed");
 }
 
-async function proxyStream({ url, apiKey, body, response }) {
+async function proxyStream({ url, apiKey, body, response, headers = {} }) {
   const ac = new AbortController();
   const abortUpstream = () => {
     if (!ac.signal.aborted) ac.abort(new Error("client aborted"));
@@ -2362,6 +2391,7 @@ async function proxyStream({ url, apiKey, body, response }) {
         Accept: "text/event-stream",
         "Content-Type": "application/json",
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        ...headers,
       },
       body: JSON.stringify(body),
       signal: ac.signal,
@@ -2421,6 +2451,55 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
       return;
     }
 
+    if (pathname === "/api/files/upload" || pathname === "/api/files/delete") {
+      if (request.method !== "POST") {
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+      }
+      const body = await readJsonBody(request);
+      const name = normalizeTavernFileName(body.name ?? body.path);
+      if (!name) {
+        sendJson(response, 400, { error: "Invalid Tavern file name" });
+        return;
+      }
+      const filePath = join(dirname(dataFilePath), "tavern-files", name);
+      if (pathname.endsWith("/upload")) {
+        const base64 = typeof body.data === "string" ? body.data : "";
+        if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64)) {
+          sendJson(response, 400, { error: "Invalid base64 file data" });
+          return;
+        }
+        await mkdir(dirname(filePath), { recursive: true });
+        const staging = `${filePath}.tmp-${process.pid}-${globalThis.crypto.randomUUID()}`;
+        try {
+          await writeFile(staging, Buffer.from(base64, "base64"));
+          await rename(staging, filePath);
+        } finally {
+          await rm(staging, { force: true });
+        }
+        sendJson(response, 200, { path: `user/files/${name}` });
+      } else {
+        await rm(filePath, { force: true });
+        sendJson(response, 200, { ok: true });
+      }
+      return;
+    }
+
+    if (pathname === "/api/characters/chats") {
+      if (request.method !== "POST") {
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+      }
+      const body = await readJsonBody(request);
+      const data = await readAppData(dataFilePath);
+      const card = data?.characterCards?.find((entry) =>
+        entry.avatarDataUrl === body.avatar_url || `${entry.id}.png` === body.avatar_url,
+      );
+      const chats = card ? (data.chatSessions ?? []).filter((entry) => entry.roleplayCharacterCardId === card.id) : [];
+      sendJson(response, 200, chats.map((entry) => ({ file_name: `${entry.id}.jsonl` })));
+      return;
+    }
+
     if (pathname === "/api/settings/get" || pathname === "/api/settings/save") {
       sendJson(response, 503, {
         error: "Renge 扩展设置通过 SillyTavern.getContext().extensionSettings 保存",
@@ -2448,13 +2527,14 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
       const body = await readJsonBody(request);
       const { apiBaseUrl, apiKey } = getTavernProviderTarget(body);
       const requestBody = buildTavernChatCompletionRequest(body);
+      const headers = getTavernRequestHeaders(body);
       if (!requestBody.model || !Array.isArray(requestBody.messages)) {
         sendJson(response, 400, { error: "第三方生成请求缺少 model 或 messages" });
         return;
       }
       const url = getCompatibleApiEndpoint(apiBaseUrl, "chat/completions");
       if (requestBody.stream === true) {
-        await proxyStream({ url, apiKey, body: requestBody, response });
+        await proxyStream({ url, apiKey, body: requestBody, response, headers });
         return;
       }
       const upstream = await proxyJson({
@@ -2462,6 +2542,7 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
         apiKey,
         method: "POST",
         body: requestBody,
+        headers,
       });
       sendJson(response, upstream.ok ? 200 : upstream.status, upstream.payload);
       return;
@@ -3262,6 +3343,27 @@ export function startRengeServer(options = {}) {
 
     if (url.pathname.startsWith("/api/")) {
       await handleApi(request, response, url.pathname, dataFilePath, piHost);
+      return;
+    }
+
+    if (url.pathname.startsWith("/user/files/")) {
+      let name;
+      try {
+        name = normalizeTavernFileName(decodeURIComponent(url.pathname.slice("/user/files/".length)));
+      } catch {
+        name = null;
+      }
+      if (isHtmlPreviewOrigin || request.method !== "GET" || !name) {
+        sendJson(response, 400, { error: "Invalid Tavern file request" });
+        return;
+      }
+      try {
+        const bytes = await readFile(join(dirname(dataFilePath), "tavern-files", name));
+        response.writeHead(200, { "Content-Type": "application/octet-stream", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
+        response.end(bytes);
+      } catch {
+        sendJson(response, 404, { error: "File not found" });
+      }
       return;
     }
 

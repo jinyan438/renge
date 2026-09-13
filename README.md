@@ -219,6 +219,12 @@ npm start
 
 浏览器在后端持久化接口不可用时会退回 `localStorage`。供应商配置可能包含 API Key，因此不要把数据目录、浏览器配置或 `app-data.json` 上传到公开位置，也不要把 API Key 写入仓库文件。
 
+酒馆脚本的扩展设置保存在 `app-data.json` 的 `tavernExtensionSettings` 字段；首次升级会读取旧的本地设置。脚本数据、聊天元数据、消息中的数据库表和世界书也随应用数据保存。`saveChat()` 等异步保存接口在磁盘写入完成后返回，失败会抛出错误。星河璀璨数据库使用的向量文件存放在同一数据目录的 `tavern-files` 下，Android 则使用应用内部文件目录。IndexedDB 使用应用自己的持久化浏览器配置。
+
+已针对星河璀璨数据库 `spv9.2.5.1` 的设置桥接、世界书局部更新、文件接口和 OpenAI-compatible 自定义 API 做兼容处理。脚本本身及其依赖仍需要联网加载；原生 Claude/Gemini 协议和酒馆连接管理器预设不是本应用的完整实现，建议使用本应用主 API 或 OpenAI-compatible 自定义接口。
+
+浏览器回归测试：先运行 `npm run build` 和 `npx playwright install chromium`，再运行 `npm run test:tavern`。也可以用环境变量 `PLAYWRIGHT_CHANNEL=chrome` 使用本机 Chrome。设置 `TAVERN_SCRIPT_FILE` 为酒馆脚本 JSON 的路径后，同一测试会加载真实脚本并验证界面中的 API 预设、开关在浏览器与服务重启后恢复。测试使用独立临时数据目录，不读取日常应用数据。
+
 ## 环境变量
 
 | 变量 | 默认值 | 作用 |

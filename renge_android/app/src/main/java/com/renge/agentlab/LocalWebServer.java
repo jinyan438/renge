@@ -3,6 +3,7 @@ package com.renge.agentlab;
 import android.content.Context;
 import android.content.res.AssetManager;
 import android.util.AtomicFile;
+import android.util.Base64;
 import android.util.JsonReader;
 import android.util.JsonToken;
 import android.util.JsonWriter;
@@ -11,6 +12,9 @@ import android.webkit.WebStorage;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.LoaderOptions;
+import org.yaml.snakeyaml.constructor.SafeConstructor;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -35,6 +39,7 @@ import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Arrays;
@@ -49,6 +54,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class LocalWebServer {
     private static final int PREFERRED_PORT = 5191;
@@ -145,7 +152,7 @@ public class LocalWebServer {
             String requestHost = request.headers.getOrDefault("host", "")
                     .toLowerCase(Locale.US)
                     .replaceFirst(":\\d+$", "");
-            if ("preview.localhost".equals(requestHost) && request.path.startsWith("/api/")) {
+            if ("preview.localhost".equals(requestHost) && (request.path.startsWith("/api/") || request.path.startsWith("/user/files/") || isTavernStorageModule(request.path))) {
                 sendJson(output, 404, jsonError("Not found"));
                 output.flush();
                 return;
@@ -158,7 +165,11 @@ public class LocalWebServer {
             }
 
             request = request.withBody(readRequestBody(input, request.contentLength));
-            if (request.path.startsWith("/api/")) {
+            if (isTavernStorageModule(request.path)) {
+                sendAsset(output, "tavern-storage-compat.js");
+            } else if (request.path.startsWith("/user/files/")) {
+                serveTavernFile(request, output);
+            } else if (request.path.startsWith("/api/")) {
                 handleApi(request, output);
             } else {
                 serveStatic(request.path, output);
@@ -224,6 +235,7 @@ public class LocalWebServer {
         return new Request(
                 requestLine[0].toUpperCase(Locale.US),
                 normalizePath(requestLine[1]),
+                requestLine[1],
                 headers,
                 contentLength,
                 null
@@ -802,7 +814,170 @@ public class LocalWebServer {
         }
     }
 
+    private static boolean isTavernStorageModule(String path) {
+        return "/script.js".equals(path) || "/scripts/extensions.js".equals(path);
+    }
+
+    private static String tavernProxyUrl(String remote) throws IOException {
+        return "/api/tavern-module-proxy?url=" + URLEncoder.encode(remote, "UTF-8") + "&v=2";
+    }
+
+    private String rewriteTavernModule(String source, String remote) throws IOException {
+        Pattern imports = Pattern.compile("(\\b(?:from|import)\\s*(?:\\(\\s*)?)(['\"])((?:/|\\.{1,2}/|https://)[^'\"\\s]+)\\2");
+        Matcher matcher = imports.matcher(source);
+        StringBuffer result = new StringBuffer();
+        while (matcher.find()) {
+            String path = matcher.group(3);
+            String resolved;
+            if (isTavernStorageModule(path)) {
+                resolved = path;
+            } else if (path.endsWith("/data/storage/script.js")) {
+                resolved = "/script.js";
+            } else if (path.endsWith("/data/storage/scripts/extensions.js")) {
+                resolved = "/scripts/extensions.js";
+            } else {
+                String absolute = URI.create(remote).resolve(path).toString();
+                resolved = isTavernModuleUrl(absolute) ? tavernProxyUrl(absolute) : absolute;
+            }
+            // Modules execute from srcdoc; use an absolute local URL for nested module imports.
+            if (resolved.startsWith("/")) resolved = "http://127.0.0.1:" + serverSocket.getLocalPort() + resolved;
+            matcher.appendReplacement(result, Matcher.quoteReplacement(matcher.group(1) + matcher.group(2) + resolved + matcher.group(2)));
+        }
+        matcher.appendTail(result);
+        return result.toString();
+    }
+
+    private static boolean isTavernModuleUrl(String value) {
+        try {
+            URI uri = URI.create(value);
+            return "https".equals(uri.getScheme()) && Arrays.asList("testingcf.jsdelivr.net", "cdn.jsdelivr.net", "fastly.jsdelivr.net", "gcore.jsdelivr.net").contains(uri.getHost());
+        } catch (Exception ignored) { return false; }
+    }
+
+    private void serveTavernModule(Request request, OutputStream output) throws IOException {
+        if (!"GET".equals(request.method)) {
+            sendJson(output, 405, jsonError("Method not allowed"));
+            return;
+        }
+        String remote = "";
+        String query = URI.create(request.target).getRawQuery();
+        if (query != null) for (String pair : query.split("&")) {
+            if (pair.startsWith("url=")) remote = URLDecoder.decode(pair.substring(4), "UTF-8");
+        }
+        if (!isTavernModuleUrl(remote)) {
+            sendJson(output, 400, jsonError("Only jsDelivr modules are supported"));
+            return;
+        }
+        String fallback = remote.replaceFirst("https://[^/]+", "https://cdn.jsdelivr.net");
+        for (String candidate : new String[] {remote, fallback}) {
+            HttpURLConnection connection = null;
+            try {
+                connection = openConnection(candidate, "", "text/javascript");
+                int status = connection.getResponseCode();
+                if (status < 200 || status >= 300) continue;
+                String source = new String(readConnectionBody(connection, status), StandardCharsets.UTF_8);
+                sendBytes(output, 200, "text/javascript;charset=utf-8", rewriteTavernModule(source, candidate).getBytes(StandardCharsets.UTF_8));
+                return;
+            } catch (IOException ignored) {
+            } finally { if (connection != null) connection.disconnect(); }
+        }
+        sendJson(output, 502, jsonError("Tavern module download failed"));
+    }
+
+    private File tavernFile(String value) throws IOException {
+        String name = value.replaceFirst("^/?(?:user/)?files/", "");
+        if (!name.matches("[^\\\\/<>:\"|?*\\x00-\\x1f]{1,200}") || name.startsWith(".") || name.endsWith(".") || name.endsWith(" ")) {
+            throw new IOException("Invalid Tavern file name");
+        }
+        return new File(new File(context.getFilesDir(), "tavern-files"), name);
+    }
+
+    private void serveTavernFile(Request request, OutputStream output) throws IOException {
+        if (!"GET".equals(request.method)) {
+            sendJson(output, 405, jsonError("Method not allowed"));
+            return;
+        }
+        File file = tavernFile(request.path.substring("/user/files/".length()));
+        AtomicFile atomic = new AtomicFile(file);
+        try (InputStream input = atomic.openRead()) {
+            sendBytes(output, 200, "application/octet-stream", readAll(input));
+        } catch (IOException error) {
+            sendJson(output, 404, jsonError("File not found"));
+        }
+    }
+
+    private synchronized void handleTavernFile(Request request, OutputStream output) throws IOException, JSONException {
+        if (!"POST".equals(request.method)) {
+            sendJson(output, 405, jsonError("Method not allowed"));
+            return;
+        }
+        JSONObject body = parseJson(request.body);
+        File file;
+        try { file = tavernFile(body.optString("name", body.optString("path", ""))); }
+        catch (IOException error) { sendJson(output, 400, jsonError(error.getMessage())); return; }
+        AtomicFile atomic = new AtomicFile(file);
+        if (request.path.endsWith("/delete")) {
+            atomic.delete();
+            sendJson(output, 200, new JSONObject().put("ok", true));
+            return;
+        }
+        byte[] bytes;
+        String base64 = body.optString("data", "");
+        if (base64.length() % 4 != 0 || !base64.matches("[A-Za-z0-9+/]*={0,2}")) {
+            sendJson(output, 400, jsonError("Invalid base64 file data"));
+            return;
+        }
+        bytes = Base64.decode(base64, Base64.DEFAULT);
+        FileOutputStream stream = null;
+        try {
+            stream = atomic.startWrite();
+            stream.write(bytes);
+            atomic.finishWrite(stream);
+        } catch (IOException error) {
+            atomic.failWrite(stream);
+            throw error;
+        }
+        sendJson(output, 200, new JSONObject().put("path", "user/files/" + file.getName()));
+    }
+
     private void handleApi(Request request, OutputStream output) throws IOException, JSONException {
+        if ("/api/characters/chats".equals(request.path)) {
+            if (!"POST".equals(request.method)) { sendJson(output, 405, jsonError("Method not allowed")); return; }
+            JSONObject body = parseJson(request.body);
+            JSONObject data;
+            try (InputStream input = new AtomicFile(appDataFile).openRead()) {
+                data = new JSONObject(new String(readAll(input), StandardCharsets.UTF_8));
+            }
+            JSONArray cards = data.optJSONArray("characterCards");
+            String cardId = "";
+            String avatar = body.optString("avatar_url", "");
+            if (cards != null) for (int index = 0; index < cards.length(); index++) {
+                JSONObject card = cards.optJSONObject(index);
+                if (card != null && (avatar.equals(card.optString("avatarDataUrl")) || avatar.equals(card.optString("id") + ".png"))) {
+                    cardId = card.optString("id"); break;
+                }
+            }
+            JSONArray result = new JSONArray();
+            JSONArray chats = data.optJSONArray("chatSessions");
+            if (!cardId.isEmpty() && chats != null) for (int index = 0; index < chats.length(); index++) {
+                JSONObject chat = chats.optJSONObject(index);
+                if (chat != null && cardId.equals(chat.optString("roleplayCharacterCardId"))) result.put(new JSONObject().put("file_name", chat.optString("id") + ".jsonl"));
+            }
+            sendBytes(output, 200, "application/json;charset=utf-8", result.toString().getBytes(StandardCharsets.UTF_8));
+            return;
+        }
+        if ("/api/backends/chat-completions/generate".equals(request.path) || "/api/backends/chat-completions/status".equals(request.path)) {
+            handleTavernCompletion(request, output);
+            return;
+        }
+        if ("/api/tavern-module-proxy".equals(request.path)) {
+            serveTavernModule(request, output);
+            return;
+        }
+        if ("/api/files/upload".equals(request.path) || "/api/files/delete".equals(request.path)) {
+            handleTavernFile(request, output);
+            return;
+        }
         if (request.path.startsWith("/api/app-data/assets/")) {
             if (!"GET".equals(request.method)) {
                 sendJson(output, 405, jsonError("Method not allowed"));
@@ -1131,6 +1306,98 @@ public class LocalWebServer {
         for (String name : new String[]{"extensions", "generated-images", "session-images", "skills"}) {
             deleteRecursively(new File(context.getFilesDir(), name));
         }
+    }
+
+    private JSONObject tavernObject(Object value) throws JSONException {
+        if (value instanceof JSONObject) return (JSONObject) value;
+        if (value == null || value == JSONObject.NULL || value.toString().trim().isEmpty()) return new JSONObject();
+        Object parsed = new Yaml(new SafeConstructor(new LoaderOptions())).load(value.toString());
+        if (parsed instanceof Map) return new JSONObject((Map<?, ?>) parsed);
+        JSONObject result = new JSONObject();
+        if (parsed instanceof Iterable) {
+            for (Object part : (Iterable<?>) parsed) if (part instanceof Map) {
+                JSONObject fields = new JSONObject((Map<?, ?>) part);
+                for (Iterator<String> keys = fields.keys(); keys.hasNext();) {
+                    String key = keys.next();
+                    result.put(key, fields.get(key));
+                }
+            }
+            return result;
+        }
+        throw new JSONException("Tavern options must be a YAML object");
+    }
+
+    private String firstTavernValue(JSONObject body, String... fields) {
+        for (String field : fields) {
+            String value = body.optString(field, "").trim();
+            if (!value.isEmpty()) return value;
+        }
+        return "";
+    }
+
+    private void handleTavernCompletion(Request request, OutputStream output) throws IOException, JSONException {
+        if (!"POST".equals(request.method)) { sendJson(output, 405, jsonError("Method not allowed")); return; }
+        JSONObject body = parseJson(request.body);
+        String base = firstTavernValue(body, "reverse_proxy", "custom_url", "apiBaseUrl", "apiurl").replaceAll("/+$", "").replaceFirst("/(?:chat/completions|models)$", "");
+        if (!(base.startsWith("https://") || base.startsWith("http://"))) {
+            sendJson(output, 400, jsonError("Missing provider URL")); return;
+        }
+        JSONObject headers = tavernObject(body.opt("custom_include_headers"));
+        String key = firstTavernValue(body, "proxy_password", "apiKey", "api_key", "key");
+        JSONObject upstream = new JSONObject();
+        copyJsonFields(body, upstream, new String[] {"model", "messages", "max_tokens", "max_completion_tokens", "temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop", "stream", "stream_options", "tools", "tool_choice", "response_format", "reasoning_effort", "logit_bias", "n"});
+        mergeTavernObject(upstream, tavernObject(body.opt("custom_include_body")));
+        Object excluded = body.opt("custom_exclude_body");
+        if (excluded != null && excluded != JSONObject.NULL && !excluded.toString().trim().isEmpty()) {
+            Object parsed = new Yaml(new SafeConstructor(new LoaderOptions())).load(excluded.toString());
+            if (parsed instanceof Iterable) {
+                for (Object path : (Iterable<?>) parsed) deleteTavernPath(upstream, String.valueOf(path));
+            } else {
+                for (String path : excluded.toString().split("[,\\n]")) deleteTavernPath(upstream, path.trim());
+            }
+        }
+        boolean status = request.path.endsWith("/status");
+        HttpURLConnection connection = openConnection(base + (status ? "/models" : "/chat/completions"), key, upstream.optBoolean("stream") ? "text/event-stream" : "application/json");
+        try {
+            connection.setRequestMethod(status ? "GET" : "POST");
+            for (Iterator<String> names = headers.keys(); names.hasNext();) {
+                String name = names.next();
+                if (!name.matches("(?i)host|content-length|connection|transfer-encoding|cookie")) connection.setRequestProperty(name, headers.getString(name));
+            }
+            if (!status) {
+                connection.setDoOutput(true);
+                try (OutputStream destination = connection.getOutputStream()) { destination.write(upstream.toString().getBytes(StandardCharsets.UTF_8)); }
+            }
+            int code = connection.getResponseCode();
+            if (!status && upstream.optBoolean("stream") && code >= 200 && code < 300) {
+                writeHead(output, code, "text/event-stream;charset=utf-8", -1);
+                try (InputStream input = connection.getInputStream()) {
+                    byte[] buffer = new byte[8192];
+                    int count;
+                    while ((count = input.read(buffer)) != -1) { output.write(buffer, 0, count); output.flush(); }
+                }
+            } else {
+                sendBytes(output, code, "application/json;charset=utf-8", readConnectionBody(connection, code));
+            }
+        } finally { connection.disconnect(); }
+    }
+
+    private void mergeTavernObject(JSONObject target, JSONObject patch) throws JSONException {
+        for (Iterator<String> keys = patch.keys(); keys.hasNext();) {
+            String key = keys.next();
+            if (target.opt(key) instanceof JSONObject && patch.opt(key) instanceof JSONObject) {
+                mergeTavernObject(target.getJSONObject(key), patch.getJSONObject(key));
+            } else { target.put(key, patch.get(key)); }
+        }
+    }
+
+    private void deleteTavernPath(JSONObject target, String path) {
+        String[] parts = path.split("\\.");
+        for (int index = 0; index < parts.length - 1; index++) {
+            target = target.optJSONObject(parts[index]);
+            if (target == null) return;
+        }
+        if (parts.length > 0) target.remove(parts[parts.length - 1]);
     }
 
     private ProviderTarget getProviderTarget(JSONObject body) throws JSONException {
@@ -1732,6 +1999,7 @@ public class LocalWebServer {
     private static final class Request {
         final String method;
         final String path;
+        final String target;
         final Map<String, String> headers;
         final long contentLength;
         final byte[] body;
@@ -1739,19 +2007,21 @@ public class LocalWebServer {
         Request(
                 String method,
                 String path,
+                String target,
                 Map<String, String> headers,
                 long contentLength,
                 byte[] body
         ) {
             this.method = method;
             this.path = path;
+            this.target = target;
             this.headers = headers;
             this.contentLength = contentLength;
             this.body = body;
         }
 
         Request withBody(byte[] nextBody) {
-            return new Request(method, path, headers, contentLength, nextBody);
+            return new Request(method, path, target, headers, contentLength, nextBody);
         }
     }
 

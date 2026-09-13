@@ -133,12 +133,14 @@ export type TavernScriptRuntimeAdapter = {
   getPresetVariables?(): Record<string, unknown>;
   setPresetVariables?(variables: Record<string, unknown>): void;
   getExtensionSettings?(): Record<string, unknown>;
-  setExtensionSettings?(settings: Record<string, unknown>): void;
+  setExtensionSettings?(settings: Record<string, unknown>): void | Promise<void>;
+  flushPersistence?(): Promise<void>;
   getChatMetadata?(): Record<string, unknown>;
   setChatMetadata?(metadata: Record<string, unknown>): void;
   getScriptData(scriptId: string): Record<string, unknown>;
   setScriptData(scriptId: string, data: Record<string, unknown>): void;
   getCharacter(): TavernRuntimeCharacter | null;
+  getCharacterSummaries?(): Array<{ id: string; name: string; avatarDataUrl: string }>;
   getWorldBooks(): TavernRuntimeWorldBook[];
   setWorldBook(worldBook: TavernRuntimeWorldBook): void;
   deleteWorldBook?(identifier: string): void;
@@ -226,6 +228,7 @@ const TAVERN_EVENTS = Object.freeze({
   GENERATION_STARTED: "generation_started",
   GENERATION_AFTER_COMMANDS: "generation_after_commands",
   GENERATION_ENDED: "generation_ended",
+  GENERATION_STOPPED: "generation_stopped",
   CHAT_COMPLETION_SETTINGS_READY: "chat_completion_settings_ready",
   CHAT_COMPLETION_PROMPT_READY: "chat_completion_prompt_ready",
   STREAM_TOKEN_RECEIVED: "stream_token_received",
@@ -1175,15 +1178,15 @@ function normalizeTavernWorldBookPosition(
   fallback: TavernRuntimeWorldBookEntry["position"] = "after_char",
 ) {
   const normalized = String(value ?? "").trim().toLowerCase();
-  if (normalized === "before_char" || normalized === "0") return "before_char";
-  if (normalized === "after_char" || normalized === "1") return "after_char";
+  if (normalized === "before_char" || normalized === "before_character_definition" || normalized === "0") return "before_char";
+  if (normalized === "after_char" || normalized === "after_character_definition" || normalized === "1") return "after_char";
   if (normalized === "before_an" || normalized === "2" || normalized === "5") {
     return "before_an";
   }
   if (normalized === "after_an" || normalized === "3" || normalized === "6") {
     return "after_an";
   }
-  if (normalized === "at_depth" || normalized === "4") return "at_depth";
+  if (normalized === "at_depth" || normalized.startsWith("at_depth_as_") || normalized === "4") return "at_depth";
   return fallback;
 }
 
@@ -1247,7 +1250,7 @@ function normalizeTavernWorldBookEntry(
   const position = isRecord(raw.position) ? raw.position : {};
   const fallbackId = fallback?.id ?? `worldbook-entry-${crypto.randomUUID()}`;
   const id = String(raw.id ?? raw.uid ?? fallbackId);
-  const strategyType = String(strategy.type ?? "").toLowerCase();
+  const strategyType = String(raw.type ?? strategy.type ?? "").toLowerCase();
   const rawEnabled = raw.enabled ?? (raw.disabled === undefined ? undefined : !raw.disabled);
   return {
     id,
@@ -1264,12 +1267,12 @@ function normalizeTavernWorldBookEntry(
         fallback?.secondaryKeys,
     ),
     constant: toTavernBoolean(
-      raw.constant,
-      strategyType === "constant" || (fallback?.constant ?? false),
+      raw.type === undefined ? raw.constant : strategyType === "constant",
+      strategyType ? strategyType === "constant" : (fallback?.constant ?? false),
     ),
     selective: toTavernBoolean(
-      raw.selective,
-      strategyType === "selective" || (fallback?.selective ?? false),
+      raw.type === undefined ? raw.selective : strategyType === "selective",
+      strategyType ? strategyType === "selective" : (fallback?.selective ?? false),
     ),
     selectiveLogic: Math.max(
       0,
@@ -2372,6 +2375,7 @@ export class TavernScriptRuntime {
       }
       if (messagesChanged) this.adapter.setMessages(messages);
       this.refreshSillyTavernChatCache();
+      if (messagesChanged) await this.adapter.flushPersistence?.();
       return succeeded;
     };
 
@@ -2391,6 +2395,7 @@ export class TavernScriptRuntime {
       else messages.splice(position, 0, ...created);
       this.adapter.setMessages(messages);
       this.refreshSillyTavernChatCache();
+      await this.adapter.flushPersistence?.();
       return true;
     };
 
@@ -2401,6 +2406,7 @@ export class TavernScriptRuntime {
         this.adapter.getMessages().filter((_, index) => !indexes.has(index)),
       );
       this.refreshSillyTavernChatCache();
+      await this.adapter.flushPersistence?.();
       return true;
     };
 
@@ -2430,6 +2436,7 @@ export class TavernScriptRuntime {
       previousVariables: Record<string, unknown>,
       option?: unknown,
     ) => {
+      await this.adapter.flushPersistence?.();
       await this.emit(TAVERN_EVENTS.VARIABLE_CHANGED, cloneValue(variables), cloneValue(option));
       await this.emit(
         "mag_variable_update_ended",
@@ -2561,7 +2568,17 @@ export class TavernScriptRuntime {
         active: book.active,
         entries: getWorldbook(book.name),
       }));
-    const getLorebookEntries = async (name: unknown) => getWorldbook(name);
+    const getLorebookEntries = async (name: unknown) => {
+      const book = findWorldBook(name);
+      if (!book) throw new Error(`Worldbook not found: ${String(name)}`);
+      return book.entries.map((entry) => ({
+        ...formatTavernWorldBookEntry(entry),
+        type: entry.constant ? "constant" : "selective",
+        position: entry.position === "at_depth" ? "at_depth_as_system"
+          : entry.position === "before_char" ? "before_character_definition"
+            : entry.position === "after_char" ? "after_character_definition" : entry.position,
+      }));
+    };
     const getCharWorldbookNames = () => {
       const primary = getCharacterWorldBook()?.name ?? null;
       const additional = getGlobalWorldBooks()
@@ -2596,8 +2613,19 @@ export class TavernScriptRuntime {
     };
     const setLorebookEntries = async (name: unknown, entries: unknown) => {
       const book = findWorldBook(name);
-      if (!book || !Array.isArray(entries)) return false;
-      persistWorldBookEntries(book, entries);
+      if (!book) throw new Error(`Worldbook not found: ${String(name)}`);
+      if (!Array.isArray(entries)) throw new Error("Lorebook entries must be an array");
+      const patches = new Map(entries.filter(isRecord).map((entry) => [String(entry.uid ?? entry.id), entry]));
+      patches.forEach((_patch, uid) => {
+        if (!book.entries.some((entry) => entry.uid === uid || entry.id === uid)) {
+          throw new Error(`Lorebook entry not found: ${uid}`);
+        }
+      });
+      persistWorldBookEntries(book, book.entries.map((entry, index) => {
+        const patch = patches.get(entry.uid) ?? patches.get(entry.id);
+        return patch ? normalizeTavernWorldBookEntry({ ...patch, name: patch.comment ?? patch.name }, index, entry) : entry;
+      }));
+      await this.adapter.flushPersistence?.();
       return true;
     };
     const createOrReplaceWorldbook = async (name: unknown, entries: unknown) => {
@@ -2606,6 +2634,7 @@ export class TavernScriptRuntime {
       const existingBook = findWorldBook(normalizedName);
       if (existingBook) {
         persistWorldBookEntries(existingBook, entries);
+        await this.adapter.flushPersistence?.();
         return normalizedName;
       }
       const timestamp = new Date().toISOString();
@@ -2622,18 +2651,21 @@ export class TavernScriptRuntime {
         updatedAt: timestamp,
       };
       this.adapter.setWorldBook(createdBook);
+      await this.adapter.flushPersistence?.();
       return normalizedName;
     };
     const replaceWorldbook = async (name: unknown, entries: unknown) => {
       const book = findWorldBook(name);
       if (!book || !Array.isArray(entries)) return false;
       persistWorldBookEntries(book, entries);
+      await this.adapter.flushPersistence?.();
       return true;
     };
     const deleteWorldbook = async (name: unknown) => {
       const book = findWorldBook(name);
       if (!book || !this.adapter.deleteWorldBook) return false;
       this.adapter.deleteWorldBook(book.id || book.name);
+      await this.adapter.flushPersistence?.();
       return true;
     };
     const rebindGlobalWorldbooks = async (names: unknown) => {
@@ -2648,6 +2680,7 @@ export class TavernScriptRuntime {
         ),
       );
       this.adapter.setActiveWorldBookNames(nextNames);
+      await this.adapter.flushPersistence?.();
       return true;
     };
     const getOrCreateChatWorldbook = async () => {
@@ -2680,22 +2713,28 @@ export class TavernScriptRuntime {
         : isRecord(result) && Array.isArray(result.entries)
           ? result.entries
           : currentEntries;
-      return cloneValue(persistWorldBookEntries(book, nextEntries));
+      const persisted = persistWorldBookEntries(book, nextEntries);
+      await this.adapter.flushPersistence?.();
+      return cloneValue(persisted);
     };
     const createWorldbookEntries = async (name: unknown, entries: unknown) => {
       const book = findWorldBook(name);
-      if (!book || !Array.isArray(entries)) return [];
+      if (!book) throw new Error(`Worldbook not found: ${String(name)}`);
+      if (!Array.isArray(entries)) throw new Error("Worldbook entries must be an array");
       const additions = entries.map((entry, index) =>
         normalizeTavernWorldBookEntry(entry, book.entries.length + index),
       );
       persistWorldBookEntries(book, [...book.entries, ...additions]);
+      await this.adapter.flushPersistence?.();
       return cloneValue(additions.map(formatTavernWorldBookEntry));
     };
     const createLorebookEntry = async (name: unknown, entry: unknown) =>
       (await createWorldbookEntries(name, [entry]))[0] ?? null;
+    const createLorebookEntries = async (name: unknown, entries: unknown) =>
+      (await createWorldbookEntries(name, entries)).map((entry) => entry.uid);
     const deleteWorldbookEntries = async (name: unknown, idsOrPredicate: unknown) => {
       const book = findWorldBook(name);
-      if (!book) return false;
+      if (!book) throw new Error(`Worldbook not found: ${String(name)}`);
       const formattedEntries = book.entries.map(formatTavernWorldBookEntry);
       let retainedEntries: TavernRuntimeWorldBookEntry[];
       if (typeof idsOrPredicate === "function") {
@@ -2717,6 +2756,7 @@ export class TavernScriptRuntime {
         );
       }
       persistWorldBookEntries(book, retainedEntries);
+      await this.adapter.flushPersistence?.();
       return true;
     };
     const deleteLorebookEntry = async (name: unknown, entryId: unknown) =>
@@ -2735,7 +2775,9 @@ export class TavernScriptRuntime {
       );
       if (index < 0) return null;
       currentEntries[index] = { ...currentEntries[index], ...cloneValue(updates) };
-      return persistWorldBookEntries(book, currentEntries)[index] ?? null;
+      const persisted = persistWorldBookEntries(book, currentEntries)[index] ?? null;
+      await this.adapter.flushPersistence?.();
+      return persisted;
     };
     const getWorldbookEntry = (name: unknown, entryId: unknown) => {
       const id = String(entryId);
@@ -2792,7 +2834,7 @@ export class TavernScriptRuntime {
       getOrCreateChatWorldbook,
       setLorebookEntries,
       createLorebookEntry,
-      createLorebookEntries: createWorldbookEntries,
+      createLorebookEntries,
       deleteLorebookEntry,
       getCharWorldbookNames,
       getCharLorebooks,
@@ -2952,7 +2994,9 @@ export class TavernScriptRuntime {
     };
     const saveChat = async () => {
       this.adapter.setChatMetadata?.(cloneValue(chatMetadata));
-      return this.persistSillyTavernChatCache();
+      this.persistSillyTavernChatCache();
+      await this.adapter.flushPersistence?.();
+      return true;
     };
     const updateChatMetadata = async (patch: unknown, reset = false) => {
       const next = reset
@@ -2961,12 +3005,14 @@ export class TavernScriptRuntime {
       Object.keys(chatMetadata).forEach((key) => delete chatMetadata[key]);
       Object.assign(chatMetadata, next);
       this.adapter.setChatMetadata?.(cloneValue(chatMetadata));
+      await this.adapter.flushPersistence?.();
       return cloneValue(chatMetadata);
     };
     const deleteLastMessage = async () => {
       if (this.sillyTavernChatCache.length === 0) return false;
       this.sillyTavernChatCache.pop();
       this.persistSillyTavernChatCache();
+      await this.adapter.flushPersistence?.();
       await this.emit(TAVERN_EVENTS.MESSAGE_DELETED, this.sillyTavernChatCache.length);
       return true;
     };
@@ -3076,11 +3122,12 @@ export class TavernScriptRuntime {
       {},
     );
     const extensionSettings = isRecord(storedExtensionSettings)
-      ? cloneValue(storedExtensionSettings)
+      ? storedExtensionSettings
       : {};
     const saveSettingsDebounced = () => {
+      let saved: void | Promise<void> = undefined;
       if (this.adapter.setExtensionSettings) {
-        this.adapter.setExtensionSettings(cloneValue(extensionSettings));
+        saved = this.adapter.setExtensionSettings(extensionSettings);
       } else {
         const variables = cloneValue(this.adapter.getGlobalVariables());
         variables[TAVERN_EXTENSION_SETTINGS_VARIABLE_KEY] = cloneValue(extensionSettings);
@@ -3088,7 +3135,7 @@ export class TavernScriptRuntime {
       }
 
       const preset = this.adapter.getPresetState?.();
-      if (!preset || !this.adapter.savePresetSettings) return;
+      if (!preset || !this.adapter.savePresetSettings) return saved;
       const completionPrompts = Array.isArray(chatCompletionSettings.prompts)
         ? chatCompletionSettings.prompts.filter(isRecord)
         : [];
@@ -3126,6 +3173,7 @@ export class TavernScriptRuntime {
             ? chatCompletionSettings.custom_exclude_body
             : preset.customExcludeBody,
       });
+      return saved;
     };
 
     const sillyTavern: Record<string, unknown> = {
@@ -3430,7 +3478,7 @@ export class TavernScriptRuntime {
       eventClearEvent: (eventName: unknown) => this.eventHandlers.delete(String(eventName)),
       eventClearListener,
       eventClearAll: () => this.eventHandlers.clear(),
-      getCharData: () => this.getSillyTavernCharacters()[0]?.data ?? null,
+      getCharData: () => getCharacter() ? this.getSillyTavernCharacters()[0]?.data ?? null : null,
       getWorldbookNames,
       getGlobalWorldbookNames,
       getWorldbook,
@@ -3449,7 +3497,7 @@ export class TavernScriptRuntime {
       setLorebookSettings: async () => true,
       setLorebookEntries,
       createLorebookEntry,
-      createLorebookEntries: createWorldbookEntries,
+      createLorebookEntries,
       deleteLorebookEntry,
       updateWorldbookWith,
       createWorldbookEntries,
@@ -3712,7 +3760,7 @@ export class TavernScriptRuntime {
       const extensionId = String(normalized.extension_id ?? "").trim();
       if (!extensionId) return;
       if (this.adapter.getExtensionSettings && this.adapter.setExtensionSettings) {
-        const extensionSettings = cloneValue(this.adapter.getExtensionSettings());
+        const extensionSettings = this.adapter.getExtensionSettings();
         extensionSettings[extensionId] = next;
         this.adapter.setExtensionSettings(extensionSettings);
         return;
@@ -3930,11 +3978,14 @@ export class TavernScriptRuntime {
 
   private getSillyTavernCharacters() {
     const character = this.adapter.getCharacter();
-    if (!character) return [];
+    const otherCharacters = (this.adapter.getCharacterSummaries?.() ?? [])
+      .filter((entry) => entry.id !== character?.id)
+      .map((entry) => ({ name: entry.name, avatar: entry.avatarDataUrl || `${entry.id}.png`, data: { name: entry.name } }));
+    if (!character) return otherCharacters;
     return [
       {
         name: character.name,
-        avatar: this.localizePlaceholderImages(character.avatarDataUrl),
+        avatar: this.localizePlaceholderImages(character.avatarDataUrl) || `${character.id}.png`,
         data: {
           name: character.name,
           description: character.description,
@@ -3949,6 +4000,7 @@ export class TavernScriptRuntime {
           character_book: character.worldBook,
         },
       },
+      ...otherCharacters,
     ];
   }
 

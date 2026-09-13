@@ -1,0 +1,10 @@
+const context = () => globalThis.SillyTavern?.getContext?.() ?? {};
+export const getContext = context;
+export const extension_settings = globalThis.extension_settings ?? context().extensionSettings ?? {};
+export const saveSettingsDebounced = (...args) => globalThis.saveSettingsDebounced?.(...args);
+export const saveSettings = saveSettingsDebounced;
+export const saveChat = (...args) => context().saveChat?.(...args);
+export const saveChatDebounced = saveChat;
+export const eventSource = globalThis.eventSource ?? context().eventSource;
+export const event_types = globalThis.event_types ?? context().eventTypes ?? {};
+export const getRequestHeaders = () => context().getRequestHeaders?.() ?? { "Content-Type": "application/json" };

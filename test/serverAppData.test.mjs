@@ -9,8 +9,91 @@ import {
   parseWindowsProxyServer,
   parsePiSkillMetadata,
   rewriteTavernModuleImports,
+  getTavernProviderTarget,
+  normalizeTavernFileName,
   startRengeServer,
 } from "../server.mjs";
+
+test("Xinghe custom API skips empty proxy fields and uses YAML authorization", () => {
+  assert.deepEqual(getTavernProviderTarget({
+    reverse_proxy: "", proxy_password: "", custom_url: "https://example.test/v1/",
+    custom_include_headers: "Authorization: Bearer fixture-key",
+  }), { apiBaseUrl: "https://example.test/v1", apiKey: "fixture-key" });
+});
+
+test("Xinghe storage imports resolve to the host, including injected bridge source", () => {
+  const rewritten = rewriteTavernModuleImports([
+    "const bridge = `await import('/scripts/extensions.js'); await import('/script.js');`;",
+    "await import('./data/storage/script.js');",
+    "await import('./data/storage/scripts/extensions.js');",
+  ].join("\n"), "http://127.0.0.1:5190", "https://gcore.jsdelivr.net/gh/AlbusKen/shujuku@spv9.2.5.1/index.js");
+  assert.equal((rewritten.match(/http:\/\/127.0.0.1:5190\/script.js/g) ?? []).length, 2);
+  assert.equal((rewritten.match(/http:\/\/127.0.0.1:5190\/scripts\/extensions.js/g) ?? []).length, 2);
+  assert.doesNotMatch(rewritten, /tavern-module-proxy/);
+});
+
+test("Tavern file names reject traversal and platform special paths", () => {
+  for (const value of ["../app-data.json", "..\\app-data.json", "/outside.json", "CON.json", "x:y", "nested/file.json", "x."]) {
+    assert.equal(normalizeTavernFileName(value), null, value);
+  }
+  assert.equal(normalizeTavernFileName("/user/files/index.json"), "index.json");
+});
+
+test("Xinghe custom completions forward authorization, headers and body overrides", async (t) => {
+  let captured;
+  const upstream = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    captured = { url: request.url, headers: request.headers, body: JSON.parse(Buffer.concat(chunks).toString()) };
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ choices: [{ message: { content: "fixture response" } }] }));
+  });
+  await new Promise(resolve => upstream.listen(0, "127.0.0.1", resolve));
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-xinghe-api-"));
+  const controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  t.after(async () => {
+    await new Promise(resolve => controller.server.close(resolve));
+    await new Promise(resolve => upstream.close(resolve));
+    await rm(dataDir, { recursive: true, force: true });
+  });
+  const response = await fetch(`${controller.url}/api/backends/chat-completions/generate`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      custom_url: `http://127.0.0.1:${upstream.address().port}/v1`, reverse_proxy: "", proxy_password: "",
+      custom_include_headers: "Authorization: Bearer fixture-key\nX-Provider-Option: enabled",
+      model: "fixture-model", messages: [{ role: "system", content: "Update table" }], max_tokens: 100,
+      custom_include_body: "temperature: 0.25\nresponse_format:\n  type: json_object",
+      custom_exclude_body: "- max_tokens",
+    }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(captured.url, "/v1/chat/completions");
+  assert.equal(captured.headers.authorization, "Bearer fixture-key");
+  assert.equal(captured.headers["x-provider-option"], "enabled");
+  assert.deepEqual(captured.body, { model: "fixture-model", messages: [{ role: "system", content: "Update table" }], temperature: 0.25, response_format: { type: "json_object" } });
+});
+
+test("Tavern vector files survive server restart and delete through legacy paths", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-tavern-files-"));
+  let controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  const close = () => new Promise(resolve => controller.server.close(resolve));
+  t.after(async () => { await close(); await rm(dataDir, { recursive: true, force: true }); });
+  const data = JSON.stringify({ rows: [["remember", "after restart"]], vector: [0.1, 0.2] });
+  const upload = await fetch(`${controller.url}/api/files/upload`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "xinghe-index.json", data: Buffer.from(data).toString("base64") }),
+  });
+  assert.equal(upload.status, 200);
+  await close();
+  controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  assert.equal(await (await fetch(`${controller.url}/user/files/xinghe-index.json`)).text(), data);
+  const deleted = await fetch(`${controller.url}/api/files/delete`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: "/user/files/xinghe-index.json" }),
+  });
+  assert.equal(deleted.status, 200);
+  assert.equal((await fetch(`${controller.url}/user/files/xinghe-index.json`)).status, 404);
+});
 
 test("reduces HTML upstream failures to a readable error message", () => {
   assert.equal(

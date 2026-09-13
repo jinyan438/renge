@@ -424,6 +424,7 @@ test("jsDelivr module graphs use the local Tavern module proxy", () => {
   const source = `
 import 'https://testingcf.jsdelivr.net/gh/example/card@123/bundle.js';
 import { helper } from "https://cdn.jsdelivr.net/npm/example/+esm";
+import 'https://gcore.jsdelivr.net/gh/AlbusKen/shujuku@spv9.2.5.1/index.js';
 const image = "https://files.example.test/card.png";
 `;
 
@@ -437,7 +438,8 @@ const image = "https://files.example.test/card.png";
     transformed,
     /http:\/\/127\.0\.0\.1:5190\/api\/tavern-module-proxy\?url=https%3A%2F%2Fcdn\.jsdelivr\.net/,
   );
-  assert.equal((transformed.match(/&v=2/g) ?? []).length, 2);
+  assert.match(transformed, /url=https%3A%2F%2Fgcore\.jsdelivr\.net/);
+  assert.equal((transformed.match(/&v=2/g) ?? []).length, 3);
   assert.match(transformed, /https:\/\/files\.example\.test\/card\.png/);
 });
 

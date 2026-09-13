@@ -624,7 +624,7 @@ export function createTavernMacroRegistry(
 }
 
 const JSDELIVR_MODULE_URL_PATTERN =
-  /https:\/\/(?:testingcf|cdn|fastly)\.jsdelivr\.net\/[^'"`\s)]+/g;
+  /https:\/\/(?:testingcf|cdn|fastly|gcore)\.jsdelivr\.net\/[^'"`\s)]+/g;
 const TAVERN_MODULE_PROXY_VERSION = "2";
 
 /** Routes jsDelivr ES-module graphs through Renge's server-side loader. */
