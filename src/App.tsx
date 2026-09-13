@@ -12889,6 +12889,15 @@ export function App() {
       }, 180);
     }
   }, [flushChatInputContext]);
+  const setChatInputElementRef = useCallback((element: HTMLTextAreaElement | null) => {
+    chatInputRef.current = element;
+    if (!element) return;
+    const syncScriptedInput = () => setChatInput(element.value);
+    // jQuery's .trigger("input") calls DOM event properties but does not reach
+    // React's delegated onChange listener. Tavern scripts rely on that pattern.
+    element.oninput = syncScriptedInput;
+    element.onchange = syncScriptedInput;
+  }, [setChatInput]);
   const handleChatInputBlur = useCallback(() => {
     if (chatInputContextTimerRef.current !== null) {
       window.clearTimeout(chatInputContextTimerRef.current);
@@ -37603,8 +37612,8 @@ export function App() {
                 onChange={(event) => void handleChatAttachmentChange(event.target.files)}
               />
               <textarea
-                id="renge_chat_input"
-                ref={chatInputRef}
+                id="send_textarea"
+                ref={setChatInputElementRef}
                 defaultValue={chatInputValueRef.current}
                 placeholder="输入消息"
                 rows={3}
@@ -38386,7 +38395,7 @@ export function App() {
                   </details>
                 </div>
                 <button
-                  id="renge_chat_send_button"
+                  id="send_but"
                   ref={chatSendButtonRef}
                   type="button"
                   className={`send-button ${chatGenerationState !== "idle" ? "stop" : ""}`}
