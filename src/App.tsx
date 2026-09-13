@@ -12835,6 +12835,8 @@ export function App() {
   const htmlPreviewFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const chatInputValueRef = useRef("");
   const chatInputHasContentRef = useRef(false);
+  const scriptedActionAutoSendTimerRef = useRef<number | null>(null);
+  const scriptedActionAutoSendKeyRef = useRef("");
   const chatInputContextDirtyRef = useRef(false);
   const chatInputContextTimerRef = useRef<number | null>(null);
   const flushChatInputContext = useCallback((force = false) => {
@@ -12891,8 +12893,72 @@ export function App() {
   }, [flushChatInputContext]);
   const setChatInputElementRef = useCallback((element: HTMLTextAreaElement | null) => {
     chatInputRef.current = element;
+    if (scriptedActionAutoSendTimerRef.current !== null) {
+      window.clearTimeout(scriptedActionAutoSendTimerRef.current);
+      scriptedActionAutoSendTimerRef.current = null;
+    }
+    scriptedActionAutoSendKeyRef.current = "";
     if (!element) return;
-    const syncScriptedInput = () => setChatInput(element.value);
+
+    type ScriptCompatibleTextarea = HTMLTextAreaElement & {
+      _acuOriginalActionText?: string | null;
+    };
+
+    const clearScriptedActionMarker = () => {
+      const scriptedTextarea = element as ScriptCompatibleTextarea;
+      scriptedTextarea._acuOriginalActionText = null;
+      const jquery = (window as Window & {
+        jQuery?: (target: unknown) => { removeData?: (key: string) => unknown };
+      }).jQuery;
+      try {
+        jquery?.(element).removeData?.("acu-original-action-text");
+      } catch {
+        // The compatibility bridge may be torn down while a send is finishing.
+      }
+    };
+
+    const scheduleScriptedActionAutoSend = (event?: Event) => {
+      // Script-generated input/change events are not trusted. Trusted events
+      // are ordinary user editing and must never trigger an automatic send.
+      if (event?.isTrusted) return;
+      if (scriptedActionAutoSendTimerRef.current !== null) {
+        window.clearTimeout(scriptedActionAutoSendTimerRef.current);
+      }
+      scriptedActionAutoSendTimerRef.current = window.setTimeout(() => {
+        scriptedActionAutoSendTimerRef.current = null;
+        const scriptedTextarea = element as ScriptCompatibleTextarea;
+        const actionText = String(scriptedTextarea._acuOriginalActionText ?? "").trim();
+        const resolvedText = String(element.value ?? "").trim();
+        if (!actionText || !resolvedText || !resolvedText.includes(actionText)) return;
+
+        // A skill/check action opens this panel and must wait for its roll
+        // result before the composer can be submitted.
+        if (
+          document.querySelector(
+            ".acu-dice-panel, .acu-dice-overlay, .acu-contest-panel, .acu-contest-overlay",
+          )
+        ) {
+          return;
+        }
+
+        const sendKey = `${actionText}\u0000${resolvedText}`;
+        if (scriptedActionAutoSendKeyRef.current === sendKey) return;
+        scriptedActionAutoSendKeyRef.current = sendKey;
+
+        const sendPromise = sendChatMessageRef.current(resolvedText, []);
+        void Promise.resolve(sendPromise).finally(() => {
+          clearScriptedActionMarker();
+          if (scriptedActionAutoSendKeyRef.current === sendKey) {
+            scriptedActionAutoSendKeyRef.current = "";
+          }
+        });
+      }, 0);
+    };
+
+    const syncScriptedInput = (event?: Event) => {
+      setChatInput(element.value);
+      scheduleScriptedActionAutoSend(event);
+    };
     // jQuery's .trigger("input") calls DOM event properties but does not reach
     // React's delegated onChange listener. Tavern scripts rely on that pattern.
     element.oninput = syncScriptedInput;
@@ -28045,6 +28111,20 @@ export function App() {
     chatMessagesRef.current = initialMessages;
     setChatMessages(initialMessages);
     setChatInput("");
+    const sentTextarea = chatInputRef.current as (HTMLTextAreaElement & {
+      _acuOriginalActionText?: string | null;
+    }) | null;
+    if (sentTextarea) {
+      sentTextarea._acuOriginalActionText = null;
+      const jquery = (window as Window & {
+        jQuery?: (target: unknown) => { removeData?: (key: string) => unknown };
+      }).jQuery;
+      try {
+        jquery?.(sentTextarea).removeData?.("acu-original-action-text");
+      } catch {
+        // The compatibility bridge may be unavailable during runtime teardown.
+      }
+    }
     setChatAttachments([]);
     let abortController: AbortController | null = null;
     let abortSignal: AbortSignal | undefined;
