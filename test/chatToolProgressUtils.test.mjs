@@ -27,6 +27,19 @@ test("waits for two animation frames before starting visible tool work", async (
   assert.equal(resolved, true);
 });
 
+test("falls back when animation frames are suspended in a background WebView", async () => {
+  let fallback;
+  const progressPaint = waitForToolProgressPaint(
+    () => undefined,
+    (callback) => {
+      fallback = callback;
+      return () => undefined;
+    },
+  );
+  fallback();
+  await progressPaint;
+});
+
 test("formats the outer Codex tool-run duration in the compact Chinese style", () => {
   const startedAt = "2026-09-10T00:00:00.000Z";
   assert.equal(

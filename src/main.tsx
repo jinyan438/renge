@@ -1,11 +1,14 @@
 import React, { lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
+import { installAndroidBackgroundTimerShim } from "./androidBackgroundRuntime";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import "./index.css";
 import "./styles.css";
 import "./settings-desktop.css";
 import "./workspace-desktop.css";
 import "./chat-conversation.css";
+
+installAndroidBackgroundTimerShim();
 
 const App = lazy(() => import("./App").then((module) => ({ default: module.App })));
 

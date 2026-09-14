@@ -10,6 +10,8 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.util.Base64;
@@ -34,6 +36,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 public class AndroidWorkspaceBridge {
@@ -50,6 +54,8 @@ public class AndroidWorkspaceBridge {
     private final ContentResolver resolver;
     private final SharedPreferences preferences;
     private final AndroidTerminalManager terminalManager;
+    private final Handler backgroundTimerHandler = new Handler(Looper.getMainLooper());
+    private final Map<Integer, BackgroundTimer> backgroundTimers = new ConcurrentHashMap<>();
 
     private String pendingRequestId;
     private Uri treeUri;
@@ -141,6 +147,61 @@ public class AndroidWorkspaceBridge {
 
     void dispose() {
         terminalManager.disposeAll();
+        backgroundTimers.values().forEach(backgroundTimerHandler::removeCallbacks);
+        backgroundTimers.clear();
+    }
+
+    @JavascriptInterface
+    public void scheduleBackgroundTimer(int timerId, long delayMs, boolean repeating) {
+        if (timerId >= 0) return;
+        long normalizedDelay = Math.max(0L, Math.min(Integer.MAX_VALUE, delayMs));
+        if (repeating) normalizedDelay = Math.max(4L, normalizedDelay);
+        BackgroundTimer timer = new BackgroundTimer(timerId, normalizedDelay, repeating);
+        BackgroundTimer previous = backgroundTimers.put(timerId, timer);
+        if (previous != null) backgroundTimerHandler.removeCallbacks(previous);
+        backgroundTimerHandler.postDelayed(timer, normalizedDelay);
+    }
+
+    @JavascriptInterface
+    public void cancelBackgroundTimer(int timerId) {
+        cancelBackgroundTimerInternal(timerId);
+    }
+
+    private void cancelBackgroundTimerInternal(int timerId) {
+        BackgroundTimer timer = backgroundTimers.remove(timerId);
+        if (timer != null) backgroundTimerHandler.removeCallbacks(timer);
+    }
+
+    private final class BackgroundTimer implements Runnable {
+        private final int timerId;
+        private final long delayMs;
+        private final boolean repeating;
+
+        private BackgroundTimer(int timerId, long delayMs, boolean repeating) {
+            this.timerId = timerId;
+            this.delayMs = delayMs;
+            this.repeating = repeating;
+        }
+
+        @Override
+        public void run() {
+            if (backgroundTimers.get(timerId) != this) return;
+            if (!repeating) backgroundTimers.remove(timerId);
+            try {
+                webView.evaluateJavascript(
+                        "window.__rengeDispatchBackgroundTimer && window.__rengeDispatchBackgroundTimer("
+                                + timerId
+                                + ")",
+                        ignored -> {
+                            if (repeating && backgroundTimers.get(timerId) == this) {
+                                backgroundTimerHandler.postDelayed(this, delayMs);
+                            }
+                        }
+                );
+            } catch (RuntimeException ignored) {
+                backgroundTimers.remove(timerId);
+            }
+        }
     }
 
     @JavascriptInterface

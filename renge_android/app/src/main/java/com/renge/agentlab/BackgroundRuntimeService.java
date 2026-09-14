@@ -45,6 +45,7 @@ public class BackgroundRuntimeService extends Service {
     private WifiManager.WifiLock wifiLock;
     private int boundClients;
     private boolean foreground;
+    private boolean appInBackground;
 
     @Override
     public void onCreate() {
@@ -93,11 +94,25 @@ public class BackgroundRuntimeService extends Service {
         return serverUrl;
     }
 
+    void setAppInBackground(boolean inBackground) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post(() -> setAppInBackground(inBackground));
+            return;
+        }
+        appInBackground = inBackground;
+        mainHandler.removeCallbacks(leaveForegroundRunnable);
+        if (inBackground) {
+            enterForegroundExecutionMode();
+        } else if (activeGenerationRequests.get() == 0) {
+            mainHandler.postDelayed(leaveForegroundRunnable, FOREGROUND_RELEASE_DELAY_MS);
+        }
+    }
+
     private void handleGenerationRequestStarted() {
         int activeRequests = activeGenerationRequests.incrementAndGet();
         mainHandler.removeCallbacks(leaveForegroundRunnable);
         if (activeRequests == 1) {
-            mainHandler.post(this::enterForegroundGenerationMode);
+            mainHandler.post(this::enterForegroundExecutionMode);
         }
     }
 
@@ -109,14 +124,14 @@ public class BackgroundRuntimeService extends Service {
         }
     }
 
-    private void enterForegroundGenerationMode() {
-        if (activeGenerationRequests.get() == 0 || foreground) return;
+    private void enterForegroundExecutionMode() {
+        if ((activeGenerationRequests.get() == 0 && !appInBackground) || foreground) return;
         Notification notification = buildNotification();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                     NOTIFICATION_ID,
                     notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
             );
         } else {
             startForeground(NOTIFICATION_ID, notification);
@@ -126,7 +141,7 @@ public class BackgroundRuntimeService extends Service {
     }
 
     private void leaveForegroundGenerationMode() {
-        if (activeGenerationRequests.get() != 0) return;
+        if (activeGenerationRequests.get() != 0 || appInBackground) return;
         releasePowerLocks();
         if (foreground) {
             stopForeground(STOP_FOREGROUND_REMOVE);
@@ -136,7 +151,9 @@ public class BackgroundRuntimeService extends Service {
     }
 
     private void stopWhenIdle() {
-        if (boundClients == 0 && activeGenerationRequests.get() == 0) stopSelf();
+        if (boundClients == 0 && activeGenerationRequests.get() == 0 && !appInBackground) {
+            stopSelf();
+        }
     }
 
     private void createNotificationChannel() {
@@ -214,14 +231,6 @@ public class BackgroundRuntimeService extends Service {
         } catch (RuntimeException error) {
             Log.w(TAG, "Unable to release a background generation lock", error);
         }
-    }
-
-    @Override
-    public void onTimeout(int startId, int foregroundServiceType) {
-        Log.w(TAG, "Background generation exceeded the Android foreground-service limit");
-        activeGenerationRequests.set(0);
-        leaveForegroundGenerationMode();
-        stopSelf(startId);
     }
 
     @Override

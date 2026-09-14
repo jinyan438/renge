@@ -2,6 +2,6 @@
     <string name="app_name">Renge Agent</string>
     <string name="background_generation_channel">后台会话</string>
     <string name="background_generation_channel_description">保持正在生成的会话连接</string>
-    <string name="background_generation_title">正在生成回复</string>
-    <string name="background_generation_message">锁屏或切换应用后仍会继续，完成后自动停止</string>
+    <string name="background_generation_title">Renge 正在后台运行</string>
+    <string name="background_generation_message">会话、工具和酒馆脚本将继续执行</string>
 </resources>

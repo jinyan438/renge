@@ -2142,19 +2142,25 @@ export class TavernScriptRuntime {
         this.currentScriptId = previousScriptId;
       }
     };
-    const nativeSetTimeout = win.setTimeout.bind(win);
-    const nativeClearTimeout = win.clearTimeout.bind(win);
-    const nativeSetInterval = win.setInterval.bind(win);
+    const timerHost = typeof window.RengeAndroidNative?.scheduleBackgroundTimer === "function"
+      ? window
+      : win;
+    const nativeSetTimeout = timerHost.setTimeout.bind(timerHost) as typeof win.setTimeout;
+    const nativeClearTimeout = timerHost.clearTimeout.bind(timerHost) as typeof win.clearTimeout;
+    const nativeSetInterval = timerHost.setInterval.bind(timerHost) as typeof win.setInterval;
+    const nativeClearInterval = timerHost.clearInterval.bind(timerHost) as typeof win.clearInterval;
     const nativeRequestAnimationFrame = win.requestAnimationFrame?.bind(win);
     const nativeCancelAnimationFrame = win.cancelAnimationFrame?.bind(win);
     const animationFrameFallbacks = new Map<number, number>();
     win.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
       const ownerScriptId = getScriptId();
       return nativeSetTimeout(
-        typeof handler === "function" && ownerScriptId
-          ? (...callbackArgs: unknown[]) =>
-              runWithScriptContext(ownerScriptId, () => handler(...callbackArgs))
-          : handler,
+        typeof handler === "function"
+          ? ownerScriptId
+            ? (...callbackArgs: unknown[]) =>
+                runWithScriptContext(ownerScriptId, () => handler(...callbackArgs))
+            : handler
+          : () => win.eval(String(handler)),
         timeout,
         ...args,
       );
@@ -2162,14 +2168,18 @@ export class TavernScriptRuntime {
     win.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
       const ownerScriptId = getScriptId();
       return nativeSetInterval(
-        typeof handler === "function" && ownerScriptId
-          ? (...callbackArgs: unknown[]) =>
-              runWithScriptContext(ownerScriptId, () => handler(...callbackArgs))
-          : handler,
+        typeof handler === "function"
+          ? ownerScriptId
+            ? (...callbackArgs: unknown[]) =>
+                runWithScriptContext(ownerScriptId, () => handler(...callbackArgs))
+            : handler
+          : () => win.eval(String(handler)),
         timeout,
         ...args,
       );
     }) as typeof win.setInterval;
+    win.clearTimeout = ((timerId?: number) => nativeClearTimeout(timerId)) as typeof win.clearTimeout;
+    win.clearInterval = ((timerId?: number) => nativeClearInterval(timerId)) as typeof win.clearInterval;
     if (nativeRequestAnimationFrame) {
       win.requestAnimationFrame = ((callback: FrameRequestCallback) => {
         const ownerScriptId = getScriptId();

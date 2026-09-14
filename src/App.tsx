@@ -1473,6 +1473,8 @@ type RengeAndroidNativeBridge = {
   openBrowser?(optionsJson: string): string;
   browserCommand?(optionsJson: string): string;
   browserRequest?(requestId: string, optionsJson: string): void;
+  scheduleBackgroundTimer?(timerId: number, delayMs: number, repeating: boolean): void;
+  cancelBackgroundTimer?(timerId: number): void;
 };
 
 declare global {
@@ -19217,12 +19219,7 @@ export function App() {
     const deadline = Date.now() + 20_000;
     const delay = (milliseconds: number) =>
       new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
-    const afterNextPaint = () =>
-      new Promise<void>((resolve) => {
-        window.requestAnimationFrame(() => {
-          window.requestAnimationFrame(() => resolve());
-        });
-      });
+    const afterNextPaint = () => waitForToolProgressPaint();
 
     const prepareHtmlPreviewSession = async () => {
       // Switching chats and rebuilding the Tavern runtime are committed after

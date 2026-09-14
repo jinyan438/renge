@@ -36,6 +36,7 @@ type ReplayableToolCall = {
 };
 
 type ToolProgressFrameScheduler = (callback: () => void) => void;
+type ToolProgressFallbackScheduler = (callback: () => void) => () => void;
 
 const scheduleToolProgressFrame: ToolProgressFrameScheduler = (callback) => {
   if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
@@ -45,13 +46,26 @@ const scheduleToolProgressFrame: ToolProgressFrameScheduler = (callback) => {
   setTimeout(callback, 0);
 };
 
+const scheduleToolProgressFallback: ToolProgressFallbackScheduler = (callback) => {
+  const timerId = setTimeout(callback, 120);
+  return () => clearTimeout(timerId);
+};
+
 export function waitForToolProgressPaint(
   scheduleFrame: ToolProgressFrameScheduler = scheduleToolProgressFrame,
+  scheduleFallback: ToolProgressFallbackScheduler = scheduleToolProgressFallback,
 ) {
   return new Promise<void>((resolve) => {
-    scheduleFrame(() => {
-      scheduleFrame(resolve);
-    });
+    let settled = false;
+    let cancelFallback: () => void = () => undefined;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cancelFallback();
+      resolve();
+    };
+    cancelFallback = scheduleFallback(finish);
+    scheduleFrame(() => scheduleFrame(finish));
   });
 }
 

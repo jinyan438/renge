@@ -16,7 +16,9 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.view.View;
@@ -42,6 +44,7 @@ public class MainActivity extends Activity {
     private static final int FILE_CHOOSER_REQUEST = 1201;
     private static final int DIRECTORY_PICKER_REQUEST = 1202;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 1203;
+    private static final long BACKGROUND_WEBVIEW_PULSE_INTERVAL_MS = 250L;
     private static final String HTML_PREVIEW_HOST = "html-preview.renge.invalid";
     private static final String BROWSER_INTENT_SCHEME = "renge-browser";
     private static final String ANDROID_USER_AGENT_TOKEN = "RengeAgentLabAndroid";
@@ -58,6 +61,19 @@ public class MainActivity extends Activity {
     private boolean htmlFullscreenActive;
     private boolean backgroundRuntimeServiceBindingActive;
     private boolean appPageLoaded;
+    private boolean activityPaused;
+    private final Handler backgroundWebViewHandler = new Handler(Looper.getMainLooper());
+    private final Runnable backgroundWebViewPulse = new Runnable() {
+        @Override
+        public void run() {
+            if (!activityPaused || webView == null) return;
+            try {
+                webView.evaluateJavascript("void 0", null);
+            } catch (RuntimeException ignored) {
+            }
+            backgroundWebViewHandler.postDelayed(this, BACKGROUND_WEBVIEW_PULSE_INTERVAL_MS);
+        }
+    };
 
     private final ServiceConnection backgroundRuntimeServiceConnection = new ServiceConnection() {
         @Override
@@ -65,6 +81,7 @@ public class MainActivity extends Activity {
             BackgroundRuntimeService.LocalBinder localBinder =
                     (BackgroundRuntimeService.LocalBinder) binder;
             backgroundRuntimeService = localBinder.getService();
+            backgroundRuntimeService.setAppInBackground(activityPaused);
             try {
                 loadAppPage(backgroundRuntimeService.getServerUrl());
             } catch (Exception error) {
@@ -108,6 +125,7 @@ public class MainActivity extends Activity {
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
+        settings.setOffscreenPreRaster(true);
         settings.setUseWideViewPort(false);
         settings.setLoadWithOverviewMode(false);
         settings.setSupportZoom(false);
@@ -395,7 +413,37 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        activityPaused = false;
+        backgroundWebViewHandler.removeCallbacks(backgroundWebViewPulse);
+        if (webView != null) {
+            webView.resumeTimers();
+            webView.onResume();
+        }
+        if (backgroundRuntimeService != null) {
+            backgroundRuntimeService.setAppInBackground(false);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        activityPaused = true;
+        if (webView != null) {
+            webView.resumeTimers();
+            webView.onResume();
+        }
+        backgroundWebViewHandler.removeCallbacks(backgroundWebViewPulse);
+        backgroundWebViewHandler.post(backgroundWebViewPulse);
+        if (backgroundRuntimeService != null) {
+            backgroundRuntimeService.setAppInBackground(true);
+        }
+        super.onPause();
+    }
+
+    @Override
     protected void onDestroy() {
+        backgroundWebViewHandler.removeCallbacksAndMessages(null);
         hideCustomFullscreenView();
         if (downloadCompleteReceiver != null) {
             try {
@@ -405,6 +453,9 @@ public class MainActivity extends Activity {
             downloadCompleteReceiver = null;
         }
         if (backgroundRuntimeServiceBindingActive) {
+            if (backgroundRuntimeService != null) {
+                backgroundRuntimeService.setAppInBackground(false);
+            }
             unbindService(backgroundRuntimeServiceConnection);
             backgroundRuntimeServiceBindingActive = false;
         }
