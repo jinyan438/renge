@@ -18,6 +18,7 @@ export type ToolProgressTimingEntry = {
   startedAt?: string;
   endedAt?: string;
   completed: boolean;
+  lifecycle?: "start" | "finish";
 };
 
 export type ToolProgressTiming = {
@@ -88,11 +89,25 @@ export function resolveToolProgressTiming(
   const endedTime = endedTimes.length > 0
     ? Math.max(startedTime, Math.max(...endedTimes))
     : startedTime;
+  let pendingLifecycleCount = 0;
+  let independentEntriesCompleted = true;
+  for (const entry of entries) {
+    if (entry.lifecycle === "start") {
+      pendingLifecycleCount += 1;
+    } else if (entry.lifecycle === "finish") {
+      pendingLifecycleCount = Math.max(0, pendingLifecycleCount - 1);
+    } else if (!entry.completed) {
+      independentEntriesCompleted = false;
+    }
+  }
 
   return {
     startedAt: new Date(startedTime).toISOString(),
     endedAt: new Date(endedTime).toISOString(),
-    completed: entries.length > 0 && entries.every((entry) => entry.completed),
+    completed:
+      entries.length > 0 &&
+      pendingLifecycleCount === 0 &&
+      independentEntriesCompleted,
   };
 }
 

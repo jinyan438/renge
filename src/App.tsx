@@ -5026,6 +5026,7 @@ function getRenderedChatItems(
         ? {
             fallbackAt: segment.message.createdAt,
             completed: toolBlock.variant !== "action",
+            lifecycle: toolBlock.variant === "action" ? "start" : "finish",
           }
         : null;
 
@@ -23342,7 +23343,7 @@ export function App() {
       <details
         className={`pi-tool-visualization ${meta.status} ${isMutation ? "mutation" : ""} ${isShell ? "shell" : ""}`}
         key={key}
-        open={meta.status === "running" || isMutation}
+        open={meta.status === "running"}
       >
         <summary className="pi-tool-visualization-header">
           <span className="pi-tool-visualization-icon"><Icon size={21} /></span>
@@ -23502,9 +23503,7 @@ export function App() {
       ).values(),
     );
     const stepCount = visualizations.length > 0 ? visualizations.length : item.blocks.length;
-    const autoOpen = !item.completed || visualizations.some((visualization) =>
-      /(?:write|edit|patch)/i.test(visualization.name),
-    ) || visualizations.some((visualization) => visualization.status === "running");
+    const autoOpen = !item.completed;
     const statusLabel = item.completed
       ? `${hasError ? "处理异常" : "已处理"} ${formatProcessingDuration(item.startedAt, item.endedAt)}`
       : "处理中";

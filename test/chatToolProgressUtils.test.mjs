@@ -99,6 +99,32 @@ test("keeps a tool run processing until every entry is complete", () => {
   assert.equal(timing.endedAt, "2026-09-10T00:00:05.000Z");
 });
 
+test("treats a legacy tool result or error as the end of its preceding action", () => {
+  const fallbackAt = "2026-09-10T00:00:01.000Z";
+  const action = { fallbackAt, completed: false, lifecycle: "start" };
+
+  assert.equal(resolveToolProgressTiming([action]).completed, false);
+  for (const completed of [true, false]) {
+    assert.equal(resolveToolProgressTiming([
+      action,
+      {
+        fallbackAt: "2026-09-10T00:00:02.000Z",
+        completed,
+        lifecycle: "finish",
+      },
+    ]).completed, true);
+  }
+  assert.equal(resolveToolProgressTiming([
+    action,
+    {
+      fallbackAt: "2026-09-10T00:00:02.000Z",
+      completed: true,
+      lifecycle: "finish",
+    },
+    { ...action, fallbackAt: "2026-09-10T00:00:03.000Z" },
+  ]).completed, false);
+});
+
 const browserCases = [
   ["打开网页：\nhttp://localhost:8123/snake.html", "action", "浏览器导航"],
   ["预览临时文件：audience-comments.html", "action", "预览临时文件"],

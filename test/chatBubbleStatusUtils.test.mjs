@@ -136,7 +136,7 @@ test("each grouped tool bubble renders its own status even when collapsed", () =
   );
   const makeGroup = (status) => ({
     completed: status !== "running", blocks: [], segments: [{ message: {} }],
-    visualizations: [{ name: "read", status }],
+    visualizations: [{ name: status === "running" ? "read" : "write", status }],
   });
   const toolGroups = ["done", "error", "running"].map(makeGroup);
   const markup = renderToStaticMarkup(renderGroups({ toolGroups }, "tools"));
@@ -145,11 +145,38 @@ test("each grouped tool bubble renders its own status even when collapsed", () =
   for (const status of ["complete", "error", "running"]) {
     assert.ok(markup.includes(`class="chat-bubble-dot ${status}"`));
   }
+  assert.equal((markup.match(/<details[^>]*\bopen=""/g) ?? []).length, 1);
   assert.equal(getToolBubbleStatus(makeGroup("running"), false), "incomplete");
   assert.equal(getToolBubbleStatus({
     ...makeGroup("running"), segments: [{ message: { outputStatus: "incomplete" } }],
   }, true), "incomplete");
   assert.equal(getToolBubbleStatus({ completed: true, visualizations: [], blocks: [{ variant: "error" }] }, true), "error");
+});
+
+test("completed and failed tools auto-collapse, including file mutations", () => {
+  const renderTool = loadAppCode(
+    "  const renderPiToolVisualization =",
+    "  const renderToolProgressBlock =",
+    "renderPiToolVisualization",
+    {
+      React,
+      toolVisualizationResultText: () => "",
+      toolVisualizationDiff: () => "",
+      isObjectRecord: () => false,
+      FileCode2: () => null,
+      Terminal: () => null,
+      FilePenLine: () => null,
+      Wrench: () => null,
+      CircleCheck: () => null,
+      X: () => null,
+      LoaderCircle: () => null,
+      ChevronDown: () => null,
+    },
+  );
+
+  assert.equal(renderTool({ name: "write", status: "running" }, "running").props.open, true);
+  assert.equal(renderTool({ name: "write", status: "done" }, "done").props.open, false);
+  assert.equal(renderTool({ name: "write", status: "error" }, "error").props.open, false);
 });
 
 test("clicking a status dot centers its bubble and pauses automatic output following", () => {
