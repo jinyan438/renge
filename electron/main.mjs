@@ -1715,6 +1715,20 @@ async function createMainWindow() {
   });
 
   mainWindow.webContents.on("did-attach-webview", (_event, guestContents) => {
+    guestContents.on("render-process-gone", (_goneEvent, details) => {
+      let url = "";
+      try {
+        if (!guestContents.isDestroyed()) url = guestContents.getURL();
+      } catch {
+        // The guest can finish destruction before this diagnostic listener runs.
+      }
+      console.error("[sidebar-browser] renderer process exited", {
+        id: guestContents.id,
+        url,
+        reason: details?.reason,
+        exitCode: details?.exitCode,
+      });
+    });
     guestContents.on("context-menu", (contextEvent, params) => {
       contextEvent.preventDefault();
       if (!mainWindow || mainWindow.isDestroyed()) return;

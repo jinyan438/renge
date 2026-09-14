@@ -13,6 +13,7 @@ import {
   getAvailableBrowserToolDefinitions,
   isAndroidAppShell,
   isBrowserAddressInputAvailable,
+  isBrowserScriptExpression,
   isBrowserToolName,
   normalizeBrowserAddress,
   openAndroidBrowserAddress,
@@ -116,6 +117,22 @@ test("detects whether an about:blank document contains user-visible content", ()
   assert.equal(runProbe({ innerText: "开始游戏", textContent: "开始游戏", children: [] }), true);
   assert.equal(runProbe({ innerText: "", textContent: "", children: [{ tagName: "CANVAS" }] }), true);
   assert.equal(runProbe({ innerText: "", textContent: "", children: [{ tagName: "BUTTON" }] }), true);
+});
+
+test("selects expression and statement browser scripts without executing them", () => {
+  globalThis.__rengeBrowserScriptPreflight = 0;
+  assert.equal(isBrowserScriptExpression("document.title"), true);
+  assert.equal(isBrowserScriptExpression("await Promise.resolve(42)"), true);
+  assert.equal(
+    isBrowserScriptExpression("globalThis.__rengeBrowserScriptPreflight += 1"),
+    true,
+  );
+  assert.equal(
+    isBrowserScriptExpression("const title = document.title; return title;"),
+    false,
+  );
+  assert.equal(globalThis.__rengeBrowserScriptPreflight, 0);
+  delete globalThis.__rengeBrowserScriptPreflight;
 });
 
 test("builds a syntactically valid page-reading script", () => {

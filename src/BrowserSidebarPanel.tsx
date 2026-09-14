@@ -54,6 +54,7 @@ import {
   calculateBrowserFitZoomFactor,
   isAndroidAppShell,
   isBrowserAddressInputAvailable,
+  isBrowserScriptExpression,
   normalizeBrowserAddress,
   openAndroidBrowserAddress,
   registerBrowserSidebarController,
@@ -433,6 +434,9 @@ export function BrowserSidebarPanel({
   const androidContextTabIdRef = useRef("");
   const androidPopoverTabIdRef = useRef("");
   const fitRequestRef = useRef(new Map<string, number>());
+  const readyWebviewTabIdsRef = useRef(new Set<string>());
+  const documentProbeInFlightRef = useRef(new Set<string>());
+  const documentProbeFailedTabIdsRef = useRef(new Set<string>());
   const popoverRootRef = useRef<HTMLDivElement | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const pageRef = useRef<HTMLDivElement | null>(null);
@@ -683,6 +687,9 @@ export function BrowserSidebarPanel({
       if (!node) {
         webviewNodesRef.current.delete(tabId);
         fitRequestRef.current.delete(tabId);
+        readyWebviewTabIdsRef.current.delete(tabId);
+        documentProbeInFlightRef.current.delete(tabId);
+        documentProbeFailedTabIdsRef.current.delete(tabId);
         setWebviewNodes((current) => {
           const next = new Map(current);
           next.delete(tabId);
@@ -694,6 +701,8 @@ export function BrowserSidebarPanel({
       webviewNodesRef.current.set(tabId, node);
       setWebviewNodes((current) => new Map(current).set(tabId, node));
       const startLoading = () => {
+        readyWebviewTabIdsRef.current.delete(tabId);
+        documentProbeFailedTabIdsRef.current.delete(tabId);
         setContextMenu((current) => current?.tabId === tabId ? null : current);
         setCommentEditor((current) => current?.tabId === tabId ? null : current);
         fitRequestRef.current.set(tabId, (fitRequestRef.current.get(tabId) ?? 0) + 1);
@@ -702,10 +711,30 @@ export function BrowserSidebarPanel({
         refreshPageState(tabId, node, true);
       };
       const stopLoading = () => {
+        readyWebviewTabIdsRef.current.add(tabId);
+        documentProbeFailedTabIdsRef.current.delete(tabId);
         refreshPageState(tabId, node, false);
         if (activeTabIdRef.current === tabId) {
           void fitPageToWidth(tabId, node).catch(() => undefined);
         }
+      };
+      const domReady = () => {
+        readyWebviewTabIdsRef.current.add(tabId);
+        documentProbeFailedTabIdsRef.current.delete(tabId);
+      };
+      const renderProcessGone = (event: Event) => {
+        readyWebviewTabIdsRef.current.delete(tabId);
+        documentProbeFailedTabIdsRef.current.add(tabId);
+        const reason = String(
+          (event as Event & { details?: { reason?: string } }).details?.reason ?? "",
+        );
+        updateBrowserTab(tabId, (tab) => ({
+          ...tab,
+          loading: false,
+          error: reason
+            ? `网页渲染进程已退出（${reason}），请重新加载页面`
+            : "网页渲染进程已退出，请重新加载页面",
+        }));
       };
       const navigation = () => {
         const loading = tabsRef.current.find((tab) => tab.id === tabId)?.loading ?? false;
@@ -740,11 +769,13 @@ export function BrowserSidebarPanel({
       };
       node.addEventListener("did-start-loading", startLoading);
       node.addEventListener("did-stop-loading", stopLoading);
+      node.addEventListener("dom-ready", domReady);
       node.addEventListener("did-navigate", navigation);
       node.addEventListener("did-navigate-in-page", navigation);
       node.addEventListener("page-title-updated", titleUpdated);
       node.addEventListener("did-fail-load", failed);
       node.addEventListener("found-in-page", foundInPage);
+      node.addEventListener("render-process-gone", renderProcessGone);
 
       let resizeTimer = 0;
       const resizeObserver = electronAvailable
@@ -763,11 +794,16 @@ export function BrowserSidebarPanel({
         resizeObserver?.disconnect();
         node.removeEventListener("did-start-loading", startLoading);
         node.removeEventListener("did-stop-loading", stopLoading);
+        node.removeEventListener("dom-ready", domReady);
         node.removeEventListener("did-navigate", navigation);
         node.removeEventListener("did-navigate-in-page", navigation);
         node.removeEventListener("page-title-updated", titleUpdated);
         node.removeEventListener("did-fail-load", failed);
         node.removeEventListener("found-in-page", foundInPage);
+        node.removeEventListener("render-process-gone", renderProcessGone);
+        readyWebviewTabIdsRef.current.delete(tabId);
+        documentProbeInFlightRef.current.delete(tabId);
+        documentProbeFailedTabIdsRef.current.delete(tabId);
       });
     },
     [applyZoomFactor, electronAvailable, fitPageToWidth, refreshPageState, updateBrowserTab],
@@ -1773,7 +1809,20 @@ export function BrowserSidebarPanel({
       || activeTab.hasDocumentContent
     ) return;
     const probe = () => {
-      void refreshDocumentContentState(activeTab.id, webviewNode).catch(() => undefined);
+      const tabId = activeTab.id;
+      if (
+        !readyWebviewTabIdsRef.current.has(tabId)
+        || documentProbeInFlightRef.current.has(tabId)
+        || documentProbeFailedTabIdsRef.current.has(tabId)
+      ) return;
+      documentProbeInFlightRef.current.add(tabId);
+      void refreshDocumentContentState(tabId, webviewNode)
+        .catch(() => {
+          // Navigation and destroyed guests reject executeJavaScript. Wait for
+          // the next dom-ready event instead of retrying every 600ms forever.
+          documentProbeFailedTabIdsRef.current.add(tabId);
+        })
+        .finally(() => documentProbeInFlightRef.current.delete(tabId));
     };
     probe();
     const intervalId = window.setInterval(probe, 600);
@@ -1969,23 +2018,17 @@ export function BrowserSidebarPanel({
               error?: { name?: string; message?: string; stack?: string };
             };
             let outcome: ScriptExecutionOutcome;
+            const asExpression = isBrowserScriptExpression(script);
             try {
               outcome = await executeInPage<ScriptExecutionOutcome>(
-                buildBrowserScriptExecutionWrapper(script),
+                buildBrowserScriptExecutionWrapper(script, asExpression),
                 true,
               );
-            } catch {
-              try {
-                outcome = await executeInPage<ScriptExecutionOutcome>(
-                  buildBrowserScriptExecutionWrapper(script, false),
-                  true,
-                );
-              } catch (statementError) {
-                const message = statementError instanceof Error
-                  ? statementError.message
-                  : String(statementError);
-                throw new Error(`页面脚本存在语法错误或无法执行：${message}`);
-              }
+            } catch (executionError) {
+              const message = executionError instanceof Error
+                ? executionError.message
+                : String(executionError);
+              throw new Error(`页面脚本无法执行：${message}`);
             }
             if (!outcome?.__rengeBrowserScriptExecution) {
               throw new Error("页面脚本没有返回可识别的执行结果");

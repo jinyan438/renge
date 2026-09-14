@@ -460,6 +460,19 @@ export function buildBrowserDocumentContentProbeScript() {
   })()`;
 }
 
+export function isBrowserScriptExpression(script: string) {
+  const source = String(script ?? "").trim().replace(/;+\s*$/, "");
+  if (!source) return false;
+  try {
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as FunctionConstructor;
+    // Compile only: the page script must never run in the application renderer.
+    new AsyncFunction(`return (${source});`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function buildBrowserPageReadScript(args: BrowserToolArguments) {
   const rawMode = String(args.mode ?? "");
   const mode = ["snapshot", "interactive", "text", "html"].includes(rawMode)
