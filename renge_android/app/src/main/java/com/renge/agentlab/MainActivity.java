@@ -4,6 +4,10 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.DownloadManager;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ComponentName;
@@ -44,6 +48,8 @@ public class MainActivity extends Activity {
     private static final int FILE_CHOOSER_REQUEST = 1201;
     private static final int DIRECTORY_PICKER_REQUEST = 1202;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 1203;
+    private static final int COMPLETION_NOTIFICATION_ID = 5192;
+    private static final String COMPLETION_CHANNEL_ID = "conversation_completed";
     private static final long BACKGROUND_WEBVIEW_PULSE_INTERVAL_MS = 250L;
     private static final String HTML_PREVIEW_HOST = "html-preview.renge.invalid";
     private static final String BROWSER_INTENT_SCHEME = "renge-browser";
@@ -291,6 +297,42 @@ public class MainActivity extends Activity {
                     NOTIFICATION_PERMISSION_REQUEST
             );
         }
+    }
+
+    void notifyConversationCompleted() {
+        if (!activityPaused || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED)) return;
+
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager == null) return;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                    COMPLETION_CHANNEL_ID,
+                    getString(R.string.conversation_completed_channel),
+                    NotificationManager.IMPORTANCE_DEFAULT
+            );
+            manager.createNotificationChannel(channel);
+        }
+        Intent openAppIntent = new Intent(this, MainActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent contentIntent = PendingIntent.getActivity(
+                this,
+                1,
+                openAppIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+        Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? new Notification.Builder(this, COMPLETION_CHANNEL_ID)
+                : new Notification.Builder(this).setPriority(Notification.PRIORITY_DEFAULT);
+        manager.notify(COMPLETION_NOTIFICATION_ID, builder
+                .setSmallIcon(R.drawable.ic_stat_renge)
+                .setContentTitle(getString(R.string.conversation_completed_title))
+                .setContentText(getString(R.string.conversation_completed_message))
+                .setContentIntent(contentIntent)
+                .setCategory(Notification.CATEGORY_MESSAGE)
+                .setAutoCancel(true)
+                .build());
     }
 
     private void openBrowserIntent(Uri uri) {

@@ -1470,6 +1470,7 @@ type RengeAndroidApi = {
 };
 
 type RengeAndroidNativeBridge = {
+  notifyConversationCompleted?(): void;
   openBrowser?(optionsJson: string): string;
   browserCommand?(optionsJson: string): string;
   browserRequest?(requestId: string, optionsJson: string): void;
@@ -13972,6 +13973,14 @@ export function App() {
     chatScrollFollowLatestRef.current = true;
     setChatGenerationState("running");
     return controller;
+  };
+
+  const notifyAndroidConversationCompleted = () => {
+    try {
+      window.RengeAndroidNative?.notifyConversationCompleted?.();
+    } catch (error) {
+      console.warn("Android 会话完成通知发送失败", error);
+    }
   };
 
   const finishChatGeneration = async (
@@ -26965,11 +26974,21 @@ export function App() {
             });
           }
         }
+        if (!options.exposeHeartbeatTools && options.multiAgentIndex === undefined
+            && !options.multiAgentSupervisorMode && !abortSignal.aborted
+            && finalAssistantMessage.outputStatus !== "incomplete") {
+          notifyAndroidConversationCompleted();
+        }
         return (
           chatMessagesRef.current.find(
             (message) => message.id === finalAssistantMessage.id,
           ) ?? finalAssistantMessage
         );
+      }
+      if (!options.exposeHeartbeatTools && options.multiAgentIndex === undefined
+          && !options.multiAgentSupervisorMode && !abortSignal.aborted
+          && finalAssistantMessage.outputStatus !== "incomplete") {
+        notifyAndroidConversationCompleted();
       }
       return finalAssistantMessage;
     } catch (error) {
@@ -27456,6 +27475,9 @@ export function App() {
               ? `${completionLabel}，状态栏已更新 ${statusBarResult.updated} 项。`
               : `${completionLabel}，状态栏无变化。`,
         });
+      }
+      if (result.completed && result.finalMessage.outputStatus !== "incomplete") {
+        notifyAndroidConversationCompleted();
       }
     } catch (error) {
       if (isChatAbortError(error)) {
@@ -29291,6 +29313,11 @@ export function App() {
                 : "回复已生成。",
         });
       }
+      if (!abortSignal?.aborted && chatMessagesRef.current.find(
+        (message) => message.id === assistantMessageId,
+      )?.outputStatus !== "incomplete") {
+        notifyAndroidConversationCompleted();
+      }
     } catch (error) {
       if (isChatAbortError(error)) {
         if (streamingAssistantInserted && assistantMessageId) {
@@ -30280,6 +30307,9 @@ export function App() {
                 ? `${completionLabel}，状态栏已更新 ${statusBarResult.updated} 项。`
                 : `${completionLabel}，状态栏无变化。`,
           });
+        }
+        if (result.completed && result.finalMessage.outputStatus !== "incomplete") {
+          notifyAndroidConversationCompleted();
         }
       } else {
         const assistantMessage = await generateAssistantForMessages(nextMessages, requestSender, {

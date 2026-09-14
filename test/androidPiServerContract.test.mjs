@@ -15,6 +15,10 @@ const mainActivitySourceUrl = new URL(
   "../renge_android/app/src/main/java/com/renge/agentlab/MainActivity.java",
   import.meta.url,
 );
+const workspaceBridgeSourceUrl = new URL(
+  "../renge_android/app/src/main/java/com/renge/agentlab/AndroidWorkspaceBridge.java",
+  import.meta.url,
+);
 const androidManifestUrl = new URL(
   "../renge_android/app/src/main/AndroidManifest.xml",
   import.meta.url,
@@ -115,6 +119,23 @@ test("Android generation requests are owned by a foreground runtime service", as
   assert.match(runtimeSource, /installAndroidBackgroundTimerShim/);
   assert.match(runtimeSource, /scheduleBackgroundTimer/);
   assert.match(runtimeSource, /__rengeDispatchBackgroundTimer/);
+});
+
+test("Android completion notifications are gated by background state and permission", async () => {
+  const [activitySource, bridgeSource, appSource, stringsSource] = await Promise.all([
+    readFile(mainActivitySourceUrl, "utf8"),
+    readFile(workspaceBridgeSourceUrl, "utf8"),
+    readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../renge_android/app/src/main/res/values/strings.xml", import.meta.url), "utf8"),
+  ]);
+  assert.match(bridgeSource, /@JavascriptInterface\s+public void notifyConversationCompleted\(\)/);
+  assert.match(activitySource, /void notifyConversationCompleted\(\)\s*\{\s*if \(!activityPaused/);
+  assert.match(activitySource, /checkSelfPermission\(Manifest\.permission\.POST_NOTIFICATIONS\)/);
+  assert.match(activitySource, /COMPLETION_CHANNEL_ID[\s\S]*NotificationManager\.IMPORTANCE_DEFAULT/);
+  assert.match(activitySource, /setAutoCancel\(true\)/);
+  assert.match(appSource, /if \(result\.completed && result\.finalMessage\.outputStatus !== "incomplete"\)/);
+  assert.match(appSource, /!options\.exposeHeartbeatTools && options\.multiAgentIndex === undefined/);
+  assert.match(stringsSource, /name="conversation_completed_title">会话输出完成/);
 });
 
 test("Android routes hidden-page timers and animation frames through native scheduling", () => {

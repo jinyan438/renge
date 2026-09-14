@@ -4,4 +4,7 @@
     <string name="background_generation_channel_description">保持正在生成的会话连接</string>
     <string name="background_generation_title">Renge 正在后台运行</string>
     <string name="background_generation_message">会话、工具和酒馆脚本将继续执行</string>
+    <string name="conversation_completed_channel">会话完成提醒</string>
+    <string name="conversation_completed_title">会话输出完成</string>
+    <string name="conversation_completed_message">回复已生成，点击返回会话查看</string>
 </resources>

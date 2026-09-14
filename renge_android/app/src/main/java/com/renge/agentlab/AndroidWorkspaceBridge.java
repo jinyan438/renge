@@ -152,6 +152,11 @@ public class AndroidWorkspaceBridge {
     }
 
     @JavascriptInterface
+    public void notifyConversationCompleted() {
+        activity.runOnUiThread(() -> ((MainActivity) activity).notifyConversationCompleted());
+    }
+
+    @JavascriptInterface
     public void scheduleBackgroundTimer(int timerId, long delayMs, boolean repeating) {
         if (timerId >= 0) return;
         long normalizedDelay = Math.max(0L, Math.min(Integer.MAX_VALUE, delayMs));
