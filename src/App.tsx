@@ -292,12 +292,17 @@ import {
   splitLargePiToolCallDelta,
 } from "./piStreamEventQueue";
 import {
+  ensureProviderModelMaxOutputTokens,
   ensureProviderModelInputModes,
+  getProviderModelMaxOutputTokens,
+  normalizeProviderModelMaxOutputTokens,
   normalizeProviderModelInputModes,
   providerModelSupportsImages,
+  setProviderModelMaxOutputTokens,
   setProviderModelImageSupport,
   stripUnsupportedImageInputs,
   type ProviderModelInputModes,
+  type ProviderModelMaxOutputTokens,
 } from "./providerModelCapabilities";
 import {
   buildProviderReasoningDisableRequest,
@@ -636,6 +641,7 @@ type ModelProviderChannel = {
   modelId: string;
   models: string[];
   modelInputModes: ProviderModelInputModes;
+  modelMaxOutputTokens: ProviderModelMaxOutputTokens;
   reasoningEnabled: boolean;
   reasoningEffort: ProviderReasoningEffort;
   updatedAt: string;
@@ -1780,6 +1786,47 @@ function getProviderReasoningEffortLabel(
   );
 }
 
+function PositiveIntegerInput({
+  value,
+  disabled = false,
+  onCommit,
+}: {
+  value: number;
+  disabled?: boolean;
+  onCommit: (value: number) => void;
+}) {
+  const [text, setText] = useState(String(value));
+
+  useEffect(() => {
+    setText(String(value));
+  }, [value]);
+
+  const commit = () => {
+    const parsed = Math.floor(Number(text));
+    if (Number.isSafeInteger(parsed) && parsed > 0) {
+      if (parsed !== value) onCommit(parsed);
+      setText(String(parsed));
+      return;
+    }
+    setText(String(value));
+  };
+
+  return (
+    <input
+      type="number"
+      min="1"
+      step="1"
+      value={text}
+      disabled={disabled}
+      onChange={(event) => setText(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") event.currentTarget.blur();
+      }}
+    />
+  );
+}
+
 function createProviderChannel(name = "OpenAI Compatible"): ModelProviderChannel {
   const timestamp = new Date().toISOString();
   return {
@@ -1791,6 +1838,7 @@ function createProviderChannel(name = "OpenAI Compatible"): ModelProviderChannel
     modelId: "",
     models: [],
     modelInputModes: {},
+    modelMaxOutputTokens: {},
     reasoningEnabled: false,
     reasoningEffort: "medium",
     updatedAt: timestamp,
@@ -1808,6 +1856,10 @@ function createVolcengineCodingPlanProviderChannel(): ModelProviderChannel {
     modelId: VOLCENGINE_CODING_PLAN_MODEL_ID,
     models: [VOLCENGINE_CODING_PLAN_MODEL_ID],
     modelInputModes: ensureProviderModelInputModes({}, [VOLCENGINE_CODING_PLAN_MODEL_ID]),
+    modelMaxOutputTokens: ensureProviderModelMaxOutputTokens(
+      {},
+      [VOLCENGINE_CODING_PLAN_MODEL_ID],
+    ),
     reasoningEnabled: false,
     reasoningEffort: "medium",
     updatedAt: timestamp,
@@ -1819,15 +1871,21 @@ function createDefaultProviderChannels() {
 }
 
 function normalizeProviderChannel(rawProvider: Partial<ModelProviderChannel>): ModelProviderChannel {
+  const modelId = rawProvider.modelId ?? "";
+  const models = Array.isArray(rawProvider.models) ? rawProvider.models.filter(Boolean) : [];
   return {
     id: rawProvider.id ?? crypto.randomUUID(),
     name: rawProvider.name ?? "OpenAI Compatible",
     apiType: normalizeProviderApiType(rawProvider.apiType),
     apiBaseUrl: rawProvider.apiBaseUrl ?? "",
     apiKey: rawProvider.apiKey ?? "",
-    modelId: rawProvider.modelId ?? "",
-    models: Array.isArray(rawProvider.models) ? rawProvider.models.filter(Boolean) : [],
+    modelId,
+    models,
     modelInputModes: normalizeProviderModelInputModes(rawProvider.modelInputModes),
+    modelMaxOutputTokens: ensureProviderModelMaxOutputTokens(
+      normalizeProviderModelMaxOutputTokens(rawProvider.modelMaxOutputTokens),
+      [modelId, ...models],
+    ),
     reasoningEnabled: rawProvider.reasoningEnabled === true,
     reasoningEffort: normalizeProviderReasoningEffort(rawProvider.reasoningEffort),
     updatedAt: rawProvider.updatedAt ?? new Date().toISOString(),
@@ -15134,6 +15192,10 @@ export function App() {
     activeProvider?.modelInputModes,
     activeProviderModelId,
   );
+  const activeProviderModelMaxOutputTokens = getProviderModelMaxOutputTokens(
+    activeProvider?.modelMaxOutputTokens,
+    activeProviderModelId,
+  );
   const getMultiAgentRequestConfig = (personaId: string) => {
     const storedConfig = multiAgentModelConfigs[personaId];
     const provider =
@@ -21133,6 +21195,10 @@ export function App() {
                   provider.modelInputModes,
                   models,
                 ),
+                modelMaxOutputTokens: ensureProviderModelMaxOutputTokens(
+                  provider.modelMaxOutputTokens,
+                  models,
+                ),
                 modelId: provider.modelId || models[0],
                 updatedAt: new Date().toISOString(),
               }
@@ -25344,6 +25410,10 @@ export function App() {
               ? {
                   enableTools: options.includeTools,
                   allowImageInputs: sendImageAttachmentsToProvider,
+                  modelMaxOutputTokens: getProviderModelMaxOutputTokens(
+                    requestProvider.modelMaxOutputTokens,
+                    requestModelId,
+                  ),
                   contextWindow: resolveContextCompressionLimit(
                     { ...contextCompressionSettings, enabled: true },
                     requestModelId,
@@ -25786,6 +25856,10 @@ export function App() {
               runId: subPiRunId,
               enableTools: subAgentToolDefinitions.length > 0 || piMcpEnabled,
               allowImageInputs: subAgentCanReceiveImages,
+              modelMaxOutputTokens: getProviderModelMaxOutputTokens(
+                subAgentProvider.modelMaxOutputTokens,
+                subAgentModelId,
+              ),
               contextWindow: resolveContextCompressionLimit(
                 { ...contextCompressionSettings, enabled: true },
                 subAgentModelId,
@@ -27868,6 +27942,7 @@ export function App() {
           modelId: requestModelId,
           models: chatProvider?.models ?? [requestModelId],
           modelInputModes: chatProvider?.modelInputModes ?? {},
+          modelMaxOutputTokens: chatProvider?.modelMaxOutputTokens ?? {},
           reasoningEnabled: hasCustomApi ? false : chatProvider?.reasoningEnabled === true,
           reasoningEffort: chatProvider?.reasoningEffort ?? "medium",
           updatedAt: chatProvider?.updatedAt ?? new Date().toISOString(),
@@ -28644,6 +28719,10 @@ export function App() {
               ? {
                   enableTools: options.includeTools,
                   allowImageInputs: sendImageAttachmentsToProvider,
+                  modelMaxOutputTokens: getProviderModelMaxOutputTokens(
+                    chatProvider.modelMaxOutputTokens,
+                    requestModelId,
+                  ),
                   contextWindow: resolveContextCompressionLimit(
                     { ...contextCompressionSettings, enabled: true },
                     requestModelId,
@@ -33447,6 +33526,23 @@ export function App() {
                       </button>
                     </div>
                     <div className="provider-model-capability">
+                      <label className="provider-model-token-field">
+                        <span>模型最大输出 Tokens</span>
+                        <PositiveIntegerInput
+                          key={`${activeProvider.id}:${activeProviderModelId}`}
+                          value={activeProviderModelMaxOutputTokens}
+                          disabled={!activeProviderModelId}
+                          onCommit={(value) =>
+                            updateProvider(activeProvider.id, {
+                              modelMaxOutputTokens: setProviderModelMaxOutputTokens(
+                                activeProvider.modelMaxOutputTokens,
+                                activeProviderModelId,
+                                value,
+                              ),
+                            })
+                          }
+                        />
+                      </label>
                       <label
                         className={`provider-thinking-toggle ${
                           activeProviderModelSupportsImages ? "active" : ""
@@ -33470,10 +33566,12 @@ export function App() {
                       </label>
                       <p>
                         {activeProviderModelId
-                          ? activeProviderModelSupportsImages
-                            ? "开启后会把图片作为 image_url 发送给当前模型。"
-                            : "关闭时不会把图片 Base64 放入上下文；可启用图像识别 MCP 处理图片。"
-                          : "先填写或选择模型 ID，再配置图片理解能力。"}
+                          ? `最大输出默认 65,536 Token；当前模型${
+                              activeProviderModelSupportsImages
+                                ? "会接收 image_url 图片。"
+                                : "仅接收文本，可启用图像识别 MCP 处理图片。"
+                            }`
+                          : "先填写或选择模型 ID，再配置最大输出和图片理解能力。"}
                       </p>
                     </div>
                   </div>

@@ -2,7 +2,6 @@ import { mkdir, open, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { Type } from "typebox";
 
-export const RESUMABLE_WRITE_MAX_CHARS = 8_000;
 const writeQueues = new Map();
 
 async function withWriteQueue(path, operation) {
@@ -93,10 +92,9 @@ function writeResult(path, operation, bytesWritten, totalBytes, alreadyApplied =
 }
 
 /**
- * A bounded, offset-checked replacement for Pi's whole-file write tool.
- * Small files still fit in one overwrite call. Large files are written as one
- * overwrite chunk followed by append chunks. Append calls are idempotent so a
- * response loss cannot duplicate a chunk on disk.
+ * An offset-checked replacement for Pi's whole-file write tool. A file can be
+ * written in one call, while optional append calls remain resumable and
+ * idempotent so a response loss cannot duplicate content on disk.
  */
 export function createResumableWriteTool(cwd) {
   const initializedPaths = new Set();
@@ -104,16 +102,15 @@ export function createResumableWriteTool(cwd) {
     name: "write",
     label: "write",
     description: [
-      "Write one bounded chunk to a file inside the current workspace.",
-      `content MUST be at most ${RESUMABLE_WRITE_MAX_CHARS} characters.`,
-      "For a new or replaced file, first call operation=overwrite with expected_bytes=0.",
-      "For remaining content, call operation=append and copy next expected_bytes from the previous tool result.",
+      "Write content to a file inside the current workspace.",
+      "For a new or replaced file, call operation=overwrite with expected_bytes=0.",
+      "If content is split across calls, use operation=append and copy next expected_bytes from the previous tool result.",
       "Never regenerate or overwrite earlier chunks after the first successful call; append the next chunk instead.",
     ].join(" "),
-    promptSnippet: "Write files in bounded, resumable, offset-checked chunks",
+    promptSnippet: "Write files with resumable, offset-checked operations",
     promptGuidelines: [
-      `Never send more than ${RESUMABLE_WRITE_MAX_CHARS} characters in one write call.`,
-      "For large files, call write once with operation=overwrite and expected_bytes=0, then repeatedly with operation=append and the exact next expected_bytes returned by the tool.",
+      "A complete file may be sent in one write call with operation=overwrite and expected_bytes=0.",
+      "When splitting a file, append each later part with the exact next expected_bytes returned by the previous write result.",
       "A streamed tool-call preview is not proof of a write. Before claiming completion, wait for the write tool result and use read or ls to verify the file in the current workspace.",
     ],
     parameters: Type.Object({
@@ -132,9 +129,8 @@ export function createResumableWriteTool(cwd) {
         minimum: 0,
       }),
       content: Type.String({
-        description: `The next file chunk only, at most ${RESUMABLE_WRITE_MAX_CHARS} characters.`,
+        description: "The complete file content or the next file part.",
         minLength: 1,
-        maxLength: RESUMABLE_WRITE_MAX_CHARS,
       }),
     }),
     executionMode: "sequential",
@@ -151,11 +147,6 @@ export function createResumableWriteTool(cwd) {
         throw new Error("write.expected_bytes 必须是非负整数");
       }
       if (!content) throw new Error("write.content 不能为空");
-      if (content.length > RESUMABLE_WRITE_MAX_CHARS) {
-        throw new Error(
-          `write.content 有 ${content.length} 个字符，单次最多 ${RESUMABLE_WRITE_MAX_CHARS}；请拆成多个顺序块。`,
-        );
-      }
 
       const { absolutePath, workspaceRelative } = resolveWorkspaceWritePath(cwd, path);
       const contentBuffer = Buffer.from(content, "utf8");

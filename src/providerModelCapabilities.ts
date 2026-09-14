@@ -1,5 +1,8 @@
 export type ModelInputMode = "text" | "image";
 export type ProviderModelInputModes = Record<string, ModelInputMode[]>;
+export type ProviderModelMaxOutputTokens = Record<string, number>;
+
+export const DEFAULT_PROVIDER_MODEL_MAX_OUTPUT_TOKENS = 65_536;
 
 type MessageWithContent = {
   content: unknown;
@@ -52,6 +55,57 @@ export function ensureProviderModelInputModes(value: unknown, modelIds: string[]
   modelIds.forEach((modelId) => {
     const key = normalizeModelId(modelId);
     if (key && !normalized[key]) normalized[key] = ["text"];
+  });
+  return normalized;
+}
+
+function normalizeMaxOutputTokens(value: unknown) {
+  const parsed = Math.floor(Number(value));
+  return Number.isSafeInteger(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_PROVIDER_MODEL_MAX_OUTPUT_TOKENS;
+}
+
+export function normalizeProviderModelMaxOutputTokens(
+  value: unknown,
+): ProviderModelMaxOutputTokens {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+
+  const normalized: ProviderModelMaxOutputTokens = {};
+  Object.entries(value).forEach(([modelId, maxOutputTokens]) => {
+    const key = normalizeModelId(modelId);
+    if (!key) return;
+    normalized[key] = normalizeMaxOutputTokens(maxOutputTokens);
+  });
+  return normalized;
+}
+
+export function getProviderModelMaxOutputTokens(value: unknown, modelId: string) {
+  const key = normalizeModelId(modelId);
+  if (!key) return DEFAULT_PROVIDER_MODEL_MAX_OUTPUT_TOKENS;
+  return normalizeProviderModelMaxOutputTokens(value)[key]
+    ?? DEFAULT_PROVIDER_MODEL_MAX_OUTPUT_TOKENS;
+}
+
+export function setProviderModelMaxOutputTokens(
+  value: unknown,
+  modelId: string,
+  maxOutputTokens: unknown,
+) {
+  const key = normalizeModelId(modelId);
+  const normalized = normalizeProviderModelMaxOutputTokens(value);
+  if (!key) return normalized;
+  normalized[key] = normalizeMaxOutputTokens(maxOutputTokens);
+  return normalized;
+}
+
+export function ensureProviderModelMaxOutputTokens(value: unknown, modelIds: string[]) {
+  const normalized = normalizeProviderModelMaxOutputTokens(value);
+  modelIds.forEach((modelId) => {
+    const key = normalizeModelId(modelId);
+    if (key && normalized[key] === undefined) {
+      normalized[key] = DEFAULT_PROVIDER_MODEL_MAX_OUTPUT_TOKENS;
+    }
   });
   return normalized;
 }

@@ -489,9 +489,18 @@ button.settings-window-light.close:hover {
 .settings-desktop .field input:focus,
 .settings-desktop .field textarea:focus,
 .settings-desktop .field select:focus,
-.settings-desktop .model-input-row select:focus {
+.settings-desktop .model-input-row select:focus,
+.settings-desktop .provider-model-token-field input:focus {
   border-color: rgba(0, 102, 221, 0.72);
   box-shadow: 0 0 0 3px rgba(0, 102, 221, 0.12);
+}
+
+.settings-desktop .provider-model-token-field input {
+  border-color: #d4d4da;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #29292d;
+  box-shadow: 0 1px 2px rgba(23, 23, 28, 0.035) inset;
 }
 
 .settings-desktop .provider-model-capability .provider-thinking-toggle span {

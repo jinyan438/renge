@@ -11,7 +11,6 @@ import {
 } from "../pi/continuous-retry.mjs";
 import {
   createResumableWriteTool,
-  RESUMABLE_WRITE_MAX_CHARS,
 } from "../pi/resumable-write-tool.mjs";
 
 test("continuous Pi retry uses capped backoff until the run is aborted", async () => {
@@ -132,10 +131,10 @@ test("continuous Pi retry checkpoints an unfinished tool call instead of replayi
   assert.equal(session.agent.state.thinkingLevel, "off");
   assert.equal(steeringMessages.length, 1);
   assert.match(steeringMessages[0].content[0].text, /首块 overwrite/);
-  assert.match(steeringMessages[0].content[0].text, /每块不超过 8000 字符/);
+  assert.match(steeringMessages[0].content[0].text, /单次写入完整文件/);
 });
 
-test("resumable write chunks are bounded, offset checked, and idempotent", async () => {
+test("resumable writes accept large content, check offsets, and remain idempotent", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "renge-resumable-write-test-"));
   const tool = createResumableWriteTool(cwd);
   const signal = new AbortController().signal;
@@ -178,12 +177,15 @@ test("resumable write chunks are bounded, offset checked, and idempotent", async
       expected_bytes: 6,
       content: "x",
     }, signal), /偏移不匹配/);
-    await assert.rejects(() => tool.execute("write-too-large", {
-      path: "too-large.txt",
+    const largeContent = "x".repeat(20_000);
+    const large = await tool.execute("write-large", {
+      path: "large.txt",
       operation: "overwrite",
       expected_bytes: 0,
-      content: "x".repeat(RESUMABLE_WRITE_MAX_CHARS + 1),
-    }, signal), /单次最多/);
+      content: largeContent,
+    }, signal);
+    assert.equal(large.details.totalBytes, 20_000);
+    assert.equal(await readFile(join(cwd, "large.txt"), "utf8"), largeContent);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -366,6 +368,7 @@ test("Pi Host closes an interrupted write preview and resumes with the chunk pro
         apiBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
         apiKey: "test-key",
         apiType: "chat-completions",
+        modelMaxOutputTokens: 48_000,
         workspace: { kind: "electron", cwd: dataDir },
         request: {
           model: "test-model",
@@ -385,14 +388,12 @@ test("Pi Host closes an interrupted write preview and resumes with the chunk pro
     const writeTool = upstreamRequests[0].tools.find(
       (tool) => tool.function?.name === "write",
     );
-    assert.equal(
-      writeTool.function.parameters.properties.content.maxLength,
-      RESUMABLE_WRITE_MAX_CHARS,
-    );
-    assert.match(
+    assert.equal("maxLength" in writeTool.function.parameters.properties.content, false);
+    assert.doesNotMatch(
       upstreamRequests[0].messages.find((message) => message.role === "system")?.content ?? "",
-      /Never send more than 8000 characters in one write call/,
+      /8000|8,000|at most \d+ characters/i,
     );
+    assert.equal(upstreamRequests[0].max_completion_tokens, 48_000);
     assert.match(JSON.stringify(upstreamRequests[1].messages), /UNEXECUTED_PARTIAL_PREFIX/);
     assert.match(JSON.stringify(upstreamRequests[1].messages), /该工具尚未执行/);
     assert.match(JSON.stringify(upstreamRequests[1].messages), /首块 overwrite/);

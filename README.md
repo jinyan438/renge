@@ -187,7 +187,7 @@ APK、Android 构建目录、`local.properties` 和生成的 Web Assets 已加�
 ## 首次使用
 
 1. 打开右上角的“设置”。
-2. 在“供应商设置”中选择 Chat Completions 或 Responses API，并填写模型服务名称、API Base URL 和 API Key。
+2. 在“供应商设置”中选择 Chat Completions 或 Responses API，并填写模型服务名称、API Base URL 和 API Key。每个模型可独立设置最大输出 Token，默认 65,536。
 3. 拉取模型列表或手动填写模型 ID，然后选择当前模型。
 4. 根据需要配置系统提示词、用户资料、MCP 服务器和 Skill。
 5. 创建或选择一个人格 Agent。

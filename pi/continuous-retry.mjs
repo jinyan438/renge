@@ -113,7 +113,7 @@ function buildPartialProgressContinuationMessage(progress, hasIncompleteToolCall
         "禁止重新分析、重新规划、复述用户需求或再次输出长思维链。直接沿用已有结论，立即执行尚未完成的动作；有可用工具时优先调用工具，否则直接给出尚未完成的最终正文。",
         "不要从“用户想要”、需求清单、设计思路或任务概述重新开始。",
         hasIncompleteToolCall
-          ? "上一轮未完成的工具调用没有执行。严禁把参数预览当成落盘成功，也不要再次生成整文件巨型调用。写大文件时必须使用 write 的分块协议：首块 overwrite，之后按工具返回的 expected_bytes 逐块 append，每块不超过 8000 字符；最后用 read 或 ls 验证真实文件。"
+          ? "上一轮未完成的工具调用没有执行。严禁把参数预览当成落盘成功；请重新发起完整 write。可用 overwrite 与 expected_bytes=0 单次写入完整文件；若主动分段，首块 overwrite，之后按工具返回的 expected_bytes 逐块 append；最后用 read 或 ls 验证真实文件。"
           : "",
         "<previous_progress_tail>",
         tail,

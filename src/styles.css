@@ -3991,6 +3991,32 @@ summary:focus-visible {
   margin-top: 8px;
 }
 
+.provider-model-token-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 220px);
+  gap: 12px;
+  align-items: center;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.provider-model-token-field input {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 11px;
+  border: 1px solid #cfd6e2;
+  border-radius: 8px;
+  color: #172033;
+  background: #ffffff;
+  outline: 0;
+}
+
+.provider-model-token-field input:focus {
+  border-color: #07C160;
+  box-shadow: 0 0 0 3px rgba(7, 193, 96, 0.14);
+}
+
 .provider-model-capability .provider-thinking-toggle {
   width: fit-content;
   white-space: nowrap;
@@ -10528,6 +10554,11 @@ input[type="range"] {
   .provider-thinking-row {
     grid-template-columns: 1fr;
     gap: 10px;
+  }
+
+  .provider-model-token-field {
+    grid-template-columns: 1fr;
+    gap: 6px;
   }
 
   .sidebar {
