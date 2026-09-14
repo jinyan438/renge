@@ -33388,210 +33388,310 @@ export function App() {
                 ))}
               </aside>
 
-              <section className="section-block provider-editor">
-                <div className="section-heading compact">
-                  <div>
+              <section className="provider-editor provider-editor-page">
+                <header className="provider-editor-hero">
+                  <span className="provider-editor-hero-icon" aria-hidden="true">
+                    <Boxes size={24} />
+                  </span>
+                  <div className="provider-editor-hero-copy">
                     <h2>供应商设置</h2>
                     <p>兼容 OpenAI 风格接口；模型列表从 API 地址下的 /models 拉取。</p>
                   </div>
                   <button
                     type="button"
-                    className="icon-button danger"
+                    className="provider-delete-action"
                     title="删除供应商"
                     disabled={providers.length <= 1}
                     onClick={deleteProvider}
                   >
                     <Trash2 size={16} />
+                    删除供应商
                   </button>
-                </div>
+                </header>
 
-                <div className="provider-form">
-                  <label className="field">
-                    <span>供应商名称</span>
-                    <input
-                      value={activeProvider.name}
-                      placeholder="例如：OpenAI Compatible"
-                      onChange={(event) =>
-                        updateProvider(activeProvider.id, { name: event.target.value })
-                      }
-                    />
-                  </label>
-
-                  <div className="field provider-api-type-field">
-                    <span>API 类型</span>
-                    <div
-                      className="provider-api-type-segmented"
-                      role="group"
-                      aria-label="API 类型"
-                    >
-                      <button
-                        type="button"
-                        className={activeProvider.apiType === "chat-completions" ? "active" : ""}
-                        aria-pressed={activeProvider.apiType === "chat-completions"}
-                        onClick={() =>
-                          updateProvider(activeProvider.id, { apiType: "chat-completions" })
-                        }
-                      >
-                        Chat Completions
-                      </button>
-                      <button
-                        type="button"
-                        className={activeProvider.apiType === "responses" ? "active" : ""}
-                        aria-pressed={activeProvider.apiType === "responses"}
-                        onClick={() =>
-                          updateProvider(activeProvider.id, { apiType: "responses" })
-                        }
-                      >
-                        Responses
-                      </button>
-                    </div>
-                  </div>
-
-                  <label className="field">
-                    <span>API 地址</span>
-                    <input
-                      value={activeProvider.apiBaseUrl}
-                      placeholder="例如：https://api.openai.com/v1"
-                      onChange={(event) =>
-                        updateProvider(activeProvider.id, { apiBaseUrl: event.target.value })
-                      }
-                    />
-                  </label>
-
-                  <label className="field">
-                    <span>密钥</span>
-                    <div className="secret-input">
-                      <KeyRound size={16} />
-                      <input
-                        type={providerApiKeyVisible ? "text" : "password"}
-                        value={activeProvider.apiKey}
-                        placeholder="sk-..."
-                        onChange={(event) =>
-                          updateProvider(activeProvider.id, { apiKey: event.target.value })
-                        }
-                      />
-                      <button
-                        type="button"
-                        className="secret-toggle"
-                        title={providerApiKeyVisible ? "隐藏密钥" : "显示密钥"}
-                        aria-label={providerApiKeyVisible ? "隐藏密钥" : "显示密钥"}
-                        aria-pressed={providerApiKeyVisible}
-                        onClick={() => setProviderApiKeyVisible((visible) => !visible)}
-                      >
-                        {providerApiKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}
-                      </button>
-                    </div>
-                  </label>
-
-                  <div className="field">
-                    <span>模型 ID</span>
-                    <div className="model-input-row">
-                      <input
-                        value={activeProvider.modelId}
-                        placeholder={activeProvider.models.length > 0 ? "留空使用已拉取模型" : "手动填写模型 ID"}
-                        onChange={(event) =>
-                          updateProvider(activeProvider.id, { modelId: event.target.value })
-                        }
-                      />
-                      {activeProvider.modelId && (
-                        <button
-                          type="button"
-                          className="ghost-action"
-                          title="清除模型 ID，恢复使用拉取列表"
-                          onClick={() => updateProvider(activeProvider.id, { modelId: "" })}
-                        >
-                          <X size={16} />
-                          清除
-                        </button>
-                      )}
-                      {activeProvider.models.length > 0 && (
-                        <select
-                          value={
-                            activeProvider.models.includes(activeProvider.modelId)
-                              ? activeProvider.modelId
-                              : activeProvider.modelId
-                                ? ""
-                                : activeProvider.models[0]
-                          }
-                          title="选择已拉取模型"
-                          onChange={(event) =>
-                            updateProvider(activeProvider.id, { modelId: event.target.value })
-                          }
-                        >
-                          <option value="" disabled>
-                            选择已拉取模型
-                          </option>
-                          {activeProvider.models.map((modelId) => (
-                            <option key={modelId} value={modelId}>
-                              {modelId}
-                            </option>
-                          ))}
-                        </select>
-                      )}
-                      <button
-                        type="button"
-                        className="ghost-action"
-                        disabled={providerPullState.status === "loading"}
-                        onClick={pullProviderModels}
-                      >
-                        <RefreshCw size={16} />
-                        拉取模型
-                      </button>
-                    </div>
-                    <div className="provider-model-capability">
-                      <label className="provider-model-token-field">
-                        <span>模型最大输出 Tokens</span>
-                        <PositiveIntegerInput
-                          key={`${activeProvider.id}:${activeProviderModelId}`}
-                          value={activeProviderModelMaxOutputTokens}
-                          disabled={!activeProviderModelId}
-                          onCommit={(value) =>
-                            updateProvider(activeProvider.id, {
-                              modelMaxOutputTokens: setProviderModelMaxOutputTokens(
-                                activeProvider.modelMaxOutputTokens,
-                                activeProviderModelId,
-                                value,
-                              ),
-                            })
-                          }
-                        />
-                      </label>
-                      <label
-                        className={`provider-thinking-toggle ${
-                          activeProviderModelSupportsImages ? "active" : ""
-                        }`}
-                      >
+                <div className="provider-form provider-section-list">
+                  <article className="provider-config-section">
+                    <header className="provider-config-heading">
+                      <Tags size={20} aria-hidden="true" />
+                      <div>
+                        <h3>基本信息</h3>
+                        <p>设置供应商的标识名称与接口地址</p>
+                      </div>
+                    </header>
+                    <div className="provider-config-grid">
+                      <label className="field provider-field">
+                        <span>
+                          供应商名称 <i>*</i>
+                        </span>
                         <input
-                          type="checkbox"
-                          checked={activeProviderModelSupportsImages}
-                          disabled={!activeProviderModelId}
+                          value={activeProvider.name}
+                          placeholder="例如：OpenAI Compatible"
                           onChange={(event) =>
-                            updateProvider(activeProvider.id, {
-                              modelInputModes: setProviderModelImageSupport(
-                                activeProvider.modelInputModes,
-                                activeProviderModelId,
-                                event.target.checked,
-                              ),
-                            })
+                            updateProvider(activeProvider.id, { name: event.target.value })
                           }
                         />
-                        <span>模型支持图片理解</span>
+                        <small>用于在列表中显示，便于识别和管理。</small>
                       </label>
-                      <p>
-                        {activeProviderModelId
-                          ? `最大输出默认 65,536 Token；当前模型${
-                              activeProviderModelSupportsImages
-                                ? "会接收 image_url 图片。"
-                                : "仅接收文本，可启用图像识别 MCP 处理图片。"
-                            }`
-                          : "先填写或选择模型 ID，再配置最大输出和图片理解能力。"}
-                      </p>
-                    </div>
-                  </div>
 
-                  <div className="provider-thinking-row">
+                      <label className="field provider-field">
+                        <span>
+                          API 地址 <i>*</i>
+                        </span>
+                        <input
+                          value={activeProvider.apiBaseUrl}
+                          placeholder="例如：https://api.openai.com/v1"
+                          onChange={(event) =>
+                            updateProvider(activeProvider.id, { apiBaseUrl: event.target.value })
+                          }
+                        />
+                        <small>兼容 OpenAI 风格的接口地址。</small>
+                      </label>
+                    </div>
+                  </article>
+
+                  <article className="provider-config-section">
+                    <header className="provider-config-heading">
+                      <Settings2 size={20} aria-hidden="true" />
+                      <div>
+                        <h3>接口配置</h3>
+                        <p>选择 API 类型并填写密钥</p>
+                      </div>
+                    </header>
+                    <div className="provider-config-grid">
+                      <div className="field provider-field provider-api-type-field">
+                        <span>API 类型</span>
+                        <div
+                          className="provider-api-type-segmented"
+                          role="group"
+                          aria-label="API 类型"
+                        >
+                          <button
+                            type="button"
+                            className={
+                              activeProvider.apiType === "chat-completions" ? "active" : ""
+                            }
+                            aria-pressed={activeProvider.apiType === "chat-completions"}
+                            onClick={() =>
+                              updateProvider(activeProvider.id, { apiType: "chat-completions" })
+                            }
+                          >
+                            Chat Completions
+                          </button>
+                          <button
+                            type="button"
+                            className={activeProvider.apiType === "responses" ? "active" : ""}
+                            aria-pressed={activeProvider.apiType === "responses"}
+                            onClick={() =>
+                              updateProvider(activeProvider.id, { apiType: "responses" })
+                            }
+                          >
+                            Responses
+                          </button>
+                        </div>
+                        <small>根据供应商提供的接口类型进行选择。</small>
+                      </div>
+
+                      <label className="field provider-field">
+                        <span>
+                          密钥 <i>*</i>
+                        </span>
+                        <div className="secret-input">
+                          <KeyRound size={16} />
+                          <input
+                            type={providerApiKeyVisible ? "text" : "password"}
+                            value={activeProvider.apiKey}
+                            placeholder="sk-..."
+                            onChange={(event) =>
+                              updateProvider(activeProvider.id, { apiKey: event.target.value })
+                            }
+                          />
+                          <button
+                            type="button"
+                            className="secret-toggle"
+                            title={providerApiKeyVisible ? "隐藏密钥" : "显示密钥"}
+                            aria-label={providerApiKeyVisible ? "隐藏密钥" : "显示密钥"}
+                            aria-pressed={providerApiKeyVisible}
+                            onClick={() => setProviderApiKeyVisible((visible) => !visible)}
+                          >
+                            {providerApiKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}
+                          </button>
+                        </div>
+                        <small>输入供应商提供的 API Key，用于访问接口。</small>
+                      </label>
+                    </div>
+                  </article>
+
+                  <article className="provider-config-section">
+                    <header className="provider-config-heading">
+                      <Database size={20} aria-hidden="true" />
+                      <div>
+                        <h3>模型设置</h3>
+                        <p>选择默认模型和配置相关参数</p>
+                      </div>
+                    </header>
+                    <div className="provider-config-grid">
+                      <div className="field provider-field">
+                        <span>
+                          模型 ID <i>*</i>
+                        </span>
+                        <div className="provider-model-id-row">
+                          <input
+                            value={activeProvider.modelId}
+                            placeholder={
+                              activeProvider.models.length > 0
+                                ? "留空使用已拉取模型"
+                                : "手动填写模型 ID"
+                            }
+                            onChange={(event) =>
+                              updateProvider(activeProvider.id, { modelId: event.target.value })
+                            }
+                          />
+                          {activeProvider.modelId && (
+                            <button
+                              type="button"
+                              className="ghost-action"
+                              title="清除模型 ID，恢复使用拉取列表"
+                              onClick={() => updateProvider(activeProvider.id, { modelId: "" })}
+                            >
+                              <X size={16} />
+                              清除
+                            </button>
+                          )}
+                        </div>
+                        <small>填写要使用的模型 ID，或从右侧下拉列表中选择。</small>
+                      </div>
+
+                      <div className="field provider-field">
+                        <span>默认模型</span>
+                        <div className="provider-model-select-row">
+                          <select
+                            value={
+                              activeProvider.models.includes(activeProvider.modelId)
+                                ? activeProvider.modelId
+                                : activeProvider.modelId
+                                  ? ""
+                                  : activeProvider.models[0] ?? ""
+                            }
+                            title="选择已拉取模型"
+                            disabled={activeProvider.models.length === 0}
+                            onChange={(event) =>
+                              updateProvider(activeProvider.id, { modelId: event.target.value })
+                            }
+                          >
+                            <option value="" disabled>
+                              {activeProvider.models.length > 0
+                                ? "选择已拉取模型"
+                                : "请先拉取模型"}
+                            </option>
+                            {activeProvider.models.map((modelId) => (
+                              <option key={modelId} value={modelId}>
+                                {modelId}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            className="ghost-action"
+                            disabled={providerPullState.status === "loading"}
+                            onClick={pullProviderModels}
+                          >
+                            <RefreshCw size={16} />
+                            拉取模型
+                          </button>
+                        </div>
+                        <small>从 API 获取可用模型列表并选择默认模型。</small>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article className="provider-config-section provider-advanced-section">
+                    <div className="provider-advanced-layout">
+                      <header className="provider-config-heading">
+                        <Wrench size={20} aria-hidden="true" />
+                        <div>
+                          <h3>高级选项</h3>
+                          <p>配置模型的运行参数和能力</p>
+                        </div>
+                      </header>
+
+                      <div className="provider-advanced-grid">
+                        <label className="field provider-field provider-token-field">
+                          <span>模型最大输出 Tokens</span>
+                          <PositiveIntegerInput
+                            key={`${activeProvider.id}:${activeProviderModelId}`}
+                            value={activeProviderModelMaxOutputTokens}
+                            disabled={!activeProviderModelId}
+                            onCommit={(value) =>
+                              updateProvider(activeProvider.id, {
+                                modelMaxOutputTokens: setProviderModelMaxOutputTokens(
+                                  activeProvider.modelMaxOutputTokens,
+                                  activeProviderModelId,
+                                  value,
+                                ),
+                              })
+                            }
+                          />
+                          <small>最大输出默认 65,536 Token。</small>
+                        </label>
+
+                        <div className="field provider-field provider-image-capability">
+                          <span>输入能力</span>
+                          <label
+                            className={`provider-thinking-toggle ${
+                              activeProviderModelSupportsImages ? "active" : ""
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={activeProviderModelSupportsImages}
+                              disabled={!activeProviderModelId}
+                              onChange={(event) =>
+                                updateProvider(activeProvider.id, {
+                                  modelInputModes: setProviderModelImageSupport(
+                                    activeProvider.modelInputModes,
+                                    activeProviderModelId,
+                                    event.target.checked,
+                                  ),
+                                })
+                              }
+                            />
+                            <span>模型支持图片理解</span>
+                          </label>
+                          <small>
+                            {activeProviderModelId
+                              ? activeProviderModelSupportsImages
+                                ? "当前模型会接收 image_url 图片。"
+                                : "当前模型仅接收文本，可启用图像识别 MCP 处理图片。"
+                              : "先填写或选择模型 ID，再配置图片理解能力。"}
+                          </small>
+                        </div>
+
+                        <label className="field provider-field provider-thinking-level">
+                          <span>思考强度</span>
+                          <select
+                            value={activeProvider.reasoningEffort}
+                            disabled={!activeProvider.reasoningEnabled}
+                            onChange={(event) =>
+                              updateProvider(activeProvider.id, {
+                                reasoningEffort: normalizeProviderReasoningEffort(
+                                  event.target.value,
+                                ),
+                              })
+                            }
+                          >
+                            {getProviderReasoningEffortOptions(activeProvider).map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                          <small>设置模型在推理/思考时的思维深度。</small>
+                        </label>
+                      </div>
+                    </div>
+
                     <label
-                      className={`provider-thinking-toggle ${
+                      className={`provider-reasoning-banner ${
                         activeProvider.reasoningEnabled ? "active" : ""
                       }`}
                     >
@@ -33604,28 +33704,10 @@ export function App() {
                           })
                         }
                       />
-                      <span>请求思考</span>
+                      <strong>请求思考</strong>
+                      <span>启用后，模型在回答时会进行更充分的思考，以获得更高质量的结果。</span>
                     </label>
-
-                    <label className="field provider-thinking-level">
-                      <span>思考强度</span>
-                      <select
-                        value={activeProvider.reasoningEffort}
-                        disabled={!activeProvider.reasoningEnabled}
-                        onChange={(event) =>
-                          updateProvider(activeProvider.id, {
-                            reasoningEffort: normalizeProviderReasoningEffort(event.target.value),
-                          })
-                        }
-                      >
-                        {getProviderReasoningEffortOptions(activeProvider).map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
+                  </article>
 
                   {providerPullState.message && (
                     <p className={`provider-status ${providerPullState.status}`}>
