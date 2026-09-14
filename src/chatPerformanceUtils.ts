@@ -61,6 +61,24 @@ const chatIdleActivityScheduler = createChatScrollScheduler();
 const automaticScrollTargets = new WeakMap<HTMLElement, number>();
 const bubbleFocusCleanups = new WeakMap<HTMLElement, () => void>();
 
+export function isChatScrollInteractionActive() {
+  return chatScrollScheduler.isScrolling();
+}
+
+export function resolveChatFollowLatest(options: {
+  current: boolean;
+  scrollHeight: number;
+  scrollTop: number;
+  clientHeight: number;
+  interactionActive: boolean;
+  threshold?: number;
+}) {
+  const distanceFromLatest =
+    options.scrollHeight - options.scrollTop - options.clientHeight;
+  if (distanceFromLatest <= (options.threshold ?? 64)) return true;
+  return options.interactionActive ? false : options.current;
+}
+
 function clearChatBubbleFocus(thread: HTMLElement) {
   bubbleFocusCleanups.get(thread)?.();
 }
@@ -204,7 +222,6 @@ export function observeChatScrollActivity(thread: HTMLElement) {
     const automaticTarget = automaticScrollTargets.get(thread);
     if (automaticTarget !== undefined && Math.abs(thread.scrollTop - automaticTarget) < 1) return;
     automaticScrollTargets.delete(thread);
-    markScrolling();
   };
   const handlePointerMove = (event: PointerEvent) => {
     if (event.buttons === 1) markScrolling();
@@ -239,6 +256,33 @@ export function observeChatScrollActivity(thread: HTMLElement) {
     thread.removeEventListener("pointermove", handlePointerMove);
     thread.removeEventListener("keydown", handleKeyDown);
     thread.removeEventListener("scroll", handleScroll);
+  };
+}
+
+export function observeChatLayoutChanges(
+  thread: HTMLElement,
+  onLayoutChange: () => void,
+) {
+  if (typeof ResizeObserver !== "function" || typeof MutationObserver !== "function") {
+    return () => undefined;
+  }
+
+  const resizeObserver = new ResizeObserver(onLayoutChange);
+  const observeLayout = () => {
+    resizeObserver.disconnect();
+    resizeObserver.observe(thread);
+    Array.from(thread.children).forEach((child) => resizeObserver.observe(child));
+  };
+  const mutationObserver = new MutationObserver(() => {
+    observeLayout();
+    onLayoutChange();
+  });
+
+  observeLayout();
+  mutationObserver.observe(thread, { childList: true });
+  return () => {
+    resizeObserver.disconnect();
+    mutationObserver.disconnect();
   };
 }
 

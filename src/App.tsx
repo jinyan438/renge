@@ -250,8 +250,11 @@ import {
   centerChatBubble,
   createChatPreviewMountQueue,
   createChatStreamUpdateBatcher,
+  isChatScrollInteractionActive,
   markChatInputActivity,
+  observeChatLayoutChanges,
   observeChatScrollActivity,
+  resolveChatFollowLatest,
   ROLEPLAY_CHAT_STREAM_RENDER_INTERVAL_MS,
   scheduleChatIdleWork,
   scheduleChatFrameWork,
@@ -12839,6 +12842,7 @@ export function App() {
   });
   const chatThreadRef = useRef<HTMLDivElement>(null);
   const chatScrollActivityCleanupRef = useRef<(() => void) | null>(null);
+  const chatLayoutCleanupRef = useRef<(() => void) | null>(null);
   const chatScrollFollowLatestRef = useRef(true);
   const chatReadingFocusRef = useRef(false);
   const chatScrollFrameRef = useRef<(() => void) | null>(null);
@@ -13180,9 +13184,15 @@ export function App() {
     (thread: HTMLDivElement | null) => {
       chatScrollActivityCleanupRef.current?.();
       chatScrollActivityCleanupRef.current = null;
+      chatLayoutCleanupRef.current?.();
+      chatLayoutCleanupRef.current = null;
       chatThreadRef.current = thread;
       if (!thread) return;
       chatScrollActivityCleanupRef.current = observeChatScrollActivity(thread);
+      chatLayoutCleanupRef.current = observeChatLayoutChanges(
+        thread,
+        scheduleChatScrollToLatest,
+      );
       chatReadingFocusRef.current = false;
       chatScrollFollowLatestRef.current = true;
       scheduleChatScrollToLatest();
@@ -13194,6 +13204,8 @@ export function App() {
     return () => {
       chatScrollActivityCleanupRef.current?.();
       chatScrollActivityCleanupRef.current = null;
+      chatLayoutCleanupRef.current?.();
+      chatLayoutCleanupRef.current = null;
       if (chatScrollFrameRef.current !== null) {
         chatScrollFrameRef.current();
         chatScrollFrameRef.current = null;
@@ -19864,6 +19876,7 @@ export function App() {
     scheduleChatScrollToLatest();
   }, [
     chatGenerationState,
+    chatReasoningVisible,
     regexProcessedChatMessages,
     scheduleChatScrollToLatest,
     visibleChatMessages,
@@ -37095,8 +37108,13 @@ export function App() {
               chatScrollStateFrameRef.current = window.requestAnimationFrame(() => {
                 chatScrollStateFrameRef.current = null;
                 if (chatReadingFocusRef.current) return;
-                chatScrollFollowLatestRef.current =
-                  thread.scrollHeight - thread.scrollTop - thread.clientHeight <= 64;
+                chatScrollFollowLatestRef.current = resolveChatFollowLatest({
+                  current: chatScrollFollowLatestRef.current,
+                  scrollHeight: thread.scrollHeight,
+                  scrollTop: thread.scrollTop,
+                  clientHeight: thread.clientHeight,
+                  interactionActive: isChatScrollInteractionActive(),
+                });
               });
             }}
           >

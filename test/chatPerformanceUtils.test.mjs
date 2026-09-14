@@ -11,7 +11,9 @@ import {
   createChatPreviewMountQueue,
   createChatScrollScheduler,
   createChatStreamUpdateBatcher,
+  observeChatLayoutChanges,
   observeChatScrollActivity,
+  resolveChatFollowLatest,
   scrollChatToLatest,
 } from "../src/chatPerformanceUtils.ts";
 import { getHtmlPreviewLayoutSettleDelays } from "../src/htmlPreviewUtils.ts";
@@ -343,7 +345,7 @@ test("skips canceled previews without blocking previews still in view", () => {
   assert.deepEqual(mounted, ["visible"]);
 });
 
-test("scroll events distinguish automatic following from iframe-originated scrolling", (context) => {
+test("layout-driven scroll events do not interrupt automatic following", (context) => {
   const timers = createFakeScheduler();
   const previews = [];
   const thread = new EventTarget();
@@ -368,6 +370,9 @@ test("scroll events distinguish automatic following from iframe-originated scrol
     assert.deepEqual(previews, []);
     thread.scrollTop = 900;
     thread.dispatchEvent(new Event("scroll"));
+    assert.equal(chatScrollScheduler.isScrolling(), false);
+    assert.deepEqual(previews, []);
+    thread.dispatchEvent(new Event("wheel"));
     assert.equal(chatScrollScheduler.isScrolling(), true);
     assert.deepEqual(previews, [{ type: CHAT_SCROLL_ACTIVITY_MESSAGE, scrolling: true }]);
     scrollChatToLatest(thread);
@@ -379,6 +384,78 @@ test("scroll events distinguish automatic following from iframe-originated scrol
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
   }
+});
+
+test("keeps following across layout shifts but stops for deliberate scrolling", () => {
+  const base = {
+    current: true,
+    scrollHeight: 2400,
+    scrollTop: 1200,
+    clientHeight: 600,
+  };
+  assert.equal(
+    resolveChatFollowLatest({ ...base, interactionActive: false }),
+    true,
+    "collapsing reasoning must not turn a later layout shift into reading mode",
+  );
+  assert.equal(resolveChatFollowLatest({ ...base, interactionActive: true }), false);
+  assert.equal(
+    resolveChatFollowLatest({ ...base, current: false, interactionActive: false }),
+    false,
+  );
+  assert.equal(
+    resolveChatFollowLatest({
+      ...base,
+      current: false,
+      scrollTop: 1750,
+      interactionActive: false,
+    }),
+    true,
+    "returning near the bottom resumes following",
+  );
+});
+
+test("observes chat message height and child-list changes", (context) => {
+  const previousResizeObserver = globalThis.ResizeObserver;
+  const previousMutationObserver = globalThis.MutationObserver;
+  const firstChild = {};
+  const secondChild = {};
+  const thread = { children: [firstChild] };
+  const observed = [];
+  let resizeCallback;
+  let mutationCallback;
+  let resizeDisconnected = false;
+  let mutationDisconnected = false;
+
+  globalThis.ResizeObserver = class {
+    constructor(callback) { resizeCallback = callback; }
+    observe(target) { observed.push(target); }
+    disconnect() { resizeDisconnected = true; }
+  };
+  globalThis.MutationObserver = class {
+    constructor(callback) { mutationCallback = callback; }
+    observe() {}
+    disconnect() { mutationDisconnected = true; }
+  };
+  context.after(() => {
+    if (previousResizeObserver === undefined) delete globalThis.ResizeObserver;
+    else globalThis.ResizeObserver = previousResizeObserver;
+    if (previousMutationObserver === undefined) delete globalThis.MutationObserver;
+    else globalThis.MutationObserver = previousMutationObserver;
+  });
+
+  let changes = 0;
+  const dispose = observeChatLayoutChanges(thread, () => changes += 1);
+  assert.deepEqual(observed, [thread, firstChild]);
+  resizeCallback();
+  assert.equal(changes, 1);
+  thread.children = [firstChild, secondChild];
+  mutationCallback();
+  assert.equal(changes, 2);
+  assert.deepEqual(observed.slice(-3), [thread, firstChild, secondChild]);
+  dispose();
+  assert.equal(resizeDisconnected, true);
+  assert.equal(mutationDisconnected, true);
 });
 
 test("keeps every asynchronously growing chat message in normal layout", () => {
