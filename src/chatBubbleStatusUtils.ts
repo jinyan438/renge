@@ -30,6 +30,12 @@ export function getChatBubbleStatus(
   return isLastSegment ? status : "complete";
 }
 
+export function shouldAutoExpandChatReasoning(
+  message: { outputStatus?: ChatBubbleStatus; reasoningStatus?: string },
+) {
+  return message.outputStatus === "running" && message.reasoningStatus === "running";
+}
+
 export function getToolBubbleStatus(
   group: {
     completed: boolean;

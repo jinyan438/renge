@@ -284,6 +284,7 @@ import {
   getChatCompletionStatus,
   getToolBubbleStatus,
   normalizeChatOutputStatus,
+  shouldAutoExpandChatReasoning,
   type ChatBubbleStatus,
 } from "./chatBubbleStatusUtils";
 import {
@@ -695,6 +696,7 @@ type ChatMessage = {
   role: ChatRole;
   content: string;
   reasoning?: string;
+  reasoningStatus?: "running" | "complete";
   outputStatus?: ChatBubbleStatus;
   renderAsPlainText?: boolean;
   createdAt: string;
@@ -2676,6 +2678,11 @@ function normalizeChatMessage(
     ...(typeof rawMessage.reasoning === "string" && rawMessage.reasoning.trim()
       ? { reasoning: rawMessage.reasoning }
       : {}),
+    ...(rawMessage.reasoningStatus === "running" && outputStatus === "running"
+      ? { reasoningStatus: "running" as const }
+      : rawMessage.reasoningStatus === "running" || rawMessage.reasoningStatus === "complete"
+        ? { reasoningStatus: "complete" as const }
+        : {}),
     ...(rawMessage.renderAsPlainText === true ? { renderAsPlainText: true } : {}),
     ...(outputStatus ? { outputStatus } : {}),
     createdAt:
@@ -10880,6 +10887,11 @@ function createStreamingAssistantMessage(
             ...(reasoning
               ? { reasoning: `${message.reasoning ?? ""}${reasoning}` }
               : {}),
+            ...(content
+              ? { reasoningStatus: "complete" as const }
+              : reasoning
+                ? { reasoningStatus: "running" as const }
+                : {}),
           })),
         );
       };
@@ -10927,6 +10939,7 @@ function createStreamingAssistantMessage(
                 content,
                 renderAsPlainText: false,
                 outputStatus,
+                reasoningStatus: "complete",
                 ...(reasoning.trim() ? { reasoning } : {}),
               }
             : message,
@@ -10938,7 +10951,11 @@ function createStreamingAssistantMessage(
       streamUpdates.cancel();
       setChatMessages((current) => updateMessage(current, (message) =>
         message.outputStatus === "running"
-          ? { ...message, outputStatus: signal?.aborted ? "incomplete" : "error" }
+          ? {
+              ...message,
+              outputStatus: signal?.aborted ? "incomplete" : "error",
+              reasoningStatus: "complete",
+            }
           : message,
       ));
     },
@@ -13991,7 +14008,11 @@ export function App() {
     if (activeChatAbortControllerRef.current !== controller) return;
     commitChatMessages((current) => current.map((message) => {
       if (message.outputStatus === "running") {
-        return { ...message, outputStatus: controller.signal.aborted ? "incomplete" : "error" };
+        return {
+          ...message,
+          outputStatus: controller.signal.aborted ? "incomplete" : "error",
+          reasoningStatus: "complete",
+        };
       }
       if (message.role === "assistant" && (
         message.toolVisualization?.status === "running" ||
@@ -23554,8 +23575,11 @@ export function App() {
     );
   };
 
-  const renderChatReasoning = (reasoning: string | undefined, keyPrefix: string) => {
-    const trimmedReasoning = reasoning?.trim();
+  const renderChatReasoning = (
+    message: Pick<ChatMessage, "reasoning" | "reasoningStatus" | "outputStatus">,
+    keyPrefix: string,
+  ) => {
+    const trimmedReasoning = message.reasoning?.trim();
     if (!chatReasoningVisible || !trimmedReasoning) return null;
     const displayReasoning = substituteUserNicknameMacro(
       trimmedReasoning,
@@ -23563,7 +23587,7 @@ export function App() {
     );
 
     return (
-      <details className="chat-reasoning" open>
+      <details className="chat-reasoning" open={shouldAutoExpandChatReasoning(message)}>
         <summary className="chat-reasoning-header">
           <span className="chat-reasoning-icon"><Sparkles size={24} /></span>
           <span className="chat-reasoning-heading">
@@ -25901,6 +25925,11 @@ export function App() {
                       ...(reasoning
                         ? { reasoning: `${message.reasoning ?? ""}${reasoning}` }
                         : {}),
+                      ...(content
+                        ? { reasoningStatus: "complete" as const }
+                        : reasoning
+                          ? { reasoningStatus: "running" as const }
+                          : {}),
                     }
                   : message,
               ),
@@ -26863,6 +26892,7 @@ export function App() {
             ? "incomplete"
             : "complete";
       }
+      finalAssistantMessage.reasoningStatus = "complete";
 
       if (streamingAssistantInserted) {
         const {
@@ -28776,6 +28806,11 @@ export function App() {
                       ...(reasoning
                         ? { reasoning: `${message.reasoning ?? ""}${reasoning}` }
                         : {}),
+                      ...(content
+                        ? { reasoningStatus: "complete" as const }
+                        : reasoning
+                          ? { reasoningStatus: "running" as const }
+                          : {}),
                     }
                   : message,
               ),
@@ -29241,6 +29276,7 @@ export function App() {
                           : {}),
                       }),
                   renderAsPlainText: false,
+                  reasoningStatus: "complete",
                   ...(Object.keys(assistantMessageVariables).length > 0
                     ? { variables: assistantMessageVariables }
                     : {}),
@@ -37446,7 +37482,7 @@ export function App() {
                               <>
                                 {segmentIndex === 0 &&
                                   message.role === "assistant" &&
-                                  renderChatReasoning(message.reasoning, id)}
+                                  renderChatReasoning(message, id)}
                                 <div className="mes_text">
                                   {renderChatContent(
                                     segment,

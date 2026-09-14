@@ -11,6 +11,7 @@ import {
   getChatCompletionStatus,
   getToolBubbleStatus,
   normalizeChatOutputStatus,
+  shouldAutoExpandChatReasoning,
 } from "../src/chatBubbleStatusUtils.ts";
 import { createChatStreamUpdateBatcher } from "../src/chatPerformanceUtils.ts";
 import { createPiStreamingTimeline } from "../src/piStreamingTimeline.ts";
@@ -43,12 +44,13 @@ function createStreamFixture() {
       crypto: { randomUUID: () => `message-${messages.length}` },
     },
   );
+  const createStreamingSegment = (id) => createSegment(
+    (update) => { messages = update(messages); }, controller.signal, undefined, id,
+  );
   const timeline = createPiStreamingTimeline({
-    createSegment: (id) => createSegment(
-      (update) => { messages = update(messages); }, controller.signal, undefined, id,
-    ),
+    createSegment: createStreamingSegment,
   });
-  return { timeline, controller, get messages() { return messages; } };
+  return { timeline, controller, createSegment: createStreamingSegment, get messages() { return messages; } };
 }
 
 test("text transitions from running to complete and cleanup preserves completion", async () => {
@@ -59,6 +61,24 @@ test("text transitions from running to complete and cleanup preserves completion
   fixture.timeline.complete("已生成");
   fixture.timeline.cancel();
   assert.equal(fixture.messages[0].outputStatus, "complete");
+});
+
+test("streamed reasoning expands until content starts and stays collapsed after completion", async () => {
+  const fixture = createStreamFixture();
+  const segment = fixture.createSegment();
+  segment.pushReasoning("正在思考");
+  await segment.finish();
+  assert.equal(fixture.messages[0].reasoningStatus, "running");
+  assert.equal(shouldAutoExpandChatReasoning(fixture.messages[0]), true);
+
+  segment.pushContent("最终回复");
+  await segment.finish();
+  assert.equal(fixture.messages[0].reasoningStatus, "complete");
+  assert.equal(shouldAutoExpandChatReasoning(fixture.messages[0]), false);
+
+  segment.complete("最终回复", "正在思考");
+  assert.equal(fixture.messages[0].reasoningStatus, "complete");
+  assert.equal(shouldAutoExpandChatReasoning(fixture.messages[0]), false);
 });
 
 test("stopping a later bubble preserves earlier completed bubbles", async () => {
@@ -109,6 +129,14 @@ test("restored sessions cannot keep a running text indicator", () => {
   assert.equal(getChatBubbleStatus({}), "complete");
   assert.equal(getChatBubbleStatus({ renderAsPlainText: true }), "incomplete");
   assert.equal(getChatBubbleStatus({ outputStatus: "running" }, false), "complete");
+});
+
+test("reasoning auto-collapses when final output starts or the call ends", () => {
+  assert.equal(shouldAutoExpandChatReasoning({ reasoningStatus: "running", outputStatus: "running" }), true);
+  assert.equal(shouldAutoExpandChatReasoning({ reasoningStatus: "complete", outputStatus: "running" }), false);
+  for (const outputStatus of ["complete", "incomplete", "error", undefined]) {
+    assert.equal(shouldAutoExpandChatReasoning({ reasoningStatus: "running", outputStatus }), false);
+  }
 });
 
 test("completion reasons distinguish successful, truncated, missing and failed endings", () => {
