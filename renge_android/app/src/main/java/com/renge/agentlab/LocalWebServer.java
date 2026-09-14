@@ -58,6 +58,20 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class LocalWebServer {
+    public interface RequestLifecycleListener {
+        void onGenerationRequestStarted();
+        void onGenerationRequestFinished();
+    }
+
+    private static final RequestLifecycleListener NO_OP_REQUEST_LIFECYCLE_LISTENER = new RequestLifecycleListener() {
+        @Override
+        public void onGenerationRequestStarted() {
+        }
+
+        @Override
+        public void onGenerationRequestFinished() {
+        }
+    };
     private static final int PREFERRED_PORT = 5191;
     private static final String PI_KERNEL_ID = "@earendil-works/pi-coding-agent@0.85.1";
     private static final long MAX_COMPLETE_BACKUP_BYTES = 512L * 1024L * 1024L;
@@ -85,13 +99,21 @@ public class LocalWebServer {
     private final File appDataAssetsBackupDirectory;
     private final Map<String, PiSessionState> piSessions = new ConcurrentHashMap<>();
     private final Map<String, HttpURLConnection> activePiRuns = new ConcurrentHashMap<>();
+    private final RequestLifecycleListener requestLifecycleListener;
 
     private ServerSocket serverSocket;
     private Thread acceptThread;
     private volatile boolean running;
 
     public LocalWebServer(Context context) {
+        this(context, NO_OP_REQUEST_LIFECYCLE_LISTENER);
+    }
+
+    public LocalWebServer(Context context, RequestLifecycleListener requestLifecycleListener) {
         this.context = context.getApplicationContext();
+        this.requestLifecycleListener = requestLifecycleListener == null
+                ? NO_OP_REQUEST_LIFECYCLE_LISTENER
+                : requestLifecycleListener;
         this.appDataFile = new File(this.context.getFilesDir(), "app-data.json");
         this.appDataBackupFile = new File(this.context.getFilesDir(), "app-data.previous.json");
         this.appDataAssetsDirectory = new File(this.context.getFilesDir(), "app-data-assets");
@@ -142,11 +164,15 @@ public class LocalWebServer {
     }
 
     private void handleSocket(Socket socket) {
+        boolean generationRequest = false;
         try (Socket closeableSocket = socket) {
             closeableSocket.setSoTimeout(30000);
             BufferedInputStream input = new BufferedInputStream(closeableSocket.getInputStream());
             Request request = readRequestHeaders(input);
             if (request == null) return;
+
+            generationRequest = isGenerationRequest(request);
+            if (generationRequest) requestLifecycleListener.onGenerationRequestStarted();
 
             OutputStream output = closeableSocket.getOutputStream();
             String requestHost = request.headers.getOrDefault("host", "")
@@ -181,7 +207,16 @@ public class LocalWebServer {
                 sendJson(socket.getOutputStream(), 500, jsonError(error.getMessage()));
             } catch (IOException ignored) {
             }
+        } finally {
+            if (generationRequest) requestLifecycleListener.onGenerationRequestFinished();
         }
+    }
+
+    private boolean isGenerationRequest(Request request) {
+        if (!"POST".equals(request.method)) return false;
+        return "/api/chat/completions".equals(request.path)
+                || "/api/pi/chat".equals(request.path)
+                || "/api/backends/chat-completions/generate".equals(request.path);
     }
 
     private Request readRequestHeaders(BufferedInputStream input) throws IOException {
@@ -1359,6 +1394,7 @@ public class LocalWebServer {
         boolean status = request.path.endsWith("/status");
         HttpURLConnection connection = openConnection(base + (status ? "/models" : "/chat/completions"), key, upstream.optBoolean("stream") ? "text/event-stream" : "application/json");
         try {
+            if (!status && upstream.optBoolean("stream")) connection.setReadTimeout(0);
             connection.setRequestMethod(status ? "GET" : "POST");
             for (Iterator<String> names = headers.keys(); names.hasNext();) {
                 String name = names.next();
@@ -1706,6 +1742,7 @@ public class LocalWebServer {
                 target.apiKey,
                 "text/event-stream"
         );
+        connection.setReadTimeout(0);
         connection.setRequestMethod("POST");
         connection.setDoOutput(true);
         byte[] requestBytes = providerRequest.toString().getBytes(StandardCharsets.UTF_8);
@@ -1827,6 +1864,7 @@ public class LocalWebServer {
             JSONObject body
     ) throws IOException {
         HttpURLConnection connection = openConnection(url, apiKey, "text/event-stream");
+        connection.setReadTimeout(0);
         connection.setRequestMethod("POST");
         connection.setDoOutput(true);
         byte[] bodyBytes = body.toString().getBytes(StandardCharsets.UTF_8);

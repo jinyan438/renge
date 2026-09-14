@@ -1,17 +1,22 @@
 package com.renge.agentlab;
 
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.DownloadManager;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.ServiceConnection;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.IBinder;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.view.View;
@@ -36,6 +41,7 @@ import org.json.JSONObject;
 public class MainActivity extends Activity {
     private static final int FILE_CHOOSER_REQUEST = 1201;
     private static final int DIRECTORY_PICKER_REQUEST = 1202;
+    private static final int NOTIFICATION_PERMISSION_REQUEST = 1203;
     private static final String HTML_PREVIEW_HOST = "html-preview.renge.invalid";
     private static final String BROWSER_INTENT_SCHEME = "renge-browser";
     private static final String ANDROID_USER_AGENT_TOKEN = "RengeAgentLabAndroid";
@@ -43,15 +49,37 @@ public class MainActivity extends Activity {
     private WebView webView;
     private FrameLayout rootLayout;
     private AndroidBrowserHost androidBrowserHost;
-    private LocalWebServer localWebServer;
+    private BackgroundRuntimeService backgroundRuntimeService;
     private AndroidWorkspaceBridge androidWorkspaceBridge;
     private ValueCallback<Uri[]> fileChooserCallback;
     private BroadcastReceiver downloadCompleteReceiver;
     private View customFullscreenView;
     private WebChromeClient.CustomViewCallback customFullscreenCallback;
     private boolean htmlFullscreenActive;
+    private boolean backgroundRuntimeServiceBindingActive;
+    private boolean appPageLoaded;
 
-    @SuppressLint("SetJavaScriptEnabled")
+    private final ServiceConnection backgroundRuntimeServiceConnection = new ServiceConnection() {
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder binder) {
+            BackgroundRuntimeService.LocalBinder localBinder =
+                    (BackgroundRuntimeService.LocalBinder) binder;
+            backgroundRuntimeService = localBinder.getService();
+            try {
+                loadAppPage(backgroundRuntimeService.getServerUrl());
+            } catch (Exception error) {
+                showStartupError(error);
+            }
+        }
+
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            backgroundRuntimeService = null;
+            appPageLoaded = false;
+        }
+    };
+
+    @SuppressLint({"SetJavaScriptEnabled", "UnspecifiedRegisterReceiverFlag"})
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -94,6 +122,9 @@ public class MainActivity extends Activity {
 
         webView.setHorizontalScrollBarEnabled(false);
         webView.setOverScrollMode(WebView.OVER_SCROLL_NEVER);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
+        }
         androidWorkspaceBridge = new AndroidWorkspaceBridge(this, webView, DIRECTORY_PICKER_REQUEST);
         webView.addJavascriptInterface(androidWorkspaceBridge, "RengeAndroidNative");
 
@@ -198,17 +229,48 @@ public class MainActivity extends Activity {
             }
         });
 
+        requestNotificationPermission();
         try {
-            localWebServer = new LocalWebServer(this);
-            String appUrl = localWebServer.start();
-            webView.loadUrl(appUrl + "?rengePlatform=android");
+            Intent serviceIntent = new Intent(this, BackgroundRuntimeService.class);
+            startService(serviceIntent);
+            backgroundRuntimeServiceBindingActive = bindService(
+                    serviceIntent,
+                    backgroundRuntimeServiceConnection,
+                    Context.BIND_AUTO_CREATE
+            );
+            if (!backgroundRuntimeServiceBindingActive) {
+                throw new IllegalStateException("无法连接 Android 后台服务");
+            }
         } catch (Exception error) {
-            webView.loadData(
-                    "<html><body><h1>Renge Android 启动失败</h1><pre>"
-                            + error.getMessage()
-                            + "</pre></body></html>",
-                    "text/html",
-                    "UTF-8"
+            showStartupError(error);
+        }
+    }
+
+    private void loadAppPage(String appUrl) {
+        if (appPageLoaded || webView == null) return;
+        appPageLoaded = true;
+        webView.loadUrl(appUrl + "?rengePlatform=android");
+    }
+
+    private void showStartupError(Exception error) {
+        if (webView == null) return;
+        String message = error.getMessage() == null ? error.toString() : error.getMessage();
+        webView.loadData(
+                "<html><body><h1>Renge Android 启动失败</h1><pre>"
+                        + android.text.TextUtils.htmlEncode(message)
+                        + "</pre></body></html>",
+                "text/html",
+                "UTF-8"
+        );
+    }
+
+    private void requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(
+                    new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                    NOTIFICATION_PERMISSION_REQUEST
             );
         }
     }
@@ -342,9 +404,11 @@ public class MainActivity extends Activity {
             }
             downloadCompleteReceiver = null;
         }
-        if (localWebServer != null) {
-            localWebServer.stop();
+        if (backgroundRuntimeServiceBindingActive) {
+            unbindService(backgroundRuntimeServiceConnection);
+            backgroundRuntimeServiceBindingActive = false;
         }
+        backgroundRuntimeService = null;
         if (androidBrowserHost != null) androidBrowserHost.destroy();
         androidBrowserHost = null;
         if (androidWorkspaceBridge != null) androidWorkspaceBridge.dispose();
