@@ -20505,6 +20505,14 @@ export function App() {
     event.preventDefault();
     event.stopPropagation();
 
+    if (
+      event.currentTarget.classList.contains("chat-message-more") &&
+      chatMessageMenu?.messageId === messageId
+    ) {
+      setChatMessageMenu(null);
+      return;
+    }
+
     const bubble =
       event.currentTarget.closest<HTMLElement>(".chat-bubble") ??
       event.currentTarget
