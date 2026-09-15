@@ -36892,16 +36892,18 @@ export function App() {
                 )}
               </div>
             </details>
-            {mcpServers.length > 0 && (
-              <details className="chat-resource-select">
-                <summary title="选择 MCP">
-                  <Boxes size={15} />
-                  <strong>MCP</strong>
-                  <span>{enabledMcpServers.length}</span>
-                  <ChevronDown size={14} />
-                </summary>
-                <div className="chat-resource-select-menu" role="group" aria-label="选择 MCP">
-                  {mcpServers.map((server) => (
+            <details className="chat-resource-select">
+              <summary title="选择 MCP">
+                <Boxes size={15} />
+                <strong>MCP</strong>
+                <span>{enabledMcpServers.length}</span>
+                <ChevronDown size={14} />
+              </summary>
+              <div className="chat-resource-select-menu" role="group" aria-label="选择 MCP">
+                {mcpServers.length === 0 ? (
+                  <p>请先在设置的“MCP 服务器”中添加或导入。</p>
+                ) : (
+                  mcpServers.map((server) => (
                     <label key={server.id}>
                       <input
                         type="checkbox"
@@ -36912,20 +36914,22 @@ export function App() {
                       />
                       <span>{server.name || "未命名 MCP"}</span>
                     </label>
-                  ))}
-                </div>
-              </details>
-            )}
-            {skills.length > 0 && (
-              <details className="chat-resource-select">
-                <summary title="选择 Skill">
-                  <Sparkles size={15} />
-                  <strong>Skill</strong>
-                  <span>{enabledSkills.length}</span>
-                  <ChevronDown size={14} />
-                </summary>
-                <div className="chat-resource-select-menu" role="group" aria-label="选择 Skill">
-                  {skills.map((skill) => (
+                  ))
+                )}
+              </div>
+            </details>
+            <details className="chat-resource-select">
+              <summary title="选择 Skill">
+                <Sparkles size={15} />
+                <strong>Skill</strong>
+                <span>{enabledSkills.length}</span>
+                <ChevronDown size={14} />
+              </summary>
+              <div className="chat-resource-select-menu" role="group" aria-label="选择 Skill">
+                {skills.length === 0 ? (
+                  <p>请先在设置的“Skills”中导入。</p>
+                ) : (
+                  skills.map((skill) => (
                     <label
                       key={skill.id}
                       title={!skill.piNativeValid ? "请先在设置中转换为 Pi 原生格式" : undefined}
@@ -36940,10 +36944,10 @@ export function App() {
                       />
                       <span>{skill.name || "未命名 Skill"}</span>
                     </label>
-                  ))}
-                </div>
-              </details>
-            )}
+                  ))
+                )}
+              </div>
+            </details>
             {chatMode === "roleplay" && activeSessionRoleplayCard && (
               <div className="chat-roleplay-scope">
                 <BookOpen size={15} />
