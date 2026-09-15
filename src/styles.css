@@ -4243,15 +4243,6 @@ summary:focus-visible {
   white-space: nowrap;
 }
 
-.local-workspace-clear {
-  color: #a7b0c3;
-}
-
-.local-workspace-clear:hover {
-  color: #fca5a5;
-  background: rgba(248, 113, 113, 0.12);
-}
-
 .chat-session-area {
   display: flex;
   flex: 1;
@@ -4260,11 +4251,6 @@ summary:focus-visible {
   gap: 10px;
   overflow: auto;
   padding-top: 2px;
-}
-
-.local-tools-panel-clear-only {
-  display: flex;
-  justify-content: flex-end;
 }
 
 .chat-workspace-picker {

@@ -21041,30 +21041,6 @@ export function App() {
     setChatStatus({ status: "idle", message: "会话已删除，相关记忆已取消。" });
   };
 
-  const clearLocalWorkspace = () => {
-    if (activeSessionChangeIsBlocked()) return;
-    workspaceAutoRestoreDisabledRef.current = true;
-    if (localWorkspaceHandle?.kind === "pc") {
-      setPcTransferWorkspace(null);
-      localStorage.removeItem(PC_WORKSPACE_PATH_STORAGE_KEY);
-      localStorage.removeItem(PC_WORKSPACE_NAME_STORAGE_KEY);
-    }
-    setLocalWorkspaceHandle(null);
-    setLocalToolsEnabled(false);
-    restoredWorkspacePathRef.current = "";
-    restoredPcWorkspaceRef.current = true;
-    setChatStatus({ status: "idle", message: "" });
-
-    const fallbackSession =
-      chatSessions.find((session) => session.workspaceKey === DEFAULT_WORKSPACE_KEY) ??
-      createChatSession();
-
-    if (!chatSessions.some((session) => session.id === fallbackSession.id)) {
-      setChatSessions((current) => [...current, fallbackSession]);
-    }
-    showChatSession(fallbackSession);
-  };
-
   const deleteWorkspaceSessions = (workspaceKey: string, workspaceName: string) => {
     if (activeSessionChangeIsBlocked()) return;
     const workspaceSessionCount = chatSessions.filter(
@@ -36975,19 +36951,6 @@ export function App() {
               </label>
             </div>
           </div>
-
-          {localWorkspaceHandle && (
-            <div className="local-tools-panel local-tools-panel-clear-only">
-              <button
-                type="button"
-                className="session-icon-button local-workspace-clear"
-                title="取消工作区"
-                onClick={clearLocalWorkspace}
-              >
-                <X size={14} />
-              </button>
-            </div>
-          )}
 
           <div className="chat-session-area">
             <section className="chat-workspace-picker" aria-label="工作区选择">
