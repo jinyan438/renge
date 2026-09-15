@@ -15747,6 +15747,10 @@ export function App() {
     ],
     [activeChatPreset, chatPresetEnabled, scopedRoleplayCard, tavernScripts],
   );
+  const enabledTavernScriptCount = useMemo(
+    () => tavernScriptTargets.filter((target) => target.script.enabled).length,
+    [tavernScriptTargets],
+  );
   const selectedTavernScriptTarget = useMemo(
     () =>
       tavernScriptTargets.find((target) => target.key === selectedTavernScriptKey) ??
@@ -36850,6 +36854,41 @@ export function App() {
                       <span>{worldBook.name}</span>
                     </label>
                   ))
+                )}
+              </div>
+            </details>
+            <details className="chat-resource-select">
+              <summary title="开关酒馆脚本">
+                <Play size={15} />
+                <strong>脚本</strong>
+                <span>{enabledTavernScriptCount}</span>
+                <ChevronDown size={14} />
+              </summary>
+              <div className="chat-resource-select-menu" role="group" aria-label="开关酒馆脚本">
+                {tavernScriptTargets.length === 0 ? (
+                  <p>请先在设置的“脚本”中导入或新建。</p>
+                ) : (
+                  tavernScriptTargets.map((target) => {
+                    const scopeLabel =
+                      target.scope === "global"
+                        ? "全局"
+                        : target.scope === "preset"
+                          ? "预设"
+                          : "角色";
+                    const scriptLabel = target.script.name || "未命名脚本";
+                    return (
+                      <label key={target.key} title={`${scopeLabel}脚本 · ${scriptLabel}`}>
+                        <input
+                          type="checkbox"
+                          checked={target.script.enabled}
+                          onChange={(event) =>
+                            updateTavernScriptTarget(target, { enabled: event.target.checked })
+                          }
+                        />
+                        <span>{`${scopeLabel} · ${scriptLabel}`}</span>
+                      </label>
+                    );
+                  })
                 )}
               </div>
             </details>
