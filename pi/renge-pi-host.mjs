@@ -149,6 +149,28 @@ function flushIncompleteStreamingToolCalls(
   }
   run.streamingToolCalls.clear();
   run.unexecutedToolCalls.clear();
+  run.executionToolCallAliases.clear();
+}
+
+/**
+ * Resolves the preview id the UI already rendered for an execution event.
+ * Pi numbers tool calls per assistant message, so the oldest unexecuted
+ * preview with the same tool name belongs to this execution.
+ */
+function resolvePreviewToolCallId(run, executionToolCallId, toolName) {
+  const executionId = String(executionToolCallId ?? "");
+  const known = run.executionToolCallAliases.get(executionId);
+  if (known) return known;
+
+  for (const [previewId, preview] of run.unexecutedToolCalls) {
+    if (toolName && preview.toolName !== toolName) continue;
+    run.executionToolCallAliases.set(executionId, previewId);
+    run.unexecutedToolCalls.delete(previewId);
+    return previewId;
+  }
+
+  run.executionToolCallAliases.set(executionId, executionId);
+  return executionId;
 }
 
 function toolContent(result, allowImageInputs = true) {
@@ -458,6 +480,11 @@ export function createRengePiHost({
       // A toolcall_end event only means the JSON parser closed. Keep the
       // preview here until tool_execution_start proves the tool really ran.
       unexecutedToolCalls: new Map(),
+      // Pi executes tool calls with its own toolCallId, which can differ from
+      // the id used while streaming the preview. Keep the join so tool_start /
+      // tool_end can update the preview in place instead of appending a new
+      // message under later text.
+      executionToolCallAliases: new Map(),
       session: null,
       settingsManager: null,
       sessionKey,
@@ -732,17 +759,22 @@ export function createRengePiHost({
           event.type === "tool_execution_start" &&
           !customToolNames.has(event.toolName)
         ) {
-          run.unexecutedToolCalls.delete(String(event.toolCallId ?? ""));
+          const previewToolCallId = resolvePreviewToolCallId(
+            run,
+            event.toolCallId,
+            event.toolName,
+          );
           writeSse(response, piEvent("tool_start", {
             runId,
-            toolCallId: event.toolCallId,
+            toolCallId: previewToolCallId,
+            executionToolCallId: event.toolCallId,
             toolName: event.toolName,
             arguments: event.args,
           }));
           return;
         }
         if (event.type === "tool_execution_start") {
-          run.unexecutedToolCalls.delete(String(event.toolCallId ?? ""));
+          resolvePreviewToolCallId(run, event.toolCallId, event.toolName);
         }
         if (
           event.type === "tool_execution_end" &&
@@ -750,7 +782,8 @@ export function createRengePiHost({
         ) {
           writeSse(response, piEvent("tool_end", {
             runId,
-            toolCallId: event.toolCallId,
+            toolCallId: resolvePreviewToolCallId(run, event.toolCallId, event.toolName),
+            executionToolCallId: event.toolCallId,
             toolName: event.toolName,
             isError: event.isError,
             result: event.result,
@@ -969,6 +1002,7 @@ export function createRengePiHost({
       settlePendingTools(run, new Error("Pi Host 已关闭"));
       await run.session?.abort();
       run.session?.dispose();
+      return undefined;
     }));
     for (const entry of idleSessions.values()) releaseSessionResource(entry);
     idleSessions.clear();

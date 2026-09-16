@@ -281,6 +281,7 @@ import {
   type ToolProgressTimingEntry,
 } from "./chatToolProgressUtils";
 import { createPiStreamingTimeline } from "./piStreamingTimeline";
+import { resolvePiToolAnchor } from "./piToolMessageOrderUtils";
 import {
   chatBubbleStatusLabels,
   getChatBubbleStatus,
@@ -1554,6 +1555,9 @@ type PiStreamEvent = {
   kernel?: string;
   nativeTools?: string[];
   toolCallId?: string;
+  // Pi's own id for the execution phase, which may differ from the streamed
+  // toolCallId used for the rendered preview.
+  executionToolCallId?: string;
   toolName?: string;
   contentIndex?: number;
   delta?: string;
@@ -9326,6 +9330,37 @@ function updateAssistantToolVisualization(
       toolVisualization: update(message.toolVisualization),
     };
   }));
+}
+
+/**
+ * Updates the tool message that already anchors the event, and only appends a
+ * new tool message when no rendered message anchors it yet.
+ *
+ * The anchor decision is taken from a fresh snapshot of the message list so the
+ * updater itself stays pure and idempotent, and so an anchored update never
+ * also appends a duplicate completion bubble at the tail.
+ */
+function upsertAssistantToolVisualization(
+  setChatMessages: Dispatch<SetStateAction<ChatMessage[]>>,
+  options: {
+    toolCallId?: string;
+    toolName?: string;
+    visualization: ToolVisualization;
+    append: () => void;
+  },
+) {
+  let anchored = false;
+  setChatMessages((current) => {
+    // The anchor keeps the completion attached to the position where the tool
+    // was initiated, instead of drifting below text that streamed after it.
+    const anchor = resolvePiToolAnchor(current, options);
+    if (!anchor) return current;
+    anchored = true;
+    return current.map((message) =>
+      message.id === anchor.id ? { ...message, toolVisualization: options.visualization } : message,
+    );
+  });
+  if (!anchored) options.append();
 }
 
 function buildIncompletePiToolVisualization(
@@ -25339,14 +25374,20 @@ export function App() {
               await waitForToolProgressPaint();
               return;
             }
-            appendAssistantTimelineMessage(
-              commitChatMessages,
-              formatPiNativeToolAction(event),
-              [],
-              "",
-              assistantSender,
+            upsertAssistantToolVisualization(commitChatMessages, {
+              toolCallId: event.toolCallId,
+              toolName: visualization.name,
               visualization,
-            );
+              append: () =>
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  formatPiNativeToolAction(event),
+                  [],
+                  "",
+                  assistantSender,
+                  visualization,
+                ),
+            });
             await waitForToolProgressPaint();
             return;
           }
@@ -25363,18 +25404,20 @@ export function App() {
               startedAt: previous?.startedAt,
               endedAt: new Date().toISOString(),
             };
-            if (event.toolCallId && previous) {
-              updateAssistantToolVisualization(commitChatMessages, event.toolCallId, () => visualization);
-            } else {
-              appendAssistantTimelineMessage(
-                commitChatMessages,
-                formatPiNativeToolResult(event),
-                [],
-                "",
-                assistantSender,
-                visualization,
-              );
-            }
+            upsertAssistantToolVisualization(commitChatMessages, {
+              toolCallId: event.toolCallId ?? previous?.toolCallId,
+              toolName: visualization.name,
+              visualization,
+              append: () =>
+                appendAssistantTimelineMessage(
+                  commitChatMessages,
+                  formatPiNativeToolResult(event),
+                  [],
+                  "",
+                  assistantSender,
+                  visualization,
+                ),
+            });
             hasVisibleToolResult = true;
             if (!event.isError) hasSuccessfulVisibleToolResult = true;
             return;
@@ -28616,7 +28659,13 @@ export function App() {
             if (event.toolCallId && previous) {
               updateAssistantToolVisualization(commitChatMessages, event.toolCallId, () => visualization);
             } else {
-              appendAssistantTimelineMessage(commitChatMessages, formatPiNativeToolAction(event), [], "", undefined, visualization);
+              upsertAssistantToolVisualization(commitChatMessages, {
+                toolCallId: event.toolCallId,
+                toolName: visualization.name,
+                visualization,
+                append: () =>
+                  appendAssistantTimelineMessage(commitChatMessages, formatPiNativeToolAction(event), [], "", undefined, visualization),
+              });
             }
             await waitForToolProgressPaint();
             return;
@@ -28634,11 +28683,13 @@ export function App() {
               startedAt: previous?.startedAt,
               endedAt: new Date().toISOString(),
             };
-            if (event.toolCallId && previous) {
-              updateAssistantToolVisualization(commitChatMessages, event.toolCallId, () => visualization);
-            } else {
-              appendAssistantTimelineMessage(commitChatMessages, formatPiNativeToolResult(event), [], "", undefined, visualization);
-            }
+            upsertAssistantToolVisualization(commitChatMessages, {
+              toolCallId: event.toolCallId ?? previous?.toolCallId,
+              toolName: visualization.name,
+              visualization,
+              append: () =>
+                appendAssistantTimelineMessage(commitChatMessages, formatPiNativeToolResult(event), [], "", undefined, visualization),
+            });
             hasVisibleToolResult = true;
             return;
           }
