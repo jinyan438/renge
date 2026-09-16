@@ -985,6 +985,12 @@ export function createRengePiHost({
     return extension;
   };
 
+  const updatePiPackage = async (source) => {
+    const extension = await piPackageManager.update(source);
+    invalidateIdleSessions();
+    return extension;
+  };
+
   const setPiPackageEnabled = async (source, enabled) => {
     const result = await piPackageManager.setEnabled(source, enabled);
     invalidateIdleSessions();
@@ -1017,6 +1023,7 @@ export function createRengePiHost({
     handleSetAutoCompaction,
     handleDeleteSession,
     installPiPackage,
+    updatePiPackage,
     setPiPackageEnabled,
     removePiPackage,
     dispose,

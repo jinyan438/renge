@@ -100,6 +100,36 @@ async function hasDirectory(path) {
   return (await stat(path).catch(() => null))?.isDirectory() === true;
 }
 
+async function readJsonObject(path, errorMessage) {
+  let raw;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    throw new Error(`${errorMessage}（${error?.code ?? "读取失败"}）`);
+  }
+  try {
+    return objectRecord(JSON.parse(raw));
+  } catch {
+    throw new Error(errorMessage);
+  }
+}
+
+function isPackageEnabledInSettings(source, settingsManager, manager) {
+  const identity = packageIdentity(source);
+  const installedPath = manager.getInstalledPath(source, "user");
+  const currentPackages = settingsManager.getGlobalSettings().packages ?? [];
+  const matchIndex = currentPackages.findIndex((entry) => {
+    const configuredSource = packageSource(entry);
+    if (packageIdentity(configuredSource) === identity) return true;
+    const configuredPath = manager.getInstalledPath(configuredSource, "user");
+    return Boolean(installedPath && configuredPath && resolve(installedPath) === resolve(configuredPath));
+  });
+  if (matchIndex === -1) return true;
+  const entry = currentPackages[matchIndex];
+  if (typeof entry === "string") return true;
+  return PI_RESOURCE_TYPES.some((resourceType) => stringList(entry?.[resourceType]).length > 0);
+}
+
 async function getDeclaredResources(packageRoot, packageJson) {
   const piManifest = objectRecord(packageJson.pi);
   const resources = {};
@@ -118,7 +148,7 @@ async function inspectPiPackage({ source, cwd, agentDir, manager }) {
   const installedPath = manager.getInstalledPath(source, "user");
   if (!installedPath) throw new Error("Pi 插件安装完成后未找到包目录。");
   const packageJsonPath = join(installedPath, "package.json");
-  const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8"));
+  const packageJson = await readJsonObject(packageJsonPath, "Pi 插件 package.json 不是有效的 JSON。");
   const resources = await getDeclaredResources(installedPath, packageJson);
   if (!PI_RESOURCE_TYPES.some((resourceType) => resources[resourceType].length > 0)) {
     throw new Error("该包没有声明 Pi extensions、skills、prompts 或 themes 资源。");
@@ -266,6 +296,28 @@ export function createPiPackageManager({ cwd = process.cwd(), agentDir }) {
         manager.addSourceToSettings(source);
         await settingsManager.flush();
         await setEnabledInSettings(source, true, settingsManager, manager);
+        return extension;
+      });
+    },
+
+    update(rawSource) {
+      return withMutation(async () => {
+        const source = normalizePiPackageSource(rawSource);
+        const { manager, settingsManager } = createManager();
+        if (!manager.getInstalledPath(source, "user")) {
+          throw new Error(`Pi 插件未安装，无法更新：${source}`);
+        }
+        const wasEnabled = isPackageEnabledInSettings(source, settingsManager, manager);
+        await manager.update(source);
+        const extension = await inspectPiPackage({
+          source,
+          cwd: resolvedCwd,
+          agentDir: resolvedAgentDir,
+          manager,
+        });
+        manager.addSourceToSettings(source);
+        await settingsManager.flush();
+        await setEnabledInSettings(source, wasEnabled, settingsManager, manager);
         return extension;
       });
     },

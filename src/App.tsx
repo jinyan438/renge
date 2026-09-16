@@ -17669,6 +17669,71 @@ export function App() {
     }
   };
 
+  const updateInstalledExtensionPackage = async (extension: InstalledExtension) => {
+    const piPackageSource = extension.compatibility === "pi"
+      ? extension.piPackageSource ?? extension.sourceUrl
+      : "";
+    const sourceUrl = piPackageSource ? "" : extension.sourceUrl.trim();
+    if (!piPackageSource && !sourceUrl) {
+      setExtensionStatus({
+        status: "error",
+        message: `${extension.displayName} 缺少可用的更新来源。`,
+      });
+      return;
+    }
+    setExtensionStatus({ status: "loading", message: `正在更新 ${extension.displayName}...` });
+    try {
+      const response = await fetch("/api/extensions/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: extension.id,
+          piPackageSource,
+          sourceUrl,
+        }),
+      });
+      const payload = (await response.json()) as {
+        extension?: InstalledExtension;
+        error?: string;
+      };
+      if (!response.ok || payload.error || !payload.extension) {
+        throw new Error(payload.error || `扩展更新失败：${response.status}`);
+      }
+      const updated = normalizeInstalledExtension(payload.extension);
+      if (!updated) throw new Error("扩展更新结果缺少必要的 manifest 信息。");
+      const previousVersion = extension.version;
+      setExtensions((current) => {
+        const existing = current.find((item) => item.id === extension.id);
+        const merged = existing
+          ? {
+              ...updated,
+              // 保留本地安装时间和用户设置，避免更新抹掉用户配置。
+              installedAt: existing.installedAt,
+              settings:
+                updated.id === ST_PROMPT_TEMPLATE_EXTENSION_ID
+                  ? existing.settings
+                  : { ...updated.settings, ...existing.settings },
+            }
+          : updated;
+        return current
+          .map((item) => (item.id === extension.id ? merged : item))
+          .sort((left, right) => left.loadingOrder - right.loadingOrder);
+      });
+      const versionChanged = previousVersion && previousVersion !== updated.version;
+      setExtensionStatus({
+        status: "success",
+        message: versionChanged
+          ? `${updated.displayName} 已更新：v${previousVersion} → v${updated.version}。`
+          : `${updated.displayName} 已是最新版本（v${updated.version}）。`,
+      });
+    } catch (error) {
+      setExtensionStatus({
+        status: "error",
+        message: error instanceof Error ? error.message : "扩展更新失败。",
+      });
+    }
+  };
+
   const updateInstalledExtension = (
     extensionId: string,
     patch: Partial<InstalledExtension>,
@@ -31392,6 +31457,16 @@ export function App() {
                   </label>
                   <button
                     type="button"
+                    className="extension-update-action"
+                    title="从来源重新拉取并更新扩展"
+                    disabled={extensionStatus.status === "loading"}
+                    onClick={() => void updateInstalledExtensionPackage(promptTemplateExtension)}
+                  >
+                    <RefreshCw size={16} />
+                    更新
+                  </button>
+                  <button
+                    type="button"
                     className="extension-delete-action"
                     title="删除扩展"
                     onClick={() => void deleteInstalledExtension(promptTemplateExtension)}
@@ -31643,6 +31718,16 @@ export function App() {
                         />
                         <span />
                       </label>
+                      <button
+                        type="button"
+                        className="extension-update-action"
+                        title="从来源重新拉取并更新扩展"
+                        disabled={extensionStatus.status === "loading"}
+                        onClick={() => void updateInstalledExtensionPackage(extension)}
+                      >
+                        <RefreshCw size={16} />
+                        更新
+                      </button>
                       <button
                         type="button"
                         className="extension-delete-action"

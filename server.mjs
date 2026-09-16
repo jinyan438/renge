@@ -2617,6 +2617,41 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
       return;
     }
 
+    if (pathname === "/api/extensions/update") {
+      if (request.method !== "POST") {
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+      }
+      const body = await readJsonBody(request);
+      const extensionId = String(body.id ?? "").trim();
+      const piPackageSource = String(body.piPackageSource ?? "").trim();
+      const sourceUrl = String(body.sourceUrl ?? "").trim();
+      try {
+        if (piPackageSource) {
+          const extension = await piHost.updatePiPackage(piPackageSource);
+          sendJson(response, 200, { extension, updated: true });
+          return;
+        }
+        if (!sourceUrl) {
+          sendJson(response, 400, { error: "缺少扩展来源，无法更新。" });
+          return;
+        }
+        const extension = await installTavernExtensionFromGit(dataFilePath, sourceUrl);
+        if (extensionId && extension.id !== extensionId) {
+          sendJson(response, 409, {
+            error: `更新后的扩展 ID 与已安装记录不一致（${extension.id} ≠ ${extensionId}）。`,
+          });
+          return;
+        }
+        sendJson(response, 200, { extension, updated: true });
+      } catch (error) {
+        sendJson(response, 500, {
+          error: error instanceof Error ? error.message : "扩展更新失败。",
+        });
+      }
+      return;
+    }
+
     if (pathname === "/api/extensions/install") {
       if (request.method !== "POST") {
         sendJson(response, 405, { error: "Method not allowed" });

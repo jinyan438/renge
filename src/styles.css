@@ -11392,6 +11392,32 @@ input[type="range"] {
   gap: 9px;
 }
 
+.extension-update-action {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  color: #1d4ed8;
+  background: #f5f9ff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.extension-update-action:hover:not(:disabled) {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+
+.extension-update-action:disabled,
+.extension-delete-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .extension-delete-action {
   display: inline-flex;
   min-height: 34px;
