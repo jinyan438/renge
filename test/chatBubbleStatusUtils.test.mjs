@@ -183,7 +183,7 @@ test("each grouped tool bubble renders its own status even when collapsed", () =
   assert.equal(getToolBubbleStatus({ completed: true, visualizations: [], blocks: [{ variant: "error" }] }, true), "error");
 });
 
-test("consecutive tool runs wrap into one outer fold that auto-expands while unfinished", () => {
+test("consecutive tool runs wrap into one outer fold that stays open while it is the newest output", () => {
   const renderGroups = loadAppCode(
     "  const renderChatBubbleDot =",
     "  const renderChatReasoning =",
@@ -202,23 +202,60 @@ test("consecutive tool runs wrap into one outer fold that auto-expands while unf
     visualizations: [{ name: status === "running" ? "read" : "write", status }],
   });
 
+  const newest = { isNewestVisibleItem: true };
+  const stale = { isNewestVisibleItem: false };
+
   const running = renderToStaticMarkup(renderGroups({
     toolGroups: [makeGroup("done"), makeGroup("running")], completed: false,
-  }, "tools"));
+  }, "tools", newest));
   assert.equal((running.match(/class="chat-tool-fold(?: |")/g) ?? []).length, 1);
   assert.ok(/<details class="chat-tool-fold "[^>]*\bopen=""/.test(running));
   assert.ok(running.includes("2 步"));
 
-  const finished = renderToStaticMarkup(renderGroups({
+  // The newest fold keeps its state while steps finish, so it no longer flips.
+  const settledStep = renderToStaticMarkup(renderGroups({
     toolGroups: [makeGroup("done"), makeGroup("done")], completed: true,
-  }, "tools"));
-  assert.equal((finished.match(/<details[^>]*\bopen=""/g) ?? []).length, 0);
-  assert.ok(finished.includes("已处理 1s"));
+  }, "tools", newest));
+  assert.ok(/<details class="chat-tool-fold "[^>]*\bopen=""/.test(settledStep));
+  assert.ok(settledStep.includes("已处理 1s"));
+
+  // It collapses once later content renders or a newer fold takes over.
+  const superseded = renderToStaticMarkup(renderGroups({
+    toolGroups: [makeGroup("done"), makeGroup("done")], completed: true,
+  }, "tools", stale));
+  assert.equal((superseded.match(/<details[^>]*\bopen=""/g) ?? []).length, 0);
 
   const single = renderToStaticMarkup(renderGroups({
     toolGroups: [makeGroup("done")], completed: true,
-  }, "tools"));
+  }, "tools", stale));
   assert.equal((single.match(/chat-tool-fold/g) ?? []).length, 0);
+});
+
+test("the newest visible chat item decides which tool fold stays expanded", () => {
+  const getLastVisibleIndex = loadAppCode(
+    "function isRenderedChatItemVisible(",
+    "function stripHiddenImageAnnotations(",
+    "getLastVisibleChatItemIndex",
+    {
+      shouldHideEmptyAssistantBubble: (content, reasoningVisible, attachments, hasOtherOutput) =>
+        !reasoningVisible &&
+        !String(content).trim() &&
+        (attachments ?? 0) <= 0 &&
+        !hasOtherOutput,
+    },
+  );
+  const fold = { kind: "toolOnlyGroup" };
+  const text = (content) => ({ kind: "segment", message: { role: "assistant", content } });
+  const hidden = { kind: "segment", message: { role: "assistant", content: "" } };
+
+  // While the fold is the newest output it stays open.
+  assert.equal(getLastVisibleIndex([text("说明"), fold], true), 1);
+  // Hidden reasoning-only bubbles after the fold must not collapse it.
+  assert.equal(getLastVisibleIndex([fold, hidden], false), 0);
+  // The next body output takes over, so the fold closes.
+  assert.equal(getLastVisibleIndex([fold, text("后续正文")], true), 1);
+  // A newer fold also takes over.
+  assert.equal(getLastVisibleIndex([fold, { kind: "toolOnlyGroup" }], true), 1);
 });
 
 test("completed and failed tools auto-collapse, including file mutations", () => {

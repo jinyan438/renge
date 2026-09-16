@@ -5189,6 +5189,32 @@ function getRenderedChatItems(
   return groupedItems;
 }
 
+// While a tool-only run is the newest visible item, its outer fold stays open so
+// the many inner tool folds do not collapse and re-expand on every step. It only
+// collapses once later content renders, a newer fold takes over, or output ends.
+function isRenderedChatItemVisible(
+  item: RenderedChatItem,
+  reasoningVisible: boolean,
+): boolean {
+  if (item.kind !== "segment") return true;
+  return !shouldHideEmptyAssistantBubble(
+    item.message.content,
+    reasoningVisible,
+    item.message.attachments?.length ?? 0,
+    Boolean(item.message.choiceRequest || item.message.toolVisualization),
+  );
+}
+
+function getLastVisibleChatItemIndex(
+  items: RenderedChatItem[],
+  reasoningVisible: boolean,
+): number {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (isRenderedChatItemVisible(items[index], reasoningVisible)) return index;
+  }
+  return -1;
+}
+
 function stripHiddenImageAnnotations(content: string) {
   return content.replace(/\n*<!--\s*(?:local-image-path|source-url)\s*:[\s\S]*?-->\s*/gi, "\n");
 }
@@ -19866,6 +19892,10 @@ export function App() {
       ),
     [chatMultiBubbleEnabled, chatReasoningVisible, regexProcessedChatMessages],
   );
+  const lastVisibleChatItemIndex = useMemo(
+    () => getLastVisibleChatItemIndex(renderedChatItems, chatReasoningVisible),
+    [chatReasoningVisible, renderedChatItems],
+  );
   const chatMessageIndexById = useMemo(
     () => new Map(chatMessages.map((message, index) => [message.id, index])),
     [chatMessages],
@@ -23624,6 +23654,7 @@ export function App() {
   const renderToolOnlyGroup = (
     item: Extract<RenderedChatItem, { kind: "toolOnlyGroup" }>,
     messageId: string,
+    options: { isNewestVisibleItem?: boolean } = {},
   ) => {
     const renderedGroups = item.toolGroups.map((toolGroup, index) =>
       renderToolRunGroup(toolGroup, `${messageId}-${index}`),
@@ -23645,7 +23676,9 @@ export function App() {
           : toolGroup.blocks.length),
       0,
     );
-    const autoOpen = !item.completed;
+    const autoOpen = item.completed
+      ? Boolean(options.isNewestVisibleItem) && chatGenerationState !== "idle"
+      : true;
     const statusLabel = item.completed
       ? `${hasError ? "部分异常" : "已处理"} ${formatProcessingDuration(item.startedAt, item.endedAt)}`
       : "处理中";
@@ -37261,7 +37294,7 @@ export function App() {
                 )}
               </div>
             ) : (
-              renderedChatItems.map((item) => {
+              renderedChatItems.map((item, renderedItemIndex) => {
                 if (item.kind === "toolGroup" || item.kind === "toolOnlyGroup") {
                   const toolGroups =
                     item.kind === "toolOnlyGroup" ? item.toolGroups : [item];
@@ -37319,7 +37352,9 @@ export function App() {
                             {renderChatMessageHeader(message, messageName, item.completed ? formatCodexDuration(item.startedAt, item.endedAt) : "处理中")}
                             <div className="chat-bubble tool-run-bubble" onContextMenu={(event) => handleChatBubbleContextMenu(message.id, event)}>
                               {item.kind === "toolOnlyGroup"
-                                ? renderToolOnlyGroup(item, item.id)
+                                ? renderToolOnlyGroup(item, item.id, {
+                                    isNewestVisibleItem: renderedItemIndex === lastVisibleChatItemIndex,
+                                  })
                                 : renderToolRunGroup(item, item.id)}
                             </div>
                           </div>
