@@ -340,7 +340,6 @@ import {
   type ProviderApiType,
 } from "./responsesApiUtils.mjs";
 import {
-  shouldAutoContinueLocalTask,
   shouldRequireLocalToolCall,
 } from "./localTaskUtils";
 import {
@@ -25968,33 +25967,6 @@ export function App() {
           }
           throwIfChatAborted(abortSignal);
           const subAgentContent = streamResult.content.trim();
-          const subAgentReasoning = streamResult.reasoning;
-          const subAgentContinuationContent =
-            subStreamingTimeline.lastSegmentContent.trim() || subAgentContent;
-          if (
-            activeLocalToolsEnabled &&
-            activeFileToolsWorkspaceHandle &&
-            subToolRound < MAX_SUB_AGENT_TOOL_ROUNDS - 1 &&
-            shouldAutoContinueLocalTask(
-              subAgentContinuationContent,
-              streamResult.finishReason,
-            )
-          ) {
-            subAgentApiMessages.push({
-              role: "assistant",
-              content: subAgentContent,
-              ...buildProviderReasoningReplay(
-                subAgentProvider,
-                subAgentReasoning,
-              ),
-            });
-            subAgentApiMessages.push({
-              role: "user",
-              content:
-                "【内部自动续执行信号，不是用户发送的新消息】继续执行当前未完成的子任务，直接使用可用工具推进，直到满足完成标准或遇到真实阻塞。不要只说明计划。",
-            });
-            continue;
-          }
           if (!subAgentContent) {
             throw new Error(`${subAgent.name} 没有返回可供主 Agent 验收的结果。`);
           }
@@ -26615,46 +26587,6 @@ export function App() {
                 completionResult.finishReason,
               );
               reasoningOnlyToolRetryCount += 1;
-              assistantContent = "";
-              assistantReasoning = "";
-              continue;
-            }
-
-            const localTaskContinuationContent =
-              streamingRound?.lastSegmentContent.trim() || assistantContent;
-            if (
-              activeLocalToolsEnabled &&
-              activeFileToolsWorkspaceHandle &&
-              shouldAutoContinueLocalTask(
-                localTaskContinuationContent,
-                completionResult.finishReason,
-              )
-            ) {
-              if (!streamingRound) {
-                appendAssistantTimelineMessage(
-                  commitChatMessages,
-                  assistantContent,
-                  [],
-                  assistantReasoning,
-                  assistantSender,
-                );
-              } else {
-                streamingRound.complete(assistantContent, assistantReasoning, getChatCompletionStatus(completionResult.finishReason));
-              }
-              apiMessages.push({
-                role: "assistant",
-                content: assistantContent,
-                ...buildProviderReasoningReplay(
-                  requestProvider,
-                  assistantReasoning,
-                ),
-              });
-              apiMessages.push({
-                role: "user",
-                content: isTruncatedChatFinishReason(completionResult.finishReason)
-                  ? "【内部自动续执行信号，不是用户发送的新消息】上一轮因输出长度限制被截断。紧接已有进度继续执行任务，优先调用可用工具完成尚未完成的步骤，不要重做已完成内容，直到任务完成、遇到真实阻塞或需要用户授权。"
-                  : "【内部自动续执行信号，不是用户发送的新消息】继续执行当前未完成的任务，直接调用可用工具推进，直到任务完成、遇到真实阻塞或需要用户授权。不要只说明计划。",
-              });
               assistantContent = "";
               assistantReasoning = "";
               continue;
@@ -29175,45 +29107,6 @@ export function App() {
                 completionResult.finishReason,
               );
               reasoningOnlyToolRetryCount += 1;
-              assistantContent = "";
-              assistantReasoning = "";
-              continue;
-            }
-
-            const localTaskContinuationContent =
-              streamingRound?.lastSegmentContent.trim() || assistantContent;
-            if (
-              activeLocalToolsEnabled &&
-              activeFileToolsWorkspaceHandle &&
-              shouldAutoContinueLocalTask(
-                localTaskContinuationContent,
-                completionResult.finishReason,
-              )
-            ) {
-              if (!streamingRound) {
-                appendAssistantTimelineMessage(
-                  commitChatMessages,
-                  assistantContent,
-                  [],
-                  assistantReasoning,
-                );
-              } else {
-                streamingRound.complete(assistantContent, assistantReasoning, getChatCompletionStatus(completionResult.finishReason));
-              }
-              apiMessages.push({
-                role: "assistant",
-                content: assistantContent,
-                ...buildProviderReasoningReplay(
-                  chatProvider,
-                  assistantReasoning,
-                ),
-              });
-              apiMessages.push({
-                role: "user",
-                content: isTruncatedChatFinishReason(completionResult.finishReason)
-                  ? "【内部自动续执行信号，不是用户发送的新消息】上一轮因输出长度限制被截断。紧接已有进度继续执行任务，优先调用可用工具完成尚未完成的步骤，不要重做已完成内容，直到任务完成、遇到真实阻塞或需要用户授权。"
-                  : "【内部自动续执行信号，不是用户发送的新消息】继续执行当前未完成的任务，直接调用可用工具推进，直到任务完成、遇到真实阻塞或需要用户授权。不要只说明计划。",
-              });
               assistantContent = "";
               assistantReasoning = "";
               continue;
