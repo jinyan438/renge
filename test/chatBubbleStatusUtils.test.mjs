@@ -231,6 +231,48 @@ test("consecutive tool runs wrap into one outer fold that stays open while it is
   assert.equal((single.match(/chat-tool-fold/g) ?? []).length, 0);
 });
 
+test("consecutive runs inside the outer fold keep each newest run expanded until output moves on", () => {
+  const renderGroups = loadAppCode(
+    "  const renderChatBubbleDot =",
+    "  const renderChatReasoning =",
+    "renderToolOnlyGroup",
+    {
+      React, chatBubbleStatusLabels, getToolBubbleStatus, chatGenerationState: "running",
+      formatProcessingDuration: () => "1s",
+      renderPiToolVisualization: () => null,
+      renderChatAttachments: () => null,
+      ListTree: () => null,
+      X: () => null, Wrench: () => null, FileCode2: () => null, ChevronDown: () => null,
+    },
+  );
+  const makeGroup = (status) => ({
+    completed: status !== "running", blocks: [], segments: [{ message: {} }],
+    visualizations: [{ name: status === "running" ? "read" : "write", status }],
+  });
+  const runStates = (markup) =>
+    Array.from(markup.matchAll(/<details class="chat-tool-run(?: error)? ?"[^>]*?>/g), (match) =>
+      /\bopen=""/.test(match[0]),
+    );
+
+  // While the group is the newest output, only the finished runs before the
+  // newest one collapse; the newest run stays open even though it finished.
+  const live = renderToStaticMarkup(renderGroups({
+    toolGroups: [makeGroup("done"), makeGroup("done"), makeGroup("done")], completed: true,
+  }, "tools", { isNewestVisibleItem: true }));
+  assert.deepEqual(runStates(live), [false, false, true]);
+
+  // Once the outer fold is superseded, every inner run collapses with it.
+  const superseded = renderToStaticMarkup(renderGroups({
+    toolGroups: [makeGroup("done"), makeGroup("done"), makeGroup("done")], completed: true,
+  }, "tools", { isNewestVisibleItem: false }));
+  assert.deepEqual(runStates(superseded), [false, false, false]);
+
+  const single = renderToStaticMarkup(renderGroups({
+    toolGroups: [makeGroup("done")], completed: true,
+  }, "tools", { isNewestVisibleItem: true }));
+  assert.deepEqual(runStates(single), [true]);
+});
+
 test("the newest visible chat item decides which tool fold stays expanded", () => {
   const getLastVisibleIndex = loadAppCode(
     "function isRenderedChatItemVisible(",

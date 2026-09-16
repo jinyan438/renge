@@ -23590,6 +23590,7 @@ export function App() {
   const renderToolRunGroup = (
     item: Extract<RenderedChatItem, { kind: "toolGroup" }>,
     messageId: string,
+    options: { isNewestRun?: boolean; isNewestVisibleItem?: boolean } = {},
   ) => {
     const firstVisualization = item.visualizations.find((visualization) => {
       const args = visualization.args ?? {};
@@ -23613,7 +23614,15 @@ export function App() {
       ).values(),
     );
     const stepCount = visualizations.length > 0 ? visualizations.length : item.blocks.length;
-    const autoOpen = !item.completed;
+    // Like the outer fold, a finished run stays expanded while it is still the
+    // newest output, so consecutive runs no longer collapse and re-expand as
+    // each step ends. It only collapses once later content renders, a newer run
+    // takes over, or the whole output finishes.
+    const autoOpen = item.completed
+      ? Boolean(options.isNewestRun) &&
+        Boolean(options.isNewestVisibleItem) &&
+        chatGenerationState !== "idle"
+      : true;
     const statusLabel = item.completed
       ? `${hasError ? "处理异常" : "已处理"} ${formatProcessingDuration(item.startedAt, item.endedAt)}`
       : "处理中";
@@ -23656,8 +23665,12 @@ export function App() {
     messageId: string,
     options: { isNewestVisibleItem?: boolean } = {},
   ) => {
+    const lastToolGroupIndex = item.toolGroups.length - 1;
     const renderedGroups = item.toolGroups.map((toolGroup, index) =>
-      renderToolRunGroup(toolGroup, `${messageId}-${index}`),
+      renderToolRunGroup(toolGroup, `${messageId}-${index}`, {
+        isNewestRun: index === lastToolGroupIndex,
+        isNewestVisibleItem: Boolean(options.isNewestVisibleItem),
+      }),
     );
     if (item.toolGroups.length < 2) {
       return <div className="chat-tool-groups">{renderedGroups}</div>;
@@ -37355,7 +37368,10 @@ export function App() {
                                 ? renderToolOnlyGroup(item, item.id, {
                                     isNewestVisibleItem: renderedItemIndex === lastVisibleChatItemIndex,
                                   })
-                                : renderToolRunGroup(item, item.id)}
+                                : renderToolRunGroup(item, item.id, {
+                                    isNewestRun: true,
+                                    isNewestVisibleItem: renderedItemIndex === lastVisibleChatItemIndex,
+                                  })}
                             </div>
                           </div>
                         </div>
