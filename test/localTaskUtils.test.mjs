@@ -55,3 +55,64 @@ test("continues only when the latest task state is still incomplete", () => {
     false,
   );
 });
+
+test("stops when the model is blocked waiting for the user", () => {
+  // Extra turns can never supply the answer, so these must never auto-continue
+  // even though they contain explicit pending-work phrasing.
+  assert.equal(
+    shouldAutoContinueLocalTask("需要继续，但我需要你先提供数据库连接串。"),
+    false,
+  );
+  assert.equal(
+    shouldAutoContinueLocalTask("下一步要写测试，不过需要你确认测试框架。"),
+    false,
+  );
+  assert.equal(
+    shouldAutoContinueLocalTask("还没完成。请问要用哪个方案？请选择 A 或 B。"),
+    false,
+  );
+  assert.equal(
+    shouldAutoContinueLocalTask("cannot proceed without the API key, please provide it."),
+    false,
+  );
+  assert.equal(
+    shouldAutoContinueLocalTask("我应该先改哪个文件？请你确认。"),
+    false,
+  );
+});
+
+test("treats truncation as authoritative even when a completion word appears", () => {
+  // The provider cut the model off mid-output, so a leftover completion keyword
+  // must not stop the run: there is usually a half-written file behind it.
+  assert.equal(
+    shouldAutoContinueLocalTask(
+      "代码已完成，接下来我要写测试。文件内容如下：function a(){",
+      "length",
+    ),
+    true,
+  );
+  assert.equal(
+    shouldAutoContinueLocalTask("已创建 index.html，下一步要写样式。", "length"),
+    true,
+  );
+  assert.equal(
+    shouldAutoContinueLocalTask("第一部分已经写完，现在开始写第二部分：", "length"),
+    true,
+  );
+});
+
+test("stops after a truncated turn that closes on a completion claim", () => {
+  // The output limit only clipped trailing prose, so the job really is done.
+  assert.equal(shouldAutoContinueLocalTask("测试全部通过，构建成功。", "length"), false);
+  assert.equal(shouldAutoContinueLocalTask("已完成。测试通过。", "length"), false);
+  assert.equal(
+    shouldAutoContinueLocalTask("任务已完成，文件在 a.html。需要的话我可以继续优化，告诉我即可。", "length"),
+    false,
+  );
+});
+
+test("does not continue on a plain explanation with no pending work", () => {
+  assert.equal(shouldAutoContinueLocalTask("这个函数的实现思路是先排序再二分查找。"), false);
+  assert.equal(shouldAutoContinueLocalTask("报错的原因是路径写错了，应该用绝对路径。"), false);
+  assert.equal(shouldAutoContinueLocalTask("已构建通过。我继续说明一下目录结构："), false);
+});
