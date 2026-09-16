@@ -26,7 +26,7 @@ export type InstalledExtension = {
   homePage: string;
   license: string;
   enabled: boolean;
-  compatibility: "native" | "web";
+  compatibility: "native" | "web" | "pi";
   status: "installed" | "error";
   statusMessage: string;
   capabilities: string[];
@@ -37,6 +37,13 @@ export type InstalledExtension = {
   jsFiles: string[];
   cssFiles: string[];
   assetBaseUrl: string;
+  piPackageSource?: string;
+  piResources?: {
+    extensions: number;
+    skills: number;
+    prompts: number;
+    themes: number;
+  };
   installedAt: string;
   updatedAt: string;
 };
@@ -192,6 +199,7 @@ export function normalizeInstalledExtension(value: unknown): InstalledExtension 
   const isTavernHelperCore =
     packageName.toLowerCase() === TAVERN_HELPER_CORE_PACKAGE ||
     sourceUrl.toLowerCase().includes(TAVERN_HELPER_CORE_PACKAGE);
+  const isPiPackage = value.compatibility === "pi" || typeof value.piPackageSource === "string";
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(id) || !packageName || !sourceUrl) return null;
 
   const defaults = isPromptTemplate
@@ -265,7 +273,11 @@ export function normalizeInstalledExtension(value: unknown): InstalledExtension 
     homePage: normalizeWebUrl(value.homePage, sourceUrl),
     license: normalizeString(value.license, defaults.license),
     enabled: value.enabled !== false,
-    compatibility: isPromptTemplate || isTavernHelperCore ? "native" : "web",
+    compatibility: isPiPackage
+      ? "pi"
+      : isPromptTemplate || isTavernHelperCore
+        ? "native"
+        : "web",
     status: value.status === "error" ? "error" : "installed",
     statusMessage: isTavernHelperCore
       ? defaults.statusMessage
@@ -284,9 +296,20 @@ export function normalizeInstalledExtension(value: unknown): InstalledExtension 
     optional: normalizeStringList(value.optional),
     jsFiles: isTavernHelperCore ? [] : normalizeAssetList(value.jsFiles),
     cssFiles: isTavernHelperCore ? [] : normalizeAssetList(value.cssFiles),
-    assetBaseUrl: isPromptTemplate || isTavernHelperCore
+    assetBaseUrl: isPromptTemplate || isTavernHelperCore || isPiPackage
       ? ""
       : `/scripts/extensions/third-party/${encodeURIComponent(id)}`,
+    ...(isPiPackage
+      ? {
+          piPackageSource: normalizeString(value.piPackageSource, sourceUrl),
+          piResources: {
+            extensions: Math.max(0, Math.floor(Number(isRecord(value.piResources) ? value.piResources.extensions : 0) || 0)),
+            skills: Math.max(0, Math.floor(Number(isRecord(value.piResources) ? value.piResources.skills : 0) || 0)),
+            prompts: Math.max(0, Math.floor(Number(isRecord(value.piResources) ? value.piResources.prompts : 0) || 0)),
+            themes: Math.max(0, Math.floor(Number(isRecord(value.piResources) ? value.piResources.themes : 0) || 0)),
+          },
+        }
+      : {}),
     installedAt:
       typeof value.installedAt === "string" ? value.installedAt : defaults.installedAt,
     updatedAt:

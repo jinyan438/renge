@@ -11338,6 +11338,12 @@ input[type="range"] {
   background: #eef8ff;
 }
 
+.extension-compatibility.pi {
+  border-color: #f0c36d;
+  color: #7a4b00;
+  background: #fff8e6;
+}
+
 .extension-runtime-badge {
   display: inline-flex;
   min-height: 28px;

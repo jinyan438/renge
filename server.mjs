@@ -15,6 +15,7 @@ import {
   normalizeProviderApiType,
 } from "./src/responsesApiUtils.mjs";
 import { createRengePiHost } from "./pi/renge-pi-host.mjs";
+import { isPiPackageSource } from "./pi/pi-package-manager.mjs";
 import {
   callPiMcpTool,
   discoverPiMcpTools,
@@ -2622,7 +2623,10 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
         return;
       }
       const body = await readJsonBody(request);
-      const extension = await installTavernExtensionFromGit(dataFilePath, body.sourceUrl);
+      const source = body.source ?? body.sourceUrl;
+      const extension = isPiPackageSource(source)
+        ? await piHost.installPiPackage(source)
+        : await installTavernExtensionFromGit(dataFilePath, source);
       sendJson(response, 200, { extension });
       return;
     }
@@ -2638,8 +2642,24 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
       }
 
       if (request.method === "DELETE" && !operation) {
+        const body = await readJsonBody(request);
+        if (body.piPackageSource) await piHost.removePiPackage(body.piPackageSource);
         await rm(extensionDirectory, { recursive: true, force: true });
         sendJson(response, 200, { ok: true, id: extensionId });
+        return;
+      }
+
+      if (request.method === "PATCH" && !operation) {
+        const body = await readJsonBody(request);
+        if (!body.piPackageSource) {
+          sendJson(response, 400, { error: "缺少 Pi 插件包源" });
+          return;
+        }
+        const result = await piHost.setPiPackageEnabled(
+          body.piPackageSource,
+          body.enabled === true,
+        );
+        sendJson(response, 200, result);
         return;
       }
 

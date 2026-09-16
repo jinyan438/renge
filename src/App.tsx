@@ -214,7 +214,6 @@ import {
 import {
   DEFAULT_PROMPT_TEMPLATE_SETTINGS,
   ST_PROMPT_TEMPLATE_EXTENSION_ID,
-  ST_PROMPT_TEMPLATE_SOURCE_URL,
   loadInstalledExtensions,
   normalizeInstalledExtension,
   normalizeInstalledExtensions,
@@ -12742,7 +12741,7 @@ export function App() {
     loadInstalledExtensions(EXTENSIONS_STORAGE_KEY),
   );
   const [extensionInstallUrl, setExtensionInstallUrl] = useState(
-    ST_PROMPT_TEMPLATE_SOURCE_URL,
+    "@ff-labs/pi-fff",
   );
   const [extensionStatus, setExtensionStatus] = useState<{
     status: ProviderPullState;
@@ -17532,15 +17531,15 @@ export function App() {
   const installTavernExtension = async () => {
     const sourceUrl = extensionInstallUrl.trim();
     if (!sourceUrl) {
-      setExtensionStatus({ status: "error", message: "请先填写扩展 Git 仓库地址。" });
+      setExtensionStatus({ status: "error", message: "请先填写 Pi 插件包名或酒馆扩展 Git 地址。" });
       return;
     }
-    setExtensionStatus({ status: "loading", message: "正在克隆仓库并读取酒馆扩展清单..." });
+    setExtensionStatus({ status: "loading", message: "正在识别、安装并验证扩展..." });
     try {
       const response = await fetch("/api/extensions/install", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceUrl }),
+        body: JSON.stringify({ source: sourceUrl }),
       });
       const payload = (await response.json()) as {
         extension?: InstalledExtension;
@@ -17589,6 +17588,8 @@ export function App() {
     try {
       const response = await fetch(`/api/extensions/${encodeURIComponent(extension.id)}`, {
         method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ piPackageSource: extension.piPackageSource }),
       });
       const payload = (await response.json()) as { error?: string };
       if (!response.ok || payload.error) {
@@ -17650,18 +17651,40 @@ export function App() {
     );
   };
 
-  const setInstalledExtensionEnabled = (
+  const setInstalledExtensionEnabled = async (
     extension: InstalledExtension,
     enabled: boolean,
   ) => {
-    updateInstalledExtension(extension.id, {
-      enabled,
-      statusMessage: enabled ? "扩展已启用" : "扩展已关闭",
-    });
-    setExtensionStatus({
-      status: "success",
-      message: `${extension.displayName} 已${enabled ? "启用" : "关闭"}。`,
-    });
+    setExtensionStatus({ status: "loading", message: `正在${enabled ? "启用" : "关闭"} ${extension.displayName}...` });
+    try {
+      if (extension.compatibility === "pi") {
+        const response = await fetch(`/api/extensions/${encodeURIComponent(extension.id)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            piPackageSource: extension.piPackageSource ?? extension.sourceUrl,
+            enabled,
+          }),
+        });
+        const payload = (await response.json()) as { error?: string };
+        if (!response.ok || payload.error) {
+          throw new Error(payload.error || `Pi 插件状态更新失败：${response.status}`);
+        }
+      }
+      updateInstalledExtension(extension.id, {
+        enabled,
+        statusMessage: enabled ? "扩展已启用" : "扩展已关闭",
+      });
+      setExtensionStatus({
+        status: "success",
+        message: `${extension.displayName} 已${enabled ? "启用" : "关闭"}。`,
+      });
+    } catch (error) {
+      setExtensionStatus({
+        status: "error",
+        message: error instanceof Error ? error.message : "扩展状态更新失败。",
+      });
+    }
   };
 
   const updatePromptTemplateSettings = (
@@ -18194,7 +18217,9 @@ export function App() {
           extension.enabled
             ? extension.compatibility === "native"
               ? { status: "active", message: "Renge 原生兼容层运行中" }
-              : { status: "loading", message: "正在加载扩展资源..." }
+              : extension.compatibility === "pi"
+                ? { status: "active", message: "Pi 原生插件将在下次模型请求中加载" }
+                : { status: "loading", message: "正在加载扩展资源..." }
             : { status: "idle", message: "扩展已关闭" },
         ]),
       ),
@@ -31235,9 +31260,9 @@ export function App() {
         <header className="extension-manager-header">
           <div>
             <div>
-              <div className="eyebrow">SillyTavern Extensions</div>
+              <div className="eyebrow">Pi Packages &amp; SillyTavern Extensions</div>
               <h1>扩展管理器</h1>
-              <p>酒馆扩展通过 Renge 原生兼容层接入会话、角色卡、世界书与变量系统。</p>
+              <p>原生加载 Pi 插件与资源包，同时兼容酒馆扩展的会话、角色卡、世界书和变量接口。</p>
             </div>
           </div>
           <div className="extension-manager-summary">
@@ -31252,17 +31277,17 @@ export function App() {
 
         <section className="extension-install-panel" aria-labelledby="extension-install-title">
           <div>
-            <div className="eyebrow">Install from Git</div>
-            <h2 id="extension-install-title">安装酒馆扩展</h2>
-            <p>粘贴公开 Git 仓库地址，Renge 会克隆仓库、读取 manifest.json 并安装扩展资源。</p>
+            <div className="eyebrow">Install Pi Package or Git Extension</div>
+            <h2 id="extension-install-title">安装扩展</h2>
+            <p>输入 npm Pi 包名，或粘贴酒馆扩展 Git 地址。Pi Git/本地包可使用 pi: 前缀。</p>
           </div>
           <div className="extension-install-form">
             <label className="field">
-              <span>扩展仓库地址</span>
+              <span>包名或扩展地址</span>
               <input
                 value={extensionInstallUrl}
                 onChange={(event) => setExtensionInstallUrl(event.target.value)}
-                placeholder={ST_PROMPT_TEMPLATE_SOURCE_URL}
+                placeholder="@ff-labs/pi-fff"
               />
             </label>
             <button
@@ -31272,7 +31297,7 @@ export function App() {
               onClick={() => void installTavernExtension()}
             >
               <Download size={16} />
-              {extensionStatus.status === "loading" ? "正在安装..." : "从 Git 安装"}
+              {extensionStatus.status === "loading" ? "正在安装..." : "安装"}
             </button>
           </div>
         </section>
@@ -31306,7 +31331,7 @@ export function App() {
                       type="checkbox"
                       checked={promptTemplateExtension.enabled}
                       onChange={(event) =>
-                        setInstalledExtensionEnabled(
+                        void setInstalledExtensionEnabled(
                           promptTemplateExtension,
                           event.target.checked,
                         )
@@ -31528,20 +31553,20 @@ export function App() {
                   <header className="extension-card-header">
                     <div className="extension-card-brand">
                       <span className="extension-card-icon generic">
-                        <Puzzle size={25} />
+                        {extension.compatibility === "pi" ? <Boxes size={25} /> : <Puzzle size={25} />}
                       </span>
                       <div>
                         <div className="extension-title-row">
                           <h2>{extension.displayName}</h2>
                           <span className="extension-version">v{extension.version}</span>
                           <span
-                            className={`extension-compatibility ${
-                              extension.compatibility === "web" ? "web" : ""
-                            }`}
+                            className={`extension-compatibility ${extension.compatibility}`}
                           >
                             {extension.compatibility === "native"
                               ? "Renge 原生兼容"
-                              : "酒馆 Web 兼容"}
+                              : extension.compatibility === "pi"
+                                ? "Pi 原生插件"
+                                : "酒馆 Web 兼容"}
                           </span>
                           <span className={`extension-runtime-badge ${runtimeState.status}`}>
                             {runtimeState.status === "active"
@@ -31562,7 +31587,7 @@ export function App() {
                           type="checkbox"
                           checked={extension.enabled}
                           onChange={(event) =>
-                            setInstalledExtensionEnabled(extension, event.target.checked)
+                            void setInstalledExtensionEnabled(extension, event.target.checked)
                           }
                         />
                         <span />
@@ -31608,9 +31633,15 @@ export function App() {
                     </section>
                     <section className="extension-runtime-details">
                       <h3>扩展资源</h3>
-                      <p>
-                        JavaScript：{extension.jsFiles.length} 个 · CSS：{extension.cssFiles.length} 个
-                      </p>
+                      {extension.compatibility === "pi" ? (
+                        <p>
+                          扩展入口：{extension.piResources?.extensions ?? 0} 个 · Skills：{extension.piResources?.skills ?? 0} 组 · 提示词：{extension.piResources?.prompts ?? 0} 个 · 主题：{extension.piResources?.themes ?? 0} 个
+                        </p>
+                      ) : (
+                        <p>
+                          JavaScript：{extension.jsFiles.length} 个 · CSS：{extension.cssFiles.length} 个
+                        </p>
+                      )}
                       {extension.requires.length > 0 && (
                         <p>必需扩展：{extension.requires.join("、")}</p>
                       )}
@@ -31618,14 +31649,20 @@ export function App() {
                         <p>可选扩展：{extension.optional.join("、")}</p>
                       )}
                       <small>
-                        关闭或删除时会卸载脚本与样式节点，并广播 renge-extension-unload 事件。
+                        {extension.compatibility === "pi"
+                          ? "由 Pi DefaultResourceLoader 原生加载；状态变更会在下一次模型请求生效。"
+                          : "关闭或删除时会卸载脚本与样式节点，并广播 renge-extension-unload 事件。"}
                       </small>
                     </section>
                   </div>
 
                   <div className="extension-security-note">
                     <Wrench size={17} />
-                    <span>通用扩展会执行仓库中的 JavaScript。只安装并启用你信任的 Git 仓库。</span>
+                    <span>
+                      {extension.compatibility === "pi"
+                        ? "Pi 插件拥有当前用户权限，可访问文件、网络并运行程序。只安装可信的软件包。"
+                        : "通用扩展会执行仓库中的 JavaScript。只安装并启用你信任的 Git 仓库。"}
+                    </span>
                   </div>
                 </article>
               );
@@ -31634,7 +31671,7 @@ export function App() {
             <div className="extension-empty-state">
               <Puzzle size={28} />
               <strong>还没有安装扩展</strong>
-              <span>在上方粘贴酒馆扩展 Git 仓库地址，然后点击“从 Git 安装”。</span>
+              <span>在上方输入 Pi 插件 npm 包名，或粘贴酒馆扩展 Git 仓库地址。</span>
             </div>
           )}
         </section>

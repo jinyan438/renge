@@ -13,6 +13,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { createPiMcpAdapter, normalizePiMcpConfig } from "./pi-mcp-adapter-bridge.mjs";
+import { createPiPackageManager } from "./pi-package-manager.mjs";
 import { installContinuousPiRetry } from "./continuous-retry.mjs";
 import { createResumableWriteTool } from "./resumable-write-tool.mjs";
 import {
@@ -266,6 +267,7 @@ export function createRengePiHost({
   // remains the source of truth for normal persistence.
   const idleSessions = new Map();
   const sessionDir = join(resolve(dataDir), ".pi", "sessions");
+  const piPackageManager = createPiPackageManager({ cwd: defaultCwd, agentDir });
   const providerUsers = new Map();
   let modelRuntimePromise;
 
@@ -293,6 +295,11 @@ export function createRengePiHost({
         entry.modelRuntime.unregisterProvider(entry.providerId);
       }
     }
+  };
+
+  const invalidateIdleSessions = () => {
+    for (const entry of idleSessions.values()) releaseSessionResource(entry);
+    idleSessions.clear();
   };
 
   const contextWindowOverrides = new Map();
@@ -573,6 +580,14 @@ export function createRengePiHost({
         ? [createResumableWriteTool(cwd)]
         : [];
       const customTools = [...bridgedCustomTools, ...localCustomTools];
+      const initialActiveToolNames = toolsEnabled
+        ? [
+            ...nativeTools,
+            ...(requestedToolsEnabled ? extensionToolNames : []),
+            ...customTools.map((tool) => tool.name),
+          ]
+        : [];
+      const allowDynamicExtensionTools = toolsEnabled && requestedToolsEnabled;
       // Only tools bridged back to the renderer suppress native execution
       // events. The local resumable write tool must still paint start/end.
       customToolNames = new Set(bridgedCustomTools.map((tool) => tool.name));
@@ -590,22 +605,32 @@ export function createRengePiHost({
         modelRuntime,
         model,
         thinkingLevel: reasoningConfig.thinkingLevel,
-        tools: toolsEnabled
-          ? [
-              ...nativeTools,
-              ...(requestedToolsEnabled ? extensionToolNames : []),
-              ...customTools.map((tool) => tool.name),
-            ]
-          : [],
+        // An explicit tools list is an SDK allowlist. Omit it when tools are
+        // enabled so Pi extensions may register tools during session_start.
+        ...(allowDynamicExtensionTools ? {} : { tools: initialActiveToolNames }),
         customTools,
         resourceLoader,
         settingsManager,
         sessionManager,
       });
       run.session = session;
+      if (allowDynamicExtensionTools) {
+        session.setActiveToolsByName(initialActiveToolNames);
+      }
       installContinuousPiRetry(session);
       await session.bindExtensions({
         mode: "json",
+        onError: (extensionError) => {
+          console.warn(
+            `[pi-extension] ${extensionError.extensionPath} ${extensionError.event}: ${extensionError.error}`,
+          );
+          writeSse(response, piEvent("extension_error", {
+            runId,
+            extensionPath: extensionError.extensionPath,
+            event: extensionError.event,
+            error: extensionError.error,
+          }));
+        },
         commandContextActions: {
           waitForIdle: () => session.waitForIdle(),
           newSession: async () => ({ cancelled: true }),
@@ -921,6 +946,24 @@ export function createRengePiHost({
     return { ok: true, status: 200 };
   };
 
+  const installPiPackage = async (source) => {
+    const extension = await piPackageManager.install(source);
+    invalidateIdleSessions();
+    return extension;
+  };
+
+  const setPiPackageEnabled = async (source, enabled) => {
+    const result = await piPackageManager.setEnabled(source, enabled);
+    invalidateIdleSessions();
+    return result;
+  };
+
+  const removePiPackage = async (source) => {
+    const result = await piPackageManager.remove(source);
+    invalidateIdleSessions();
+    return result;
+  };
+
   const dispose = async () => {
     await Promise.all(Array.from(runs.values()).map(async (run) => {
       settlePendingTools(run, new Error("Pi Host 已关闭"));
@@ -939,6 +982,9 @@ export function createRengePiHost({
     handleCompact,
     handleSetAutoCompaction,
     handleDeleteSession,
+    installPiPackage,
+    setPiPackageEnabled,
+    removePiPackage,
     dispose,
   };
 }
