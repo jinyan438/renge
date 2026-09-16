@@ -159,6 +159,7 @@ test("each grouped tool bubble renders its own status even when collapsed", () =
       formatProcessingDuration: () => "1s",
       renderPiToolVisualization: () => null,
       renderChatAttachments: () => null,
+      ListTree: () => null,
       X: () => null, Wrench: () => null, FileCode2: () => null, ChevronDown: () => null,
     },
   );
@@ -173,12 +174,51 @@ test("each grouped tool bubble renders its own status even when collapsed", () =
   for (const status of ["complete", "error", "running"]) {
     assert.ok(markup.includes(`class="chat-bubble-dot ${status}"`));
   }
-  assert.equal((markup.match(/<details[^>]*\bopen=""/g) ?? []).length, 1);
+  // Only the still-running inner run stays open while the outer fold is present.
+  assert.equal((markup.match(/<details[^>]*\bopen=""/g) ?? []).length, 2);
   assert.equal(getToolBubbleStatus(makeGroup("running"), false), "incomplete");
   assert.equal(getToolBubbleStatus({
     ...makeGroup("running"), segments: [{ message: { outputStatus: "incomplete" } }],
   }, true), "incomplete");
   assert.equal(getToolBubbleStatus({ completed: true, visualizations: [], blocks: [{ variant: "error" }] }, true), "error");
+});
+
+test("consecutive tool runs wrap into one outer fold that auto-expands while unfinished", () => {
+  const renderGroups = loadAppCode(
+    "  const renderChatBubbleDot =",
+    "  const renderChatReasoning =",
+    "renderToolOnlyGroup",
+    {
+      React, chatBubbleStatusLabels, getToolBubbleStatus, chatGenerationState: "running",
+      formatProcessingDuration: () => "1s",
+      renderPiToolVisualization: () => null,
+      renderChatAttachments: () => null,
+      ListTree: () => null,
+      X: () => null, Wrench: () => null, FileCode2: () => null, ChevronDown: () => null,
+    },
+  );
+  const makeGroup = (status) => ({
+    completed: status !== "running", blocks: [], segments: [{ message: {} }],
+    visualizations: [{ name: status === "running" ? "read" : "write", status }],
+  });
+
+  const running = renderToStaticMarkup(renderGroups({
+    toolGroups: [makeGroup("done"), makeGroup("running")], completed: false,
+  }, "tools"));
+  assert.equal((running.match(/class="chat-tool-fold(?: |")/g) ?? []).length, 1);
+  assert.ok(/<details class="chat-tool-fold "[^>]*\bopen=""/.test(running));
+  assert.ok(running.includes("2 步"));
+
+  const finished = renderToStaticMarkup(renderGroups({
+    toolGroups: [makeGroup("done"), makeGroup("done")], completed: true,
+  }, "tools"));
+  assert.equal((finished.match(/<details[^>]*\bopen=""/g) ?? []).length, 0);
+  assert.ok(finished.includes("已处理 1s"));
+
+  const single = renderToStaticMarkup(renderGroups({
+    toolGroups: [makeGroup("done")], completed: true,
+  }, "tools"));
+  assert.equal((single.match(/chat-tool-fold/g) ?? []).length, 0);
 });
 
 test("completed and failed tools auto-collapse, including file mutations", () => {
@@ -205,6 +245,59 @@ test("completed and failed tools auto-collapse, including file mutations", () =>
   assert.equal(renderTool({ name: "write", status: "running" }, "running").props.open, true);
   assert.equal(renderTool({ name: "write", status: "done" }, "done").props.open, false);
   assert.equal(renderTool({ name: "write", status: "error" }, "error").props.open, false);
+});
+
+test("consecutive assistant tool messages group into one completed tool-only run", () => {
+  const getRenderedChatItems = loadAppCode(
+    "function getRenderedChatItems(",
+    "function stripHiddenImageAnnotations(",
+    "getRenderedChatItems",
+    {
+      getRenderedChatSegments: (messages) =>
+        messages.map((message, index) => ({
+          id: `${message.id}-0`,
+          message,
+          segment: message.content,
+          segmentIndex: 0,
+          showTime: index === 0,
+        })),
+      parseToolProgressContent: (content) =>
+        content.startsWith("Pi 写入文件：")
+          ? { variant: "success", title: "写入文件", badge: "完成", links: [], details: [] }
+          : null,
+      resolveToolProgressTiming: (entries) => ({
+        startedAt: "2026-01-01T00:00:00.000Z",
+        endedAt: "2026-01-01T00:00:05.000Z",
+        completed: entries.every((entry) => entry.completed),
+      }),
+      shouldHideEmptyAssistantBubble: (content, reasoningVisible, attachments, hasOtherOutput) =>
+        !reasoningVisible &&
+        !String(content).trim() &&
+        (attachments ?? 0) <= 0 &&
+        !hasOtherOutput,
+    },
+  );
+
+  const makeMessage = (id, content) => ({
+    id, role: "assistant", content, createdAt: "2026-01-01T00:00:00.000Z",
+  });
+  // Two tool runs separated by a hidden reasoning-only bubble still form one outer fold.
+  const items = getRenderedChatItems(
+    [
+      makeMessage("a", "Pi 写入文件：a.ts"),
+      makeMessage("reasoning", ""),
+      makeMessage("b", "Pi 写入文件：b.ts"),
+    ],
+    false,
+    false,
+  );
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].kind, "toolOnlyGroup");
+  assert.equal(items[0].toolGroups.length, 2);
+  assert.equal(items[0].completed, true);
+  assert.equal(items[0].startedAt, "2026-01-01T00:00:00.000Z");
+  assert.equal(items[0].endedAt, "2026-01-01T00:00:05.000Z");
 });
 
 test("clicking a status dot centers its bubble and pauses automatic output following", () => {

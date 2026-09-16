@@ -26,6 +26,7 @@ import {
   GripVertical,
   KeyRound,
   ListPlus,
+  ListTree,
   Languages,
   MessageSquare,
   MoreHorizontal,
@@ -23625,12 +23626,55 @@ export function App() {
     item: Extract<RenderedChatItem, { kind: "toolOnlyGroup" }>,
     messageId: string,
   ) => {
+    const renderedGroups = item.toolGroups.map((toolGroup, index) =>
+      renderToolRunGroup(toolGroup, `${messageId}-${index}`),
+    );
+    if (item.toolGroups.length < 2) {
+      return <div className="chat-tool-groups">{renderedGroups}</div>;
+    }
+
+    const hasError = item.toolGroups.some(
+      (toolGroup) =>
+        toolGroup.blocks.some((block) => block.variant === "error") ||
+        toolGroup.visualizations.some((visualization) => visualization.status === "error"),
+    );
+    const stepCount = item.toolGroups.reduce(
+      (total, toolGroup) =>
+        total +
+        (toolGroup.visualizations.length > 0
+          ? toolGroup.visualizations.length
+          : toolGroup.blocks.length),
+      0,
+    );
+    const autoOpen = !item.completed;
+    const statusLabel = item.completed
+      ? `${hasError ? "部分异常" : "已处理"} ${formatProcessingDuration(item.startedAt, item.endedAt)}`
+      : "处理中";
+    const description = item.completed
+      ? `连续 ${item.toolGroups.length} 次工具处理已结束`
+      : `连续 ${item.toolGroups.length} 次工具处理正在进行`;
+
     return (
-      <div className="chat-tool-groups">
-        {item.toolGroups.map((toolGroup, index) =>
-          renderToolRunGroup(toolGroup, `${messageId}-${index}`),
-        )}
-      </div>
+      <details
+        className={`chat-tool-fold ${hasError ? "error" : ""}`}
+        tabIndex={-1}
+        open={autoOpen || undefined}
+      >
+        <summary className="chat-tool-fold-header">
+          <span className="chat-tool-fold-icon">
+            {hasError ? <X size={16} /> : <ListTree size={16} />}
+          </span>
+          <span className="chat-tool-heading">
+            <strong>{statusLabel}</strong>
+            <span className="chat-tool-description">{description}</span>
+          </span>
+          <span className="chat-tool-fold-badge">
+            {stepCount} 步
+            <ChevronDown className="chat-tool-fold-chevron" size={16} />
+          </span>
+        </summary>
+        <div className="chat-tool-groups chat-tool-fold-body">{renderedGroups}</div>
+      </details>
     );
   };
 
