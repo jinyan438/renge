@@ -532,6 +532,23 @@
   align-items: start;
 }
 
+.character-greeting-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.character-greeting-generation-status,
+.character-translation-prompt-content > .field-error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.character-greeting-generation-status {
+  color: var(--color-text-muted);
+}
+
 .character-private-notice {
   display: flex;
   align-items: center;

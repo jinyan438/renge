@@ -162,6 +162,10 @@ import {
   saveCharacterCardsToDatabase,
   type CharacterCard,
 } from "./characterCardUtils";
+import {
+  buildCharacterGreetingGenerationPrompt,
+  normalizeGeneratedCharacterGreeting,
+} from "./characterGreetingUtils";
 import { sortCharacterCardsByImportTime } from "./characterCardOrderUtils";
 import {
   getCharacterRegexTemplateConfig,
@@ -12676,6 +12680,12 @@ export function App() {
     useState(true);
   const [characterTranslationPromptDialogOpen, setCharacterTranslationPromptDialogOpen] =
     useState(false);
+  const [characterGreetingGenerationDialog, setCharacterGreetingGenerationDialog] = useState<{
+    cardId: string;
+    requirements: string;
+    status: ProviderPullState;
+    message: string;
+  } | null>(null);
   const [characterTranslationPreview, setCharacterTranslationPreview] = useState<{
     cardId: string;
     items: Array<{
@@ -16831,6 +16841,114 @@ export function App() {
     chatPresetEnabled && activeChatPreset
       ? buildChatPresetRequestParameters(activeChatPreset)
       : null;
+  const openCharacterGreetingGenerationDialog = (card: CharacterCard) => {
+    setCharacterGreetingGenerationDialog({
+      cardId: card.id,
+      requirements: "",
+      status: "idle",
+      message: "",
+    });
+  };
+  const generateCharacterAlternateGreeting = async () => {
+    if (!characterGreetingGenerationDialog) return;
+    const requirements = characterGreetingGenerationDialog.requirements.trim();
+    if (!requirements) {
+      setCharacterGreetingGenerationDialog((current) =>
+        current ? { ...current, status: "error", message: "请先填写生成要求。" } : current,
+      );
+      return;
+    }
+    const card = characterCards.find(
+      (candidate) => candidate.id === characterGreetingGenerationDialog.cardId,
+    );
+    if (!card) {
+      setCharacterGreetingGenerationDialog((current) =>
+        current ? { ...current, status: "error", message: "当前角色卡已不存在。" } : current,
+      );
+      return;
+    }
+    const modelId = getEffectiveProviderModelId(chatProvider);
+    if (!chatProvider?.apiBaseUrl || !modelId) {
+      setCharacterGreetingGenerationDialog((current) =>
+        current
+          ? {
+              ...current,
+              status: "error",
+              message: "生成前请先在设置中配置可用的供应商和模型。",
+            }
+          : current,
+      );
+      return;
+    }
+
+    setCharacterGreetingGenerationDialog((current) =>
+      current ? { ...current, status: "loading", message: "正在生成备选问候..." } : current,
+    );
+    try {
+      const prompt = buildCharacterGreetingGenerationPrompt(card, requirements);
+      const messages = composeChatApiMessages(
+        prompt.systemPrompt,
+        [{ role: "user", content: prompt.userPrompt }],
+        undefined,
+        { name: card.name || "角色", description: card.description },
+      );
+      const response = await fetch("/api/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...buildProviderApiTarget(chatProvider),
+          request: {
+            model: modelId,
+            ...(activeChatPresetRequestParameters ?? {
+              temperature: 0.85,
+              max_tokens: 1800,
+            }),
+            messages,
+            stream: false,
+          },
+        }),
+      });
+      const payload = (await readChatCompletionPayload(response)) as {
+        error?: string | { message?: string };
+        choices?: Array<{ message?: ChatApiMessage }>;
+        output_text?: string;
+      };
+      if (!response.ok) {
+        const errorMessage =
+          typeof payload.error === "string" ? payload.error : payload.error?.message;
+        throw new Error(errorMessage || `生成请求失败：${response.status}`);
+      }
+      const greeting = normalizeGeneratedCharacterGreeting(
+        getChatApiMessageText(payload.choices?.[0]?.message).trim() ||
+          payload.output_text?.trim() ||
+          "",
+      );
+      if (!greeting) throw new Error("模型没有返回问候内容。");
+
+      setCharacterCards((current) =>
+        current.map((candidate) =>
+          candidate.id === card.id
+            ? {
+                ...candidate,
+                alternateGreetings: [...candidate.alternateGreetings, greeting],
+                updatedAt: new Date().toISOString(),
+              }
+            : candidate,
+        ),
+      );
+      setCharacterGreetingGenerationDialog(null);
+    } catch (error) {
+      setCharacterGreetingGenerationDialog((current) =>
+        current
+          ? {
+              ...current,
+              status: "error",
+              message: error instanceof Error ? error.message : "备选问候生成失败。",
+            }
+          : current,
+      );
+    }
+  };
   const prepareContextCompressedMessages = async ({
     messages,
     provider,
@@ -32206,9 +32324,19 @@ export function App() {
                         })}><Trash2 size={15} /></button>
                       </div>
                     ))}
-                    <button type="button" className="ghost-action" onClick={() => updateCharacterCard(editingCharacterCard.id, {
-                      alternateGreetings: [...editingCharacterCard.alternateGreetings, ""],
-                    })}><Plus size={15} />增加备选问候</button>
+                    <div className="character-greeting-actions">
+                      <button type="button" className="ghost-action" onClick={() => updateCharacterCard(editingCharacterCard.id, {
+                        alternateGreetings: [...editingCharacterCard.alternateGreetings, ""],
+                      })}><Plus size={15} />增加备选问候</button>
+                      <button
+                        type="button"
+                        className="small-action"
+                        onClick={() => openCharacterGreetingGenerationDialog(editingCharacterCard)}
+                      >
+                        <Sparkles size={15} />
+                        AI 生成备选问候
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -32508,6 +32636,106 @@ export function App() {
                   <button type="button" className="ghost-action" onClick={() => exportCharacterJson(editingCharacterCard)}><FileJson size={15} />导出 JSON</button>
                   <button type="button" className="ghost-action" onClick={() => void exportCharacterPng(editingCharacterCard)}><Download size={15} />导出 PNG</button>
                   <button type="button" className="small-action" onClick={() => setEditingCharacterCardId("")}><Check size={15} />完成</button>
+                </div>
+              </footer>
+            </section>
+          </div>
+        )}
+
+        {characterGreetingGenerationDialog && (
+          <div
+            className="modal-backdrop character-translation-prompt-backdrop character-greeting-generation-backdrop"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="character-greeting-generation-title"
+          >
+            <section className="character-translation-prompt-modal character-greeting-generation-modal">
+              <header className="character-editor-header">
+                <div>
+                  <h2 id="character-greeting-generation-title">AI 生成备选问候</h2>
+                  <span>
+                    参考角色卡基本信息、现有问候、内置世界书和当前启用的聊天预设。
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="icon-button flat"
+                  title="关闭"
+                  disabled={characterGreetingGenerationDialog.status === "loading"}
+                  onClick={() => setCharacterGreetingGenerationDialog(null)}
+                >
+                  <X size={18} />
+                </button>
+              </header>
+              <div className="character-translation-prompt-content">
+                <label className="field">
+                  <span>生成要求</span>
+                  <textarea
+                    rows={9}
+                    autoFocus
+                    value={characterGreetingGenerationDialog.requirements}
+                    placeholder="例如：雨夜重逢的场景，氛围克制，包含动作和对话，约 500 字……"
+                    disabled={characterGreetingGenerationDialog.status === "loading"}
+                    onChange={(event) =>
+                      setCharacterGreetingGenerationDialog((current) =>
+                        current
+                          ? {
+                              ...current,
+                              requirements: event.target.value,
+                              status: "idle",
+                              message: "",
+                            }
+                          : current,
+                      )
+                    }
+                  />
+                </label>
+                {characterGreetingGenerationDialog.message && (
+                  <p
+                    className={
+                      characterGreetingGenerationDialog.status === "error"
+                        ? "field-error"
+                        : "character-greeting-generation-status"
+                    }
+                    role={
+                      characterGreetingGenerationDialog.status === "error" ? "alert" : "status"
+                    }
+                  >
+                    {characterGreetingGenerationDialog.message}
+                  </p>
+                )}
+              </div>
+              <footer className="character-editor-footer">
+                <span>
+                  {chatPresetEnabled && activeChatPreset
+                    ? `当前预设：${activeChatPreset.name}`
+                    : "当前未启用聊天预设，将使用默认生成参数。"}
+                </span>
+                <div>
+                  <button
+                    type="button"
+                    className="ghost-action"
+                    disabled={characterGreetingGenerationDialog.status === "loading"}
+                    onClick={() => setCharacterGreetingGenerationDialog(null)}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    className="small-action"
+                    disabled={
+                      characterGreetingGenerationDialog.status === "loading" ||
+                      !characterGreetingGenerationDialog.requirements.trim()
+                    }
+                    onClick={() => void generateCharacterAlternateGreeting()}
+                  >
+                    {characterGreetingGenerationDialog.status === "loading" ? (
+                      <LoaderCircle className="chat-status-spinner" size={15} />
+                    ) : (
+                      <Sparkles size={15} />
+                    )}
+                    {characterGreetingGenerationDialog.status === "loading" ? "生成中" : "生成"}
+                  </button>
                 </div>
               </footer>
             </section>
