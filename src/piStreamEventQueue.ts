@@ -12,6 +12,11 @@ type ToolCallDeltaEvent = {
   argumentsText?: string;
 };
 
+type PiStreamRenderEvent<Event> =
+  | { kind: "pi"; event: Event }
+  | { kind: "content"; delta: string }
+  | { kind: "reasoning"; delta: string };
+
 export function splitLargePiToolCallDelta<Event extends ToolCallDeltaEvent>(
   event: Event,
   minimumChunkCharacters = 48,
@@ -94,5 +99,52 @@ export function createPiStreamEventQueue<Event>({
       while (activeDrain) await activeDrain;
       if (failed) throw failure;
     },
+  };
+}
+
+/**
+ * Serializes every render-affecting stream event in wire order.
+ *
+ * Pi tool events can pause for a paint while text frames keep arriving. If
+ * text is rendered outside this queue, that later text overtakes the tool and
+ * the tool bubble is appended after the final answer instead of at its source
+ * position.
+ */
+export function createPiStreamRenderQueue<Event extends ToolCallDeltaEvent>({
+  dispatchPiEvent,
+  dispatchContent,
+  dispatchReasoning,
+  waitForPaint,
+}: {
+  dispatchPiEvent: (event: Event) => void | Promise<void>;
+  dispatchContent: (delta: string) => void;
+  dispatchReasoning: (delta: string) => void;
+  waitForPaint: () => Promise<void>;
+}) {
+  const queue = createPiStreamEventQueue<PiStreamRenderEvent<Event>>({
+    dispatch(item) {
+      if (item.kind === "pi") return dispatchPiEvent(item.event);
+      if (item.kind === "content") dispatchContent(item.delta);
+      else dispatchReasoning(item.delta);
+    },
+    shouldPaintAfter: (item) =>
+      item.kind === "pi" && item.event.type === "tool_call_delta",
+    paintWeight: (item) =>
+      item.kind === "pi" ? item.event.delta?.length ?? 0 : 0,
+    maxPaintWeight: 48,
+    waitForPaint,
+  });
+
+  return {
+    enqueuePiEvent(event: Event) {
+      queue.enqueue({ kind: "pi", event });
+    },
+    enqueueContent(delta: string) {
+      if (delta) queue.enqueue({ kind: "content", delta });
+    },
+    enqueueReasoning(delta: string) {
+      if (delta) queue.enqueue({ kind: "reasoning", delta });
+    },
+    waitForIdle: queue.waitForIdle,
   };
 }

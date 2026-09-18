@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  createPiStreamRenderQueue,
   createPiStreamEventQueue,
   splitLargePiToolCallDelta,
 } from "../src/piStreamEventQueue.ts";
@@ -139,6 +140,33 @@ test("uses the same ordered timeline for sub-agent messages", async () => {
 
   assert.equal(rendered[1].sender, "sub-agent");
   assert.deepEqual(rendered.map((item) => item.kind), ["tool", "text"]);
+});
+
+test("does not let final text overtake a queued Pi tool event", async () => {
+  const { rendered, timeline } = createTimelineFixture();
+  const queue = createPiStreamRenderQueue({
+    async dispatchPiEvent(event) {
+      if (event.type !== "tool_call_start") return;
+      timeline.beforeTool();
+      appendTool(rendered, event.toolName);
+      await Promise.resolve();
+    },
+    dispatchContent: timeline.pushContent,
+    dispatchReasoning: timeline.pushReasoning,
+    async waitForPaint() {},
+  });
+
+  queue.enqueueContent("工具前正文");
+  queue.enqueuePiEvent({ type: "tool_call_start", toolName: "bash" });
+  queue.enqueueContent("最终正文");
+  await queue.waitForIdle();
+  await timeline.finish();
+  timeline.complete("工具前正文最终正文");
+
+  assert.deepEqual(
+    rendered.map((item) => item.kind === "tool" ? item.name : item.content),
+    ["工具前正文", "bash", "最终正文"],
+  );
 });
 
 test("serializes Pi events and paints coalesced tool deltas before execution", async () => {

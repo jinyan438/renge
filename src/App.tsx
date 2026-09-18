@@ -292,7 +292,7 @@ import {
   type ChatBubbleStatus,
 } from "./chatBubbleStatusUtils";
 import {
-  createPiStreamEventQueue,
+  createPiStreamRenderQueue,
   splitLargePiToolCallDelta,
 } from "./piStreamEventQueue";
 import {
@@ -11148,12 +11148,11 @@ async function readChatStream(
   let finishReason = "";
   const toolCallsByIndex = new Map<number, ChatToolCall>();
   const responsesReasoningItemsById = new Map<string, unknown>();
-  const piEventQueue = createPiStreamEventQueue<PiStreamEvent>({
-    dispatch: onPiEvent,
-    shouldPaintAfter: (event) => event.type === "tool_call_delta",
+  const renderQueue = createPiStreamRenderQueue<PiStreamEvent>({
+    dispatchPiEvent: onPiEvent,
+    dispatchContent: onDelta,
+    dispatchReasoning: onReasoningDelta,
     waitForPaint: waitForToolProgressPaint,
-    paintWeight: (event) => event.delta?.length ?? 0,
-    maxPaintWeight: 48,
   });
 
   const applyToolCallDeltas = (deltas: ChatToolCallDelta[]) => {
@@ -11214,7 +11213,7 @@ async function readChatStream(
 
     if (isObjectRecord(payload) && isObjectRecord(payload.pi)) {
       const event = payload.pi as unknown as PiStreamEvent;
-      splitLargePiToolCallDelta(event).forEach(piEventQueue.enqueue);
+      splitLargePiToolCallDelta(event).forEach(renderQueue.enqueuePiEvent);
       return true;
     }
 
@@ -11239,20 +11238,20 @@ async function readChatStream(
         );
         fullReasoning = mergedReasoning.text;
         reasoningMessageMode = mergedReasoning.messageMode;
-        if (mergedReasoning.delta) onReasoningDelta(mergedReasoning.delta);
+        if (mergedReasoning.delta) renderQueue.enqueueReasoning(mergedReasoning.delta);
       }
       if (!streamContent.content) return true;
 
       if (streamContent.mode === "delta") {
         fullContent += streamContent.content;
-        onDelta(streamContent.content);
+        renderQueue.enqueueContent(streamContent.content);
         return true;
       }
 
       if (streamContent.content.startsWith(fullContent)) {
         const delta = streamContent.content.slice(fullContent.length);
         fullContent = streamContent.content;
-        if (delta) onDelta(delta);
+        if (delta) renderQueue.enqueueContent(delta);
       } else if (!fullContent.startsWith(streamContent.content)) {
         fullContent = streamContent.content;
       }
@@ -11288,7 +11287,7 @@ async function readChatStream(
 
   buffer += decoder.decode();
   splitSseFrames(buffer, true).frames.forEach(applySseFrame);
-  await piEventQueue.waitForIdle();
+  await renderQueue.waitForIdle();
 
   return {
     content: fullContent,
