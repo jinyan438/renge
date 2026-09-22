@@ -210,6 +210,25 @@ test("trailing assistant history stays in context for Pi continuation requests",
   assert.equal(result.history[1].role, "assistant");
 });
 
+test("Pi image conversion always supplies a valid MIME type", () => {
+  const result = convertOpenAiMessagesToPi([
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "请描述图片" },
+        { type: "image_url", image_url: { url: "data:undefined;base64, AA==" } },
+        { type: "input_image", image_url: "data:image/jpeg;base64,/9j/" },
+      ],
+    },
+  ]);
+
+  assert.deepEqual(result.promptMessage.content, [
+    { type: "text", text: "请描述图片" },
+    { type: "image", mimeType: "image/png", data: "AA==" },
+    { type: "image", mimeType: "image/jpeg", data: "/9j/" },
+  ]);
+});
+
 test("provider normalization selects the matching Pi OpenAI adapter", () => {
   assert.deepEqual(
     normalizePiProviderConfig({

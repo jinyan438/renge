@@ -133,6 +133,23 @@ function messageText(content) {
     .join("\n");
 }
 
+const IMAGE_MIME_TYPE_PATTERN = /^image\/[a-z0-9][a-z0-9.+-]*$/i;
+
+function normalizeImageMimeType(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return IMAGE_MIME_TYPE_PATTERN.test(normalized) ? normalized : "image/png";
+}
+
+function parseImageDataUrl(value) {
+  const raw = String(value ?? "").trim();
+  const match = raw.match(/^data:([^;,]*)(?:;[^,]*)?;base64,([\s\S]*)$/i);
+  if (!match) return null;
+  return {
+    mimeType: normalizeImageMimeType(match[1]),
+    data: match[2].replace(/\s+/g, ""),
+  };
+}
+
 function userContent(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -142,11 +159,14 @@ function userContent(content) {
       parts.push({ type: "text", text: part.text });
       continue;
     }
-    if (part?.type !== "image_url") continue;
-    const url = String(part.image_url?.url ?? "");
-    const match = url.match(/^data:([^;,]+);base64,([\s\S]+)$/i);
-    if (match) {
-      parts.push({ type: "image", mimeType: match[1], data: match[2] });
+    if (part?.type !== "image_url" && part?.type !== "input_image") continue;
+    const imageValue = part.image_url ?? part.image;
+    const url = typeof imageValue === "string"
+      ? imageValue
+      : String(imageValue?.url ?? "");
+    const image = parseImageDataUrl(url);
+    if (image) {
+      parts.push({ type: "image", mimeType: image.mimeType, data: image.data });
     } else if (url) {
       parts.push({ type: "text", text: `[Image: ${url}]` });
     }

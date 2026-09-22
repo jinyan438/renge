@@ -182,10 +182,11 @@ function toolContent(result, allowImageInputs = true) {
       }
       if (allowImageInputs && item?.type === "image" && typeof item.data === "string") {
         const dataUrl = item.data.match(/^data:([^;,]+);base64,([\s\S]+)$/i);
+        const mimeType = dataUrl?.[1] ?? item.mimeType ?? item.mime_type;
         return [{
           type: "image",
-          data: dataUrl?.[2] ?? item.data,
-          mimeType: dataUrl?.[1] ?? String(item.mimeType ?? item.mime_type ?? "image/png"),
+          data: (dataUrl?.[2] ?? item.data).replace(/\s+/g, ""),
+          mimeType: normalizeImageMimeType(mimeType),
         }];
       }
       return [];
@@ -193,6 +194,13 @@ function toolContent(result, allowImageInputs = true) {
     if (blocks.length > 0) return blocks;
   }
   return [{ type: "text", text: serializePiToolResult(result) }];
+}
+
+const IMAGE_MIME_TYPE_PATTERN = /^image\/[a-z0-9][a-z0-9.+-]*$/i;
+
+function normalizeImageMimeType(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return IMAGE_MIME_TYPE_PATTERN.test(normalized) ? normalized : "image/png";
 }
 
 function safeSchema(parameters) {
@@ -212,12 +220,14 @@ function resolvePrompt(promptMessage) {
   for (const part of promptMessage.content ?? []) {
     if (part.type === "text") text.push(part.text);
     if (part.type === "image") {
+      const data = typeof part.data === "string" ? part.data.trim() : "";
+      if (!data) continue;
       images.push({
         type: "image",
         source: {
           type: "base64",
-          mediaType: part.mimeType,
-          data: part.data,
+          mediaType: normalizeImageMimeType(part.mimeType),
+          data: data.replace(/\s+/g, ""),
         },
       });
     }

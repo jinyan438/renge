@@ -2577,7 +2577,14 @@ function normalizeChatAttachment(rawValue: unknown): ChatAttachment | null {
         : "未命名文件",
     type: typeof rawAttachment.type === "string" ? rawAttachment.type : "",
     size: Number.isFinite(size) && size >= 0 ? size : 0,
-    ...(typeof rawAttachment.dataUrl === "string" ? { dataUrl: rawAttachment.dataUrl } : {}),
+    ...(typeof rawAttachment.dataUrl === "string"
+      ? {
+          dataUrl: normalizeImageDataUrl(
+            rawAttachment.dataUrl,
+            typeof rawAttachment.type === "string" ? rawAttachment.type : "image/png",
+          ),
+        }
+      : {}),
     ...(typeof rawAttachment.downloadUrl === "string"
       ? { downloadUrl: rawAttachment.downloadUrl }
       : {}),
@@ -8130,6 +8137,24 @@ function getDataUrlBase64(dataUrl: string) {
   return commaIndex >= 0 ? dataUrl.slice(commaIndex + 1) : dataUrl;
 }
 
+const IMAGE_MIME_TYPE_PATTERN = /^image\/[a-z0-9][a-z0-9.+-]*$/i;
+
+function normalizeImageDataUrl(value: unknown, fallbackMimeType = "image/png") {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw || !raw.startsWith("data:")) return raw;
+  const match = raw.match(/^data:([^;,]*)(?:;[^,]*)?;base64,([\s\S]*)$/i);
+  if (!match) return raw;
+  const candidateMimeType = String(match[1] ?? "").trim().toLowerCase();
+  const candidateFallback = String(fallbackMimeType ?? "").trim().toLowerCase();
+  const mimeType = IMAGE_MIME_TYPE_PATTERN.test(candidateMimeType)
+    ? candidateMimeType
+    : IMAGE_MIME_TYPE_PATTERN.test(candidateFallback)
+      ? candidateFallback
+      : "image/png";
+  const base64 = match[2].replace(/\s+/g, "");
+  return `data:${mimeType};base64,${base64}`;
+}
+
 function canProviderReceiveImageUrl(
   provider: ModelProviderChannel | null | undefined,
   modelId: string,
@@ -8392,9 +8417,13 @@ function formatChatMessageForApi(
     .join("\n\n");
   if (!options.sendImageAttachmentsToProvider) return textWithAttachments;
 
-  const imageAttachments = attachments.filter((attachment) =>
-    attachment.type.startsWith("image/") && attachment.dataUrl,
-  );
+  const imageAttachments = attachments.filter((attachment) => {
+    const dataUrl = attachment.dataUrl?.trim() ?? "";
+    return Boolean(
+      dataUrl &&
+        (attachment.type.toLowerCase().startsWith("image/") || /^data:image\//i.test(dataUrl)),
+    );
+  });
 
   if (imageAttachments.length === 0) return textWithAttachments;
 
@@ -8402,7 +8431,9 @@ function formatChatMessageForApi(
     { type: "text" as const, text: textWithAttachments || "请分析随消息上传的文件。" },
     ...imageAttachments.map((attachment) => ({
       type: "image_url" as const,
-      image_url: { url: attachment.dataUrl ?? "" },
+      image_url: {
+        url: normalizeImageDataUrl(attachment.dataUrl, attachment.type) || attachment.dataUrl || "",
+      },
     })),
   ];
 }
