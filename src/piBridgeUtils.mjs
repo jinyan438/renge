@@ -142,11 +142,13 @@ function normalizeImageMimeType(value) {
 
 function parseImageDataUrl(value) {
   const raw = String(value ?? "").trim();
-  const match = raw.match(/^data:([^;,]*)(?:;[^,]*)?;base64,([\s\S]*)$/i);
+  const match = raw.match(/^data:([^;,]*)(?:;[^,]*)?;base64(?:,([\s\S]*))?$/i);
   if (!match) return null;
+  const data = String(match[2] ?? "").replace(/\s+/g, "");
+  if (!data) return null;
   return {
     mimeType: normalizeImageMimeType(match[1]),
-    data: match[2].replace(/\s+/g, ""),
+    data,
   };
 }
 

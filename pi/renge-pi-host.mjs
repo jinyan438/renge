@@ -183,9 +183,11 @@ function toolContent(result, allowImageInputs = true) {
       if (allowImageInputs && item?.type === "image" && typeof item.data === "string") {
         const dataUrl = item.data.match(/^data:([^;,]+);base64,([\s\S]+)$/i);
         const mimeType = dataUrl?.[1] ?? item.mimeType ?? item.mime_type;
+        const data = (dataUrl?.[2] ?? item.data).replace(/\s+/g, "");
+        if (!data) return [];
         return [{
           type: "image",
-          data: (dataUrl?.[2] ?? item.data).replace(/\s+/g, ""),
+          data,
           mimeType: normalizeImageMimeType(mimeType),
         }];
       }

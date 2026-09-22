@@ -1963,6 +1963,57 @@ function getCompatibleApiEndpoint(apiBaseUrl, endpoint) {
   return `${String(apiBaseUrl).replace(/\/+$/, "")}/${suffix}`;
 }
 
+const IMAGE_MIME_TYPE_PATTERN = /^image\/[a-z0-9][a-z0-9.+-]*$/i;
+
+function normalizeOutboundImageUrl(value) {
+  if (typeof value !== "string") return "";
+  const raw = value.trim();
+  if (!raw) return "";
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (!/^data:/i.test(raw)) return "";
+  const match = raw.match(/^data:([^;,]*)(?:;[^,]*)?;base64(?:,([\s\S]*))?$/i);
+  const data = String(match?.[2] ?? "").replace(/\s+/g, "");
+  if (!data) return "";
+  const candidateMime = String(match?.[1] ?? "").trim().toLowerCase();
+  const mime = IMAGE_MIME_TYPE_PATTERN.test(candidateMime) ? candidateMime : "image/png";
+  return `data:${mime};base64,${data}`;
+}
+
+function sanitizeOutboundMessageContent(content) {
+  if (!Array.isArray(content)) return content;
+  let removedImage = false;
+  const next = content.flatMap((part) => {
+    if (!isObjectRecord(part)) return [];
+    if (part.type !== "image_url" && part.type !== "input_image") return [part];
+    const rawImageUrl = isObjectRecord(part.image_url) ? part.image_url.url : part.image_url;
+    const imageUrl = normalizeOutboundImageUrl(rawImageUrl);
+    if (!imageUrl) {
+      removedImage = true;
+      return [];
+    }
+    return [{
+      ...part,
+      ...(part.type === "image_url"
+        ? { image_url: isObjectRecord(part.image_url) ? { ...part.image_url, url: imageUrl } : { url: imageUrl } }
+        : { image_url: imageUrl }),
+    }];
+  });
+  if (next.length > 0 || !removedImage) return next;
+  return [{ type: "text", text: "图片内容无效，未发送。" }];
+}
+
+function sanitizeOutboundRequestBody(body) {
+  if (!isObjectRecord(body) || !Array.isArray(body.messages)) return body;
+  return {
+    ...body,
+    messages: body.messages.map((message) => {
+      if (!isObjectRecord(message)) return message;
+      const content = sanitizeOutboundMessageContent(message.content);
+      return content === message.content ? message : { ...message, content };
+    }),
+  };
+}
+
 function modelSupportsSmallerImageSize(model) {
   const modelId = String(model ?? "").toLowerCase();
   return (
@@ -2017,6 +2068,7 @@ function shouldRetryImageGenerationWithSmallerSize(upstream, imageRequestBody, r
 }
 
 async function proxyJson({ url, apiKey, method = "GET", body, timeoutMs, headers = {} }) {
+  const outboundBody = sanitizeOutboundRequestBody(body);
   const ac = new AbortController();
   const timer = timeoutMs ? setTimeout(() => ac.abort(new Error(`upstream timeout after ${timeoutMs}ms`)), timeoutMs) : null;
   let upstreamResponse;
@@ -2025,11 +2077,11 @@ async function proxyJson({ url, apiKey, method = "GET", body, timeoutMs, headers
       method,
       headers: {
         Accept: "application/json",
-        ...(body ? { "Content-Type": "application/json" } : {}),
+         ...(outboundBody ? { "Content-Type": "application/json" } : {}),
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
         ...headers,
       },
-      body: body ? JSON.stringify(body) : undefined,
+       body: outboundBody ? JSON.stringify(outboundBody) : undefined,
       signal: ac.signal,
       dispatcher: getUpstreamDispatcher(),
     });
@@ -2396,6 +2448,7 @@ export function normalizeUpstreamErrorMessage(text, statusText = "") {
 }
 
 async function proxyStream({ url, apiKey, body, response, headers = {} }) {
+  const outboundBody = sanitizeOutboundRequestBody(body);
   const ac = new AbortController();
   const abortUpstream = () => {
     if (!ac.signal.aborted) ac.abort(new Error("client aborted"));
@@ -2412,7 +2465,7 @@ async function proxyStream({ url, apiKey, body, response, headers = {} }) {
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
         ...headers,
       },
-      body: JSON.stringify(body),
+       body: JSON.stringify(outboundBody),
       signal: ac.signal,
       dispatcher: getUpstreamDispatcher(),
     });

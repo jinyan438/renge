@@ -217,6 +217,7 @@ test("Pi image conversion always supplies a valid MIME type", () => {
       content: [
         { type: "text", text: "请描述图片" },
         { type: "image_url", image_url: { url: "data:undefined;base64, AA==" } },
+        { type: "image_url", image_url: { url: "data:undefined;base64" } },
         { type: "input_image", image_url: "data:image/jpeg;base64,/9j/" },
       ],
     },
@@ -225,6 +226,7 @@ test("Pi image conversion always supplies a valid MIME type", () => {
   assert.deepEqual(result.promptMessage.content, [
     { type: "text", text: "请描述图片" },
     { type: "image", mimeType: "image/png", data: "AA==" },
+    { type: "text", text: "[Image: data:undefined;base64]" },
     { type: "image", mimeType: "image/jpeg", data: "/9j/" },
   ]);
 });
