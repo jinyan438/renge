@@ -909,6 +909,7 @@ type ChatSession = {
   memoryPersonaIds: string[];
   roleplayCharacterCardId?: string;
   roleplayGreetingIndex?: number;
+  characterWorldBookOverrides?: Record<string, WorldBook | null>;
   scriptVariables: Record<string, unknown>;
   tavernMetadata: Record<string, unknown>;
   statusBar: StatusBarState;
@@ -2960,6 +2961,17 @@ function normalizeChatSession(rawValue: unknown): ChatSession {
     typeof rawSession.workspaceKey === "string" && rawSession.workspaceKey
       ? rawSession.workspaceKey
       : DEFAULT_WORKSPACE_KEY;
+  const characterWorldBookOverrides: Record<string, WorldBook | null> = {};
+  if (isObjectRecord(rawSession.characterWorldBookOverrides)) {
+    Object.entries(rawSession.characterWorldBookOverrides).forEach(([cardId, rawBook]) => {
+      if (!cardId.trim()) return;
+      if (rawBook === null) {
+        characterWorldBookOverrides[cardId] = null;
+      } else if (isObjectRecord(rawBook)) {
+        characterWorldBookOverrides[cardId] = normalizeWorldBook(rawBook);
+      }
+    });
+  }
 
   return {
     id:
@@ -2999,6 +3011,9 @@ function normalizeChatSession(rawValue: unknown): ChatSession {
             Math.floor(Number(rawSession.roleplayGreetingIndex) || 0),
           ),
         }
+      : {}),
+    ...(Object.keys(characterWorldBookOverrides).length > 0
+      ? { characterWorldBookOverrides }
       : {}),
     createdAt:
       typeof rawSession.createdAt === "string"
@@ -9900,6 +9915,18 @@ function getMcpImageMimeType(item: Record<string, unknown>) {
     .find((value) => IMAGE_MIME_TYPE_PATTERN.test(value)) ?? "image/png";
 }
 
+function resolveSessionCharacterWorldBook(
+  session: ChatSession | undefined,
+  card: CharacterCard,
+  availableWorldBooks: WorldBook[],
+) {
+  const overrides = session?.characterWorldBookOverrides;
+  if (overrides && Object.prototype.hasOwnProperty.call(overrides, card.id)) {
+    return overrides[card.id] ?? null;
+  }
+  return resolveCharacterWorldBook(card, availableWorldBooks);
+}
+
 function getMcpImageDataUrl(item: Record<string, unknown>) {
   const data = typeof item.data === "string" ? item.data.trim() : "";
   if (/^data:/i.test(data)) return normalizeImageDataUrl(data, getMcpImageMimeType(item));
@@ -15471,17 +15498,19 @@ export function App() {
     [activeWorldBookIds, worldBooks],
   );
   const characterWorldBookSources = useMemo(
-    () =>
-      (scopedRoleplayCard ? [scopedRoleplayCard] : [])
+    () => {
+      const session = chatSessions.find((candidate) => candidate.id === activeChatSessionId);
+      return (scopedRoleplayCard ? [scopedRoleplayCard] : [])
         .map((card) => ({
           card,
-          worldBook: resolveCharacterWorldBook(card, worldBooks),
+          worldBook: resolveSessionCharacterWorldBook(session, card, worldBooks),
         }))
         .filter(
           (source): source is { card: CharacterCard; worldBook: WorldBook } =>
             Boolean(source.worldBook),
-        ),
-    [scopedRoleplayCard, worldBooks],
+        );
+    },
+    [activeChatSessionId, chatSessions, scopedRoleplayCard, worldBooks],
   );
 
   useEffect(() => {
@@ -17555,6 +17584,17 @@ export function App() {
     () => scopedRoleplayCard,
     [scopedRoleplayCard],
   );
+  const activeSessionCharacterWorldBook = useMemo(
+    () =>
+      activeSessionRoleplayCard
+        ? resolveSessionCharacterWorldBook(
+            activeChatSession,
+            activeSessionRoleplayCard,
+            worldBooks,
+          )
+        : null,
+    [activeChatSession, activeSessionRoleplayCard, worldBooks],
+  );
   const chatVisualStyle = useMemo(
     () =>
       ({
@@ -18006,7 +18046,7 @@ export function App() {
           )
         : null;
       const characterBook = card
-        ? resolveCharacterWorldBook(card, worldBooksRef.current)
+        ? resolveSessionCharacterWorldBook(session, card, worldBooksRef.current)
         : null;
       return characterBook
         ? [
@@ -18060,13 +18100,37 @@ export function App() {
       const activeCharacterIndex = card
         ? characterCardsRef.current.findIndex((candidate) => candidate.id === card.id)
         : -1;
+      const hasSessionCharacterBookOverride = Boolean(
+        card && session?.characterWorldBookOverrides &&
+          Object.prototype.hasOwnProperty.call(
+            session.characterWorldBookOverrides,
+            card.id,
+          ),
+      );
+      const sessionCharacterBook = card && hasSessionCharacterBookOverride
+        ? resolveSessionCharacterWorldBook(session, card, worldBooksRef.current)
+        : null;
       const characters = characterCardsRef.current.map((candidate) => ({
         name: candidate.name,
         description: candidate.description,
         personality: candidate.personality,
         scenario: candidate.scenario,
         avatar: candidate.avatarDataUrl,
-        data: candidate,
+        data: hasSessionCharacterBookOverride && candidate.id === card?.id
+          ? {
+              ...candidate,
+              characterBook: sessionCharacterBook
+                ? {
+                    ...sessionCharacterBook,
+                    entries: sessionCharacterBook.entries.map((entry) => ({
+                      ...entry,
+                      keys: [...entry.keys],
+                      secondaryKeys: [...entry.secondaryKeys],
+                    })),
+                  }
+                : null,
+            }
+          : candidate,
       }));
       const chatMetadata = session?.tavernMetadata ?? {};
       if (session && typeof chatMetadata.file_name !== "string") {
@@ -18661,8 +18725,11 @@ export function App() {
 
   const getPromptTemplateWorldBooks = (character: CharacterCard | null) => {
     const globalBooks = worldBooksRef.current;
+    const session = chatSessionsRef.current.find(
+      (candidate) => candidate.id === activeChatSessionIdRef.current,
+    );
     const characterBook = character
-      ? resolveCharacterWorldBook(character, worldBooksRef.current)
+      ? resolveSessionCharacterWorldBook(session, character, globalBooks)
       : null;
     if (!characterBook) return globalBooks;
     return [
@@ -18680,8 +18747,11 @@ export function App() {
     modelId: string,
   ): PromptTemplateRuntimeOptions | null => {
     if (!promptTemplateEnabled || !promptTemplateExtension) return null;
+    const session = chatSessionsRef.current.find(
+      (candidate) => candidate.id === activeChatSessionIdRef.current,
+    );
     const characterBook = character
-      ? resolveCharacterWorldBook(character, worldBooksRef.current)
+      ? resolveSessionCharacterWorldBook(session, character, worldBooksRef.current)
       : null;
     return {
       settings: promptTemplateExtension.settings,
@@ -18996,6 +19066,30 @@ export function App() {
           )
         : undefined;
     };
+    const getRuntimeRoleplaySession = () =>
+      chatSessionsRef.current.find(
+        (candidate) => candidate.id === activeChatSessionIdRef.current,
+      );
+    const updateRuntimeCharacterWorldBookOverride = (worldBook: WorldBook | null) => {
+      const session = getRuntimeRoleplaySession();
+      const card = getRuntimeRoleplayCard();
+      if (!session || !card) return;
+      const overrides = {
+        ...(session.characterWorldBookOverrides ?? {}),
+        [card.id]: worldBook,
+      };
+      updateSessions((sessions) =>
+        sessions.map((candidate) =>
+          candidate.id === session.id
+            ? {
+                ...candidate,
+                characterWorldBookOverrides: overrides,
+                updatedAt: new Date().toISOString(),
+              }
+            : candidate,
+        ),
+      );
+    };
 
     runtime = new TavernScriptRuntime(activeTavernScripts, {
       getMessages: () => chatMessagesRef.current as TavernRuntimeMessage[],
@@ -19203,11 +19297,20 @@ export function App() {
         );
       },
       getCharacter: () => {
+        const session = getRuntimeRoleplaySession();
         const card = getRuntimeRoleplayCard();
         if (!card) return null;
-        const characterWorldBook = resolveCharacterWorldBook(
+        const characterWorldBook = resolveSessionCharacterWorldBook(
+          session,
           card,
           worldBooksRef.current,
+        );
+        const hasSessionWorldBookOverride = Boolean(
+          session?.characterWorldBookOverrides &&
+            Object.prototype.hasOwnProperty.call(
+              session.characterWorldBookOverrides,
+              card.id,
+            ),
         );
         return {
           id: card.id,
@@ -19222,7 +19325,9 @@ export function App() {
           worldBook: characterWorldBook
             ? toTavernRuntimeWorldBook(
                 characterWorldBook,
-                card.characterBook?.id === characterWorldBook.id ? "character" : "global",
+                hasSessionWorldBookOverride || card.characterBook?.id === characterWorldBook.id
+                  ? "character"
+                  : "global",
                 true,
               )
             : null,
@@ -19249,19 +19354,7 @@ export function App() {
           entries: worldBook.entries,
         });
         if (worldBook.scope === "character") {
-          const activeCard = getRuntimeRoleplayCard();
-          if (!activeCard) return;
-          updateCards((cards) =>
-            cards.map((card) =>
-              card.id === activeCard.id
-                ? {
-                    ...card,
-                    characterBook: normalized,
-                    updatedAt: new Date().toISOString(),
-                  }
-                : card,
-            ),
-          );
+          updateRuntimeCharacterWorldBookOverride(normalized);
           return;
         }
 
@@ -19283,22 +19376,26 @@ export function App() {
         setActiveWorldBookIds(nextActiveIds);
       },
       deleteWorldBook: (identifier) => {
+        const session = getRuntimeRoleplaySession();
         const card = getRuntimeRoleplayCard();
-        if (
-          card?.characterBook &&
-          (card.characterBook.id === identifier || card.characterBook.name === identifier)
-        ) {
-          updateCards((cards) =>
-            cards.map((candidate) =>
-              candidate.id === card.id
-                ? {
-                    ...candidate,
-                    characterBook: null,
-                    updatedAt: new Date().toISOString(),
-                  }
-                : candidate,
+        const hasSessionOverride = Boolean(
+          card && session?.characterWorldBookOverrides &&
+            Object.prototype.hasOwnProperty.call(
+              session.characterWorldBookOverrides,
+              card.id,
             ),
-          );
+        );
+        const sessionCharacterBook = card
+          ? resolveSessionCharacterWorldBook(session, card, worldBooksRef.current)
+          : null;
+        const embeddedBook = hasSessionOverride
+          ? sessionCharacterBook
+          : card?.characterBook ?? null;
+        if (
+          embeddedBook &&
+          (embeddedBook.id === identifier || embeddedBook.name === identifier)
+        ) {
+          updateRuntimeCharacterWorldBookOverride(null);
           return;
         }
         const removedIds = new Set(
@@ -23258,7 +23355,7 @@ export function App() {
       },
     );
     const activeCharacterWorldBook = activeSessionRoleplayCard
-      ? resolveCharacterWorldBook(activeSessionRoleplayCard, worldBooks)
+      ? resolveSessionCharacterWorldBook(activeChatSession, activeSessionRoleplayCard, worldBooks)
       : null;
     const characterWorldBookSystemPrompt =
       chatMode === "roleplay" &&
@@ -24397,7 +24494,7 @@ export function App() {
       },
     );
     const characterWorldBook = roleplayCard
-      ? resolveCharacterWorldBook(roleplayCard, worldBooks)
+      ? resolveSessionCharacterWorldBook(session, roleplayCard, worldBooks)
       : null;
     const characterWorldBookContext =
       roleplayCard &&
@@ -25276,7 +25373,11 @@ export function App() {
         },
       );
       const responderCharacterWorldBook = responderCharacterCard
-        ? resolveCharacterWorldBook(responderCharacterCard, worldBooks)
+        ? resolveSessionCharacterWorldBook(
+            activeChatSession,
+            responderCharacterCard,
+            worldBooks,
+          )
         : null;
       const characterWorldBookSystemPrompt =
         responderCharacterCard &&
@@ -28023,7 +28124,7 @@ export function App() {
         },
       );
       const activeCharacterWorldBook = responseCharacter
-        ? resolveCharacterWorldBook(responseCharacter, worldBooks)
+        ? resolveSessionCharacterWorldBook(activeChatSession, responseCharacter, worldBooks)
         : null;
       const characterWorldBookSystemPrompt =
         responseCharacter &&
@@ -28586,7 +28687,11 @@ export function App() {
         },
       );
       const activeCharacterWorldBook = activeSessionRoleplayCard
-        ? resolveCharacterWorldBook(activeSessionRoleplayCard, worldBooks)
+        ? resolveSessionCharacterWorldBook(
+            activeChatSession,
+            activeSessionRoleplayCard,
+            worldBooks,
+          )
         : null;
       const characterWorldBookSystemPrompt =
         chatMode === "roleplay" &&
@@ -29795,7 +29900,7 @@ export function App() {
         content: message.content,
       }));
       const characterWorldBook = contextCard
-        ? resolveCharacterWorldBook(contextCard, worldBooks)
+        ? resolveSessionCharacterWorldBook(activeChatSession, contextCard, worldBooks)
         : null;
       const sharedMessages: WechatSharedContextMessage[] = contextMessages.map((message) => {
         const metadata = getWechatMessageMetadata(message);
@@ -37328,7 +37433,7 @@ export function App() {
                 <div>
                   <strong>{activeSessionRoleplayCard.name}</strong>
                   <span>
-                    私有世界书 {activeSessionRoleplayCard.characterBook?.entries.length ?? 0} 条 · 私有正则 {activeSessionRoleplayCard.regexScripts.length} 条 · 内置脚本 {activeSessionRoleplayCard.tavernScripts.length} 个
+                    当前世界书 {activeSessionCharacterWorldBook?.entries.length ?? 0} 条 · 私有正则 {activeSessionRoleplayCard.regexScripts.length} 条 · 内置脚本 {activeSessionRoleplayCard.tavernScripts.length} 个
                   </span>
                 </div>
               </div>

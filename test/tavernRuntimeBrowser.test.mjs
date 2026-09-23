@@ -24,6 +24,10 @@ try {
       id: "fixture-chat", title: "Persistence fixture", mode: "roleplay", roleplayCharacterCardId: "fixture-card",
       messages: [{ id: "greeting", role: "assistant", content: "The story begins.", createdAt: now }],
       createdAt: now, updatedAt: now,
+    }, {
+      id: "other-fixture-chat", title: "Other conversation", mode: "roleplay", roleplayCharacterCardId: "fixture-card",
+      messages: [{ id: "other-greeting", role: "assistant", content: "A separate story begins.", createdAt: now }],
+      createdAt: now, updatedAt: now,
     }],
     characterCards: [{
       id: "fixture-card", name: "Fixture", firstMessage: "The story begins.",
@@ -92,6 +96,13 @@ try {
   assert.equal(persisted.tavernExtensionSettings.persistenceFixture.sequence, 2);
   assert.equal(persisted.chatSessions[0].tavernMetadata.persistenceFixture.scope, "chat");
   assert.equal(persisted.chatSessions[0].messages[0].extra.persistenceFixture.rows[0][1], "yes");
+  assert.equal(persisted.chatSessions[0].characterWorldBookOverrides["fixture-card"].entries[1].comment, "renamed again");
+  assert.equal("characterWorldBookOverrides" in persisted.chatSessions[1], false, "lorebook edits must stay in the current conversation");
+  assert.deepEqual(
+    persisted.characterCards[0].characterBook.entries.map(entry => [entry.comment, entry.content]),
+    [["untouched", "Keep this entry"], ["database", "Database content"]],
+    "lorebook edits must leave the character card unchanged",
+  );
   assert.equal(persisted.tavernScripts[0].data.value, "script data");
   await context.close();
   context = null;
@@ -101,6 +112,10 @@ try {
   context = await chromium.launchPersistentContext(profile, launchOptions);
   page = await context.newPage();
   await waitForRuntime(page);
+  assert.equal(await page.evaluate(async () => {
+    const entries = await window.TavernHelper.getLorebookEntries("Fixture World");
+    return entries[1]?.comment;
+  }), "renamed again", "the current conversation must restore its own lorebook override");
   assert.deepEqual(await page.evaluate(async () => {
     const ctx = window.SillyTavern.getContext();
     const cache = await new Promise((resolve, reject) => {
