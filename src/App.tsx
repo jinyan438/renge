@@ -14200,6 +14200,7 @@ export function App() {
   const finishChatGeneration = async (
     controller: AbortController,
     messageId?: string,
+    options: { emitTavernLifecycleEvents?: boolean } = {},
   ) => {
     if (activeChatAbortControllerRef.current !== controller) return;
     commitChatMessages((current) => current.map((message) => {
@@ -14223,10 +14224,12 @@ export function App() {
     const messageIndex = messageId
       ? chatMessagesRef.current.findIndex((message) => message.id === messageId)
       : chatMessagesRef.current.length - 1;
-    if (controller.signal.aborted) {
-      await emitTavernEvent(TAVERN_EVENTS.GENERATION_STOPPED);
+    if (options.emitTavernLifecycleEvents !== false) {
+      if (controller.signal.aborted) {
+        await emitTavernEvent(TAVERN_EVENTS.GENERATION_STOPPED);
+      }
+      await emitTavernEvent(TAVERN_EVENTS.GENERATION_ENDED, messageIndex);
     }
-    await emitTavernEvent(TAVERN_EVENTS.GENERATION_ENDED, messageIndex);
   };
 
   const stopChatGeneration = () => {
@@ -27982,18 +27985,6 @@ export function App() {
 
     emitHtmlPreviewGenerationEvent("generation_started", [], sourceFrame);
     try {
-      await emitTavernEvent(
-        TAVERN_EVENTS.GENERATION_STARTED,
-        normalizedConfig.quiet === true ? "quiet" : "generate",
-        {
-          prompt: userInput,
-          user_input: userInput,
-          automatic_trigger: true,
-          quiet_prompt: normalizedConfig.quiet === true ? userInput : "",
-          should_stream: shouldStream,
-        },
-        false,
-      );
       setChatStatus({ status: "loading", message: "独立前端正在调用当前会话 API..." });
       const selectedSystemPrompt = requestSystemPrompts
         .map((promptProfile) => promptProfile.content.trim())
@@ -28363,7 +28354,12 @@ export function App() {
       throw error;
     } finally {
       emitHtmlPreviewGenerationEvent("generation_ended", [generatedText], sourceFrame);
-      await finishChatGeneration(abortController);
+      // Raw extension requests have their own generation events. Emitting the
+      // chat lifecycle here makes auto-fill scripts treat a background request
+      // as another completed chat turn and can start the same fill again.
+      await finishChatGeneration(abortController, undefined, {
+        emitTavernLifecycleEvents: false,
+      });
     }
   };
   generateHtmlPreviewTextRef.current = generateHtmlPreviewText;
