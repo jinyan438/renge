@@ -1120,7 +1120,6 @@ type RengeAppData = {
 };
 
 const COMPLETE_BACKUP_FORMAT = "renge-agent-complete-backup" as const;
-const LEGACY_COMPLETE_BACKUP_VERSION = 1 as const;
 const COMPLETE_BACKUP_VERSION = 3 as const;
 const COMPLETE_BACKUP_MANIFEST_FILE = "backup.json";
 const COMPLETE_BACKUP_ASSET_PREFIX = "renge-backup-asset:";
@@ -1133,18 +1132,23 @@ const COMPLETE_BACKUP_MANAGED_ROOTS = [
   "skills",
   "tavern-files",
 ] as const;
+const COMPLETE_BACKUP_ALREADY_COMPRESSED_EXTENSIONS = new Set([
+  "7z", "aab", "apk", "apng", "avif", "br", "bz2", "flac", "gif", "gz", "heic",
+  "heif", "jar", "jpeg", "jpg", "jxl", "lz4", "m4a", "m4v", "mkv", "mov", "mp3",
+  "mp4", "ogg", "pdf", "png", "rar", "webm", "webp", "woff", "woff2", "xz", "zip", "zst",
+]);
 const RENGE_STORAGE_PREFIX = "renge";
 const APP_DATA_SAVE_DEBOUNCE_MS = 800;
 const APP_DATA_SAVE_IDLE_TIMEOUT_MS = 2_000;
 
 type RengeCompleteBackup = {
   format: typeof COMPLETE_BACKUP_FORMAT;
-  version: typeof LEGACY_COMPLETE_BACKUP_VERSION | 2 | typeof COMPLETE_BACKUP_VERSION;
+  version: typeof COMPLETE_BACKUP_VERSION;
   exportedAt: string;
   appData: RengeAppData;
   localStorage: Record<string, string>;
-  assets?: Record<string, { mimeType: string }>;
-  managedFiles?: Array<{ path: string; size: number }>;
+  assets: Record<string, { mimeType: string }>;
+  managedFiles: Array<{ path: string; size: number }>;
   desktopProjectPositions?: unknown;
 };
 
@@ -3551,12 +3555,8 @@ function parseCompleteBackup(value: unknown): RengeCompleteBackup {
   if (value.format !== COMPLETE_BACKUP_FORMAT) {
     throw new Error("这不是 Renge Agent 完整备份文件。");
   }
-  if (
-    value.version !== LEGACY_COMPLETE_BACKUP_VERSION &&
-    value.version !== 2 &&
-    value.version !== COMPLETE_BACKUP_VERSION
-  ) {
-    throw new Error(`暂不支持此备份版本：${String(value.version ?? "未知")}。`);
+  if (value.version !== COMPLETE_BACKUP_VERSION) {
+    throw new Error(`仅支持新版 v3 完整备份，不支持版本：${String(value.version ?? "未知")}。`);
   }
   if (typeof value.exportedAt !== "string" || !isObjectRecord(value.appData)) {
     throw new Error("备份缺少导出时间或应用主数据。");
@@ -3579,7 +3579,7 @@ function parseCompleteBackup(value: unknown): RengeCompleteBackup {
     "skills",
     "extensions",
   ];
-  if (value.version >= 3) requiredArrayFields.push("statusBarPresets");
+  requiredArrayFields.push("statusBarPresets");
   for (const field of requiredArrayFields) {
     if (!Array.isArray(value.appData[field])) {
       throw new Error(`备份缺少完整数据字段：${field}。`);
@@ -3594,22 +3594,20 @@ function parseCompleteBackup(value: unknown): RengeCompleteBackup {
     storageEntries[key] = entryValue;
   }
   const assets: Record<string, { mimeType: string }> = {};
-  if (value.assets !== undefined) {
-    if (!isObjectRecord(value.assets)) throw new Error("备份中的图片资源索引无效。");
-    for (const [path, metadata] of Object.entries(value.assets)) {
-      if (
-        !path.startsWith("assets/") ||
-        path.slice("assets/".length).split("/").some((part) =>
-          !part || part === "." || part === ".." || /[\\\\\x00-\x1f]/.test(part),
-        ) ||
-        !isObjectRecord(metadata) ||
-        typeof metadata.mimeType !== "string" ||
-        !metadata.mimeType.startsWith("image/")
-      ) {
-        throw new Error("备份中的图片资源索引无效。");
-      }
-      assets[path] = { mimeType: metadata.mimeType };
+  if (!isObjectRecord(value.assets)) throw new Error("备份中的图片资源索引无效。");
+  for (const [path, metadata] of Object.entries(value.assets)) {
+    if (
+      !path.startsWith("assets/") ||
+      path.slice("assets/".length).split("/").some((part) =>
+        !part || part === "." || part === ".." || /[\\\\\x00-\x1f]/.test(part),
+      ) ||
+      !isObjectRecord(metadata) ||
+      typeof metadata.mimeType !== "string" ||
+      !metadata.mimeType.startsWith("image/")
+    ) {
+      throw new Error("备份中的图片资源索引无效。");
     }
+    assets[path] = { mimeType: metadata.mimeType };
   }
   if (
     value.desktopProjectPositions !== undefined &&
@@ -3618,28 +3616,23 @@ function parseCompleteBackup(value: unknown): RengeCompleteBackup {
   ) {
     throw new Error("备份中的桌面图标位置格式无效。");
   }
-  let managedFiles: Array<{ path: string; size: number }> | undefined;
-  if (value.version >= 3) {
-    if (!Array.isArray(value.managedFiles)) {
-      throw new Error("备份缺少应用文件索引。");
+  if (!Array.isArray(value.managedFiles)) throw new Error("备份缺少应用文件索引。");
+  const seenManagedFiles = new Set<string>();
+  const managedFiles = value.managedFiles.map((entry) => {
+    if (!isObjectRecord(entry)) throw new Error("备份中的应用文件索引无效。");
+    const path = normalizeCompleteBackupManagedFilePath(entry.path);
+    if (
+      !path ||
+      seenManagedFiles.has(path) ||
+      typeof entry.size !== "number" ||
+      !Number.isSafeInteger(entry.size) ||
+      entry.size < 0
+    ) {
+      throw new Error("备份中的应用文件索引无效。");
     }
-    const seenManagedFiles = new Set<string>();
-    managedFiles = value.managedFiles.map((entry) => {
-      if (!isObjectRecord(entry)) throw new Error("备份中的应用文件索引无效。");
-      const path = normalizeCompleteBackupManagedFilePath(entry.path);
-      if (
-        !path ||
-        seenManagedFiles.has(path) ||
-        typeof entry.size !== "number" ||
-        !Number.isSafeInteger(entry.size) ||
-        entry.size < 0
-      ) {
-        throw new Error("备份中的应用文件索引无效。");
-      }
-      seenManagedFiles.add(path);
-      return { path, size: entry.size };
-    });
-  }
+    seenManagedFiles.add(path);
+    return { path, size: entry.size };
+  });
 
   return {
     format: COMPLETE_BACKUP_FORMAT,
@@ -3647,8 +3640,8 @@ function parseCompleteBackup(value: unknown): RengeCompleteBackup {
     exportedAt: value.exportedAt,
     appData: value.appData as RengeAppData,
     localStorage: storageEntries,
-    ...(Object.keys(assets).length > 0 ? { assets } : {}),
-    ...(managedFiles ? { managedFiles } : {}),
+    assets,
+    managedFiles,
     ...(isObjectRecord(value.desktopProjectPositions)
       ? { desktopProjectPositions: value.desktopProjectPositions }
       : {}),
@@ -3666,6 +3659,12 @@ type CompleteBackupManagedFile = {
   size: number;
   bytes: Uint8Array;
 };
+
+function isCompressibleCompleteBackupFile(path: string) {
+  const fileName = path.slice(path.lastIndexOf("/") + 1);
+  const extension = fileName.slice(fileName.lastIndexOf(".") + 1).toLowerCase();
+  return !COMPLETE_BACKUP_ALREADY_COMPRESSED_EXTENSIONS.has(extension);
+}
 
 async function readCompleteBackupManagedFiles() {
   const response = await fetch("/api/app-data/backup-files", {
@@ -3845,10 +3844,16 @@ async function createCompleteBackupZip(
     ],
   };
   assets.forEach((asset) => {
-    archiveFiles[asset.path] = [asset.bytes, { level: 0 }];
+    archiveFiles[asset.path] = [
+      asset.bytes,
+      { level: isCompressibleCompleteBackupFile(asset.path) ? 6 : 0 },
+    ];
   });
   managedFiles.forEach((file) => {
-    archiveFiles[`files/${file.path}`] = [file.bytes, { level: 0 }];
+    archiveFiles[`files/${file.path}`] = [
+      file.bytes,
+      { level: isCompressibleCompleteBackupFile(file.path) ? 6 : 0 },
+    ];
   });
   const bytes = await new Promise<Uint8Array>((resolve, reject) => {
     zip(archiveFiles, (error, data) => {
@@ -3856,6 +3861,9 @@ async function createCompleteBackupZip(
       else resolve(data);
     });
   });
+  if (bytes.byteLength > COMPLETE_BACKUP_MAX_BYTES) {
+    throw new Error("压缩后的完整备份超过 512 MB，无法导入。");
+  }
   return {
     blob: new Blob([bytes.slice().buffer as ArrayBuffer], { type: "application/zip" }),
     assetCount: assets.length,
@@ -3868,11 +3876,7 @@ async function readCompleteBackupFile(file: File) {
   const isZipFile =
     file.name.toLowerCase().endsWith(".zip") ||
     (signature[0] === 0x50 && signature[1] === 0x4b && signature[2] === 0x03 && signature[3] === 0x04);
-  if (!isZipFile) {
-    const backup = parseCompleteBackup(JSON.parse(await file.text()) as unknown);
-    if (backup.version >= 3) throw new Error("新版完整备份必须使用 ZIP 文件。");
-    return backup;
-  }
+  if (!isZipFile) throw new Error("仅支持 v3 ZIP 完整备份，请重新导出备份文件。");
   const archiveEntries = await new Promise<Record<string, Uint8Array>>((resolve, reject) => {
     file
       .arrayBuffer()
@@ -3887,11 +3891,11 @@ async function readCompleteBackupFile(file: File) {
   const manifestBytes = archiveEntries[COMPLETE_BACKUP_MANIFEST_FILE];
   if (!manifestBytes) throw new Error("ZIP 备份缺少 backup.json。");
   const backup = parseCompleteBackup(JSON.parse(strFromU8(manifestBytes)) as unknown);
-  if (backup.version !== 2 && backup.version !== COMPLETE_BACKUP_VERSION) {
-    throw new Error(`ZIP 备份版本无效：${backup.version}。`);
+  if (backup.version !== COMPLETE_BACKUP_VERSION) {
+    throw new Error(`仅支持 v3 ZIP 完整备份，当前版本：${backup.version}。`);
   }
   const managedArchivePaths = new Set<string>();
-  for (const fileMetadata of backup.managedFiles ?? []) {
+  for (const fileMetadata of backup.managedFiles) {
     const archivePath = `files/${fileMetadata.path}`;
     const bytes = archiveEntries[archivePath];
     if (!(bytes instanceof Uint8Array) || bytes.byteLength !== fileMetadata.size) {
@@ -3899,28 +3903,31 @@ async function readCompleteBackupFile(file: File) {
     }
     managedArchivePaths.add(archivePath);
   }
-  for (const archivePath of Object.keys(archiveEntries)) {
-    if (
-      archivePath.startsWith("files/") &&
-      !archivePath.endsWith("/") &&
-      !managedArchivePaths.has(archivePath)
-    ) {
-      throw new Error(`ZIP 备份包含未索引的应用文件：${archivePath}`);
-    }
-  }
-  const assetArchivePaths = new Set(Object.keys(backup.assets ?? {}));
+  const assetArchivePaths = new Set(Object.keys(backup.assets));
   for (const path of assetArchivePaths) {
     if (!(archiveEntries[path] instanceof Uint8Array)) {
       throw new Error(`ZIP 备份缺少图片资源：${path}`);
     }
   }
+  const allowedArchiveFiles = new Set([
+    COMPLETE_BACKUP_MANIFEST_FILE,
+    ...assetArchivePaths,
+    ...managedArchivePaths,
+  ]);
+  const allowedArchiveDirectories = new Set<string>();
+  for (const archivePath of allowedArchiveFiles) {
+    const parts = archivePath.split("/");
+    for (let index = 1; index < parts.length; index += 1) {
+      allowedArchiveDirectories.add(`${parts.slice(0, index).join("/")}/`);
+    }
+  }
   for (const archivePath of Object.keys(archiveEntries)) {
-    if (
-      archivePath.startsWith("assets/") &&
-      !archivePath.endsWith("/") &&
-      !assetArchivePaths.has(archivePath)
-    ) {
-      throw new Error(`ZIP 备份包含未索引的图片资源：${archivePath}`);
+    if (archivePath.endsWith("/")) {
+      if (!allowedArchiveDirectories.has(archivePath)) {
+        throw new Error(`ZIP 备份包含未索引的目录：${archivePath}`);
+      }
+    } else if (!allowedArchiveFiles.has(archivePath)) {
+      throw new Error(`ZIP 备份包含未索引的文件：${archivePath}`);
     }
   }
   return backup;
@@ -8199,27 +8206,38 @@ function uploadCompleteBackupWithProgress(
   onProgress: (loaded: number, total: number) => void,
   onUploadComplete: () => void,
 ) {
-  return new Promise<{ exportedAt?: string; localStorage?: Record<string, string> }>((resolve, reject) => {
+  return new Promise<{
+    exportedAt?: string;
+    localStorage?: Record<string, string>;
+  }>((resolve, reject) => {
     const request = new XMLHttpRequest();
+    const rejectWithUnknownOutcome = (message: string) => {
+      const error = new Error(message);
+      Object.assign(error, { importOutcomeUnknown: true });
+      reject(error);
+    };
     request.open("PUT", "/api/app-data/import-complete");
     request.timeout = 10 * 60 * 1000;
-    request.setRequestHeader(
-      "Content-Type",
-      file.name.toLowerCase().endsWith(".zip") ? "application/zip" : "application/json",
-    );
+    request.setRequestHeader("Content-Type", "application/zip");
     request.upload.onprogress = (event) => {
       const total = event.lengthComputable && event.total > 0 ? event.total : file.size;
       onProgress(event.loaded, total);
     };
     request.upload.onload = () => onUploadComplete();
     request.onload = () => {
-      let payload: { error?: string; exportedAt?: string; localStorage?: Record<string, string> } = {};
+      let payload: {
+        error?: string;
+        exportedAt?: string;
+        localStorage?: Record<string, string>;
+        cleared?: boolean;
+      } = {};
       try {
         const parsed = JSON.parse(request.responseText) as unknown;
         if (isObjectRecord(parsed)) {
           payload = {
             error: typeof parsed.error === "string" ? parsed.error : undefined,
             exportedAt: typeof parsed.exportedAt === "string" ? parsed.exportedAt : undefined,
+            cleared: parsed.cleared === true,
             ...(isObjectRecord(parsed.localStorage)
               ? { localStorage: parsed.localStorage as Record<string, string> }
               : {}),
@@ -8231,12 +8249,14 @@ function uploadCompleteBackupWithProgress(
       if (request.status >= 200 && request.status < 300) {
         resolve(payload);
       } else {
-        reject(new Error(payload.error || `本地数据服务返回 ${request.status || "未知状态"}`));
+        const error = new Error(payload.error || `本地数据服务返回 ${request.status || "未知状态"}`);
+        Object.assign(error, { dataCleared: payload.cleared });
+        reject(error);
       }
     };
-    request.onerror = () => reject(new Error("无法连接手机本地数据服务。"));
-    request.ontimeout = () => reject(new Error("导入超时，请确认手机剩余存储空间后重试。"));
-    request.onabort = () => reject(new Error("导入已中止。"));
+    request.onerror = () => rejectWithUnknownOutcome("无法连接手机本地数据服务。");
+    request.onabort = () => rejectWithUnknownOutcome("备份上传已中断，无法确认服务端是否已完成恢复。");
+    request.ontimeout = () => rejectWithUnknownOutcome("备份导入请求超时，无法确认服务端是否已完成恢复。");
     request.send(file);
   });
 }
@@ -16257,7 +16277,7 @@ export function App() {
           ? await window.rengeDesktop.loadDesktopProjectPositions()
           : undefined;
       const managedFiles = await readCompleteBackupManagedFiles();
-      setDataBackupState({ status: "loading", message: "正在打包图片、应用文件和主数据..." });
+      setDataBackupState({ status: "loading", message: "正在压缩并打包图片、应用文件和主数据..." });
       const { blob, assetCount, managedFileCount } = await createCompleteBackupZip(
         appData,
         exportedAt,
@@ -16296,8 +16316,9 @@ export function App() {
     setDataBackupState({ status: "loading", message: "正在校验完整备份..." });
     let persistenceSuspended = false;
     let backupInstalled = false;
+    let backup: RengeCompleteBackup | null = null;
     try {
-      const backup = isAndroid ? null : await readCompleteBackupFile(file);
+      backup = isAndroid ? null : await readCompleteBackupFile(file);
       const exportedLabel = backup
         ? (() => {
             const exportedDate = new Date(backup.exportedAt);
@@ -16307,7 +16328,7 @@ export function App() {
           })()
         : `${file.name}（${formatFileSize(file.size)}）`;
       const confirmed = window.confirm(
-        `即将导入 ${exportedLabel} 的完整备份。\n\n这会替换当前全部应用数据，包括人格、角色卡、聊天、API Key、脚本、扩展和界面设置。此操作不可直接撤销，是否继续？`,
+        `即将导入 ${exportedLabel} 的 v3 完整备份。\n\n导入前会先校验备份，再清空当前全部应用数据并恢复备份内容。该操作不可直接撤销；如果导入过程中失败，当前数据可能不完整，请重新导入备份。是否继续？`,
       );
       if (!confirmed) {
         setDataBackupProgress({ active: false, value: null, label: "" });
@@ -16374,6 +16395,27 @@ export function App() {
       setDataBackupProgress({ active: true, value: 100, label: "导入完成" });
       window.setTimeout(() => window.location.reload(), 450);
     } catch (error) {
+      const importOutcomeUnknown =
+        error instanceof Error &&
+        "importOutcomeUnknown" in error &&
+        error.importOutcomeUnknown === true;
+      const importDataCleared =
+        error instanceof Error &&
+        "dataCleared" in error &&
+        error.dataCleared === true;
+      if (importDataCleared || importOutcomeUnknown) {
+        try {
+          replaceRengeLocalStorage(
+            importOutcomeUnknown && backup ? backup.localStorage : {},
+          );
+        } catch {
+          // Do not let stale browser settings return after an uncertain import.
+        }
+        await saveCharacterCardsToDatabase([]);
+      }
+      if (importDataCleared || importOutcomeUnknown) {
+        backupInstalled = true;
+      }
       if (persistenceSuspended && !backupInstalled) {
         appDataPersistenceSuspendedRef.current = false;
       }
@@ -16381,7 +16423,9 @@ export function App() {
       setDataBackupState({
         status: "error",
         message: backupInstalled
-          ? `应用服务已恢复备份，但浏览器存储同步未完成：${error instanceof Error ? error.message : "未知错误"}。正在重新载入应用...`
+          ? importOutcomeUnknown
+            ? `无法确认备份导入结果：${error instanceof Error ? error.message : "未知错误"}。正在重新载入应用...`
+            : `当前数据已清空，但备份恢复未完成：${error instanceof Error ? error.message : "未知错误"}。正在重新载入应用...`
           : error instanceof Error
             ? `导入失败：${error.message}`
             : "完整备份导入失败。",
@@ -36950,7 +36994,7 @@ export function App() {
                     </span>
                     <div>
                       <h2>导出完整备份</h2>
-                      <p>生成图片资源与主数据分离的 ZIP 快照。</p>
+                      <p>生成压缩 ZIP 快照，包含主数据、图片资源和应用文件。</p>
                     </div>
                   </div>
                   <ul className="data-backup-list">
@@ -36987,7 +37031,7 @@ export function App() {
                     导入会覆盖当前全部应用数据。开始前建议先导出一次当前数据，以便需要时恢复。
                   </div>
                   <p className="data-backup-import-note">
-                    支持新版 ZIP 完整备份及旧版 JSON 备份。导入成功后应用会自动重新载入。
+                    仅支持 v3 ZIP 完整备份。导入前会清空当前应用数据，成功后应用会自动重新载入。
                   </p>
                   {dataBackupProgress.active && (
                     <div className="data-backup-progress-panel">
@@ -37027,7 +37071,7 @@ export function App() {
                     ref={completeBackupImportInputRef}
                     className="hidden-input"
                     type="file"
-                    accept=".zip,.json,application/zip,application/x-zip-compressed,application/json"
+                    accept=".zip,application/zip,application/x-zip-compressed"
                     onChange={(event) => void importCompleteAppData(event.target.files?.[0])}
                   />
                   <button
