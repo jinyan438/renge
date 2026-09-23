@@ -111,6 +111,50 @@ test("Xinghe custom completions forward authorization, headers and body override
   assert.deepEqual(captured.body, { model: "fixture-model", messages: [{ role: "system", content: "Update table" }], temperature: 0.25, response_format: { type: "json_object" } });
 });
 
+test("chat completions reject malformed outbound image data URLs", async (t) => {
+  let captured;
+  const upstream = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    captured = JSON.parse(Buffer.concat(chunks).toString());
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ choices: [{ message: { content: "fixture response" } }] }));
+  });
+  await new Promise(resolve => upstream.listen(0, "127.0.0.1", resolve));
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-image-sanitize-"));
+  const controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  t.after(async () => {
+    await new Promise(resolve => controller.server.close(resolve));
+    await new Promise(resolve => upstream.close(resolve));
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const response = await fetch(`${controller.url}/api/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      apiBaseUrl: `http://127.0.0.1:${upstream.address().port}/v1`,
+      request: {
+        model: "fixture-vision-model",
+        messages: [{
+          role: "user",
+          content: [
+            { type: "text", text: "describe" },
+            { type: "image_url", image_url: { url: "data:undefined;base64" } },
+            { type: "image_url", image_url: { url: "data:undefined;base64,AA==" } },
+          ],
+        }],
+      },
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(captured.messages[0].content, [
+    { type: "text", text: "describe" },
+    { type: "image_url", image_url: { url: "data:image/png;base64,AA==" } },
+  ]);
+});
+
 test("Tavern vector files survive server restart and delete through legacy paths", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "renge-tavern-files-"));
   let controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });

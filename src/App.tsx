@@ -8141,9 +8141,9 @@ const IMAGE_MIME_TYPE_PATTERN = /^image\/[a-z0-9][a-z0-9.+-]*$/i;
 
 function normalizeImageDataUrl(value: unknown, fallbackMimeType = "image/png") {
   const raw = typeof value === "string" ? value.trim() : "";
-  if (!raw || !raw.startsWith("data:")) return raw;
+  if (!raw || !/^data:/i.test(raw)) return raw;
   const match = raw.match(/^data:([^;,]*)(?:;[^,]*)?;base64,([\s\S]*)$/i);
-  if (!match) return raw;
+  if (!match) return "";
   const candidateMimeType = String(match[1] ?? "").trim().toLowerCase();
   const candidateFallback = String(fallbackMimeType ?? "").trim().toLowerCase();
   const mimeType = IMAGE_MIME_TYPE_PATTERN.test(candidateMimeType)
@@ -8152,6 +8152,7 @@ function normalizeImageDataUrl(value: unknown, fallbackMimeType = "image/png") {
       ? candidateFallback
       : "image/png";
   const base64 = match[2].replace(/\s+/g, "");
+  if (!base64) return "";
   return `data:${mimeType};base64,${base64}`;
 }
 
@@ -8417,23 +8418,24 @@ function formatChatMessageForApi(
     .join("\n\n");
   if (!options.sendImageAttachmentsToProvider) return textWithAttachments;
 
-  const imageAttachments = attachments.filter((attachment) => {
-    const dataUrl = attachment.dataUrl?.trim() ?? "";
-    return Boolean(
-      dataUrl &&
-        (attachment.type.toLowerCase().startsWith("image/") || /^data:image\//i.test(dataUrl)),
-    );
+  const imageAttachments = attachments.flatMap((attachment) => {
+    const dataUrl = normalizeImageDataUrl(attachment.dataUrl, attachment.type);
+    if (
+      !dataUrl ||
+      (!attachment.type.toLowerCase().startsWith("image/") && !/^data:image\//i.test(dataUrl))
+    ) {
+      return [];
+    }
+    return [{ attachment, dataUrl }];
   });
 
   if (imageAttachments.length === 0) return textWithAttachments;
 
   return [
     { type: "text" as const, text: textWithAttachments || "请分析随消息上传的文件。" },
-    ...imageAttachments.map((attachment) => ({
+    ...imageAttachments.map(({ dataUrl }) => ({
       type: "image_url" as const,
-      image_url: {
-        url: normalizeImageDataUrl(attachment.dataUrl, attachment.type) || attachment.dataUrl || "",
-      },
+      image_url: { url: dataUrl },
     })),
   ];
 }
@@ -9876,17 +9878,21 @@ function getMcpImageContentItems(result: unknown) {
 function getMcpImageMimeType(item: Record<string, unknown>) {
   const data = typeof item.data === "string" ? item.data.trim() : "";
   const dataUrlMatch = data.match(/^data:([^;,]+)[;,]/i);
-  if (dataUrlMatch?.[1]) return dataUrlMatch[1];
-
-  const mimeType = item.mimeType ?? item.mime_type;
-  const normalized = typeof mimeType === "string" ? mimeType.trim() : "";
-  return normalized || "image/png";
+  const candidates = [
+    dataUrlMatch?.[1],
+    item.mimeType,
+    item.mime_type,
+  ];
+  return candidates
+    .map((value) => (typeof value === "string" ? value.trim().toLowerCase() : ""))
+    .find((value) => IMAGE_MIME_TYPE_PATTERN.test(value)) ?? "image/png";
 }
 
 function getMcpImageDataUrl(item: Record<string, unknown>) {
   const data = typeof item.data === "string" ? item.data.trim() : "";
-  if (data.startsWith("data:")) return data;
-  return `data:${getMcpImageMimeType(item)};base64,${stripBase64Prefix(data).replace(/\s+/g, "")}`;
+  if (/^data:/i.test(data)) return normalizeImageDataUrl(data, getMcpImageMimeType(item));
+  const base64 = stripBase64Prefix(data).replace(/\s+/g, "");
+  return base64 ? `data:${getMcpImageMimeType(item)};base64,${base64}` : "";
 }
 
 function getBase64Length(value: string) {
@@ -9919,19 +9925,21 @@ function getMimeExtension(mimeType: string) {
 }
 
 function getMcpImageAttachments(result: unknown): ChatAttachment[] {
-  return getMcpImageContentItems(result).map((item, index) => {
+  return getMcpImageContentItems(result).flatMap((item, index) => {
     const mimeType = getMcpImageMimeType(item);
     const rawName = typeof item.name === "string" ? item.name.trim() : "";
     const extension = getMimeExtension(mimeType);
     const data = typeof item.data === "string" ? item.data : "";
-    return {
+    const dataUrl = getMcpImageDataUrl(item);
+    if (!dataUrl) return [];
+    return [{
       id: crypto.randomUUID(),
       name: rawName || `mcp-image-${index + 1}.${extension}`,
       type: mimeType,
       size: estimateBase64Bytes(data),
-      dataUrl: getMcpImageDataUrl(item),
+      dataUrl,
       createdAt: new Date().toISOString(),
-    };
+    }];
   });
 }
 
@@ -10306,6 +10314,14 @@ function getToolResultVisionMessage(toolCall: ChatToolCall, result: unknown): Ch
 
   const mcpImages = getMcpImageContentItems(result);
   if (mcpImages.length === 0) return null;
+  const imageParts = mcpImages
+    .slice(0, 4)
+    .map((item) => ({
+      type: "image_url" as const,
+      image_url: { url: getMcpImageDataUrl(item) },
+    }))
+    .filter((part) => Boolean(part.image_url.url));
+  if (imageParts.length === 0) return null;
 
   return {
     role: "user",
@@ -10314,10 +10330,7 @@ function getToolResultVisionMessage(toolCall: ChatToolCall, result: unknown): Ch
         type: "text",
         text: `这是 MCP 工具「${toolCall.function.name}」返回的图片结果。请直接根据图片继续完成用户任务；不要因为工具结果是图片而报告没有可显示内容。`,
       },
-      ...mcpImages.slice(0, 4).map((item) => ({
-        type: "image_url" as const,
-        image_url: { url: getMcpImageDataUrl(item) },
-      })),
+      ...imageParts,
     ],
   };
 }

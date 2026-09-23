@@ -958,6 +958,70 @@ test("Pi Host resumes the persisted Pi session for the next Renge turn", async (
   }
 });
 
+test("Pi chat sanitizes malformed image data URLs before the provider adapter", async () => {
+  let upstreamRequest;
+  const upstream = createServer(async (request, response) => {
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    upstreamRequest = JSON.parse(raw);
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    const base = {
+      id: "image-sanitize",
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: "test-model",
+    };
+    sendChunk(response, {
+      ...base,
+      choices: [{ index: 0, delta: { role: "assistant", content: "image received" }, finish_reason: null }],
+    });
+    sendChunk(response, {
+      ...base,
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    });
+    response.end("data: [DONE]\n\n");
+  });
+
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-pi-image-sanitize-test-"));
+  const upstreamPort = await listen(upstream);
+  const renge = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  try {
+    const response = await fetch(`${renge.url}/api/pi/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        apiBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+        apiKey: "test-key",
+        apiType: "chat-completions",
+        allowImageInputs: true,
+        request: {
+          model: "test-model",
+          messages: [{
+            role: "user",
+            content: [
+              { type: "text", text: "describe" },
+              { type: "image_url", image_url: { url: "data:undefined;base64" } },
+              { type: "image_url", image_url: { url: "data:undefined;base64,AA==" } },
+            ],
+          }],
+          stream: true,
+        },
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /image received/);
+    const userMessage = upstreamRequest.messages.find((message) => message.role === "user");
+    assert.deepEqual(userMessage.content, [
+      { type: "text", text: "describe" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,AA==" } },
+    ]);
+  } finally {
+    await close(renge.server);
+    await close(upstream);
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("Pi Host preserves an upstream length stop reason", async () => {
   const upstream = createServer(async (_request, response) => {
     response.writeHead(200, { "Content-Type": "text/event-stream" });

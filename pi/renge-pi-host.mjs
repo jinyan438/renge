@@ -181,9 +181,11 @@ function toolContent(result, allowImageInputs = true) {
         return [{ type: "text", text: item.text }];
       }
       if (allowImageInputs && item?.type === "image" && typeof item.data === "string") {
-        const dataUrl = item.data.match(/^data:([^;,]+);base64,([\s\S]+)$/i);
+        const rawData = item.data.trim();
+        const dataUrl = rawData.match(/^data:([^;,]+);base64,([\s\S]+)$/i);
+        if (/^data:/i.test(rawData) && !dataUrl) return [];
         const mimeType = dataUrl?.[1] ?? item.mimeType ?? item.mime_type;
-        const data = (dataUrl?.[2] ?? item.data).replace(/\s+/g, "");
+        const data = (dataUrl?.[2] ?? rawData).replace(/\s+/g, "");
         if (!data) return [];
         return [{
           type: "image",
@@ -226,11 +228,8 @@ function resolvePrompt(promptMessage) {
       if (!data) continue;
       images.push({
         type: "image",
-        source: {
-          type: "base64",
-          mediaType: normalizeImageMimeType(part.mimeType),
-          data: data.replace(/\s+/g, ""),
-        },
+        mimeType: normalizeImageMimeType(part.mimeType),
+        data: data.replace(/\s+/g, ""),
       });
     }
   }

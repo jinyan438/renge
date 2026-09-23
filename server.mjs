@@ -1983,7 +1983,7 @@ function sanitizeOutboundMessageContent(content) {
   if (!Array.isArray(content)) return content;
   let removedImage = false;
   const next = content.flatMap((part) => {
-    if (!isObjectRecord(part)) return [];
+    if (!isObjectRecord(part)) return [part];
     if (part.type !== "image_url" && part.type !== "input_image") return [part];
     const rawImageUrl = isObjectRecord(part.image_url) ? part.image_url.url : part.image_url;
     const imageUrl = normalizeOutboundImageUrl(rawImageUrl);
@@ -2077,11 +2077,11 @@ async function proxyJson({ url, apiKey, method = "GET", body, timeoutMs, headers
       method,
       headers: {
         Accept: "application/json",
-         ...(outboundBody ? { "Content-Type": "application/json" } : {}),
+        ...(outboundBody ? { "Content-Type": "application/json" } : {}),
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
         ...headers,
       },
-       body: outboundBody ? JSON.stringify(outboundBody) : undefined,
+      body: outboundBody ? JSON.stringify(outboundBody) : undefined,
       signal: ac.signal,
       dispatcher: getUpstreamDispatcher(),
     });
@@ -2465,7 +2465,7 @@ async function proxyStream({ url, apiKey, body, response, headers = {} }) {
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
         ...headers,
       },
-       body: JSON.stringify(outboundBody),
+      body: JSON.stringify(outboundBody),
       signal: ac.signal,
       dispatcher: getUpstreamDispatcher(),
     });
@@ -2831,7 +2831,13 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
     const body = await readJsonBody(request);
 
     if (pathname === "/api/pi/chat") {
-      await piHost.handleChat(body, request, response);
+      // Pi requests can be modified by prompt hooks before reaching the
+      // provider. Apply the same image URI guard here as the regular proxy so
+      // malformed data URLs never reach a multimodal upstream.
+      const piBody = isObjectRecord(body) && isObjectRecord(body.request)
+        ? { ...body, request: sanitizeOutboundRequestBody(body.request) }
+        : body;
+      await piHost.handleChat(piBody, request, response);
       return;
     }
 
