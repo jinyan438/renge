@@ -80,7 +80,7 @@ import {
 import { createTavernSettingsStore } from "./tavernPersistenceUtils";
 import { createPortal } from "react-dom";
 import { ChatToolDiffPreview } from "./ChatToolDiffPreview";
-import { strFromU8, strToU8, unzip, zip } from "fflate";
+import { strToU8, zip } from "fflate";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
 import {
@@ -3550,104 +3550,6 @@ function replaceRengeLocalStorage(entries: Record<string, string>) {
   lastPersonasForLocalStorage = null;
 }
 
-function parseCompleteBackup(value: unknown): RengeCompleteBackup {
-  if (!isObjectRecord(value)) throw new Error("备份文件不是有效的 JSON 对象。");
-  if (value.format !== COMPLETE_BACKUP_FORMAT) {
-    throw new Error("这不是 Renge Agent 完整备份文件。");
-  }
-  if (value.version !== COMPLETE_BACKUP_VERSION) {
-    throw new Error(`仅支持新版 v3 完整备份，不支持版本：${String(value.version ?? "未知")}。`);
-  }
-  if (typeof value.exportedAt !== "string" || !isObjectRecord(value.appData)) {
-    throw new Error("备份缺少导出时间或应用主数据。");
-  }
-  if (!isObjectRecord(value.localStorage)) {
-    throw new Error("备份缺少本地设置数据。");
-  }
-
-  const requiredArrayFields: Array<keyof RengeAppData> = [
-    "personas",
-    "providers",
-    "chatSessions",
-    "systemPrompts",
-    "chatPresets",
-    "worldBooks",
-    "regexScripts",
-    "tavernScripts",
-    "characterCards",
-    "mcpServers",
-    "skills",
-    "extensions",
-  ];
-  requiredArrayFields.push("statusBarPresets");
-  for (const field of requiredArrayFields) {
-    if (!Array.isArray(value.appData[field])) {
-      throw new Error(`备份缺少完整数据字段：${field}。`);
-    }
-  }
-
-  const storageEntries: Record<string, string> = {};
-  for (const [key, entryValue] of Object.entries(value.localStorage)) {
-    if (!key.startsWith(RENGE_STORAGE_PREFIX) || typeof entryValue !== "string") {
-      throw new Error("备份中的本地设置格式无效。");
-    }
-    storageEntries[key] = entryValue;
-  }
-  const assets: Record<string, { mimeType: string }> = {};
-  if (!isObjectRecord(value.assets)) throw new Error("备份中的图片资源索引无效。");
-  for (const [path, metadata] of Object.entries(value.assets)) {
-    if (
-      !path.startsWith("assets/") ||
-      path.slice("assets/".length).split("/").some((part) =>
-        !part || part === "." || part === ".." || /[\\\\\x00-\x1f]/.test(part),
-      ) ||
-      !isObjectRecord(metadata) ||
-      typeof metadata.mimeType !== "string" ||
-      !metadata.mimeType.startsWith("image/")
-    ) {
-      throw new Error("备份中的图片资源索引无效。");
-    }
-    assets[path] = { mimeType: metadata.mimeType };
-  }
-  if (
-    value.desktopProjectPositions !== undefined &&
-    value.desktopProjectPositions !== null &&
-    !isObjectRecord(value.desktopProjectPositions)
-  ) {
-    throw new Error("备份中的桌面图标位置格式无效。");
-  }
-  if (!Array.isArray(value.managedFiles)) throw new Error("备份缺少应用文件索引。");
-  const seenManagedFiles = new Set<string>();
-  const managedFiles = value.managedFiles.map((entry) => {
-    if (!isObjectRecord(entry)) throw new Error("备份中的应用文件索引无效。");
-    const path = normalizeCompleteBackupManagedFilePath(entry.path);
-    if (
-      !path ||
-      seenManagedFiles.has(path) ||
-      typeof entry.size !== "number" ||
-      !Number.isSafeInteger(entry.size) ||
-      entry.size < 0
-    ) {
-      throw new Error("备份中的应用文件索引无效。");
-    }
-    seenManagedFiles.add(path);
-    return { path, size: entry.size };
-  });
-
-  return {
-    format: COMPLETE_BACKUP_FORMAT,
-    version: value.version,
-    exportedAt: value.exportedAt,
-    appData: value.appData as RengeAppData,
-    localStorage: storageEntries,
-    assets,
-    managedFiles,
-    ...(isObjectRecord(value.desktopProjectPositions)
-      ? { desktopProjectPositions: value.desktopProjectPositions }
-      : {}),
-  };
-}
-
 type CompleteBackupAsset = {
   path: string;
   mimeType: string;
@@ -3869,68 +3771,6 @@ async function createCompleteBackupZip(
     assetCount: assets.length,
     managedFileCount: managedFiles.length,
   };
-}
-
-async function readCompleteBackupFile(file: File) {
-  const signature = new Uint8Array(await file.slice(0, 4).arrayBuffer());
-  const isZipFile =
-    file.name.toLowerCase().endsWith(".zip") ||
-    (signature[0] === 0x50 && signature[1] === 0x4b && signature[2] === 0x03 && signature[3] === 0x04);
-  if (!isZipFile) throw new Error("仅支持 v3 ZIP 完整备份，请重新导出备份文件。");
-  const archiveEntries = await new Promise<Record<string, Uint8Array>>((resolve, reject) => {
-    file
-      .arrayBuffer()
-      .then((buffer) => {
-        unzip(new Uint8Array(buffer), (error, entries) => {
-          if (error) reject(error);
-          else resolve(entries);
-        });
-      })
-      .catch(reject);
-  });
-  const manifestBytes = archiveEntries[COMPLETE_BACKUP_MANIFEST_FILE];
-  if (!manifestBytes) throw new Error("ZIP 备份缺少 backup.json。");
-  const backup = parseCompleteBackup(JSON.parse(strFromU8(manifestBytes)) as unknown);
-  if (backup.version !== COMPLETE_BACKUP_VERSION) {
-    throw new Error(`仅支持 v3 ZIP 完整备份，当前版本：${backup.version}。`);
-  }
-  const managedArchivePaths = new Set<string>();
-  for (const fileMetadata of backup.managedFiles) {
-    const archivePath = `files/${fileMetadata.path}`;
-    const bytes = archiveEntries[archivePath];
-    if (!(bytes instanceof Uint8Array) || bytes.byteLength !== fileMetadata.size) {
-      throw new Error(`ZIP 备份缺少应用文件或文件大小不符：${fileMetadata.path}`);
-    }
-    managedArchivePaths.add(archivePath);
-  }
-  const assetArchivePaths = new Set(Object.keys(backup.assets));
-  for (const path of assetArchivePaths) {
-    if (!(archiveEntries[path] instanceof Uint8Array)) {
-      throw new Error(`ZIP 备份缺少图片资源：${path}`);
-    }
-  }
-  const allowedArchiveFiles = new Set([
-    COMPLETE_BACKUP_MANIFEST_FILE,
-    ...assetArchivePaths,
-    ...managedArchivePaths,
-  ]);
-  const allowedArchiveDirectories = new Set<string>();
-  for (const archivePath of allowedArchiveFiles) {
-    const parts = archivePath.split("/");
-    for (let index = 1; index < parts.length; index += 1) {
-      allowedArchiveDirectories.add(`${parts.slice(0, index).join("/")}/`);
-    }
-  }
-  for (const archivePath of Object.keys(archiveEntries)) {
-    if (archivePath.endsWith("/")) {
-      if (!allowedArchiveDirectories.has(archivePath)) {
-        throw new Error(`ZIP 备份包含未索引的目录：${archivePath}`);
-      }
-    } else if (!allowedArchiveFiles.has(archivePath)) {
-      throw new Error(`ZIP 备份包含未索引的文件：${archivePath}`);
-    }
-  }
-  return backup;
 }
 
 function getCompleteBackupFileTimestamp(date: Date) {
@@ -16307,28 +16147,17 @@ export function App() {
 
   const importCompleteAppData = async (file?: File) => {
     if (!file || dataBackupState.status === "loading") return;
-    const isAndroid = Boolean(window.rengeAndroid?.isAndroid);
     setDataBackupProgress({
       active: true,
       value: null,
-      label: isAndroid ? "正在准备导入" : "阶段 1/3：正在读取并校验备份",
+      label: "正在准备上传备份",
     });
-    setDataBackupState({ status: "loading", message: "正在校验完整备份..." });
+    setDataBackupState({ status: "loading", message: "正在准备完整备份导入..." });
     let persistenceSuspended = false;
     let backupInstalled = false;
-    let backup: RengeCompleteBackup | null = null;
     try {
-      backup = isAndroid ? null : await readCompleteBackupFile(file);
-      const exportedLabel = backup
-        ? (() => {
-            const exportedDate = new Date(backup.exportedAt);
-            return Number.isNaN(exportedDate.getTime())
-              ? backup.exportedAt
-              : exportedDate.toLocaleString("zh-CN");
-          })()
-        : `${file.name}（${formatFileSize(file.size)}）`;
       const confirmed = window.confirm(
-        `即将导入 ${exportedLabel} 的 v3 完整备份。\n\n导入前会先校验备份，再清空当前全部应用数据并恢复备份内容。该操作不可直接撤销；如果导入过程中失败，当前数据可能不完整，请重新导入备份。是否继续？`,
+        `即将导入 ${file.name}（${formatFileSize(file.size)}）的 v3 ZIP 完整备份。\n\n导入时会清空当前全部应用数据，再直接解包恢复备份。该操作不可直接撤销；如果导入过程中失败，当前数据可能不完整，请重新导入备份。是否继续？`,
       );
       if (!confirmed) {
         setDataBackupProgress({ active: false, value: null, label: "" });
@@ -16359,32 +16188,29 @@ export function App() {
         () => {
           setDataBackupState({
             status: "loading",
-            message: "备份上传完成，正在校验并恢复应用数据与文件...",
+            message: "备份上传完成，正在直接解包并恢复应用数据与文件...",
           });
           setDataBackupProgress({
             active: true,
             value: null,
-            label: "阶段 3/3：正在校验并恢复应用文件",
+            label: "正在解包并写入应用文件",
           });
         },
       );
       backupInstalled = true;
-      replaceRengeLocalStorage(importResult.localStorage ?? backup?.localStorage ?? {});
-      let restoredAppData = backup?.appData;
-      if (!restoredAppData) {
-        const appDataResponse = await fetch("/api/app-data", {
-          headers: { Accept: "application/json" },
-          cache: "no-store",
-        });
-        if (!appDataResponse.ok) {
-          throw new Error(`应用数据已导入，但无法同步浏览器数据库：${appDataResponse.status}`);
-        }
-        const appDataPayload = (await appDataResponse.json()) as { data?: unknown };
-        if (!isObjectRecord(appDataPayload.data)) {
-          throw new Error("应用数据已导入，但服务未返回有效的应用主数据。");
-        }
-        restoredAppData = appDataPayload.data as RengeAppData;
+      replaceRengeLocalStorage(importResult.localStorage ?? {});
+      const appDataResponse = await fetch("/api/app-data", {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      });
+      if (!appDataResponse.ok) {
+        throw new Error(`应用数据已导入，但无法同步浏览器数据库：${appDataResponse.status}`);
       }
+      const appDataPayload = (await appDataResponse.json()) as { data?: unknown };
+      if (!isObjectRecord(appDataPayload.data)) {
+        throw new Error("应用数据已导入，但服务未返回有效的应用主数据。");
+      }
+      const restoredAppData = appDataPayload.data as RengeAppData;
       await personaStore.save((restoredAppData.personas ?? []).map(normalizePersona)).catch(() => undefined);
       await saveCharacterCardsToDatabase(restoredAppData.characterCards ?? []);
 
@@ -16405,9 +16231,7 @@ export function App() {
         error.dataCleared === true;
       if (importDataCleared || importOutcomeUnknown) {
         try {
-          replaceRengeLocalStorage(
-            importOutcomeUnknown && backup ? backup.localStorage : {},
-          );
+          replaceRengeLocalStorage({});
         } catch {
           // Do not let stale browser settings return after an uncertain import.
         }
@@ -37031,7 +36855,7 @@ export function App() {
                     导入会覆盖当前全部应用数据。开始前建议先导出一次当前数据，以便需要时恢复。
                   </div>
                   <p className="data-backup-import-note">
-                    仅支持 v3 ZIP 完整备份。导入前会清空当前应用数据，成功后应用会自动重新载入。
+                    仅支持 v3 ZIP 完整备份。导入时先清空当前数据，再直接解包恢复；失败后请重新导入。
                   </p>
                   {dataBackupProgress.active && (
                     <div className="data-backup-progress-panel">

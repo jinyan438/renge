@@ -475,33 +475,13 @@ test("complete backup export and import include managed application files and im
     "current session",
   );
 
-  const unindexedFileArchive = zipSync({
-    "backup.json": strToU8(JSON.stringify(backup)),
-    "assets/image-0001.png": new Uint8Array(image),
-    "files/.pi/sessions/restored-session.jsonl": strToU8("restored session"),
-    "files/skills/new-skill/SKILL.md": strToU8("restored skill"),
-    "files/tavern-files/vectors.json": strToU8("restored vector"),
-    "unexpected.txt": strToU8("not indexed by backup.json"),
-  });
-  const unindexedFileResponse = await fetch(`${controller.url}/api/app-data/import-complete`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/zip" },
-    body: Buffer.from(unindexedFileArchive),
-  });
-  assert.equal(unindexedFileResponse.status, 400);
-  assert.equal((await unindexedFileResponse.json()).cleared, false);
-  assert.deepEqual(JSON.parse(await readFile(join(dataDir, "app-data.json"), "utf8")), previousData);
-  assert.equal(
-    await readFile(join(dataDir, ".pi", "sessions", "current-session.jsonl"), "utf8"),
-    "current session",
-  );
-
   const archive = zipSync({
     "backup.json": strToU8(JSON.stringify(backup)),
     "assets/image-0001.png": new Uint8Array(image),
     "files/.pi/sessions/restored-session.jsonl": strToU8("restored session"),
     "files/skills/new-skill/SKILL.md": strToU8("restored skill"),
     "files/tavern-files/vectors.json": strToU8("restored vector"),
+    "unexpected.txt": strToU8("ignored during direct restore"),
   }, { level: 6 });
   const importResponse = await fetch(`${controller.url}/api/app-data/import-complete`, {
     method: "PUT",
@@ -530,6 +510,7 @@ test("complete backup export and import include managed application files and im
     "restored vector",
   );
   await assert.rejects(readFile(join(dataDir, "skills", "existing-skill", "SKILL.md")));
+  await assert.rejects(readFile(join(dataDir, "unexpected.txt")));
   assert.deepEqual(
     Buffer.from(await (await fetch(`${controller.url}/api/app-data/assets/image-0001.png`)).arrayBuffer()),
     image,

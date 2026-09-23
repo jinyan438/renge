@@ -760,7 +760,11 @@ function rewriteCompleteBackupAssetReferences(value, assets, seen = new WeakMap(
     const relativePath = archivePath.startsWith("assets/")
       ? archivePath.slice("assets/".length)
       : "";
-    if (!relativePath || !assets.has(archivePath)) {
+    if (
+      !relativePath ||
+      relativePath.split("/").some((part) => !part || part === "." || part === ".." || /[\\\\\x00-\x1f]/.test(part)) ||
+      !assets.has(archivePath)
+    ) {
       throw new Error(`备份缺少图片资源：${archivePath || "未知"}`);
     }
     return `/api/app-data/assets/${relativePath.split("/").map(encodeURIComponent).join("/")}`;
@@ -782,32 +786,6 @@ function rewriteCompleteBackupAssetReferences(value, assets, seen = new WeakMap(
   return next;
 }
 
-function validateCompleteBackupAppData(appData) {
-  if (!appData || typeof appData !== "object" || Array.isArray(appData)) {
-    throw new Error("备份缺少应用主数据。");
-  }
-  const requiredArrayFields = [
-    "personas", "providers", "chatSessions", "systemPrompts", "chatPresets",
-    "worldBooks", "regexScripts", "tavernScripts", "characterCards", "mcpServers",
-    "skills", "extensions",
-  ];
-  requiredArrayFields.push("statusBarPresets");
-  for (const field of requiredArrayFields) {
-    if (!Array.isArray(appData[field])) throw new Error(`备份缺少完整数据字段：${field}。`);
-  }
-}
-
-function validateCompleteBackupLocalStorage(localStorage) {
-  if (!localStorage || typeof localStorage !== "object" || Array.isArray(localStorage)) {
-    throw new Error("备份缺少本地设置数据。");
-  }
-  for (const [key, value] of Object.entries(localStorage)) {
-    if (!key.startsWith("renge") || typeof value !== "string") {
-      throw new Error("备份中的本地设置格式无效。");
-    }
-  }
-}
-
 function parseCompleteBackupManifest(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("备份文件不是有效的 JSON 对象。");
@@ -818,129 +796,56 @@ function parseCompleteBackupManifest(value) {
   if (value.version !== 3) {
     throw new Error(`暂不支持此备份版本：${String(value.version ?? "未知")}。`);
   }
-  if (typeof value.exportedAt !== "string" || !value.exportedAt.trim()) {
-    throw new Error("备份缺少导出时间。");
-  }
-  validateCompleteBackupAppData(value.appData);
-  validateCompleteBackupLocalStorage(value.localStorage);
-  const assets = new Map();
-  if (!value.assets || typeof value.assets !== "object" || Array.isArray(value.assets)) {
-    throw new Error("备份中的图片资源索引无效。");
-  }
-  for (const [archivePath, metadata] of Object.entries(value.assets)) {
-    const relativePath = archivePath.startsWith("assets/") ? archivePath.slice("assets/".length) : "";
-    if (
-      !relativePath ||
-      relativePath.split("/").some((part) => !part || part === "." || part === ".." || /[\\\\\x00-\x1f]/.test(part)) ||
-      !metadata || typeof metadata !== "object" || Array.isArray(metadata) ||
-      typeof metadata.mimeType !== "string" || !metadata.mimeType.startsWith("image/")
-    ) {
-      throw new Error("备份中的图片资源索引无效。");
-    }
-    assets.set(archivePath, metadata);
-  }
-  if (
-    value.desktopProjectPositions !== undefined && value.desktopProjectPositions !== null &&
-    (typeof value.desktopProjectPositions !== "object" || Array.isArray(value.desktopProjectPositions))
-  ) {
-    throw new Error("备份中的桌面图标位置格式无效。");
-  }
-  if (!Array.isArray(value.managedFiles)) throw new Error("备份缺少应用文件索引。");
-  const seen = new Set();
-  const managedFiles = value.managedFiles.map((entry) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new Error("备份中的应用文件索引无效。");
-    }
-    const path = normalizeCompleteBackupManagedFilePath(entry.path);
-    if (!path || seen.has(path) || !Number.isSafeInteger(entry.size) || entry.size < 0) {
-      throw new Error("备份中的应用文件索引无效。");
-    }
-    seen.add(path);
-    return { path, size: entry.size };
-  });
-  return { ...value, assets, managedFiles };
+  const assets = new Map(
+    Object.keys(value.assets && typeof value.assets === "object" ? value.assets : {})
+      .map((archivePath) => [archivePath, true]),
+  );
+  return { ...value, assets };
 }
 
 async function installCompleteBackupZip(dataFilePath, zipBytes) {
-  const archiveEntries = unzipSync(zipBytes);
-  let uncompressedBytes = 0;
-  for (const value of Object.values(archiveEntries)) {
-    uncompressedBytes += value.byteLength;
-    if (uncompressedBytes > completeBackupMaxBytes) {
-      throw new Error("ZIP 解压后的数据超过 512MB。");
-    }
-  }
-  const manifestBytes = archiveEntries["backup.json"];
+  const manifestEntries = unzipSync(zipBytes, {
+    filter: (file) => file.name === "backup.json",
+  });
+  const manifestBytes = manifestEntries["backup.json"];
   if (!manifestBytes) throw new Error("ZIP 备份缺少 backup.json。");
   const manifest = parseCompleteBackupManifest(
     JSON.parse(strFromU8(manifestBytes)),
   );
   const dataDirectory = dirname(dataFilePath);
-  const indexedFiles = new Map(manifest.managedFiles.map((entry) => [`files/${entry.path}`, entry]));
-  const allowedArchiveFiles = new Set([
-    "backup.json",
-    ...manifest.assets.keys(),
-    ...indexedFiles.keys(),
-  ]);
-  const allowedArchiveDirectories = new Set();
-  for (const archivePath of allowedArchiveFiles) {
-    const parts = archivePath.split("/");
-    for (let index = 1; index < parts.length; index += 1) {
-      allowedArchiveDirectories.add(`${parts.slice(0, index).join("/")}/`);
-    }
-  }
-  for (const [archivePath, metadata] of manifest.assets) {
-    if (!(archiveEntries[archivePath] instanceof Uint8Array)) {
-      throw new Error(`ZIP 备份缺少图片资源：${archivePath}`);
-    }
-    const relativePath = archivePath.slice("assets/".length);
-    if (!relativePath || relativePath.split("/").some((part) => !part || part === "." || part === "..")) {
-      throw new Error("ZIP 备份中的图片资源路径非法。");
-    }
-  }
-  for (const [archivePath, bytes] of Object.entries(archiveEntries)) {
-    if (archivePath.endsWith("/")) {
-      if (!allowedArchiveDirectories.has(archivePath)) {
-        throw new Error(`ZIP 备份包含未索引的目录：${archivePath}`);
-      }
-      continue;
-    }
-    if (!allowedArchiveFiles.has(archivePath)) {
-      throw new Error(`ZIP 备份包含未索引的文件：${archivePath}`);
-    }
-    const indexed = indexedFiles.get(archivePath);
-    if (indexed && bytes.byteLength !== indexed.size) {
-      throw new Error(`ZIP 备份中的应用文件大小不符：${indexed.path}`);
-    }
-  }
-  for (const [archivePath, indexed] of indexedFiles) {
-    if (!(archiveEntries[archivePath] instanceof Uint8Array)) {
-      throw new Error(`ZIP 备份缺少应用文件：${indexed.path}`);
-    }
-  }
-  const appData = rewriteCompleteBackupAssetReferences(manifest.appData, manifest.assets);
-
   let dataCleared = false;
   try {
     dataCleared = true;
     await clearAppData(dataFilePath);
+    const archiveEntries = unzipSync(zipBytes, {
+      filter: (file) => file.name !== "backup.json",
+    });
     const assetsRoot = join(dataDirectory, "app-data-assets");
-    await mkdir(assetsRoot, { recursive: true });
-    for (const archivePath of manifest.assets.keys()) {
-      const relativePath = archivePath.slice("assets/".length);
-      const target = resolve(assetsRoot, ...relativePath.split("/"));
-      const relativeTarget = relative(assetsRoot, target);
-      if (relativeTarget.startsWith("..") || isAbsolute(relativeTarget)) {
-        throw new Error("ZIP 备份中的图片资源路径非法。");
+    for (const [archivePath, bytes] of Object.entries(archiveEntries)) {
+      if (archivePath.endsWith("/")) continue;
+      if (archivePath.startsWith("assets/")) {
+        const relativePath = archivePath.slice("assets/".length);
+        if (relativePath.split("/").some((part) => !part || part === "." || part === ".." || /[\\\\\x00-\x1f]/.test(part))) {
+          throw new Error("ZIP 备份中的图片资源路径非法。");
+        }
+        const target = resolve(assetsRoot, ...relativePath.split("/"));
+        const relativeTarget = relative(assetsRoot, target);
+        if (relativeTarget.startsWith("..") || isAbsolute(relativeTarget)) {
+          throw new Error("ZIP 备份中的图片资源路径非法。");
+        }
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, bytes);
+      } else if (archivePath.startsWith("files/")) {
+        const managedPath = normalizeCompleteBackupManagedFilePath(archivePath.slice("files/".length));
+        const target = managedPath
+          ? resolveCompleteBackupManagedFile(dataDirectory, managedPath)?.filePath
+          : null;
+        if (!target) throw new Error("ZIP 备份中的应用文件路径非法。");
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, bytes);
       }
-      await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, archiveEntries[archivePath]);
     }
-    for (const item of manifest.managedFiles) {
-      const { filePath } = resolveCompleteBackupManagedFile(dataDirectory, item.path);
-      await mkdir(dirname(filePath), { recursive: true });
-      await writeFile(filePath, archiveEntries[`files/${item.path}`]);
-    }
+    const appData = rewriteCompleteBackupAssetReferences(manifest.appData, manifest.assets);
     if (manifest.desktopProjectPositions !== undefined) {
       await writeFile(
         join(dataDirectory, "desktop-project-positions.json"),
@@ -981,11 +886,12 @@ async function handleCompleteBackupImport(request, response, dataFilePath) {
   try {
     await pipeline(request, sizeLimit, createWriteStream(backupPath, { flags: "wx" }));
     if (uploadedBytes === 0) throw new Error("备份文件为空。");
-    const signature = await readFile(backupPath).then((bytes) => bytes.subarray(0, 4));
+    const zipBytes = new Uint8Array(await readFile(backupPath));
+    const signature = zipBytes.subarray(0, 4);
     const isZip = signature[0] === 0x50 && signature[1] === 0x4b &&
       signature[2] === 0x03 && signature[3] === 0x04;
     if (!isZip) throw new Error("仅支持新版 v3 ZIP 完整备份，请重新导出备份文件。");
-    const result = await installCompleteBackupZip(dataFilePath, new Uint8Array(await readFile(backupPath)));
+    const result = await installCompleteBackupZip(dataFilePath, zipBytes);
     sendJson(response, 200, { ok: true, ...result, bytes: uploadedBytes });
   } catch (error) {
     const message = compactError(error);

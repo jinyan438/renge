@@ -44,11 +44,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -80,21 +78,6 @@ public class LocalWebServer {
     private static final String[] COMPLETE_BACKUP_MANAGED_ROOTS = new String[]{
             ".pi", "extensions", "generated-images", "session-images", "skills", "tavern-files"
     };
-    private static final Set<String> REQUIRED_APP_DATA_ARRAY_FIELDS = new HashSet<>(Arrays.asList(
-            "personas",
-            "providers",
-            "chatSessions",
-            "systemPrompts",
-            "chatPresets",
-            "worldBooks",
-            "regexScripts",
-            "tavernScripts",
-            "characterCards",
-            "mcpServers",
-            "skills",
-            "extensions",
-            "statusBarPresets"
-    ));
     private final Context context;
     private final ExecutorService executor = Executors.newCachedThreadPool();
     private final File appDataFile;
@@ -382,146 +365,54 @@ public class LocalWebServer {
         File stagedManifest = File.createTempFile("renge-backup-manifest-", ".json", context.getCacheDir());
         File stagedRawAppData = File.createTempFile("renge-app-data-raw-", ".json", context.getCacheDir());
         File stagedAppData = File.createTempFile("renge-app-data-import-", ".json", context.getCacheDir());
-        File stagedManagedFiles = File.createTempFile("renge-backup-files-index-", ".json", context.getCacheDir());
         File stagedLocalStorage = File.createTempFile("renge-local-storage-import-", ".json", context.getCacheDir());
         boolean dataCleared = false;
-        try {
-            Map<String, Long> archiveFileSizes = validateCompleteBackupZip(completeBackup, stagedManifest);
-            CompleteBackupMetadata metadata = extractCompleteBackupAppData(
-                    stagedManifest,
-                    stagedRawAppData,
-                    stagedManagedFiles,
-                    stagedLocalStorage
-            );
-            if (metadata.version != 3) {
-                throw new IOException("仅支持新版 v3 ZIP 完整备份，当前版本：" + metadata.version + "。");
-            }
-            validateImportedAppData(stagedRawAppData, metadata.version);
-            Set<String> indexedAssets = validateCompleteBackupAssets(stagedManifest, archiveFileSizes);
-            validateImportedAssetReferences(stagedRawAppData, indexedAssets);
-            validateCompleteBackupManagedFiles(stagedManagedFiles, archiveFileSizes);
-
-            dataCleared = true;
-            clearAppData();
-            try {
-                extractCompleteBackupFilesToAppData(completeBackup);
-                for (String root : COMPLETE_BACKUP_MANAGED_ROOTS) {
-                    File directory = new File(context.getFilesDir(), root);
-                    if (!directory.mkdirs() && !directory.isDirectory()) {
-                        throw new IOException("无法准备应用文件目录：" + root);
-                    }
-                }
-                rewriteImportedAssetReferences(stagedRawAppData, stagedAppData, appDataAssetsDirectory);
-                copyFileAtomically(stagedAppData, appDataFile);
-            } catch (IOException error) {
-                throw new CompleteBackupImportException(
-                        "当前数据已清空，但备份恢复失败：" + error.getMessage(),
-                        error
-                );
-            }
-            return metadata;
-        } catch (IOException error) {
-            if (dataCleared && !(error instanceof CompleteBackupImportException)) {
-                throw new CompleteBackupImportException(
-                        "当前数据已清空，但备份恢复失败：" + error.getMessage(),
-                        error
-                );
-            }
-            throw error;
-        } finally {
-            for (File stagedFile : new File[]{stagedManifest, stagedRawAppData, stagedAppData, stagedManagedFiles, stagedLocalStorage}) {
-                if (!stagedFile.delete() && stagedFile.exists()) stagedFile.deleteOnExit();
-            }
-        }
-    }
-
-    private Map<String, Long> validateCompleteBackupZip(File completeBackup, File stagedManifest) throws IOException {
-        boolean manifestFound = false;
-        long extractedBytes = 0;
-        byte[] buffer = new byte[64 * 1024];
-        Map<String, Long> archiveFileSizes = new HashMap<>();
-        Set<String> seenEntries = new HashSet<>();
+        CompleteBackupMetadata metadata = null;
         try (ZipInputStream zipInput = new ZipInputStream(
                 new BufferedInputStream(new FileInputStream(completeBackup))
         )) {
+            byte[] buffer = new byte[64 * 1024];
+            long extractedBytes = 0;
+            boolean manifestFound = false;
             ZipEntry entry;
             while ((entry = zipInput.getNextEntry()) != null) {
                 String entryName = entry.getName().replace('\\', '/');
                 if (entry.isDirectory()) {
-                    int count;
-                    while ((count = zipInput.read(buffer)) != -1) {
-                        extractedBytes += count;
-                        if (extractedBytes > MAX_COMPLETE_BACKUP_BYTES) {
-                            throw new IOException("ZIP 解压后的数据超过 512MB。");
-                        }
-                    }
+                    extractedBytes = copyCompleteBackupZipEntry(zipInput, null, buffer, extractedBytes);
                     zipInput.closeEntry();
                     continue;
                 }
-                if (!seenEntries.add(entryName)) throw new IOException("ZIP 备份包含重复文件：" + entryName);
-
-                File target = null;
-                if (COMPLETE_BACKUP_MANIFEST_FILE.equals(entryName)) {
-                    if (manifestFound) throw new IOException("ZIP 备份包含重复的 backup.json。");
-                    manifestFound = true;
-                    target = stagedManifest;
-                } else if (entryName.startsWith("assets/")) {
-                    String relativePath = entryName.substring("assets/".length());
-                    if (normalizeCompleteBackupAssetPath(relativePath) == null) {
-                        throw new IOException("ZIP 图片资源路径非法。");
+                if (!manifestFound) {
+                    if (!COMPLETE_BACKUP_MANIFEST_FILE.equals(entryName)) {
+                        throw new IOException("新版 v3 备份的 backup.json 必须是 ZIP 中的第一个文件。");
                     }
-                    if (archiveFileSizes.containsKey(entryName)) throw new IOException("ZIP 备份包含重复图片资源：" + entryName);
-                    archiveFileSizes.put(entryName, 0L);
-                } else if (entryName.startsWith("files/")) {
-                    String relativePath = normalizeCompleteBackupManagedPath(
-                            entryName.substring("files/".length())
+                    try (OutputStream manifestOutput = new BufferedOutputStream(new FileOutputStream(stagedManifest))) {
+                        extractedBytes = copyCompleteBackupZipEntry(
+                                zipInput,
+                                manifestOutput,
+                                buffer,
+                                extractedBytes
+                        );
+                    }
+                    zipInput.closeEntry();
+                    metadata = extractCompleteBackupAppData(
+                            stagedManifest,
+                            stagedRawAppData,
+                            stagedLocalStorage
                     );
-                    if (relativePath == null) throw new IOException("ZIP 应用文件路径非法。");
-                    if (archiveFileSizes.containsKey(entryName)) throw new IOException("ZIP 备份包含重复应用文件：" + entryName);
-                    archiveFileSizes.put(entryName, 0L);
-                } else {
-                    throw new IOException("ZIP 备份包含未知文件：" + entryName);
-                }
-
-                OutputStream entryOutput = target == null ? null : new BufferedOutputStream(new FileOutputStream(target));
-                long entryBytes = 0;
-                try {
-                    int count;
-                    while ((count = zipInput.read(buffer)) != -1) {
-                        extractedBytes += count;
-                        entryBytes += count;
-                        if (extractedBytes > MAX_COMPLETE_BACKUP_BYTES) {
-                            throw new IOException("ZIP 解压后的数据超过 512MB。");
-                        }
-                        if (entryOutput != null) entryOutput.write(buffer, 0, count);
+                    if (metadata.version != 3) {
+                        throw new IOException("仅支持新版 v3 ZIP 完整备份，当前版本：" + metadata.version + "。");
                     }
-                } finally {
-                    if (entryOutput != null) entryOutput.close();
-                }
-                if (archiveFileSizes.containsKey(entryName)) {
-                    archiveFileSizes.put(entryName, entryBytes);
-                }
-                zipInput.closeEntry();
-            }
-        }
-        if (!manifestFound || stagedManifest.length() == 0) {
-            throw new IOException("ZIP 备份缺少 backup.json。");
-        }
-        return archiveFileSizes;
-    }
-
-    private void extractCompleteBackupFilesToAppData(File completeBackup) throws IOException {
-        byte[] buffer = new byte[64 * 1024];
-        try (ZipInputStream zipInput = new ZipInputStream(
-                new BufferedInputStream(new FileInputStream(completeBackup))
-        )) {
-            ZipEntry entry;
-            while ((entry = zipInput.getNextEntry()) != null) {
-                String entryName = entry.getName().replace('\\', '/');
-                if (entry.isDirectory() || COMPLETE_BACKUP_MANIFEST_FILE.equals(entryName)) {
-                    zipInput.closeEntry();
+                    if (!stagedManifest.delete()) stagedManifest.deleteOnExit();
+                    manifestFound = true;
+                    dataCleared = true;
+                    clearAppData();
                     continue;
                 }
+                if (COMPLETE_BACKUP_MANIFEST_FILE.equals(entryName)) {
+                    throw new IOException("ZIP 备份包含重复的 backup.json。");
+                }
+
                 File root;
                 File target;
                 if (entryName.startsWith("assets/")) {
@@ -535,24 +426,66 @@ public class LocalWebServer {
                     root = context.getFilesDir();
                     target = new File(root, relativePath);
                 } else {
-                    throw new IOException("ZIP 备份包含未知文件：" + entryName);
+                    extractedBytes = copyCompleteBackupZipEntry(zipInput, null, buffer, extractedBytes);
+                    zipInput.closeEntry();
+                    continue;
                 }
+
                 String rootCanonicalPath = root.getCanonicalPath() + File.separator;
-                String targetCanonicalPath = target.getCanonicalPath();
-                if (!targetCanonicalPath.startsWith(rootCanonicalPath)) {
+                if (!target.getCanonicalPath().startsWith(rootCanonicalPath)) {
                     throw new IOException("ZIP 应用文件路径越界。");
                 }
                 File parent = target.getParentFile();
                 if (parent != null && !parent.mkdirs() && !parent.isDirectory()) {
                     throw new IOException("无法创建应用文件目录。");
                 }
-                try (OutputStream output = new BufferedOutputStream(new FileOutputStream(target))) {
-                    int count;
-                    while ((count = zipInput.read(buffer)) != -1) output.write(buffer, 0, count);
+                try (OutputStream fileOutput = new BufferedOutputStream(new FileOutputStream(target))) {
+                    extractedBytes = copyCompleteBackupZipEntry(zipInput, fileOutput, buffer, extractedBytes);
                 }
                 zipInput.closeEntry();
             }
+            if (!manifestFound || metadata == null) {
+                throw new IOException("ZIP 备份缺少 backup.json。");
+            }
+            for (String root : COMPLETE_BACKUP_MANAGED_ROOTS) {
+                File directory = new File(context.getFilesDir(), root);
+                if (!directory.mkdirs() && !directory.isDirectory()) {
+                    throw new IOException("无法准备应用文件目录：" + root);
+                }
+            }
+            rewriteImportedAssetReferences(stagedRawAppData, stagedAppData, appDataAssetsDirectory);
+            copyFileAtomically(stagedAppData, appDataFile);
+            return metadata;
+        } catch (IOException error) {
+            if (dataCleared && !(error instanceof CompleteBackupImportException)) {
+                throw new CompleteBackupImportException(
+                        "当前数据已清空，但备份恢复失败：" + error.getMessage(),
+                        error
+                );
+            }
+            throw error;
+        } finally {
+            for (File stagedFile : new File[]{stagedManifest, stagedRawAppData, stagedAppData, stagedLocalStorage}) {
+                if (!stagedFile.delete() && stagedFile.exists()) stagedFile.deleteOnExit();
+            }
         }
+    }
+
+    private long copyCompleteBackupZipEntry(
+            ZipInputStream input,
+            OutputStream output,
+            byte[] buffer,
+            long totalBytes
+    ) throws IOException {
+        int count;
+        while ((count = input.read(buffer)) != -1) {
+            totalBytes += count;
+            if (totalBytes > MAX_COMPLETE_BACKUP_BYTES) {
+                throw new IOException("ZIP 解压后的数据超过 512MB。");
+            }
+            if (output != null) output.write(buffer, 0, count);
+        }
+        return totalBytes;
     }
 
     private void rewriteImportedAssetReferences(
@@ -645,7 +578,6 @@ public class LocalWebServer {
     private CompleteBackupMetadata extractCompleteBackupAppData(
             File completeBackup,
             File stagedAppData,
-            File stagedManagedFiles,
             File stagedLocalStorage
     ) throws IOException {
         String format = null;
@@ -653,7 +585,6 @@ public class LocalWebServer {
         String exportedAt = null;
         boolean appDataFound = false;
         boolean localStorageFound = false;
-        boolean managedFilesFound = false;
 
         try (PushbackInputStream input = new PushbackInputStream(
                 new BufferedInputStream(new java.io.FileInputStream(completeBackup)),
@@ -697,18 +628,6 @@ public class LocalWebServer {
                         copyJsonComposite(input, valueStart, localStorageOutput);
                     }
                     localStorageFound = true;
-                } else if ("managedFiles".equals(key)) {
-                    if (managedFilesFound || valueStart != '[') {
-                        throw new IOException("备份中的应用文件索引无效。");
-                    }
-                    if (stagedManagedFiles != null) {
-                        try (OutputStream filesIndexOutput = new FileOutputStream(stagedManagedFiles)) {
-                            copyJsonComposite(input, valueStart, filesIndexOutput);
-                        }
-                    } else {
-                        copyJsonComposite(input, valueStart, null);
-                    }
-                    managedFilesFound = true;
                 } else {
                     skipJsonValue(input, valueStart);
                 }
@@ -739,9 +658,6 @@ public class LocalWebServer {
             throw new IOException("备份缺少本地设置数据。");
         }
         int parsedVersion = Integer.parseInt(version);
-        if (!managedFilesFound) {
-            throw new IOException("备份缺少应用文件索引。");
-        }
         JSONObject localStorage;
         try (InputStream input = new FileInputStream(stagedLocalStorage)) {
             localStorage = new JSONObject(new String(readAll(input), StandardCharsets.UTF_8));
@@ -756,153 +672,6 @@ public class LocalWebServer {
             throw new IOException("备份中的本地设置格式无效。", error);
         }
         return new CompleteBackupMetadata(exportedAt, parsedVersion, localStorage);
-    }
-
-    private void validateImportedAppData(File stagedAppData, int version) throws IOException {
-        Set<String> missingFields = new HashSet<>(REQUIRED_APP_DATA_ARRAY_FIELDS);
-        if (version != 3) throw new IOException("仅支持新版 v3 ZIP 完整备份。");
-        try (JsonReader reader = new JsonReader(new InputStreamReader(
-                new java.io.FileInputStream(stagedAppData),
-                StandardCharsets.UTF_8
-        ))) {
-            reader.beginObject();
-            while (reader.hasNext()) {
-                String name = reader.nextName();
-                if (missingFields.contains(name)) {
-                    if (reader.peek() != JsonToken.BEGIN_ARRAY) {
-                        throw new IOException("备份缺少完整数据字段：" + name + "。");
-                    }
-                    missingFields.remove(name);
-                }
-                reader.skipValue();
-            }
-            reader.endObject();
-            if (reader.peek() != JsonToken.END_DOCUMENT) {
-                throw new IOException("应用主数据包含多余内容。");
-            }
-        } catch (IllegalStateException error) {
-            throw new IOException("应用主数据 JSON 格式无效。", error);
-        }
-        if (!missingFields.isEmpty()) {
-            throw new IOException("备份缺少完整数据字段：" + missingFields.iterator().next() + "。");
-        }
-    }
-
-    private Set<String> validateCompleteBackupAssets(File manifestFile, Map<String, Long> archiveFileSizes) throws IOException {
-        Set<String> indexed = new HashSet<>();
-        try (InputStream input = new FileInputStream(manifestFile)) {
-            JSONObject manifest = new JSONObject(new String(readAll(input), StandardCharsets.UTF_8));
-            JSONObject assets = manifest.optJSONObject("assets");
-            if (assets == null) throw new IOException("备份中的图片资源索引无效。");
-            Iterator<String> keys = assets.keys();
-            while (keys.hasNext()) {
-                String archivePath = keys.next();
-                String relativePath = archivePath.startsWith("assets/")
-                        ? normalizeCompleteBackupAssetPath(archivePath.substring("assets/".length()))
-                        : null;
-                JSONObject metadata = assets.optJSONObject(archivePath);
-                Long fileSize = archiveFileSizes.get(archivePath);
-                if (relativePath == null || metadata == null
-                        || !metadata.optString("mimeType", "").startsWith("image/")
-                        || fileSize == null || !indexed.add(archivePath)) {
-                    throw new IOException("备份中的图片资源索引与 ZIP 内容不一致。");
-                }
-            }
-        } catch (JSONException error) {
-            throw new IOException("备份中的图片资源索引无效。", error);
-        }
-        int archivedAssetCount = 0;
-        for (String path : archiveFileSizes.keySet()) {
-            if (path.startsWith("assets/")) archivedAssetCount++;
-        }
-        if (indexed.size() != archivedAssetCount) {
-            throw new IOException("ZIP 备份中的图片资源与索引不一致。");
-        }
-        return indexed;
-    }
-
-    private void validateCompleteBackupManagedFiles(File indexFile, Map<String, Long> archiveFileSizes) throws IOException {
-        Set<String> indexed = new HashSet<>();
-        try {
-            String indexContent;
-            try (InputStream input = new FileInputStream(indexFile)) {
-                indexContent = new String(readAll(input), StandardCharsets.UTF_8);
-            }
-            JSONArray entries = new JSONArray(indexContent);
-            for (int index = 0; index < entries.length(); index++) {
-                JSONObject entry = entries.optJSONObject(index);
-                if (entry == null) throw new IOException("备份中的应用文件索引无效。");
-                String path = normalizeCompleteBackupManagedPath(entry.optString("path", null));
-                long size = entry.optLong("size", -1);
-                Long archivedSize = path == null ? null : archiveFileSizes.get("files/" + path);
-                if (path == null || size < 0 || archivedSize == null
-                        || archivedSize.longValue() != size || !indexed.add(path)) {
-                    throw new IOException("备份中的应用文件索引与 ZIP 内容不一致。" + (path == null ? "" : "：" + path));
-                }
-            }
-        } catch (JSONException error) {
-            throw new IOException("备份中的应用文件索引无效。", error);
-        }
-        int archivedFileCount = 0;
-        for (String path : archiveFileSizes.keySet()) {
-            if (path.startsWith("files/")) archivedFileCount++;
-        }
-        if (indexed.size() != archivedFileCount) {
-            throw new IOException("ZIP 备份中的应用文件与索引不一致。");
-        }
-    }
-
-    private void validateImportedAssetReferences(File rawAppData, Set<String> indexedAssets) throws IOException {
-        try (JsonReader reader = new JsonReader(new InputStreamReader(
-                new FileInputStream(rawAppData), StandardCharsets.UTF_8
-        ))) {
-            validateImportedAssetReferences(reader, indexedAssets);
-            if (reader.peek() != JsonToken.END_DOCUMENT) throw new IOException("应用主数据包含多余内容。");
-        } catch (IllegalStateException error) {
-            throw new IOException("应用主数据 JSON 格式无效。", error);
-        }
-    }
-
-    private void validateImportedAssetReferences(JsonReader reader, Set<String> indexedAssets) throws IOException {
-        try {
-            switch (reader.peek()) {
-                case BEGIN_OBJECT:
-                    reader.beginObject();
-                    while (reader.hasNext()) {
-                        reader.nextName();
-                        validateImportedAssetReferences(reader, indexedAssets);
-                    }
-                    reader.endObject();
-                    return;
-                case BEGIN_ARRAY:
-                    reader.beginArray();
-                    while (reader.hasNext()) validateImportedAssetReferences(reader, indexedAssets);
-                    reader.endArray();
-                    return;
-                case STRING:
-                    String value = reader.nextString();
-                    if (value.startsWith(COMPLETE_BACKUP_ASSET_PREFIX)) {
-                        String archivePath = value.substring(COMPLETE_BACKUP_ASSET_PREFIX.length());
-                        if (!indexedAssets.contains(archivePath)) {
-                            throw new IOException("备份缺少图片资源：" + archivePath);
-                        }
-                    }
-                    return;
-                case NUMBER:
-                    reader.nextString();
-                    return;
-                case BOOLEAN:
-                    reader.nextBoolean();
-                    return;
-                case NULL:
-                    reader.nextNull();
-                    return;
-                default:
-                    throw new IOException("应用主数据 JSON 格式无效。");
-            }
-        } catch (IllegalStateException error) {
-            throw new IOException("应用主数据 JSON 格式无效。", error);
-        }
     }
 
     private void copyFileAtomically(File source, File target) throws IOException {
