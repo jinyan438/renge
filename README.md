@@ -8,7 +8,7 @@ Renge Agent Lab 是一个本地优先的 AI Agent 工作台。它把 **Pi 编码
 
 ### Pi 内核驱动
 
-会话执行由 [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 驱动（当前 `0.85.1`），`server.mjs` 通过 `pi/renge-pi-host.mjs` 把 Pi 的 `AgentSession` 包装成 SSE 流式接口：
+会话执行由 [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 驱动（当前 `0.87.1`），`server.mjs` 通过 `pi/renge-pi-host.mjs` 把 Pi 的 `AgentSession` 包装成 SSE 流式接口：
 
 - **原生工具**：`read` / `grep` / `find` / `ls` / `write` / `edit` / `powershell`（Windows）或 `bash`（Unix）等由 Pi 内核直接执行，不经过前端桥接。
 - **可恢复写入**：Pi 原生 `write` 被替换为带偏移校验的分块式 `write` 工具（`pi/resumable-write-tool.mjs`），本地网关截断长流时不会留下永久运行的写入调用。

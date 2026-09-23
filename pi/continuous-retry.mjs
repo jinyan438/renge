@@ -146,6 +146,28 @@ function buildPartialProgressAssistantCheckpoint(message, progress) {
   };
 }
 
+function appendRetryContextEdit(session, replacement, appendedMessage) {
+  const sessionManager = session?.sessionManager;
+  if (typeof sessionManager?.appendContextEdit !== "function") return false;
+  if (
+    typeof sessionManager.getBranch !== "function" ||
+    (appendedMessage && typeof sessionManager.appendMessage !== "function") ||
+    typeof session.refreshContext !== "function"
+  ) {
+    throw new Error("Pi SessionManager does not expose the context refresh API required for retry.");
+  }
+  const assistantEntry = [...sessionManager.getBranch()]
+    .reverse()
+    .find((entry) => entry?.type === "message" && entry.message?.role === "assistant");
+  if (!assistantEntry) {
+    throw new Error("Pi retry could not find the failed assistant message in the active session branch.");
+  }
+  sessionManager.appendContextEdit(assistantEntry.id, replacement);
+  if (appendedMessage) sessionManager.appendMessage(appendedMessage);
+  session.refreshContext();
+  return true;
+}
+
 /**
  * Pi's stock retry loop stops after a finite number of attempts and lets its
  * exponential delay grow without a ceiling. Renge keeps the same retryable
@@ -198,7 +220,9 @@ export function installContinuousPiRetry(
     if (!resumeFromProgress && Array.isArray(messages) && messages.at(-1)?.role === "assistant") {
       // A connection failure before any output is safe to replay from the
       // original user message, matching Pi's normal retry behavior.
-      session.agent.state.messages = messages.slice(0, -1);
+      if (!appendRetryContextEdit(session, null)) {
+        session.agent.state.messages = messages.slice(0, -1);
+      }
     }
 
     if (resumeFromProgress && session.agent?.state) {
@@ -208,13 +232,13 @@ export function installContinuousPiRetry(
       // The previous assistant turn already did the expensive reasoning. The
       // continuation should execute that result instead of starting a second
       // reasoning pass. This is restored when the retry succeeds or ends.
-      session.agent.state.thinkingLevel = "off";
       if (Array.isArray(messages) && messages.at(-1)?.role === "assistant") {
-        session.agent.state.messages = [
-          ...messages.slice(0, -1),
-          buildPartialProgressAssistantCheckpoint(message, partialProgress),
-        ];
+        const checkpoint = buildPartialProgressAssistantCheckpoint(message, partialProgress);
+        if (!appendRetryContextEdit(session, null, checkpoint)) {
+          session.agent.state.messages = [...messages.slice(0, -1), checkpoint];
+        }
       }
+      session.agent.state.thinkingLevel = "off";
     }
 
     const controller = new AbortController();

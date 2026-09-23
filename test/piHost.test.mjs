@@ -13,15 +13,16 @@ import {
   createResumableWriteTool,
 } from "../pi/resumable-write-tool.mjs";
 
-test("continuous Pi retry uses capped backoff until the run is aborted", async () => {
-  assert.equal(getContinuousRetryDelayMs(1), 2_000);
-  assert.equal(getContinuousRetryDelayMs(2), 4_000);
-  assert.equal(getContinuousRetryDelayMs(8), 30_000);
-  assert.equal(getContinuousRetryDelayMs(10_000), 30_000);
-
-  const events = [];
+function createRetrySession(initialMessages, thinkingLevel, events = []) {
+  const branchEntries = initialMessages.map((message, index) => ({
+    type: "message",
+    id: `message-${index + 1}`,
+    message,
+  }));
+  const contextEdits = [];
   const listeners = [];
   const steeringMessages = [];
+  let refreshCount = 0;
   const session = {
     _prepareRetry() {},
     _retryAttempt: 0,
@@ -32,23 +33,75 @@ test("continuous Pi retry uses capped backoff until the run is aborted", async (
     subscribe(listener) {
       listeners.push(listener);
     },
+    sessionManager: {
+      getBranch() {
+        return [...branchEntries, ...contextEdits];
+      },
+      appendContextEdit(targetId, replacement) {
+        contextEdits.push({
+          type: "context_edit",
+          id: `context-edit-${contextEdits.length + 1}`,
+          targetId,
+          replacement,
+        });
+      },
+      appendMessage(message) {
+        branchEntries.push({
+          type: "message",
+          id: `message-${branchEntries.length + 1}`,
+          message,
+        });
+      },
+    },
+    refreshContext() {
+      refreshCount += 1;
+      session.agent.state.messages = branchEntries.flatMap((entry) => {
+        const edit = [...contextEdits].reverse().find((candidate) => candidate.targetId === entry.id);
+        if (edit?.replacement === null) return [];
+        return [edit ? { ...entry.message, content: edit.replacement.content } : entry.message];
+      });
+    },
     agent: {
       steer(message) {
         steeringMessages.push(message);
       },
-      state: {
-        thinkingLevel: "max",
-        messages: [
-          { role: "user", content: "continue" },
-          {
-            role: "assistant",
-            stopReason: "error",
-            content: [{ type: "thinking", thinking: "finished architecture and implementation plan" }],
-          },
-        ],
-      },
+      state: { thinkingLevel, messages: [...initialMessages] },
     },
   };
+  return {
+    session,
+    contextEdits,
+    listeners,
+    steeringMessages,
+    refreshCount: () => refreshCount,
+    appendMessage(message) {
+      branchEntries.push({
+        type: "message",
+        id: `message-${branchEntries.length + 1}`,
+        message,
+      });
+      session.agent.state.messages.push(message);
+    },
+  };
+}
+
+test("continuous Pi retry uses capped backoff until the run is aborted", async () => {
+  assert.equal(getContinuousRetryDelayMs(1), 2_000);
+  assert.equal(getContinuousRetryDelayMs(2), 4_000);
+  assert.equal(getContinuousRetryDelayMs(8), 30_000);
+  assert.equal(getContinuousRetryDelayMs(10_000), 30_000);
+
+  const events = [];
+  const assistantMessage = {
+    role: "assistant",
+    stopReason: "error",
+    content: [{ type: "thinking", thinking: "finished architecture and implementation plan" }],
+  };
+  const retry = createRetrySession([
+    { role: "user", content: "continue" },
+    assistantMessage,
+  ], "max", events);
+  const { session, contextEdits, listeners, steeringMessages } = retry;
 
   assert.equal(installContinuousPiRetry(session, { baseDelayMs: 0, maxDelayMs: 0 }), true);
   assert.equal(await session._prepareRetry({
@@ -61,9 +114,12 @@ test("continuous Pi retry uses capped backoff until the run is aborted", async (
   assert.equal(events[0].attempt, 1);
   assert.equal(events[0].maxAttempts, undefined);
   assert.equal(session.agent.state.messages.length, 2);
-  assert.equal(session.agent.state.messages.at(-1).stopReason, "stop");
   assert.equal(session.agent.state.messages.at(-1).content[0].type, "text");
   assert.match(session.agent.state.messages.at(-1).content[0].text, /finished architecture/);
+  assert.equal(contextEdits[0].targetId, "message-2");
+  assert.equal(contextEdits[0].replacement, null);
+  assert.equal(session.agent.state.messages.at(-1).stopReason, "stop");
+  assert.equal(retry.refreshCount(), 1);
   assert.equal(session.agent.state.thinkingLevel, "off");
   assert.equal(steeringMessages.length, 1);
   assert.match(steeringMessages[0].content[0].text, /禁止重新分析、重新规划/);
@@ -72,10 +128,12 @@ test("continuous Pi retry uses capped backoff until the run is aborted", async (
   listeners.forEach((listener) => listener({ type: "auto_retry_end", success: true }));
   assert.equal(session.agent.state.thinkingLevel, "max");
 
-  session.agent.state.messages.push({ role: "assistant", stopReason: "error", content: [] });
+  retry.appendMessage({ role: "assistant", stopReason: "error", content: [] });
   const cancelledRetry = session._prepareRetry({ errorMessage: "still unavailable" });
   session._retryAbortController.abort();
   assert.equal(await cancelledRetry, false);
+  assert.equal(contextEdits.at(-1).targetId, "message-4");
+  assert.equal(contextEdits.at(-1).replacement, null);
   assert.equal(events.at(-1).type, "auto_retry_end");
   assert.equal(events.at(-1).success, false);
   assert.equal(session._retryAttempt, 0);
@@ -83,7 +141,6 @@ test("continuous Pi retry uses capped backoff until the run is aborted", async (
 
 test("continuous Pi retry checkpoints an unfinished tool call instead of replaying it", async () => {
   const events = [];
-  const steeringMessages = [];
   const unfinished = {
     role: "assistant",
     stopReason: "error",
@@ -97,23 +154,11 @@ test("continuous Pi retry checkpoints an unfinished tool call instead of replayi
       },
     }],
   };
-  const session = {
-    _prepareRetry() {},
-    _retryAttempt: 0,
-    _emit(event) {
-      events.push(event);
-    },
-    subscribe() {},
-    agent: {
-      steer(message) {
-        steeringMessages.push(message);
-      },
-      state: {
-        thinkingLevel: "high",
-        messages: [{ role: "user", content: "build it" }, unfinished],
-      },
-    },
-  };
+  const retry = createRetrySession([
+    { role: "user", content: "build it" },
+    unfinished,
+  ], "high", events);
+  const { session, contextEdits, steeringMessages } = retry;
 
   installContinuousPiRetry(session, { baseDelayMs: 0, maxDelayMs: 0 });
   assert.equal(await session._prepareRetry(unfinished), true);
@@ -128,6 +173,12 @@ test("continuous Pi retry checkpoints an unfinished tool call instead of replayi
     session.agent.state.messages.at(-1).content[0].text,
     /partial but never executed/,
   );
+  assert.equal(contextEdits[0].targetId, "message-2");
+  assert.equal(contextEdits[0].replacement, null);
+  assert.match(session.agent.state.messages.at(-1).content[0].text, /未完成工具调用断点：该工具尚未执行/);
+  assert.equal(session.agent.state.messages.at(-1).stopReason, "stop");
+  assert.equal(unfinished.content[0].type, "toolCall");
+  assert.equal(retry.refreshCount(), 1);
   assert.equal(session.agent.state.thinkingLevel, "off");
   assert.equal(steeringMessages.length, 1);
   assert.match(steeringMessages[0].content[0].text, /首块 overwrite/);
@@ -557,7 +608,7 @@ test("Pi Host bridges a Renge-only tool result and continues the model loop", as
     assert.equal(piToolCallDeltas.map((event) => event.delta).join(""), "{\"mode\":\"text\"}");
     assert.equal(piToolCallDeltas.every((event) => !("argumentsText" in event)), true);
     assert.equal(runStart?.kernelMode, "full");
-    assert.equal(runStart?.kernel, "@earendil-works/pi-coding-agent@0.85.1");
+    assert.equal(runStart?.kernel, "@earendil-works/pi-coding-agent@0.87.1");
     assert.deepEqual(runStart?.compaction, {
       engine: "pi",
       enabled: true,
@@ -959,6 +1010,7 @@ test("Pi Host resumes the persisted Pi session for the next Renge turn", async (
 });
 
 test("Pi chat sanitizes malformed image data URLs before the provider adapter", async () => {
+  const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
   let upstreamRequest;
   const upstream = createServer(async (request, response) => {
     let raw = "";
@@ -1001,7 +1053,7 @@ test("Pi chat sanitizes malformed image data URLs before the provider adapter", 
             content: [
               { type: "text", text: "describe" },
               { type: "image_url", image_url: { url: "data:undefined;base64" } },
-              { type: "image_url", image_url: { url: "data:undefined;base64,AA==" } },
+              { type: "image_url", image_url: { url: `data:undefined;base64,${tinyPng}` } },
             ],
           }],
           stream: true,
@@ -1013,7 +1065,7 @@ test("Pi chat sanitizes malformed image data URLs before the provider adapter", 
     const userMessage = upstreamRequest.messages.find((message) => message.role === "user");
     assert.deepEqual(userMessage.content, [
       { type: "text", text: "describe" },
-      { type: "image_url", image_url: { url: "data:image/png;base64,AA==" } },
+      { type: "image_url", image_url: { url: `data:image/png;base64,${tinyPng}` } },
     ]);
   } finally {
     await close(renge.server);
