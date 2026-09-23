@@ -12863,6 +12863,7 @@ export function App() {
   const [composerModelMenuSection, setComposerModelMenuSection] =
     useState<ComposerModelMenuSection | null>(null);
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
+  const [isChatComposerDragActive, setIsChatComposerDragActive] = useState(false);
   const pendingBrowserComments = useMemo(
     () => chatAttachments.flatMap((attachment) => {
       if (attachment.type !== BROWSER_COMMENT_MIME_TYPE) return [];
@@ -38312,11 +38313,47 @@ export function App() {
             </div>
           )}
 
-          <section id="form_sheld" className="chat-composer">
+          <section
+            id="form_sheld"
+            className="chat-composer"
+            onDragEnter={(event) => {
+              if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+              event.preventDefault();
+              setIsChatComposerDragActive(true);
+            }}
+            onDragOver={(event) => {
+              if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "copy";
+              setIsChatComposerDragActive(true);
+            }}
+            onDragLeave={(event) => {
+              const nextTarget = event.relatedTarget;
+              if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+                setIsChatComposerDragActive(false);
+              }
+            }}
+            onDrop={(event) => {
+              if (!Array.from(event.dataTransfer.types).includes("Files")) {
+                setIsChatComposerDragActive(false);
+                return;
+              }
+              event.preventDefault();
+              setIsChatComposerDragActive(false);
+              void handleChatAttachmentChange(Array.from(event.dataTransfer.files));
+            }}
+          >
             {chatStatus.message && (
               <p className={`chat-status ${chatStatus.status}`}>{chatStatus.message}</p>
             )}
             <div className="chat-composer-box">
+              {isChatComposerDragActive && (
+                <div className="chat-composer-drop-overlay" aria-live="polite">
+                  <Upload size={22} />
+                  <strong>松开以上传附件</strong>
+                  <span>可一次拖入多个文件</span>
+                </div>
+              )}
               <input
                 ref={chatAttachmentInputRef}
                 className="chat-attachment-input"
