@@ -8612,6 +8612,26 @@ async function createChatAttachmentFromFile(file: File): Promise<ChatAttachment>
   };
 }
 
+function getClipboardImageFiles(clipboardData: DataTransfer): File[] {
+  const itemFiles = Array.from(clipboardData.items)
+    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file));
+  const files = itemFiles.length > 0
+    ? itemFiles
+    : Array.from(clipboardData.files).filter((file) => file.type.startsWith("image/"));
+
+  return files.map((file, index) => {
+    if (file.name) return file;
+    const subtype = file.type.split("/")[1]?.split("+")[0] || "png";
+    const extension = subtype === "jpeg" ? "jpg" : subtype;
+    return new File([file], `粘贴图片-${index + 1}.${extension}`, {
+      type: file.type || "image/png",
+      lastModified: file.lastModified,
+    });
+  });
+}
+
 function stripBase64Prefix(value: string) {
   const trimmedValue = value.trim();
   const commaIndex = trimmedValue.indexOf(",");
@@ -27522,7 +27542,7 @@ export function App() {
     return Boolean(generatedMessage);
   };
 
-  const handleChatAttachmentChange = async (files: FileList | null) => {
+  const handleChatAttachmentChange = async (files: FileList | File[] | null) => {
     const selectedFiles = Array.from(files ?? []);
     if (chatAttachmentInputRef.current) {
       chatAttachmentInputRef.current.value = "";
@@ -38308,9 +38328,15 @@ export function App() {
                 id="send_textarea"
                 ref={setChatInputElementRef}
                 defaultValue={chatInputValueRef.current}
-                placeholder="输入消息"
+                placeholder="输入消息，可粘贴图片"
                 rows={3}
                 onChange={(event) => setChatInput(event.target.value)}
+                onPaste={(event) => {
+                  const pastedImages = getClipboardImageFiles(event.clipboardData);
+                  if (pastedImages.length === 0) return;
+                  if (!event.clipboardData.getData("text/plain")) event.preventDefault();
+                  void handleChatAttachmentChange(pastedImages);
+                }}
                 onBlur={handleChatInputBlur}
                 onContextMenu={(event) => {
                   const showTextContextMenu = window.rengeDesktop?.showTextContextMenu;
@@ -38391,7 +38417,8 @@ export function App() {
                   className="composer-upload-button"
                   disabled={chatStatus.status === "loading"}
                   onClick={() => chatAttachmentInputRef.current?.click()}
-                  title="上传文件"
+                  title="上传附件（支持多选）"
+                  aria-label="上传附件，可多选"
                 >
                   <Upload size={16} />
                 </button>
