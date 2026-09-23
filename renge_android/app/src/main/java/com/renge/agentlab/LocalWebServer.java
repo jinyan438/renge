@@ -42,6 +42,7 @@ import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -77,6 +78,9 @@ public class LocalWebServer {
     private static final long MAX_COMPLETE_BACKUP_BYTES = 512L * 1024L * 1024L;
     private static final String COMPLETE_BACKUP_MANIFEST_FILE = "backup.json";
     private static final String COMPLETE_BACKUP_ASSET_PREFIX = "renge-backup-asset:";
+    private static final String[] COMPLETE_BACKUP_MANAGED_ROOTS = new String[]{
+            ".pi", "extensions", "generated-images", "session-images", "skills", "tavern-files"
+    };
     private static final Set<String> REQUIRED_APP_DATA_ARRAY_FIELDS = new HashSet<>(Arrays.asList(
             "personas",
             "providers",
@@ -97,6 +101,7 @@ public class LocalWebServer {
     private final File appDataBackupFile;
     private final File appDataAssetsDirectory;
     private final File appDataAssetsBackupDirectory;
+    private final File appDataManagedBackupDirectory;
     private final Map<String, PiSessionState> piSessions = new ConcurrentHashMap<>();
     private final Map<String, HttpURLConnection> activePiRuns = new ConcurrentHashMap<>();
     private final RequestLifecycleListener requestLifecycleListener;
@@ -118,6 +123,7 @@ public class LocalWebServer {
         this.appDataBackupFile = new File(this.context.getFilesDir(), "app-data.previous.json");
         this.appDataAssetsDirectory = new File(this.context.getFilesDir(), "app-data-assets");
         this.appDataAssetsBackupDirectory = new File(this.context.getFilesDir(), "app-data-assets.previous");
+        this.appDataManagedBackupDirectory = new File(this.context.getFilesDir(), "app-data-managed.previous");
     }
 
     public String start() throws IOException {
@@ -327,6 +333,7 @@ public class LocalWebServer {
             JSONObject payload = new JSONObject();
             payload.put("ok", true);
             payload.put("exportedAt", metadata.exportedAt);
+            payload.put("localStorage", metadata.localStorage);
             payload.put("bytes", request.contentLength);
             sendJson(output, 200, payload);
         } catch (Exception error) {
@@ -359,14 +366,21 @@ public class LocalWebServer {
     private CompleteBackupMetadata installCompleteBackup(File completeBackup) throws IOException {
         if (isZipFile(completeBackup)) return installCompleteBackupZip(completeBackup);
         File stagedAppData = File.createTempFile("renge-app-data-import-", ".json", context.getCacheDir());
+        File stagedLocalStorage = File.createTempFile("renge-local-storage-import-", ".json", context.getCacheDir());
         try {
-            CompleteBackupMetadata metadata = extractCompleteBackupAppData(completeBackup, stagedAppData);
-            validateImportedAppData(stagedAppData);
-            installStagedAppData(stagedAppData, null);
+            CompleteBackupMetadata metadata = extractCompleteBackupAppData(
+                    completeBackup,
+                    stagedAppData,
+                    null,
+                    stagedLocalStorage
+            );
+            if (metadata.version >= 3) throw new IOException("新版完整备份必须使用 ZIP 文件。");
+            validateImportedAppData(stagedAppData, metadata.version);
+            installStagedAppData(stagedAppData, null, null);
             return metadata;
         } finally {
-            if (!stagedAppData.delete() && stagedAppData.exists()) {
-                stagedAppData.deleteOnExit();
+            for (File stagedFile : new File[]{stagedAppData, stagedLocalStorage}) {
+                if (!stagedFile.delete() && stagedFile.exists()) stagedFile.deleteOnExit();
             }
         }
     }
@@ -381,31 +395,57 @@ public class LocalWebServer {
         File stagedManifest = File.createTempFile("renge-backup-manifest-", ".json", context.getCacheDir());
         File stagedRawAppData = File.createTempFile("renge-app-data-raw-", ".json", context.getCacheDir());
         File stagedAppData = File.createTempFile("renge-app-data-import-", ".json", context.getCacheDir());
+        File stagedManagedFiles = File.createTempFile("renge-backup-files-index-", ".json", context.getCacheDir());
+        File stagedLocalStorage = File.createTempFile("renge-local-storage-import-", ".json", context.getCacheDir());
         File stagedAssets = new File(
                 context.getFilesDir(),
                 ".app-data-assets-import-" + System.nanoTime()
         );
+        File stagedFiles = new File(
+                context.getFilesDir(),
+                ".app-data-files-import-" + System.nanoTime()
+        );
         if (!stagedAssets.mkdirs()) throw new IOException("无法创建图片资源暂存目录。");
         try {
-            extractCompleteBackupZip(completeBackup, stagedManifest, stagedAssets);
+            if (!stagedFiles.mkdirs()) throw new IOException("无法创建应用文件暂存目录。");
+            extractCompleteBackupZip(completeBackup, stagedManifest, stagedAssets, stagedFiles);
             CompleteBackupMetadata metadata = extractCompleteBackupAppData(
                     stagedManifest,
-                    stagedRawAppData
+                    stagedRawAppData,
+                    stagedManagedFiles,
+                    stagedLocalStorage
             );
-            if (metadata.version != 2) {
+            if (metadata.version != 2 && metadata.version != 3) {
                 throw new IOException("ZIP 完整备份版本无效：" + metadata.version + "。");
             }
-            validateImportedAppData(stagedRawAppData);
+            validateImportedAppData(stagedRawAppData, metadata.version);
+            if (metadata.version >= 3) {
+                validateCompleteBackupManagedFiles(stagedManagedFiles, stagedFiles);
+            }
             rewriteImportedAssetReferences(stagedRawAppData, stagedAppData, stagedAssets);
-            installStagedAppData(stagedAppData, stagedAssets);
+            if (metadata.version >= 3) {
+                for (String root : COMPLETE_BACKUP_MANAGED_ROOTS) {
+                    File stagedRoot = new File(stagedFiles, root);
+                    if (!stagedRoot.mkdirs() && !stagedRoot.isDirectory()) {
+                        throw new IOException("无法准备应用文件目录：" + root);
+                    }
+                }
+            }
+            installStagedAppData(stagedAppData, stagedAssets, metadata.version >= 3 ? stagedFiles : null);
             return metadata;
         } finally {
-            for (File stagedFile : new File[]{stagedManifest, stagedRawAppData, stagedAppData}) {
+            for (File stagedFile : new File[]{stagedManifest, stagedRawAppData, stagedAppData, stagedManagedFiles, stagedLocalStorage}) {
                 if (!stagedFile.delete() && stagedFile.exists()) stagedFile.deleteOnExit();
             }
             if (stagedAssets.exists()) {
                 try {
                     deleteRecursively(stagedAssets);
+                } catch (IOException ignored) {
+                }
+            }
+            if (stagedFiles.exists()) {
+                try {
+                    deleteRecursively(stagedFiles);
                 } catch (IOException ignored) {
                 }
             }
@@ -415,12 +455,14 @@ public class LocalWebServer {
     private void extractCompleteBackupZip(
             File completeBackup,
             File stagedManifest,
-            File stagedAssets
+            File stagedAssets,
+            File stagedFiles
     ) throws IOException {
         boolean manifestFound = false;
         long extractedBytes = 0;
         byte[] buffer = new byte[64 * 1024];
         String assetsCanonicalPath = stagedAssets.getCanonicalPath() + File.separator;
+        String filesCanonicalPath = stagedFiles.getCanonicalPath() + File.separator;
         try (ZipInputStream zipInput = new ZipInputStream(
                 new BufferedInputStream(new FileInputStream(completeBackup))
         )) {
@@ -455,19 +497,36 @@ public class LocalWebServer {
                     if (parent != null && !parent.mkdirs() && !parent.isDirectory()) {
                         throw new IOException("无法创建图片资源目录。");
                     }
+                } else if (entryName.startsWith("files/")) {
+                    String relativePath = normalizeCompleteBackupManagedPath(
+                            entryName.substring("files/".length())
+                    );
+                    if (relativePath == null) throw new IOException("ZIP 应用文件路径非法。");
+                    target = new File(stagedFiles, relativePath);
+                    String targetCanonicalPath = target.getCanonicalPath();
+                    if (!targetCanonicalPath.startsWith(filesCanonicalPath)) {
+                        throw new IOException("ZIP 应用文件路径越界。");
+                    }
+                    File parent = target.getParentFile();
+                    if (parent != null && !parent.mkdirs() && !parent.isDirectory()) {
+                        throw new IOException("无法创建应用文件目录。");
+                    }
                 }
 
-                if (target != null) {
-                    try (OutputStream output = new BufferedOutputStream(new FileOutputStream(target))) {
-                        int count;
-                        while ((count = zipInput.read(buffer)) != -1) {
-                            extractedBytes += count;
-                            if (extractedBytes > MAX_COMPLETE_BACKUP_BYTES) {
-                                throw new IOException("ZIP 解压后的数据超过 512MB。");
-                            }
-                            output.write(buffer, 0, count);
+                OutputStream entryOutput = target == null
+                        ? null
+                        : new BufferedOutputStream(new FileOutputStream(target));
+                try {
+                    int count;
+                    while ((count = zipInput.read(buffer)) != -1) {
+                        extractedBytes += count;
+                        if (extractedBytes > MAX_COMPLETE_BACKUP_BYTES) {
+                            throw new IOException("ZIP 解压后的数据超过 512MB。");
                         }
+                        if (entryOutput != null) entryOutput.write(buffer, 0, count);
                     }
+                } finally {
+                    if (entryOutput != null) entryOutput.close();
                 }
                 zipInput.closeEntry();
             }
@@ -564,36 +623,119 @@ public class LocalWebServer {
         }
     }
 
-    private void installStagedAppData(File stagedAppData, File stagedAssets) throws IOException {
+    private void installStagedAppData(File stagedAppData, File stagedAssets, File stagedFiles) throws IOException {
         synchronized (this) {
-            if (appDataFile.isFile() && appDataFile.length() > 0) {
+            boolean appDataBackedUp = appDataFile.isFile() && appDataFile.length() > 0;
+            if (appDataBackedUp) {
                 copyFileAtomically(appDataFile, appDataBackupFile);
             }
             boolean assetsRotated = false;
-            if (stagedAssets != null) {
-                if (appDataAssetsBackupDirectory.exists()) {
-                    deleteRecursively(appDataAssetsBackupDirectory);
-                }
-                if (appDataAssetsDirectory.exists()) {
-                    if (!appDataAssetsDirectory.renameTo(appDataAssetsBackupDirectory)) {
-                        throw new IOException("无法备份当前图片资源。");
-                    }
-                    assetsRotated = true;
-                }
-                if (!stagedAssets.renameTo(appDataAssetsDirectory)) {
-                    if (assetsRotated) appDataAssetsBackupDirectory.renameTo(appDataAssetsDirectory);
-                    throw new IOException("无法安装备份图片资源。");
-                }
-            }
+            File managedRollbackDirectory = null;
+            ArrayList<String> managedRootsMoved = new ArrayList<>();
             try {
+                if (stagedAssets != null) {
+                    if (appDataAssetsBackupDirectory.exists()) {
+                        deleteRecursively(appDataAssetsBackupDirectory);
+                    }
+                    if (appDataAssetsDirectory.exists()) {
+                        if (!appDataAssetsDirectory.renameTo(appDataAssetsBackupDirectory)) {
+                            throw new IOException("无法备份当前图片资源。");
+                        }
+                        assetsRotated = true;
+                    }
+                    if (!stagedAssets.renameTo(appDataAssetsDirectory)) {
+                        throw new IOException("无法安装备份图片资源。");
+                    }
+                }
+                if (stagedFiles != null) {
+                    managedRollbackDirectory = new File(
+                            context.getFilesDir(),
+                            ".app-data-managed-import-" + System.nanoTime()
+                    );
+                    if (!managedRollbackDirectory.mkdirs()) {
+                        throw new IOException("无法准备应用文件回滚目录。");
+                    }
+                    for (String root : COMPLETE_BACKUP_MANAGED_ROOTS) {
+                        File current = new File(context.getFilesDir(), root);
+                        File previous = new File(managedRollbackDirectory, root);
+                        File staged = new File(stagedFiles, root);
+                        if (!staged.isDirectory()) throw new IOException("备份缺少应用目录：" + root);
+                        if (current.exists()) {
+                            File parent = previous.getParentFile();
+                            if (parent != null && !parent.mkdirs() && !parent.isDirectory()) {
+                                throw new IOException("无法备份应用文件目录：" + root);
+                            }
+                            if (!current.renameTo(previous)) {
+                                throw new IOException("无法备份当前应用文件目录：" + root);
+                            }
+                        }
+                        managedRootsMoved.add(root);
+                        if (!staged.renameTo(current)) {
+                            throw new IOException("无法安装应用文件目录：" + root);
+                        }
+                    }
+                }
                 copyFileAtomically(stagedAppData, appDataFile);
+                if (managedRollbackDirectory != null) {
+                    if (appDataManagedBackupDirectory.exists()) {
+                        deleteRecursively(appDataManagedBackupDirectory);
+                    }
+                    if (!managedRollbackDirectory.renameTo(appDataManagedBackupDirectory)) {
+                        throw new IOException("无法保存上一版应用文件备份。");
+                    }
+                    managedRollbackDirectory = null;
+                }
             } catch (IOException error) {
+                ArrayList<String> rollbackFailures = new ArrayList<>();
                 if (stagedAssets != null) {
                     try {
                         deleteRecursively(appDataAssetsDirectory);
-                    } catch (IOException ignored) {
+                    } catch (IOException rollbackError) {
+                        rollbackFailures.add(rollbackError.getMessage());
                     }
-                    if (assetsRotated) appDataAssetsBackupDirectory.renameTo(appDataAssetsDirectory);
+                    if (assetsRotated && !appDataAssetsBackupDirectory.renameTo(appDataAssetsDirectory)) {
+                        rollbackFailures.add("无法恢复上一版图片资源");
+                    }
+                }
+                for (int index = managedRootsMoved.size() - 1; index >= 0; index--) {
+                    String root = managedRootsMoved.get(index);
+                    File current = new File(context.getFilesDir(), root);
+                    File previous = managedRollbackDirectory == null
+                            ? new File(appDataManagedBackupDirectory, root)
+                            : new File(managedRollbackDirectory, root);
+                    try {
+                        deleteRecursively(current);
+                    } catch (IOException rollbackError) {
+                        rollbackFailures.add(rollbackError.getMessage());
+                    }
+                    if (previous.exists() && !previous.renameTo(current)) {
+                        rollbackFailures.add("无法恢复上一版应用文件：" + root);
+                    }
+                }
+                if (appDataBackedUp) {
+                    try {
+                        copyFileAtomically(appDataBackupFile, appDataFile);
+                    } catch (IOException rollbackError) {
+                        rollbackFailures.add(rollbackError.getMessage());
+                    }
+                }
+                if (managedRollbackDirectory != null && rollbackFailures.isEmpty()) {
+                    try {
+                        deleteRecursively(managedRollbackDirectory);
+                    } catch (IOException rollbackError) {
+                        rollbackFailures.add(rollbackError.getMessage());
+                    }
+                }
+                if (!rollbackFailures.isEmpty()) {
+                    String preservedFiles = managedRollbackDirectory != null && managedRollbackDirectory.exists()
+                            ? " 应用文件备份保留在 " + managedRollbackDirectory.getAbsolutePath() + "。"
+                            : " 原有应用文件仍保留在上一版备份目录。";
+                    throw new IOException(
+                            error.getMessage() + "；自动回滚未完成："
+                                    + android.text.TextUtils.join("；", rollbackFailures)
+                                    + "。" + preservedFiles,
+                            error
+                    );
                 }
                 throw error;
             }
@@ -602,13 +744,16 @@ public class LocalWebServer {
 
     private CompleteBackupMetadata extractCompleteBackupAppData(
             File completeBackup,
-            File stagedAppData
+            File stagedAppData,
+            File stagedManagedFiles,
+            File stagedLocalStorage
     ) throws IOException {
         String format = null;
         String version = null;
         String exportedAt = null;
         boolean appDataFound = false;
         boolean localStorageFound = false;
+        boolean managedFilesFound = false;
 
         try (PushbackInputStream input = new PushbackInputStream(
                 new BufferedInputStream(new java.io.FileInputStream(completeBackup)),
@@ -645,9 +790,25 @@ public class LocalWebServer {
                     }
                     appDataFound = true;
                 } else if ("localStorage".equals(key)) {
-                    if (valueStart != '{') throw new IOException("备份中的本地设置格式无效。");
-                    copyJsonComposite(input, valueStart, null);
+                    if (localStorageFound || valueStart != '{') {
+                        throw new IOException("备份中的本地设置格式无效。");
+                    }
+                    try (OutputStream localStorageOutput = new FileOutputStream(stagedLocalStorage)) {
+                        copyJsonComposite(input, valueStart, localStorageOutput);
+                    }
                     localStorageFound = true;
+                } else if ("managedFiles".equals(key)) {
+                    if (managedFilesFound || valueStart != '[') {
+                        throw new IOException("备份中的应用文件索引无效。");
+                    }
+                    if (stagedManagedFiles != null) {
+                        try (OutputStream filesIndexOutput = new FileOutputStream(stagedManagedFiles)) {
+                            copyJsonComposite(input, valueStart, filesIndexOutput);
+                        }
+                    } else {
+                        copyJsonComposite(input, valueStart, null);
+                    }
+                    managedFilesFound = true;
                 } else {
                     skipJsonValue(input, valueStart);
                 }
@@ -665,7 +826,7 @@ public class LocalWebServer {
         if (!"renge-agent-complete-backup".equals(format)) {
             throw new IOException("这不是 Renge Agent 完整备份文件。");
         }
-        if (!("1".equals(version) || "2".equals(version))) {
+        if (!("1".equals(version) || "2".equals(version) || "3".equals(version))) {
             throw new IOException("暂不支持此备份版本：" + (version == null ? "未知" : version) + "。");
         }
         if (exportedAt == null || exportedAt.trim().isEmpty()) {
@@ -677,11 +838,29 @@ public class LocalWebServer {
         if (!localStorageFound) {
             throw new IOException("备份缺少本地设置数据。");
         }
-        return new CompleteBackupMetadata(exportedAt, Integer.parseInt(version));
+        int parsedVersion = Integer.parseInt(version);
+        if (parsedVersion >= 3 && !managedFilesFound) {
+            throw new IOException("备份缺少应用文件索引。");
+        }
+        JSONObject localStorage;
+        try (InputStream input = new FileInputStream(stagedLocalStorage)) {
+            localStorage = new JSONObject(new String(readAll(input), StandardCharsets.UTF_8));
+            Iterator<String> keys = localStorage.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                if (!key.startsWith("renge") || !(localStorage.opt(key) instanceof String)) {
+                    throw new IOException("备份中的本地设置格式无效。");
+                }
+            }
+        } catch (JSONException error) {
+            throw new IOException("备份中的本地设置格式无效。", error);
+        }
+        return new CompleteBackupMetadata(exportedAt, parsedVersion, localStorage);
     }
 
-    private void validateImportedAppData(File stagedAppData) throws IOException {
+    private void validateImportedAppData(File stagedAppData, int version) throws IOException {
         Set<String> missingFields = new HashSet<>(REQUIRED_APP_DATA_ARRAY_FIELDS);
+        if (version >= 3) missingFields.add("statusBarPresets");
         try (JsonReader reader = new JsonReader(new InputStreamReader(
                 new java.io.FileInputStream(stagedAppData),
                 StandardCharsets.UTF_8
@@ -706,6 +885,62 @@ public class LocalWebServer {
         }
         if (!missingFields.isEmpty()) {
             throw new IOException("备份缺少完整数据字段：" + missingFields.iterator().next() + "。");
+        }
+    }
+
+    private void validateCompleteBackupManagedFiles(File indexFile, File stagedFiles) throws IOException {
+        Set<String> indexed = new HashSet<>();
+        String stagedRoot = stagedFiles.getCanonicalPath() + File.separator;
+        try {
+            String indexContent;
+            try (InputStream input = new FileInputStream(indexFile)) {
+                indexContent = new String(readAll(input), StandardCharsets.UTF_8);
+            }
+            JSONArray entries = new JSONArray(indexContent);
+            for (int index = 0; index < entries.length(); index++) {
+                JSONObject entry = entries.optJSONObject(index);
+                if (entry == null) throw new IOException("备份中的应用文件索引无效。");
+                String path = normalizeCompleteBackupManagedPath(entry.optString("path", null));
+                long size = entry.optLong("size", -1);
+                if (path == null || size < 0 || !indexed.add(path)) {
+                    throw new IOException("备份中的应用文件索引无效。");
+                }
+                File file = new File(stagedFiles, path);
+                String canonicalPath = file.getCanonicalPath();
+                if (!canonicalPath.startsWith(stagedRoot) || !file.isFile() || file.length() != size) {
+                    throw new IOException("ZIP 备份缺少应用文件或文件大小不符：" + path);
+                }
+            }
+        } catch (JSONException error) {
+            throw new IOException("备份中的应用文件索引无效。", error);
+        }
+
+        Set<String> extracted = new HashSet<>();
+        for (String rootName : COMPLETE_BACKUP_MANAGED_ROOTS) {
+            File root = new File(stagedFiles, rootName);
+            if (root.exists()) collectStagedBackupFiles(stagedFiles, root, extracted);
+        }
+        if (!indexed.equals(extracted)) {
+            throw new IOException("ZIP 备份中的应用文件与索引不一致。");
+        }
+    }
+
+    private void collectStagedBackupFiles(File stagedRoot, File directory, Set<String> paths) throws IOException {
+        File[] children = directory.listFiles();
+        if (children == null) return;
+        for (File child : children) {
+            if (child.isDirectory()) {
+                collectStagedBackupFiles(stagedRoot, child, paths);
+            } else if (child.isFile()) {
+                String rootPath = stagedRoot.getCanonicalPath() + File.separator;
+                String childPath = child.getCanonicalPath();
+                if (!childPath.startsWith(rootPath)) throw new IOException("ZIP 应用文件路径越界。");
+                String relativePath = childPath.substring(rootPath.length()).replace(File.separatorChar, '/');
+                String safePath = normalizeCompleteBackupManagedPath(relativePath);
+                if (safePath == null || !paths.add(safePath)) {
+                    throw new IOException("ZIP 应用文件路径非法。");
+                }
+            }
         }
     }
 
@@ -975,6 +1210,137 @@ public class LocalWebServer {
         sendJson(output, 200, new JSONObject().put("path", "user/files/" + file.getName()));
     }
 
+    private boolean isCompleteBackupManagedRoot(String root) {
+        for (String allowed : COMPLETE_BACKUP_MANAGED_ROOTS) {
+            if (allowed.equals(root)) return true;
+        }
+        return false;
+    }
+
+    private String normalizeCompleteBackupManagedPath(String value) {
+        if (value == null || value.isEmpty()) return null;
+        String normalized = value.replace('\\', '/');
+        if (normalized.startsWith("/")) return null;
+        String[] parts = normalized.split("/", -1);
+        if (parts.length < 2 || !isCompleteBackupManagedRoot(parts[0])) return null;
+        for (String part : parts) {
+            if (part.isEmpty() || ".".equals(part) || "..".equals(part)
+                    || part.matches(".*[<>:\"|?*\\x00-\\x1f].*")
+                    || part.endsWith(".") || part.endsWith(" ")
+                    || part.matches("(?i)^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\\.|$).*$")) {
+                return null;
+            }
+        }
+        return normalized;
+    }
+
+    private String queryParameter(String target, String name) {
+        try {
+            String query = URI.create(target).getRawQuery();
+            if (query == null) return null;
+            for (String part : query.split("&")) {
+                int separator = part.indexOf('=');
+                String key = URLDecoder.decode(separator >= 0 ? part.substring(0, separator) : part, "UTF-8");
+                if (name.equals(key)) {
+                    return URLDecoder.decode(separator >= 0 ? part.substring(separator + 1) : "", "UTF-8");
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private void collectCompleteBackupManagedFiles(File root, File directory, String relativeDirectory, JSONArray files) throws IOException, JSONException {
+        File[] children = directory.listFiles();
+        if (children == null) return;
+        String canonicalRoot = root.getCanonicalPath() + File.separator;
+        for (File child : children) {
+            String canonicalChild = child.getCanonicalPath();
+            if (!canonicalChild.startsWith(canonicalRoot)) continue;
+            String relativePath = relativeDirectory + "/" + child.getName();
+            if (child.isDirectory()) {
+                collectCompleteBackupManagedFiles(root, child, relativePath, files);
+            } else if (child.isFile()) {
+                String safePath = normalizeCompleteBackupManagedPath(relativePath);
+                if (safePath != null) {
+                    files.put(new JSONObject().put("path", safePath).put("size", child.length()));
+                }
+            }
+        }
+    }
+
+    private JSONArray listCompleteBackupManagedFiles() throws IOException, JSONException {
+        JSONArray files = new JSONArray();
+        for (String name : COMPLETE_BACKUP_MANAGED_ROOTS) {
+            File root = new File(context.getFilesDir(), name);
+            if (root.isDirectory()) collectCompleteBackupManagedFiles(root, root, name, files);
+        }
+        return files;
+    }
+
+    private void serveCompleteBackupManagedFile(Request request, OutputStream output) throws IOException, JSONException {
+        if (!"GET".equals(request.method)) {
+            sendJson(output, 405, jsonError("Method not allowed"));
+            return;
+        }
+        String relativePath = normalizeCompleteBackupManagedPath(queryParameter(request.target, "path"));
+        if (relativePath == null) {
+            sendJson(output, 400, jsonError("应用文件路径非法。"));
+            return;
+        }
+        String[] parts = relativePath.split("/");
+        File root = new File(context.getFilesDir(), parts[0]);
+        File file = new File(root, relativePath.substring(parts[0].length() + 1));
+        String rootPath = root.getCanonicalPath() + File.separator;
+        String filePath = file.getCanonicalPath();
+        if (!filePath.startsWith(rootPath) || !file.isFile()) {
+            sendJson(output, 404, jsonError("应用文件不存在。"));
+            return;
+        }
+        writeHead(output, 200, "application/octet-stream", file.length());
+        try (InputStream input = new BufferedInputStream(new FileInputStream(file))) {
+            byte[] buffer = new byte[64 * 1024];
+            int count;
+            while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+        }
+    }
+
+    private void serveSessionImage(Request request, OutputStream output) throws IOException, JSONException {
+        String[] parts = request.path.substring("/api/session-images/".length()).split("/", -1);
+        if (parts.length == 0 || !parts[0].matches("[A-Za-z0-9_-]{1,128}")) {
+            sendJson(output, 400, jsonError("非法 sessionId"));
+            return;
+        }
+        File root = new File(context.getFilesDir(), "session-images");
+        File sessionDirectory = new File(root, parts[0]);
+        if (parts.length == 1 && "DELETE".equals(request.method)) {
+            deleteRecursively(sessionDirectory);
+            sendJson(output, 200, new JSONObject().put("ok", true));
+            return;
+        }
+        if (parts.length != 2 || !"GET".equals(request.method)) {
+            sendJson(output, 405, jsonError("Method not allowed"));
+            return;
+        }
+        if (!parts[1].matches("[A-Za-z0-9._-]{1,200}")) {
+            sendJson(output, 400, jsonError("非法文件名"));
+            return;
+        }
+        File file = new File(sessionDirectory, parts[1]);
+        String rootPath = sessionDirectory.getCanonicalPath() + File.separator;
+        String filePath = file.getCanonicalPath();
+        if (!filePath.startsWith(rootPath) || !file.isFile()) {
+            sendJson(output, 404, jsonError("图片不存在"));
+            return;
+        }
+        writeHead(output, 200, mimeType(file.getName()), file.length());
+        try (InputStream input = new BufferedInputStream(new FileInputStream(file))) {
+            byte[] buffer = new byte[64 * 1024];
+            int count;
+            while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+        }
+    }
+
     private void handleApi(Request request, OutputStream output) throws IOException, JSONException {
         if ("/api/characters/chats".equals(request.path)) {
             if (!"POST".equals(request.method)) { sendJson(output, 405, jsonError("Method not allowed")); return; }
@@ -1011,6 +1377,23 @@ public class LocalWebServer {
         }
         if ("/api/files/upload".equals(request.path) || "/api/files/delete".equals(request.path)) {
             handleTavernFile(request, output);
+            return;
+        }
+        if ("/api/app-data/backup-files".equals(request.path)) {
+            if (!"GET".equals(request.method)) {
+                sendJson(output, 405, jsonError("Method not allowed"));
+                return;
+            }
+            sendBytes(output, 200, "application/json;charset=utf-8",
+                    new JSONObject().put("files", listCompleteBackupManagedFiles()).toString().getBytes(StandardCharsets.UTF_8));
+            return;
+        }
+        if ("/api/app-data/backup-file".equals(request.path)) {
+            serveCompleteBackupManagedFile(request, output);
+            return;
+        }
+        if (request.path.startsWith("/api/session-images/")) {
+            serveSessionImage(request, output);
             return;
         }
         if (request.path.startsWith("/api/app-data/assets/")) {
@@ -1240,6 +1623,17 @@ public class LocalWebServer {
                     throw new IOException("无法恢复上一版图片资源。");
                 }
             }
+            if (appDataManagedBackupDirectory.exists()) {
+                for (String root : COMPLETE_BACKUP_MANAGED_ROOTS) {
+                    File current = new File(context.getFilesDir(), root);
+                    File previous = new File(appDataManagedBackupDirectory, root);
+                    if (current.exists()) deleteRecursively(current);
+                    if (previous.exists() && !previous.renameTo(current)) {
+                        throw new IOException("无法恢复上一版应用文件：" + root);
+                    }
+                }
+                deleteRecursively(appDataManagedBackupDirectory);
+            }
             source = appDataFile;
         }
 
@@ -1332,13 +1726,14 @@ public class LocalWebServer {
         new AtomicFile(appDataBackupFile).delete();
         deleteRecursively(appDataAssetsDirectory);
         deleteRecursively(appDataAssetsBackupDirectory);
+        deleteRecursively(appDataManagedBackupDirectory);
         WebStorage.getInstance().deleteAllData();
         boolean preferencesCleared = context.getSharedPreferences("renge_android_workspace", Context.MODE_PRIVATE)
                 .edit()
                 .clear()
                 .commit();
         if (!preferencesCleared) throw new IOException("无法清除 Android 工作区设置。");
-        for (String name : new String[]{"extensions", "generated-images", "session-images", "skills"}) {
+        for (String name : COMPLETE_BACKUP_MANAGED_ROOTS) {
             deleteRecursively(new File(context.getFilesDir(), name));
         }
     }
@@ -2066,10 +2461,12 @@ public class LocalWebServer {
     private static final class CompleteBackupMetadata {
         final String exportedAt;
         final int version;
+        final JSONObject localStorage;
 
-        CompleteBackupMetadata(String exportedAt, int version) {
+        CompleteBackupMetadata(String exportedAt, int version, JSONObject localStorage) {
             this.exportedAt = exportedAt;
             this.version = version;
+            this.localStorage = localStorage;
         }
     }
 

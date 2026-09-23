@@ -1,13 +1,15 @@
 import { createServer } from "node:http";
 import { createReadStream, createWriteStream } from "node:fs";
-import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { homedir, networkInterfaces, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
+import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { EnvHttpProxyAgent } from "undici";
+import { strFromU8, unzipSync } from "fflate";
 import { createUpstreamDispatcherCache, describeUpstreamNetworkError } from "./src/upstreamNetworkUtils.mjs";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
@@ -27,6 +29,15 @@ const defaultPort = Number(process.env.PORT ?? 5190);
 const windowsInternetSettingsKey = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
 const appDataFileName = "app-data.json";
 const appDataBackupCount = 3;
+const completeBackupManagedRoots = [
+  ".pi",
+  "extensions",
+  "generated-images",
+  "session-images",
+  "skills",
+  "tavern-files",
+];
+const completeBackupMaxBytes = 512 * 1024 * 1024;
 const appDataWriteQueues = new Map();
 const validatedAppDataFiles = new Map();
 const tavernModuleProxyVersion = "2";
@@ -661,7 +672,7 @@ async function clearAppData(dataFilePath) {
       );
       ownedFiles.forEach((filePath) => validatedAppDataFiles.delete(filePath));
       await Promise.all(
-        [".pi", "extensions", "generated-images", "session-images", "skills"].map((name) =>
+        [".pi", "app-data-assets", "extensions", "generated-images", "session-images", "skills", "tavern-files"].map((name) =>
           rm(join(dataDirectory, name), { recursive: true, force: true }),
         ),
       );
@@ -673,6 +684,391 @@ async function clearAppData(dataFilePath) {
     if (appDataWriteQueues.get(dataFilePath) === operation) {
       appDataWriteQueues.delete(dataFilePath);
     }
+  }
+}
+
+function normalizeCompleteBackupManagedFilePath(value) {
+  if (typeof value !== "string") return "";
+  const normalized = value.replace(/\\/g, "/");
+  const parts = normalized.split("/");
+  if (
+    !normalized ||
+    normalized.startsWith("/") ||
+    parts.some((part) =>
+      !part ||
+      part === "." ||
+      part === ".." ||
+      /[<>:"|?*\x00-\x1f]/.test(part) ||
+      /[. ]$/.test(part) ||
+      /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part),
+    ) ||
+    !completeBackupManagedRoots.includes(parts[0]) ||
+    parts.length < 2
+  ) {
+    return "";
+  }
+  return parts.join("/");
+}
+
+function resolveCompleteBackupManagedFile(dataDirectory, value) {
+  const relativePath = normalizeCompleteBackupManagedFilePath(value);
+  if (!relativePath) return null;
+  const root = resolve(dataDirectory, relativePath.split("/")[0]);
+  const filePath = resolve(dataDirectory, ...relativePath.split("/"));
+  const fromRoot = relative(root, filePath);
+  return fromRoot && !fromRoot.startsWith("..") && !isAbsolute(fromRoot)
+    ? { relativePath, filePath }
+    : null;
+}
+
+async function listCompleteBackupManagedFiles(dataDirectory) {
+  const files = [];
+  async function visit(directory, relativeDirectory) {
+    const directoryStat = await lstat(directory).catch((error) => {
+      if (isMissingFileError(error)) return null;
+      throw error;
+    });
+    if (!directoryStat || directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) return;
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if (isMissingFileError(error)) return;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const relativePath = `${relativeDirectory}/${entry.name}`;
+      const filePath = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(filePath, relativePath);
+      } else if (entry.isFile()) {
+        const fileStat = await stat(filePath);
+        files.push({ path: relativePath, size: fileStat.size });
+      }
+    }
+  }
+  for (const root of completeBackupManagedRoots) {
+    await visit(join(dataDirectory, root), root);
+  }
+  return files.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function rewriteCompleteBackupAssetReferences(value, assets, seen = new WeakMap()) {
+  if (typeof value === "string" && value.startsWith("renge-backup-asset:")) {
+    const archivePath = value.slice("renge-backup-asset:".length);
+    const relativePath = archivePath.startsWith("assets/")
+      ? archivePath.slice("assets/".length)
+      : "";
+    if (!relativePath || !assets.has(archivePath)) {
+      throw new Error(`备份缺少图片资源：${archivePath || "未知"}`);
+    }
+    return `/api/app-data/assets/${relativePath.split("/").map(encodeURIComponent).join("/")}`;
+  }
+  if (!value || typeof value !== "object") return value;
+  const existing = seen.get(value);
+  if (existing !== undefined) return existing;
+  if (Array.isArray(value)) {
+    const next = [];
+    seen.set(value, next);
+    value.forEach((entry) => next.push(rewriteCompleteBackupAssetReferences(entry, assets, seen)));
+    return next;
+  }
+  const next = {};
+  seen.set(value, next);
+  Object.entries(value).forEach(([key, entry]) => {
+    next[key] = rewriteCompleteBackupAssetReferences(entry, assets, seen);
+  });
+  return next;
+}
+
+function validateCompleteBackupAppData(appData, version) {
+  if (!appData || typeof appData !== "object" || Array.isArray(appData)) {
+    throw new Error("备份缺少应用主数据。");
+  }
+  const requiredArrayFields = [
+    "personas", "providers", "chatSessions", "systemPrompts", "chatPresets",
+    "worldBooks", "regexScripts", "tavernScripts", "characterCards", "mcpServers",
+    "skills", "extensions",
+  ];
+  if (version >= 3) requiredArrayFields.push("statusBarPresets");
+  for (const field of requiredArrayFields) {
+    if (!Array.isArray(appData[field])) throw new Error(`备份缺少完整数据字段：${field}。`);
+  }
+}
+
+function validateCompleteBackupLocalStorage(localStorage) {
+  if (!localStorage || typeof localStorage !== "object" || Array.isArray(localStorage)) {
+    throw new Error("备份缺少本地设置数据。");
+  }
+  for (const [key, value] of Object.entries(localStorage)) {
+    if (!key.startsWith("renge") || typeof value !== "string") {
+      throw new Error("备份中的本地设置格式无效。");
+    }
+  }
+}
+
+function parseCompleteBackupManifest(value, { zip = false } = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("备份文件不是有效的 JSON 对象。");
+  }
+  if (value.format !== "renge-agent-complete-backup") {
+    throw new Error("这不是 Renge Agent 完整备份文件。");
+  }
+  if (![1, 2, 3].includes(value.version)) {
+    throw new Error(`暂不支持此备份版本：${String(value.version ?? "未知")}。`);
+  }
+  if (zip && value.version < 2) throw new Error(`ZIP 备份版本无效：${value.version}。`);
+  if (typeof value.exportedAt !== "string" || !value.exportedAt.trim()) {
+    throw new Error("备份缺少导出时间。");
+  }
+  validateCompleteBackupAppData(value.appData, value.version);
+  validateCompleteBackupLocalStorage(value.localStorage);
+  const assets = new Map();
+  if (value.assets !== undefined) {
+    if (!value.assets || typeof value.assets !== "object" || Array.isArray(value.assets)) {
+      throw new Error("备份中的图片资源索引无效。");
+    }
+    for (const [archivePath, metadata] of Object.entries(value.assets)) {
+      if (
+        !archivePath.startsWith("assets/") ||
+        !metadata || typeof metadata !== "object" || Array.isArray(metadata) ||
+        typeof metadata.mimeType !== "string" || !metadata.mimeType.startsWith("image/")
+      ) {
+        throw new Error("备份中的图片资源索引无效。");
+      }
+      assets.set(archivePath, metadata);
+    }
+  }
+  if (
+    value.desktopProjectPositions !== undefined && value.desktopProjectPositions !== null &&
+    (typeof value.desktopProjectPositions !== "object" || Array.isArray(value.desktopProjectPositions))
+  ) {
+    throw new Error("备份中的桌面图标位置格式无效。");
+  }
+  let managedFiles = null;
+  if (value.version >= 3) {
+    if (!Array.isArray(value.managedFiles)) throw new Error("备份缺少应用文件索引。");
+    const seen = new Set();
+    managedFiles = value.managedFiles.map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new Error("备份中的应用文件索引无效。");
+      }
+      const path = normalizeCompleteBackupManagedFilePath(entry.path);
+      if (!path || seen.has(path) || !Number.isSafeInteger(entry.size) || entry.size < 0) {
+        throw new Error("备份中的应用文件索引无效。");
+      }
+      seen.add(path);
+      return { path, size: entry.size };
+    });
+  }
+  return { ...value, assets, managedFiles };
+}
+
+async function installCompleteBackupZip(dataFilePath, zipBytes) {
+  const archiveEntries = unzipSync(zipBytes);
+  let uncompressedBytes = 0;
+  for (const value of Object.values(archiveEntries)) {
+    uncompressedBytes += value.byteLength;
+    if (uncompressedBytes > completeBackupMaxBytes) {
+      throw new Error("ZIP 解压后的数据超过 512MB。");
+    }
+  }
+  const manifestBytes = archiveEntries["backup.json"];
+  if (!manifestBytes) throw new Error("ZIP 备份缺少 backup.json。");
+  const manifest = parseCompleteBackupManifest(
+    JSON.parse(strFromU8(manifestBytes)),
+    { zip: true },
+  );
+  const dataDirectory = dirname(dataFilePath);
+  const stagingDirectory = await mkdtemp(join(dataDirectory, ".complete-backup-import-"));
+  const stagedAssets = join(stagingDirectory, "new", "app-data-assets");
+  const stagedFiles = join(stagingDirectory, "new", "managed-files");
+  const stagedAppData = join(stagingDirectory, "app-data.json");
+  const replacements = [];
+  let preserveStagingDirectory = false;
+
+  try {
+    await mkdir(stagedAssets, { recursive: true });
+    for (const [archivePath, metadata] of manifest.assets) {
+      const bytes = archiveEntries[archivePath];
+      if (!(bytes instanceof Uint8Array)) throw new Error(`ZIP 备份缺少图片资源：${archivePath}`);
+      const relativePath = archivePath.slice("assets/".length);
+      const normalized = relativePath.replace(/\\/g, "/");
+      if (!normalized || normalized.split("/").some((part) => !part || part === "." || part === "..")) {
+        throw new Error("ZIP 备份中的图片资源路径非法。");
+      }
+      const target = resolve(stagedAssets, ...normalized.split("/"));
+      const relativeTarget = relative(stagedAssets, target);
+      if (relativeTarget.startsWith("..") || isAbsolute(relativeTarget)) {
+        throw new Error("ZIP 备份中的图片资源路径非法。");
+      }
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, bytes);
+    }
+    for (const archivePath of Object.keys(archiveEntries)) {
+      if (archivePath.startsWith("assets/") && !manifest.assets.has(archivePath)) {
+        throw new Error(`ZIP 备份包含未索引的图片资源：${archivePath}`);
+      }
+    }
+
+    if (manifest.managedFiles) {
+      await mkdir(stagedFiles, { recursive: true });
+      for (const root of completeBackupManagedRoots) {
+        await mkdir(join(stagedFiles, root), { recursive: true });
+      }
+      const indexedPaths = new Set();
+      for (const item of manifest.managedFiles) {
+        const archivePath = `files/${item.path}`;
+        const bytes = archiveEntries[archivePath];
+        if (!(bytes instanceof Uint8Array) || bytes.byteLength !== item.size) {
+          throw new Error(`ZIP 备份缺少应用文件或文件大小不符：${item.path}`);
+        }
+        indexedPaths.add(archivePath);
+        const target = resolve(stagedFiles, ...item.path.split("/"));
+        const relativeTarget = relative(stagedFiles, target);
+        if (relativeTarget.startsWith("..") || isAbsolute(relativeTarget)) {
+          throw new Error(`应用文件路径非法：${item.path}`);
+        }
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, bytes);
+      }
+      for (const archivePath of Object.keys(archiveEntries)) {
+        if (archivePath.startsWith("files/") && !indexedPaths.has(archivePath) && !archivePath.endsWith("/")) {
+          throw new Error(`ZIP 备份包含未索引的应用文件：${archivePath}`);
+        }
+      }
+    }
+
+    const appData = rewriteCompleteBackupAssetReferences(
+      manifest.appData,
+      manifest.assets,
+    );
+    await writeFile(stagedAppData, JSON.stringify(appData, null, 2), "utf8");
+
+    const replacementSpecs = [];
+    if (manifest.version >= 2) {
+      replacementSpecs.push({ source: stagedAssets, destination: join(dataDirectory, "app-data-assets"), name: "app-data-assets" });
+    }
+    if (manifest.managedFiles) {
+      replacementSpecs.push(...completeBackupManagedRoots.map((root) => ({
+        source: join(stagedFiles, root),
+        destination: join(dataDirectory, root),
+        name: root.replace(/[^a-z0-9]+/gi, "-"),
+      })));
+    }
+    if (manifest.desktopProjectPositions !== undefined) {
+      const positionSource = join(stagingDirectory, "desktop-project-positions.json");
+      await writeFile(positionSource, JSON.stringify(manifest.desktopProjectPositions), "utf8");
+      replacementSpecs.push({ source: positionSource, destination: join(dataDirectory, "desktop-project-positions.json"), name: "desktop-project-positions.json" });
+    }
+
+    const previousDirectory = join(stagingDirectory, "previous");
+    await mkdir(previousDirectory, { recursive: true });
+    try {
+      for (const spec of replacementSpecs) {
+        const previous = join(previousDirectory, spec.name);
+        const replacement = { ...spec, previous, hadPrevious: false };
+        await mkdir(dirname(spec.destination), { recursive: true });
+        try {
+          await rename(spec.destination, previous);
+          replacement.hadPrevious = true;
+        } catch (error) {
+          if (!isMissingFileError(error)) throw error;
+        }
+        replacements.push(replacement);
+        await rename(spec.source, spec.destination);
+      }
+      const parsedAppData = JSON.parse(await readFile(stagedAppData, "utf8"));
+      await writeAppData(dataFilePath, parsedAppData);
+    } catch (error) {
+      const rollbackFailures = [];
+      for (const replacement of replacements.reverse()) {
+        await rm(replacement.destination, { recursive: true, force: true }).catch((rollbackError) => {
+          rollbackFailures.push(compactError(rollbackError));
+        });
+        if (replacement.hadPrevious) {
+          await rename(replacement.previous, replacement.destination).catch((rollbackError) => {
+            rollbackFailures.push(compactError(rollbackError));
+          });
+        }
+      }
+      if (rollbackFailures.length > 0) {
+        preserveStagingDirectory = true;
+        throw new Error(
+          `${compactError(error)}；自动回滚未完成，旧数据暂存在 ${stagingDirectory}。${rollbackFailures.join("；")}`,
+        );
+      }
+      throw error;
+    }
+
+    return {
+      exportedAt: manifest.exportedAt,
+      version: manifest.version,
+      localStorage: manifest.localStorage,
+    };
+  } finally {
+    if (!preserveStagingDirectory) {
+      await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+}
+
+async function handleCompleteBackupImport(request, response, dataFilePath) {
+  if (request.method !== "PUT" && request.method !== "POST") {
+    sendJson(response, 405, { error: "Method not allowed" });
+    return;
+  }
+  const stagingDirectory = await mkdtemp(join(tmpdir(), "renge-complete-backup-import-"));
+  const backupPath = join(stagingDirectory, "complete-backup.upload");
+  let uploadedBytes = 0;
+  const sizeLimit = new Transform({
+    transform(chunk, _encoding, callback) {
+      uploadedBytes += chunk.length;
+      if (uploadedBytes > completeBackupMaxBytes) {
+        callback(new Error("备份文件超过 512MB，无法导入。"));
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+  try {
+    await pipeline(request, sizeLimit, createWriteStream(backupPath, { flags: "wx" }));
+    if (uploadedBytes === 0) throw new Error("备份文件为空。");
+    const signature = await readFile(backupPath).then((bytes) => bytes.subarray(0, 4));
+    const isZip = signature[0] === 0x50 && signature[1] === 0x4b &&
+      signature[2] === 0x03 && signature[3] === 0x04;
+    let result;
+    if (isZip) {
+      result = await installCompleteBackupZip(dataFilePath, new Uint8Array(await readFile(backupPath)));
+    } else {
+      const manifest = parseCompleteBackupManifest(
+        JSON.parse(await readFile(backupPath, "utf8")),
+      );
+      if (manifest.version >= 3) throw new Error("新版完整备份必须使用 ZIP 文件。");
+      if (manifest.assets.size > 0) throw new Error("JSON 备份缺少图片资源文件。");
+      const appData = rewriteCompleteBackupAssetReferences(manifest.appData, manifest.assets);
+      await writeAppData(dataFilePath, appData);
+      if (manifest.desktopProjectPositions !== undefined) {
+        await writeFile(
+          join(dirname(dataFilePath), "desktop-project-positions.json"),
+          JSON.stringify(manifest.desktopProjectPositions),
+          "utf8",
+        );
+      }
+      result = {
+        exportedAt: manifest.exportedAt,
+        version: manifest.version,
+        localStorage: manifest.localStorage,
+      };
+    }
+    sendJson(response, 200, { ok: true, ...result, bytes: uploadedBytes });
+  } catch (error) {
+    const message = compactError(error);
+    const status = /512MB|超过|too large/i.test(message) ? 413 : 400;
+    sendJson(response, status, { error: message });
+  } finally {
+    await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -2520,6 +2916,110 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
   try {
     if (request.method === "OPTIONS") {
       sendOptions(response);
+      return;
+    }
+
+    if (pathname === "/api/app-data/backup-files") {
+      if (request.method !== "GET") {
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+      }
+      sendJson(response, 200, {
+        files: await listCompleteBackupManagedFiles(dirname(dataFilePath)),
+      });
+      return;
+    }
+
+    if (pathname === "/api/app-data/backup-file") {
+      if (request.method !== "GET") {
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+      }
+      const requestUrl = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+      const target = resolveCompleteBackupManagedFile(dirname(dataFilePath), requestUrl.searchParams.get("path"));
+      if (!target) {
+        sendJson(response, 400, { error: "应用文件路径非法。" });
+        return;
+      }
+      try {
+        const rootEntry = join(dirname(dataFilePath), target.relativePath.split("/")[0]);
+        const rootStat = await lstat(rootEntry);
+        if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+          throw new Error("应用文件目录无效。");
+        }
+        const rootPath = await realpath(rootEntry);
+        const filePath = await realpath(target.filePath);
+        const relativePath = relative(rootPath, filePath);
+        if (!relativePath || relativePath.startsWith("..") || isAbsolute(relativePath)) {
+          throw new Error("应用文件路径越界。");
+        }
+        const fileStat = await stat(filePath);
+        if (!fileStat.isFile()) throw new Error("应用文件不存在。");
+        response.writeHead(200, {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": fileStat.size,
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        });
+        await pipeline(createReadStream(filePath), response);
+      } catch {
+        if (!response.headersSent) sendJson(response, 404, { error: "应用文件不存在。" });
+      }
+      return;
+    }
+
+    if (pathname.startsWith("/api/app-data/assets/")) {
+      if (request.method !== "GET") {
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+      }
+      let parts;
+      try {
+        parts = pathname.slice("/api/app-data/assets/".length)
+          .split("/")
+          .map((part) => decodeURIComponent(part));
+      } catch {
+        sendJson(response, 400, { error: "图片资源路径非法。" });
+        return;
+      }
+      if (
+        parts.length === 0 ||
+        parts.some((part) => !part || part === "." || part === ".." || /[\\\x00-\x1f]/.test(part))
+      ) {
+        sendJson(response, 400, { error: "图片资源路径非法。" });
+        return;
+      }
+      const assetsRoot = join(dirname(dataFilePath), "app-data-assets");
+      const assetPath = resolve(assetsRoot, ...parts);
+      try {
+        const rootStat = await lstat(assetsRoot);
+        if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+          throw new Error("图片资源目录无效。");
+        }
+        const canonicalRoot = await realpath(assetsRoot);
+        const canonicalPath = await realpath(assetPath);
+        const relativePath = relative(canonicalRoot, canonicalPath);
+        if (!relativePath || relativePath.startsWith("..") || isAbsolute(relativePath)) {
+          throw new Error("图片资源路径越界。");
+        }
+        const fileStat = await stat(canonicalPath);
+        if (!fileStat.isFile()) throw new Error("图片资源不存在。");
+        const contentType = mimeTypes[extname(canonicalPath).toLowerCase()] ?? "application/octet-stream";
+        response.writeHead(200, {
+          "Content-Type": contentType,
+          "Content-Length": fileStat.size,
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        });
+        await pipeline(createReadStream(canonicalPath), response);
+      } catch {
+        if (!response.headersSent) sendJson(response, 404, { error: "图片资源不存在。" });
+      }
+      return;
+    }
+
+    if (pathname === "/api/app-data/import-complete") {
+      await handleCompleteBackupImport(request, response, dataFilePath);
       return;
     }
 

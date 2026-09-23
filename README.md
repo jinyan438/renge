@@ -50,7 +50,7 @@ Electron 端和 Web 端共用同一套「项目化桌面」外壳（`src/Desktop
 - **附件与图片**：文本、图片和二进制附件；可对接视觉模型或图像识别 MCP，图片按会话存入 `session-images` 目录。
 - **会话记忆与心跳**：保存工作区会话，支持周期性心跳事件、循环次数和聊天提醒。
 - **微信侧栏**：把会话消息同步到微信侧栏，并可对单聊/群聊批量生成回复。
-- **数据备份**：完整备份导入导出（`renge-agent-complete-backup` 格式，含资源），以及 `app-data.json` 的多代自动备份与回滚。
+- **数据备份**：完整备份导入导出（`renge-agent-complete-backup` v3，包含应用数据目录中的配置、会话、图片与导入文件，并兼容旧 JSON/ZIP 备份），以及 `app-data.json` 的多代自动备份与回滚。
 
 ## 酒馆（SillyTavern）兼容层
 
@@ -238,10 +238,12 @@ https://api.openai.com/v1
 
 ```text
 app-data.backup-1.json ~ app-data.backup-3.json   多代自动备份
-.pi/sessions/                                     Pi 会话 JSONL
-skills/                                           已导入的 Pi 原生 Skill
-extensions/                                       已安装的酒馆扩展
-session-images/                                   按会话存放的图片
+app-data-assets/                                  角色卡封面等应用图片
+.pi/                                              Pi 会话与本地配置
+skills/                                           已导入的 Pi 原生 Skill 文件
+extensions/                                       已安装的酒馆扩展及资源
+session-images/、generated-images/                 聊天图片与生成图片
+tavern-files/                                     酒馆扩展上传的数据文件
 ```
 
 可以通过 `RENGE_DATA_DIR` 修改数据目录：

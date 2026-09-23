@@ -6,6 +6,7 @@ import { createServer, request } from "node:http";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { strToU8, zipSync } from "fflate";
 import {
   normalizeUpstreamErrorMessage,
   parseWindowsProxyServer,
@@ -403,6 +404,107 @@ test("PATCH app-data preserves stored character cards", async (t) => {
   );
   assert.deepEqual(backup.characterCards, characterCards);
   assert.deepEqual(backup.chatSessions, []);
+});
+
+test("complete backup export and import include managed application files and image assets", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-complete-backup-test-"));
+  const previousData = { generation: 1 };
+  await writeFile(join(dataDir, "app-data.json"), JSON.stringify(previousData), "utf8");
+  await mkdir(join(dataDir, ".pi", "sessions"), { recursive: true });
+  await mkdir(join(dataDir, "skills", "existing-skill"), { recursive: true });
+  await writeFile(join(dataDir, ".pi", "sessions", "current-session.jsonl"), "current session", "utf8");
+  await writeFile(join(dataDir, "skills", "existing-skill", "SKILL.md"), "existing skill", "utf8");
+
+  const controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  t.after(async () => {
+    await new Promise((resolve, reject) => {
+      controller.server.close((error) => (error ? reject(error) : resolve()));
+    });
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const indexResponse = await fetch(`${controller.url}/api/app-data/backup-files`);
+  assert.equal(indexResponse.status, 200);
+  const indexedFiles = (await indexResponse.json()).files;
+  assert.deepEqual(indexedFiles.map(({ path }) => path), [
+    ".pi/sessions/current-session.jsonl",
+    "skills/existing-skill/SKILL.md",
+  ]);
+  const fileResponse = await fetch(
+    `${controller.url}/api/app-data/backup-file?path=${encodeURIComponent(indexedFiles[0].path)}`,
+  );
+  assert.equal(await fileResponse.text(), "current session");
+
+  const image = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAE/wJ/l4eKXwAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  const managedFiles = [
+    { path: ".pi/sessions/restored-session.jsonl", size: Buffer.byteLength("restored session") },
+    { path: "skills/new-skill/SKILL.md", size: Buffer.byteLength("restored skill") },
+    { path: "tavern-files/vectors.json", size: Buffer.byteLength("restored vector") },
+  ];
+  const backup = {
+    format: "renge-agent-complete-backup",
+    version: 3,
+    exportedAt: "2026-09-23T00:00:00.000Z",
+    appData: {
+      personas: [], providers: [], chatSessions: [], systemPrompts: [], chatPresets: [],
+      statusBarPresets: [], worldBooks: [], regexScripts: [], tavernScripts: [],
+      characterCards: [{ id: "card-1", avatarDataUrl: "renge-backup-asset:assets/image-0001.png" }],
+      mcpServers: [], skills: [], extensions: [],
+    },
+    localStorage: { renge_active_persona: "persona-1" },
+    assets: { "assets/image-0001.png": { mimeType: "image/png" } },
+    managedFiles,
+    desktopProjectPositions: { chat: { x: 12, y: 24 } },
+  };
+  const archive = zipSync({
+    "backup.json": strToU8(JSON.stringify(backup)),
+    "assets/image-0001.png": new Uint8Array(image),
+    "files/.pi/sessions/restored-session.jsonl": strToU8("restored session"),
+    "files/skills/new-skill/SKILL.md": strToU8("restored skill"),
+    "files/tavern-files/vectors.json": strToU8("restored vector"),
+  });
+  const importResponse = await fetch(`${controller.url}/api/app-data/import-complete`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/zip" },
+    body: Buffer.from(archive),
+  });
+  const importPayloadText = await importResponse.text();
+  assert.equal(importResponse.status, 200, importPayloadText);
+  const importPayload = JSON.parse(importPayloadText);
+  assert.equal(importPayload.version, 3);
+  assert.deepEqual(importPayload.localStorage, backup.localStorage);
+
+  const restoredResponse = await fetch(`${controller.url}/api/app-data`);
+  const restored = (await restoredResponse.json()).data;
+  assert.equal(restored.characterCards[0].avatarDataUrl, "/api/app-data/assets/image-0001.png");
+  assert.equal(
+    await readFile(join(dataDir, ".pi", "sessions", "restored-session.jsonl"), "utf8"),
+    "restored session",
+  );
+  assert.equal(
+    await readFile(join(dataDir, "skills", "new-skill", "SKILL.md"), "utf8"),
+    "restored skill",
+  );
+  assert.equal(
+    await readFile(join(dataDir, "tavern-files", "vectors.json"), "utf8"),
+    "restored vector",
+  );
+  await assert.rejects(readFile(join(dataDir, "skills", "existing-skill", "SKILL.md")));
+  assert.deepEqual(
+    Buffer.from(await (await fetch(`${controller.url}/api/app-data/assets/image-0001.png`)).arrayBuffer()),
+    image,
+  );
+  assert.deepEqual(
+    JSON.parse(await readFile(join(dataDir, "desktop-project-positions.json"), "utf8")),
+    backup.desktopProjectPositions,
+  );
+  assert.deepEqual(
+    JSON.parse(await readFile(join(dataDir, "app-data.backup-1.json"), "utf8")),
+    previousData,
+  );
 });
 
 test("rejects app-data payloads that are not JSON objects", async (t) => {
