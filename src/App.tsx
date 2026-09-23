@@ -8064,6 +8064,7 @@ function uploadCompleteBackupWithProgress(
   return new Promise<{
     exportedAt?: string;
     localStorage?: Record<string, string>;
+    personas?: AgentPersona[];
   }>((resolve, reject) => {
     const request = new XMLHttpRequest();
     const rejectWithUnknownOutcome = (message: string) => {
@@ -8084,6 +8085,7 @@ function uploadCompleteBackupWithProgress(
         error?: string;
         exportedAt?: string;
         localStorage?: Record<string, string>;
+        personas?: AgentPersona[];
         cleared?: boolean;
       } = {};
       try {
@@ -8093,6 +8095,9 @@ function uploadCompleteBackupWithProgress(
             error: typeof parsed.error === "string" ? parsed.error : undefined,
             exportedAt: typeof parsed.exportedAt === "string" ? parsed.exportedAt : undefined,
             cleared: parsed.cleared === true,
+            ...(Array.isArray(parsed.personas)
+              ? { personas: parsed.personas as AgentPersona[] }
+              : {}),
             ...(isObjectRecord(parsed.localStorage)
               ? { localStorage: parsed.localStorage as Record<string, string> }
               : {}),
@@ -16231,20 +16236,12 @@ export function App() {
       );
       backupInstalled = true;
       replaceRengeLocalStorage(importResult.localStorage ?? {});
-      const appDataResponse = await fetch("/api/app-data", {
-        headers: { Accept: "application/json" },
-        cache: "no-store",
-      });
-      if (!appDataResponse.ok) {
-        throw new Error(`应用数据已导入，但无法同步浏览器数据库：${appDataResponse.status}`);
-      }
-      const appDataPayload = (await appDataResponse.json()) as { data?: unknown };
-      if (!isObjectRecord(appDataPayload.data)) {
-        throw new Error("应用数据已导入，但服务未返回有效的应用主数据。");
-      }
-      const restoredAppData = appDataPayload.data as RengeAppData;
-      await personaStore.save((restoredAppData.personas ?? []).map(normalizePersona)).catch(() => undefined);
-      await saveCharacterCardsToDatabase(restoredAppData.characterCards ?? []);
+      await personaStore
+        .save((importResult.personas ?? []).map(normalizePersona))
+        .catch(() => undefined);
+      // The restored server app-data is authoritative. Clear the old browser
+      // cache instead of copying every restored card and image into IndexedDB.
+      await saveCharacterCardsToDatabase([]);
 
       setDataBackupState({
         status: "success",

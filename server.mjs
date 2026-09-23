@@ -803,53 +803,104 @@ function parseCompleteBackupManifest(value) {
   return { ...value, assets };
 }
 
+async function forEachWithConcurrency(items, concurrency, visit) {
+  let nextIndex = 0;
+  let hasError = false;
+  let firstError;
+  const workerCount = Math.min(items.length, concurrency);
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (!hasError) {
+        const index = nextIndex++;
+        if (index >= items.length) return;
+        try {
+          await visit(items[index], index);
+        } catch (error) {
+          if (!hasError) {
+            hasError = true;
+            firstError = error;
+          }
+        }
+      }
+    }),
+  );
+  if (hasError) throw firstError;
+}
+
 async function installCompleteBackupZip(dataFilePath, zipBytes) {
-  const manifestEntries = unzipSync(zipBytes, {
-    filter: (file) => file.name === "backup.json",
-  });
-  const manifestBytes = manifestEntries["backup.json"];
+  // Inflate once: the old path unpacked the manifest and then decompressed the
+  // entire archive again after clearing the user's existing data.
+  const archiveEntries = unzipSync(zipBytes);
+  const manifestBytes = archiveEntries["backup.json"];
   if (!manifestBytes) throw new Error("ZIP 备份缺少 backup.json。");
   const manifest = parseCompleteBackupManifest(
     JSON.parse(strFromU8(manifestBytes)),
   );
+  if (!manifest.appData || typeof manifest.appData !== "object" || Array.isArray(manifest.appData)) {
+    throw new Error("备份缺少有效的应用主数据。");
+  }
+
   const dataDirectory = dirname(dataFilePath);
+  const assetsRoot = join(dataDirectory, "app-data-assets");
+  const restoreWrites = [];
+  const restoreDirectories = new Set();
+  let uncompressedSize = 0;
+  for (const [archivePath, bytes] of Object.entries(archiveEntries)) {
+    uncompressedSize += bytes.byteLength;
+    if (uncompressedSize > completeBackupMaxBytes) {
+      throw new Error("备份文件解压后超过 512MB，无法导入。");
+    }
+    if (archivePath.endsWith("/")) continue;
+
+    let target = null;
+    if (archivePath.startsWith("assets/")) {
+      const parts = archivePath.slice("assets/".length).split("/");
+      if (
+        parts.some((part) =>
+          !part || part === "." || part === ".." || /[\\\\\x00-\x1f]/.test(part),
+        )
+      ) {
+        throw new Error("ZIP 备份中的图片资源路径非法。");
+      }
+      target = resolve(assetsRoot, ...parts);
+      const relativeTarget = relative(assetsRoot, target);
+      if (relativeTarget.startsWith("..") || isAbsolute(relativeTarget)) {
+        throw new Error("ZIP 备份中的图片资源路径非法。");
+      }
+    } else if (archivePath.startsWith("files/")) {
+      const managedPath = normalizeCompleteBackupManagedFilePath(archivePath.slice("files/".length));
+      target = managedPath
+        ? resolveCompleteBackupManagedFile(dataDirectory, managedPath)?.filePath
+        : null;
+      if (!target) throw new Error("ZIP 备份中的应用文件路径非法。");
+    }
+
+    if (target) {
+      restoreWrites.push({ target, bytes });
+      restoreDirectories.add(dirname(target));
+    }
+  }
+
+  // Resolve asset references before clearing the current installation, so a
+  // malformed manifest cannot destroy data before reporting the error.
+  const appData = rewriteCompleteBackupAssetReferences(manifest.appData, manifest.assets);
+  const desktopProjectPositionsJson = manifest.desktopProjectPositions === undefined
+    ? null
+    : JSON.stringify(manifest.desktopProjectPositions);
   let dataCleared = false;
   try {
     dataCleared = true;
     await clearAppData(dataFilePath);
-    const archiveEntries = unzipSync(zipBytes, {
-      filter: (file) => file.name !== "backup.json",
-    });
-    const assetsRoot = join(dataDirectory, "app-data-assets");
-    for (const [archivePath, bytes] of Object.entries(archiveEntries)) {
-      if (archivePath.endsWith("/")) continue;
-      if (archivePath.startsWith("assets/")) {
-        const relativePath = archivePath.slice("assets/".length);
-        if (relativePath.split("/").some((part) => !part || part === "." || part === ".." || /[\\\\\x00-\x1f]/.test(part))) {
-          throw new Error("ZIP 备份中的图片资源路径非法。");
-        }
-        const target = resolve(assetsRoot, ...relativePath.split("/"));
-        const relativeTarget = relative(assetsRoot, target);
-        if (relativeTarget.startsWith("..") || isAbsolute(relativeTarget)) {
-          throw new Error("ZIP 备份中的图片资源路径非法。");
-        }
-        await mkdir(dirname(target), { recursive: true });
-        await writeFile(target, bytes);
-      } else if (archivePath.startsWith("files/")) {
-        const managedPath = normalizeCompleteBackupManagedFilePath(archivePath.slice("files/".length));
-        const target = managedPath
-          ? resolveCompleteBackupManagedFile(dataDirectory, managedPath)?.filePath
-          : null;
-        if (!target) throw new Error("ZIP 备份中的应用文件路径非法。");
-        await mkdir(dirname(target), { recursive: true });
-        await writeFile(target, bytes);
-      }
-    }
-    const appData = rewriteCompleteBackupAssetReferences(manifest.appData, manifest.assets);
-    if (manifest.desktopProjectPositions !== undefined) {
+    await forEachWithConcurrency([...restoreDirectories], 16, (directory) =>
+      mkdir(directory, { recursive: true }),
+    );
+    await forEachWithConcurrency(restoreWrites, 16, ({ target, bytes }) =>
+      writeFile(target, bytes),
+    );
+    if (desktopProjectPositionsJson !== null) {
       await writeFile(
         join(dataDirectory, "desktop-project-positions.json"),
-        JSON.stringify(manifest.desktopProjectPositions),
+        desktopProjectPositionsJson,
         "utf8",
       );
     }
@@ -858,6 +909,7 @@ async function installCompleteBackupZip(dataFilePath, zipBytes) {
       exportedAt: manifest.exportedAt,
       version: manifest.version,
       localStorage: manifest.localStorage,
+      personas: Array.isArray(manifest.appData.personas) ? manifest.appData.personas : [],
     };
   } catch (error) {
     if (dataCleared && error && typeof error === "object") error.backupCleared = true;
