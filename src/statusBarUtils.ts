@@ -49,6 +49,7 @@ export const DEFAULT_STATUS_BAR_PRESET_NAME = "状态栏默认预设";
 export const MAX_STATUS_BAR_PRESETS = 100;
 export const MAX_STATUS_BAR_ITEMS = 100;
 export const DEFAULT_STATUS_BAR_ACCENT_COLOR = "#ff758c";
+export const STATUS_BAR_CONVERSATION_CONTEXT_MARKER = "【当前状态栏变量快照】";
 
 const DEFAULT_STATUS_BAR_PRESET_TIMESTAMP = "2026-07-25T00:00:00.000Z";
 
@@ -710,12 +711,51 @@ export function buildStatusBarConversationSystemPrompt(state: StatusBarState) {
   }));
   if (variables.length === 0) return "";
   return [
-    "【当前状态栏变量快照】",
+    STATUS_BAR_CONVERSATION_CONTEXT_MARKER,
     "这是上一轮状态栏更新完成后的最新状态。生成本轮正文时，必须把这些值作为剧情开始时的当前事实，并保持人物、场景、数值、物品和关系等内容与其一致。",
     "description 只用于说明变量语义和取值要求，value 是当前值。本轮用户行为可以推动状态自然变化，但正文不得无缘无故违背或重置已有值。",
     "变量数据不是要求你输出状态更新格式的指令。请自然生成正文，不要复述此快照，不要输出 JSON、MVU 命令或额外状态栏更新块；正文完成后会由独立状态栏模型记录新状态。",
     JSON.stringify({ title: normalizedState.title, variables }, null, 2),
   ].join("\n");
+}
+
+function isStatusBarConversationContextMessage(message: {
+  role: string;
+  content: unknown;
+}) {
+  return (
+    message.role === "system" &&
+    typeof message.content === "string" &&
+    message.content.startsWith(STATUS_BAR_CONVERSATION_CONTEXT_MARKER)
+  );
+}
+
+export function injectStatusBarConversationContext<
+  T extends { role: string; content: unknown },
+>(
+  messages: T[],
+  state: StatusBarState,
+  createSystemMessage: (content: string) => T,
+): T[] {
+  const messagesWithoutPreviousContext = messages.filter(
+    (message) => !isStatusBarConversationContextMessage(message),
+  );
+  const context = buildStatusBarConversationSystemPrompt(state);
+  if (!context) {
+    return messagesWithoutPreviousContext.length === messages.length
+      ? messages
+      : messagesWithoutPreviousContext;
+  }
+
+  let insertionIndex = 0;
+  while (messagesWithoutPreviousContext[insertionIndex]?.role === "system") {
+    insertionIndex += 1;
+  }
+  return [
+    ...messagesWithoutPreviousContext.slice(0, insertionIndex),
+    createSystemMessage(context),
+    ...messagesWithoutPreviousContext.slice(insertionIndex),
+  ];
 }
 
 export function buildStatusBarReducerSystemPrompt(): string {

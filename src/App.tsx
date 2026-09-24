@@ -452,6 +452,7 @@ import {
   createDefaultStatusBarState,
   DEFAULT_STATUS_BAR_PRESET_ID,
   getUnresolvedStatusBarItemIds,
+  injectStatusBarConversationContext,
   loadStatusBarPresetsFromStorage,
   mergeStatusBarPatch,
   normalizeStatusBarPresets,
@@ -16983,17 +16984,16 @@ export function App() {
       lastUserMessage: getChatApiMessageText(lastUserMessage),
     }) as ChatApiMessage[];
   };
-  const prependStatusBarConversationContext = (
+  const injectSessionStatusBarConversationContext = (
     messages: ChatApiMessage[],
     sessionId: string,
   ): ChatApiMessage[] => {
     const session = chatSessionsRef.current.find((candidate) => candidate.id === sessionId);
-    const context = buildStatusBarConversationSystemPrompt(
+    return injectStatusBarConversationContext(
+      messages,
       normalizeStatusBarState(session?.statusBar),
+      (content) => ({ role: "system", content }),
     );
-    return context
-      ? [{ role: "system", content: context }, ...messages]
-      : messages;
   };
   const applyPromptRegexToApiMessages = (
     messages: ChatApiMessage[],
@@ -23606,10 +23606,11 @@ export function App() {
       meterPersona,
       responderContext,
     );
-    const statusBarPrompt = buildStatusBarConversationSystemPrompt(activeStatusBarState);
-    const messagesWithStatus = statusBarPrompt
-      ? [{ role: "system" as const, content: statusBarPrompt }, ...composedMessages]
-      : composedMessages;
+    const messagesWithStatus = injectStatusBarConversationContext(
+      composedMessages,
+      activeStatusBarState,
+      (content) => ({ role: "system" as const, content }),
+    );
     const estimatedCurrentTokens =
       estimateContextMessagesTokens(messagesWithStatus) +
       estimateContextValueTokens(availableTools);
@@ -25623,7 +25624,7 @@ export function App() {
         responderName,
         requestModelId,
       );
-      const apiMessages = prependStatusBarConversationContext(
+      const apiMessages = injectSessionStatusBarConversationContext(
         await applyTavernExtensionPromptFilters(preparedApiMessages, {
           generationAfterCommands: options.generationAfterCommands,
         }),
@@ -26325,7 +26326,7 @@ export function App() {
           subAgent.name,
           subAgentModelId,
         );
-        const subAgentApiMessages = prependStatusBarConversationContext(
+        const subAgentApiMessages = injectSessionStatusBarConversationContext(
           await applyTavernExtensionPromptFilters(
             subAgentPreparedMessages,
             { generationAfterCommands: false },
@@ -28404,7 +28405,7 @@ export function App() {
               responseName,
               requestModelId,
             );
-      const apiMessages = prependStatusBarConversationContext(
+      const apiMessages = injectSessionStatusBarConversationContext(
         normalizedConfig.quiet === true
           ? preparedApiMessages
           : await applyTavernExtensionPromptFilters(preparedApiMessages, {
@@ -28937,7 +28938,7 @@ export function App() {
         responseName,
         requestModelId,
       );
-      const apiMessages = prependStatusBarConversationContext(
+      const apiMessages = injectSessionStatusBarConversationContext(
         await applyTavernExtensionPromptFilters(preparedApiMessages, {
           generationAfterCommands: false,
         }),
@@ -30087,7 +30088,9 @@ export function App() {
           createdAt: message.createdAt,
         };
       });
-      const statusBarPrompt = buildStatusBarConversationSystemPrompt(activeStatusBarState);
+      const statusBarPrompt = buildStatusBarConversationSystemPrompt(
+        getSessionStatusBarState(activeChatSessionIdRef.current),
+      );
       const buildWorldBookContext = (characterName: string) => {
         const worldBookSystemPrompt = buildWorldBookPrompt(
           worldBooks,

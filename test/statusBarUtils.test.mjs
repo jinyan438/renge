@@ -19,6 +19,7 @@ import {
   getStatusBarVariableKey,
   getStatusBarItemValue,
   getUnresolvedStatusBarItemIds,
+  injectStatusBarConversationContext,
   mergeStatusBarPatch,
   moveStatusBarItemBefore,
   normalizeStatusBarState,
@@ -420,6 +421,48 @@ test("builds a conversation context from the latest enabled status values", () =
     buildStatusBarConversationSystemPrompt(createTestState({ enabled: false })),
     "",
   );
+});
+
+test("injects the latest status context after leading system messages without duplicates", () => {
+  const createSystemMessage = (content) => ({ role: "system", content });
+  const messages = [
+    { role: "system", content: "人格设定" },
+    { role: "system", content: "世界书设定" },
+    { role: "user", content: "继续行动" },
+  ];
+  const injected = injectStatusBarConversationContext(
+    messages,
+    createTestState(),
+    createSystemMessage,
+  );
+
+  assert.equal(injected[0].content, "人格设定");
+  assert.equal(injected[1].content, "世界书设定");
+  assert.match(injected[2].content, /^【当前状态栏变量快照】/);
+  assert.match(injected[2].content, /"value": "平静"/);
+  assert.equal(injected[3].role, "user");
+
+  const refreshed = injectStatusBarConversationContext(
+    injected,
+    createTestState({ values: { mood: "兴奋", progress: 55, hp: 90 } }),
+    createSystemMessage,
+  );
+  const statusContexts = refreshed.filter(
+    (message) =>
+      message.role === "system" &&
+      typeof message.content === "string" &&
+      message.content.startsWith("【当前状态栏变量快照】"),
+  );
+  assert.equal(statusContexts.length, 1);
+  assert.match(statusContexts[0].content, /"value": "兴奋"/);
+  assert.doesNotMatch(statusContexts[0].content, /"value": "平静"/);
+
+  const withoutStatus = injectStatusBarConversationContext(
+    refreshed,
+    createTestState({ enabled: false }),
+    createSystemMessage,
+  );
+  assert.deepEqual(withoutStatus, messages);
 });
 
 test("parses a pure JSON status patch", () => {
