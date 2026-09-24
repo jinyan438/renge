@@ -3375,7 +3375,7 @@ function persistAppDataToLocalStores(
   setLocalStorageJsonSafely(PROVIDER_STORAGE_KEY, data.providers ?? []);
   setLocalStorageValueSafely(ACTIVE_PROVIDER_STORAGE_KEY, data.activeProviderId ?? "");
   setLocalStorageJsonSafely(CHAT_SESSIONS_STORAGE_KEY, data.chatSessions ?? []);
-  setLocalStorageValueSafely(CHAT_MODE_STORAGE_KEY, data.chatMode ?? "ai");
+  setLocalStorageValueSafely(CHAT_MODE_STORAGE_KEY, data.chatMode ?? "persona");
   setLocalStorageValueSafely(
     MULTI_AGENT_WORKFLOW_STORAGE_KEY,
     data.multiAgentWorkflow ?? "sequence",
@@ -37452,19 +37452,11 @@ export function App() {
               </button>
               <button
                 type="button"
-                className={chatMode === "persona" ? "active" : ""}
+                className={chatMode === "persona" || chatMode === "multi" ? "active" : ""}
                 onClick={() => setChatMode("persona")}
               >
                 <Bot size={15} />
                 人格 Agent
-              </button>
-              <button
-                type="button"
-                className={chatMode === "multi" ? "active" : ""}
-                onClick={() => setChatMode("multi")}
-              >
-                <Boxes size={15} />
-                多 Agent
               </button>
               <button
                 type="button"
@@ -38725,7 +38717,7 @@ export function App() {
                               : "按点击顺序选择至少 2 个 Agent"
                             : chatMode === "roleplay"
                               ? "选择角色卡并创建绑定会话"
-                            : "选择人格"
+                            : "选择单人 Agent"
                       }
                     >
                       <span>
@@ -38737,41 +38729,84 @@ export function App() {
                               : `多Agent · ${multiAgentPersonas.length}`
                             : chatMode === "roleplay"
                               ? activeSessionRoleplayCard?.name ?? "选择角色卡"
-                            : activePersona.name}
+                            : `单人 · ${activePersona.name}`}
                       </span>
                     </summary>
                     <div
                       className={`composer-menu-options ${
-                        chatMode === "multi" ? "multi-agent-options" : ""
+                        chatMode === "persona" || chatMode === "multi"
+                          ? "multi-agent-options"
+                          : ""
                       }`}
                     >
-                      {chatMode === "multi" ? (
+                      {chatMode === "persona" || chatMode === "multi" ? (
                         <>
                           <div
                             className="multi-agent-workflow-switch"
                             role="group"
-                            aria-label="多 Agent 工作模式"
+                            aria-label="人格 Agent 工作模式"
                           >
                             <button
                               type="button"
-                              className={multiAgentWorkflow === "sequence" ? "active" : ""}
-                              aria-pressed={multiAgentWorkflow === "sequence"}
-                              onClick={() => setMultiAgentWorkflow("sequence")}
+                              className={chatMode === "persona" ? "active" : ""}
+                              aria-pressed={chatMode === "persona"}
+                              onClick={() => setChatMode("persona")}
+                            >
+                              <Bot size={14} />
+                              单人 Agent
+                            </button>
+                            <button
+                              type="button"
+                              className={
+                                chatMode === "multi" && multiAgentWorkflow === "sequence"
+                                  ? "active"
+                                  : ""
+                              }
+                              aria-pressed={
+                                chatMode === "multi" && multiAgentWorkflow === "sequence"
+                              }
+                              onClick={() => {
+                                setMultiAgentWorkflow("sequence");
+                                setChatMode("multi");
+                              }}
                             >
                               <Boxes size={14} />
                               固定顺序
                             </button>
                             <button
                               type="button"
-                              className={multiAgentWorkflow === "supervisor" ? "active" : ""}
-                              aria-pressed={multiAgentWorkflow === "supervisor"}
-                              onClick={() => setMultiAgentWorkflow("supervisor")}
+                              className={
+                                chatMode === "multi" && multiAgentWorkflow === "supervisor"
+                                  ? "active"
+                                  : ""
+                              }
+                              aria-pressed={
+                                chatMode === "multi" && multiAgentWorkflow === "supervisor"
+                              }
+                              onClick={() => {
+                                setMultiAgentWorkflow("supervisor");
+                                setChatMode("multi");
+                              }}
                             >
                               <Crown size={14} />
                               主从协作
                             </button>
                           </div>
-                          {multiAgentWorkflow === "sequence" ? (
+                          {chatMode === "persona" ? (
+                            personas.map((persona) => (
+                              <button
+                                type="button"
+                                className={persona.id === activePersona.id ? "active" : ""}
+                                key={persona.id}
+                                onClick={(event) => {
+                                  setActivePersonaId(persona.id);
+                                  event.currentTarget.closest("details")?.removeAttribute("open");
+                                }}
+                              >
+                                <span>{persona.name}</span>
+                              </button>
+                            ))
+                          ) : multiAgentWorkflow === "sequence" ? (
                             <div className="multi-agent-sequence">
                             <strong>回复顺序</strong>
                             <label className="multi-agent-rounds-field">
@@ -38865,7 +38900,7 @@ export function App() {
                               </small>
                             </div>
                           )}
-                          {personas.map((persona) => {
+                          {chatMode === "multi" && personas.map((persona) => {
                             const orderIndex = multiAgentPersonaIds.indexOf(persona.id);
                             const isSupervisorPrimary =
                               persona.id === multiAgentPrimaryPersonaId;
@@ -39012,21 +39047,7 @@ export function App() {
                             <span>导入角色卡</span>
                           </button>
                         )
-                      ) : (
-                        personas.map((persona) => (
-                          <button
-                            type="button"
-                            className={persona.id === activePersona.id ? "active" : ""}
-                            key={persona.id}
-                            onClick={(event) => {
-                              setActivePersonaId(persona.id);
-                              event.currentTarget.closest("details")?.removeAttribute("open");
-                            }}
-                          >
-                            <span>{persona.name}</span>
-                          </button>
-                        ))
-                      )}
+                      ) : null}
                     </div>
                   </details>
                   <details

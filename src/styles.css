@@ -736,7 +736,7 @@
 }
 
 .chat-mode-toggle {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .chat-mode-toggle button {
@@ -8311,7 +8311,7 @@ html.renge-html-fullscreen body {
 
 .multi-agent-workflow-switch {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 3px;
   padding: 3px;
   border: 1px solid #d9dee8;
@@ -11036,7 +11036,7 @@ input[type="range"] {
 }
 
 .chat-mode-toggle {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .chat-mode-toggle button {
