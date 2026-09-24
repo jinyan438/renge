@@ -990,6 +990,7 @@ export function buildStatusBarSnapshotSystemPrompt(): string {
     "每个条目的 characterId、characterName 和 characterKind 表示其唯一所属角色。正文未涉及的角色必须原样保留；严禁把一个角色发生的变化复制到另一个角色的同名变量。",
     "entries[].description 是该变量的更新依据与取值要求；如果某条说明明确要求每次必须更新，则本轮必须为该条目生成符合说明的新值。",
     "有明确变化时填写新值；没有明确变化时原样复制该条目的 currentValue。不要自行输出“不变”、KEEP、原因或判断过程。",
+    "placeholder 为 true 表示该条目尚未初始化，currentValue 已置为 null；必须结合角色设定、世界设定和本轮剧情填写最终值，严禁返回 null 或任何占位词。确实没有可推断事实的文本字段填写“未提及”，物品或清单字段确实为空时填写“无”。",
     "displayType 为 progress 的条目必须输出 0–100 整数。把正文中的行为、态度、情绪和剧情进展视为定性证据，依据 constraints 的锚点主动估算；禁止因为正文没有直接写数字或百分比就复制 currentValue。",
     "progress 的 currentValue 是上一轮基准：轻微、明确、强烈变化通常分别调整约 5、10、20；currentValue 为 0 时，只要首次出现相关状态证据，就应给出非零初始估值。只有确实完全不存在、处于最低或尚未开始时才保留 0。",
     "value 必须是状态栏直接展示的最终值，严禁填写分析、候选值、解释或变量说明复述。",
@@ -1005,6 +1006,7 @@ export function buildStatusBarSnapshotLineSystemPrompt(): string {
     "必须根据 latestUser 和 finalAssistant，为 entries 的每个 slot 填写本轮结束时的最终值；每个 slot 恰好一行，不得遗漏或新增。",
     "entries 中每个 slot 都带有唯一角色身份。正文未涉及的角色原样保留，绝对不能把其他角色的变化写入该 slot。",
     "description 是该项要求。明确变化就填写新值；确实无法判断或没有变化才原样复制 currentValue；说明要求每次更新的条目必须生成新值。",
+    "placeholder 为 true 的条目尚未初始化，必须填写非空最终值，禁止返回 null 或任何占位词；确实无法推断的文本字段填写“未提及”，物品或清单确实为空时填写“无”。",
     "带 constraints 的进度条必须填写 0–100 整数。正文没有数字也要根据行为、态度、情绪或进展主动估算：轻微、明确、强烈变化通常调整约 5、10、20；初始值为 0 且出现相关证据时必须给出非零估值。",
     "每行格式只能是：V1、一个制表符、直接展示的最终值。",
     "必须依次输出 V1、V2、V3……，不要输出 JSON、标题、序号、KEEP、原因、判断过程或其他文字。",
@@ -1042,6 +1044,7 @@ export function buildStatusBarFocusedSystemPrompt(outputMode: "json" | "lines") 
     "field 的 characterId、characterName 和 characterKind 是唯一角色边界。只根据该角色在正文中的行为更新该字段，禁止借用或复制其他角色的变化。",
     "current 是上一轮基准：没有相关新证据且不是占位值时原样保留；有相关证据时必须更新。placeholder 为 true 表示旧值无效且已从 current 移除，必须按 rule 和剧情推断一个新的最终值，严禁输出“待填入、待填写、待更新、未填写、未更新、未设置、未知、空、TBD、N/A、?、？”等占位词。",
     "rule 给出数值范围时，即使正文没有直接数字也必须估算范围内的单个数字；物品或清单字段应提取场景中人物正在使用、携带或明确拥有的对象，确实没有则填“无”。",
+    "placeholder 为 true 且确实没有可推断事实时，普通文本字段填写“未提及”，不得省略该字段或继续保留占位词。",
     "displayType 为 progress 的字段必须依据 guidance 输出 0–100 整数。正文没有数字也要主动量化；关系类首次互动使用非零中立基准，压力类出现担忧、考试压力、被审视、紧张或试探时必须非零。",
     "不得输出分析、理由、候选值、变量说明复述或多个备选答案。",
   ];
@@ -1111,17 +1114,21 @@ export function buildStatusBarSnapshotPayload(
   finalAssistant: string,
   referenceContext: StatusBarReducerReferenceContext = {},
 ) {
-  const entries = getStatusBarEntriesForPrompt(state).map((entry) => ({
-    slot: entry.slot,
-    id: entry.id,
-    characterId: entry.characterId,
-    characterName: entry.characterName,
-    characterKind: entry.characterKind,
-    variableName: entry.variableName,
-    description: entry.description,
-    currentValue: entry.currentValue,
-    ...(entry.constraints ? { constraints: entry.constraints } : {}),
-  }));
+  const entries = getStatusBarEntriesForPrompt(state).map((entry) => {
+    const placeholder = isPlaceholderStatusValue(entry.currentValue);
+    return {
+      slot: entry.slot,
+      id: entry.id,
+      characterId: entry.characterId,
+      characterName: entry.characterName,
+      characterKind: entry.characterKind,
+      variableName: entry.variableName,
+      description: entry.description,
+      currentValue: placeholder ? null : entry.currentValue,
+      placeholder,
+      ...(entry.constraints ? { constraints: entry.constraints } : {}),
+    };
+  });
   return JSON.stringify({
     entries,
     ...(referenceContext.personaContext?.trim()
@@ -1246,6 +1253,57 @@ export function buildStatusBarToolDefinition(state: StatusBarState) {
       },
     },
   } as const;
+}
+
+export function buildStatusBarFocusedResponseFormat(
+  state: StatusBarState,
+  itemIds: string[],
+) {
+  const knownIds = new Set(getStatusBarEntriesForPrompt(state).map((entry) => entry.id));
+  const ids = Array.from(new Set(itemIds)).filter((itemId) => knownIds.has(itemId));
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: "renge_status_bar_focused_completion",
+      strict: true,
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["version", "updates"],
+        properties: {
+          version: { type: "integer", const: 1 },
+          updates: {
+            type: "array",
+            minItems: ids.length,
+            maxItems: ids.length,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["id", "value"],
+              properties: {
+                id: { type: "string", enum: ids },
+                value: {
+                  anyOf: [
+                    { type: "string", maxLength: 1000 },
+                    { type: "number" },
+                    { type: "boolean" },
+                    { type: "null" },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  } as const;
+}
+
+export function buildStatusBarSnapshotResponseFormat(state: StatusBarState) {
+  return buildStatusBarFocusedResponseFormat(
+    state,
+    getStatusBarEntriesForPrompt(state).map((entry) => entry.id),
+  );
 }
 
 const STATUS_BAR_RESPONSE_TEXT_KEYS = ["output_text", "text", "content", "parts"] as const;
@@ -1990,14 +2048,71 @@ export function parseStatusBarPatch(
 export function getUnresolvedStatusBarItemIds(
   state: StatusBarState,
   parsed: Pick<ParsedStatusBarPatch, "patch" | "resolvedItemIds">,
+  options: { placeholdersOnly?: boolean } = {},
 ) {
   const resolvedIds = new Set([
     ...parsed.resolvedItemIds,
     ...parsed.patch.updates.map((update) => update.id),
   ]);
   return getStatusBarEntriesForPrompt(state)
-    .filter((entry) => !resolvedIds.has(entry.id))
+    .filter(
+      (entry) =>
+        !resolvedIds.has(entry.id) &&
+        (!options.placeholdersOnly || isPlaceholderStatusValue(entry.currentValue)),
+    )
     .map((entry) => entry.id);
+}
+
+export function createStatusBarFocusedItemBatches(
+  itemIds: string[],
+  maximumBatchSize = 16,
+) {
+  const batchSize = Math.max(1, Math.floor(maximumBatchSize) || 1);
+  const groupedIds = new Map<string, string[]>();
+  Array.from(new Set(itemIds)).forEach((itemId) => {
+    const characterId = parseStatusBarScopedItemId(itemId)?.characterId ?? "";
+    groupedIds.set(characterId, [...(groupedIds.get(characterId) ?? []), itemId]);
+  });
+  return Array.from(groupedIds.values()).flatMap((group) => {
+    const batches: string[][] = [];
+    for (let index = 0; index < group.length; index += batchSize) {
+      batches.push(group.slice(index, index + batchSize));
+    }
+    return batches;
+  });
+}
+
+export function mergeParsedStatusBarPatches(
+  state: StatusBarState,
+  current: ParsedStatusBarPatch,
+  incoming: ParsedStatusBarPatch,
+  allowedItemIds?: string[],
+): ParsedStatusBarPatch {
+  if (incoming.error) return current;
+  const allowedIds = allowedItemIds ? new Set(allowedItemIds) : null;
+  const toCanonicalId = (itemId: string) =>
+    parseStatusBarScopedItemId(itemId)
+      ? itemId
+      : createStatusBarScopedItemId(state.characterId, itemId);
+  const updatesById = new Map(
+    current.patch.updates.map((update) => [toCanonicalId(update.id), update]),
+  );
+  incoming.patch.updates.forEach((update) => {
+    const canonicalId = toCanonicalId(update.id);
+    if (!allowedIds || allowedIds.has(canonicalId)) {
+      updatesById.set(canonicalId, update);
+    }
+  });
+  const resolvedItemIds = new Set(current.resolvedItemIds);
+  [...incoming.resolvedItemIds, ...incoming.patch.updates.map((update) => update.id)]
+    .map(toCanonicalId)
+    .forEach((itemId) => {
+      if (!allowedIds || allowedIds.has(itemId)) resolvedItemIds.add(itemId);
+    });
+  return {
+    patch: { version: 1, updates: Array.from(updatesById.values()) },
+    resolvedItemIds: Array.from(resolvedItemIds),
+  };
 }
 
 export function mergeStatusBarPatch(

@@ -6,15 +6,18 @@ import {
   buildStatusBarReducerSystemPrompt,
   buildStatusBarMvuSystemPrompt,
   buildStatusBarFocusedPayload,
+  buildStatusBarFocusedResponseFormat,
   buildStatusBarFocusedSystemPrompt,
   buildStatusBarResponseFormat,
   buildStatusBarSnapshotLineSystemPrompt,
   buildStatusBarSnapshotPayload,
+  buildStatusBarSnapshotResponseFormat,
   buildStatusBarSnapshotSystemPrompt,
   buildStatusBarToolDefinition,
   buildStatusBarToolSystemPrompt,
   createUniqueStatusBarVariableName,
   createDefaultStatusBarState,
+  createStatusBarFocusedItemBatches,
   createStatusBarItem,
   createStatusBarScopedItemId,
   getStatusBarResponseText,
@@ -22,6 +25,7 @@ import {
   getStatusBarItemValue,
   getUnresolvedStatusBarItemIds,
   injectStatusBarConversationContext,
+  mergeParsedStatusBarPatches,
   mergeStatusBarPatch,
   moveStatusBarItemBefore,
   normalizeStatusBarState,
@@ -295,6 +299,10 @@ test("builds reducer payload and response schema", () => {
     }),
   );
   const responseFormat = buildStatusBarResponseFormat(state);
+  const focusedIds = ["mood", "progress"].map((itemId) =>
+    createStatusBarScopedItemId("protagonist", itemId));
+  const focusedResponseFormat = buildStatusBarFocusedResponseFormat(state, focusedIds);
+  const snapshotResponseFormat = buildStatusBarSnapshotResponseFormat(state);
   const toolDefinition = buildStatusBarToolDefinition(state);
 
   assert.equal(reducerPayload.version, 1);
@@ -347,6 +355,22 @@ test("builds reducer payload and response schema", () => {
     responseFormat.json_schema.schema.properties.updates.maxItems,
     3,
   );
+  assert.deepEqual(
+    focusedResponseFormat.json_schema.schema.properties.updates.items.properties.id.enum,
+    focusedIds,
+  );
+  assert.equal(
+    focusedResponseFormat.json_schema.schema.properties.updates.minItems,
+    focusedIds.length,
+  );
+  assert.equal(
+    focusedResponseFormat.json_schema.schema.properties.updates.maxItems,
+    focusedIds.length,
+  );
+  assert.equal(
+    snapshotResponseFormat.json_schema.schema.properties.updates.minItems,
+    3,
+  );
   assert.equal(toolDefinition.function.name, "renge_update_status_bar");
   assert.deepEqual(toolDefinition.function.parameters.required, ["delta"]);
   assert.match(
@@ -358,6 +382,7 @@ test("builds reducer payload and response schema", () => {
   assert.match(buildStatusBarMvuSystemPrompt(), /_\.set/);
   assert.match(buildStatusBarSnapshotSystemPrompt(), /entries 中的每一个条目/);
   assert.match(buildStatusBarSnapshotSystemPrompt(), /原样复制.*currentValue/);
+  assert.match(buildStatusBarSnapshotSystemPrompt(), /placeholder 为 true/);
   assert.match(buildStatusBarSnapshotSystemPrompt(), /progress.*0–100 整数/);
   assert.match(buildStatusBarSnapshotSystemPrompt(), /没有直接写数字或百分比/);
   assert.match(buildStatusBarSnapshotLineSystemPrompt(), /每个 slot/);
@@ -443,6 +468,27 @@ test("builds reducer payload and response schema", () => {
       variableName: "情绪",
       description: "仅在角色明确表现出情绪变化时更新，使用简短情绪词。",
       currentValue: "平静",
+      placeholder: false,
+    },
+  );
+  assert.deepEqual(
+    JSON.parse(
+      buildStatusBarSnapshotPayload(
+        createTestState({ values: { mood: "待填入" } }),
+        "抵达",
+        "已经完成",
+      ),
+    ).entries[0],
+    {
+      slot: "V1",
+      id: createStatusBarScopedItemId("protagonist", "mood"),
+      characterId: "protagonist",
+      characterName: "主角",
+      characterKind: "protagonist",
+      variableName: "情绪",
+      description: "仅在角色明确表现出情绪变化时更新，使用简短情绪词。",
+      currentValue: null,
+      placeholder: true,
     },
   );
 });
@@ -963,6 +1009,56 @@ test("tracks valid unchanged values so focused completion only retries omitted f
     getUnresolvedStatusBarItemIds(state, partialSnapshot),
     ["progress", "hp"].map((itemId) =>
       createStatusBarScopedItemId("protagonist", itemId)),
+  );
+});
+
+test("groups focused completion batches by character and limits their size", () => {
+  const protagonistIds = ["p1", "p2", "p3"].map((itemId) =>
+    createStatusBarScopedItemId("protagonist", itemId));
+  const characterAIds = ["a1", "a2", "a3"].map((itemId) =>
+    createStatusBarScopedItemId("character-a", itemId));
+  const batches = createStatusBarFocusedItemBatches(
+    [...protagonistIds, ...characterAIds],
+    2,
+  );
+
+  assert.deepEqual(batches, [
+    protagonistIds.slice(0, 2),
+    protagonistIds.slice(2),
+    characterAIds.slice(0, 2),
+    characterAIds.slice(2),
+  ]);
+});
+
+test("merges partial focused responses without accepting fields outside the batch", () => {
+  const state = createTestState({ values: { mood: "待填入" } });
+  const moodId = createStatusBarScopedItemId("protagonist", "mood");
+  const progressId = createStatusBarScopedItemId("protagonist", "progress");
+  const hpId = createStatusBarScopedItemId("protagonist", "hp");
+  const first = parseStatusBarPatch(
+    JSON.stringify({ version: 1, updates: [{ id: moodId, value: "专注" }] }),
+    state,
+  );
+  const focused = parseStatusBarPatch(
+    JSON.stringify({
+      version: 1,
+      updates: [
+        { id: progressId, value: 60 },
+        { id: hpId, value: 70 },
+      ],
+    }),
+    state,
+  );
+  const merged = mergeParsedStatusBarPatches(state, first, focused, [progressId]);
+
+  assert.deepEqual(merged.patch.updates, [
+    { id: moodId, value: "专注" },
+    { id: progressId, value: 60 },
+  ]);
+  assert.deepEqual(getUnresolvedStatusBarItemIds(state, merged), [hpId]);
+  assert.deepEqual(
+    getUnresolvedStatusBarItemIds(state, merged, { placeholdersOnly: true }),
+    [],
   );
 });
 

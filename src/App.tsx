@@ -442,20 +442,24 @@ import {
   buildStatusBarReducerSystemPrompt,
   buildStatusBarSnapshotLineSystemPrompt,
   buildStatusBarSnapshotPayload,
+  buildStatusBarSnapshotResponseFormat,
   buildStatusBarSnapshotSystemPrompt,
   buildStatusBarMvuSystemPrompt,
   buildStatusBarFocusedPayload,
+  buildStatusBarFocusedResponseFormat,
   buildStatusBarFocusedSystemPrompt,
   buildStatusBarResponseFormat,
   buildStatusBarToolDefinition,
   buildStatusBarToolSystemPrompt,
   createDefaultStatusBarState,
+  createStatusBarFocusedItemBatches,
   DEFAULT_STATUS_BAR_PRESET_ID,
   getStatusBarResponseText,
   getUnresolvedStatusBarItemIds,
   getStatusBarTrackedItemCount,
   injectStatusBarConversationContext,
   loadStatusBarPresetsFromStorage,
+  mergeParsedStatusBarPatches,
   mergeStatusBarPatch,
   normalizeStatusBarPresets,
   normalizeStatusBarState,
@@ -24842,9 +24846,16 @@ export function App() {
             }
           : responseFormatMode === "json_schema"
           ? { response_format: buildStatusBarResponseFormat(statusBar) }
-          : responseFormatMode === "json_object" ||
-              responseFormatMode === "snapshot_json" ||
-              responseFormatMode === "focused_json"
+          : responseFormatMode === "focused_json"
+            ? {
+                response_format: buildStatusBarFocusedResponseFormat(
+                  statusBar,
+                  focusedItemIds,
+                ),
+              }
+          : responseFormatMode === "snapshot_json"
+            ? { response_format: buildStatusBarSnapshotResponseFormat(statusBar) }
+          : responseFormatMode === "json_object"
             ? { response_format: { type: "json_object" } }
             : {}),
         stream: false,
@@ -24991,35 +25002,32 @@ export function App() {
         }
       }
       if (parsed.error) return { attempted: true, updated: 0, error: parsed.error };
-      const unresolvedItemIds = getUnresolvedStatusBarItemIds(statusBar, parsed);
-      if (unresolvedItemIds.length > 0) {
-        const focusedMode: StatusBarResponseFormatMode = usesLocalPlainStatusProtocol
-          ? "focused_lines"
-          : "focused_json";
-        const focusedResult = await requestWithCompatibilityFallback(
-          focusedMode,
-          unresolvedItemIds,
-        );
-        if (!targetIsCurrent()) return ignoredResult;
-        if (focusedResult.response.ok) {
+      const focusedMode: StatusBarResponseFormatMode = usesLocalPlainStatusProtocol
+        ? "focused_lines"
+        : "focused_json";
+      for (let pass = 0; pass < 2; pass += 1) {
+        const unresolvedItemIds = getUnresolvedStatusBarItemIds(statusBar, parsed, {
+          placeholdersOnly: pass > 0,
+        });
+        if (unresolvedItemIds.length === 0) break;
+        const focusedBatches = createStatusBarFocusedItemBatches(unresolvedItemIds);
+        for (const focusedItemIds of focusedBatches) {
+          const focusedResult = await requestWithCompatibilityFallback(
+            focusedMode,
+            focusedItemIds,
+          );
+          if (!targetIsCurrent()) return ignoredResult;
+          if (!focusedResult.response.ok) continue;
           const focusedParsed = parseStatusBarPatch(
             getRawStatusBarPatch(focusedResult.payload),
             statusBar,
           );
-          if (!focusedParsed.error && focusedParsed.patch.updates.length > 0) {
-            const mergedUpdates = new Map(
-              parsed.patch.updates.map((update) => [update.id, update]),
-            );
-            focusedParsed.patch.updates.forEach((update) => {
-              mergedUpdates.set(update.id, update);
-            });
-            parsed = {
-              patch: { version: 1, updates: Array.from(mergedUpdates.values()) },
-              resolvedItemIds: Array.from(
-                new Set([...parsed.resolvedItemIds, ...focusedParsed.resolvedItemIds]),
-              ),
-            };
-          }
+          parsed = mergeParsedStatusBarPatches(
+            statusBar,
+            parsed,
+            focusedParsed,
+            focusedItemIds,
+          );
         }
       }
       if (parsed.patch.updates.length === 0) return { attempted: true, updated: 0 };
