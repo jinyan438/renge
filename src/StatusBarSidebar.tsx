@@ -49,16 +49,19 @@ import {
 } from "./rightSidebarSizing";
 import {
   createStatusBarItem,
+  createImportantStatusBarCharacter,
   createUniqueStatusBarVariableName,
   getStatusBarItemValue,
   isDefaultStatusBarPreset,
   MAX_STATUS_BAR_ITEMS,
+  MAX_STATUS_BAR_IMPORTANT_CHARACTERS,
   MAX_STATUS_BAR_PRESETS,
   moveStatusBarItemBefore,
   normalizeStatusBarAccentColor,
   normalizeStatusBarProgressValue,
   normalizeStatusBarState,
   type StatusBarPreset,
+  type StatusBarCharacterState,
   type StatusBarState,
   validateStatusBarItems,
 } from "./statusBarUtils";
@@ -126,7 +129,7 @@ export type StatusBarSidebarProps = {
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   onStateChange: (next: StatusBarState) => void;
-  onClearValues: () => void;
+  onClearValues: (characterId: string) => void;
   onManualUpdate: () => void | Promise<void>;
   providerOptions: StatusBarProviderOption[];
   presets: StatusBarPreset[];
@@ -339,6 +342,11 @@ function cloneStatusBarState(state: StatusBarState): StatusBarState {
     ...state,
     items: state.items.map((item) => ({ ...item })),
     values: { ...state.values },
+    importantCharacters: state.importantCharacters.map((character) => ({
+      ...character,
+      items: character.items.map((item) => ({ ...item })),
+      values: { ...character.values },
+    })),
   };
 }
 
@@ -798,6 +806,7 @@ function normalizeDraftForSave(
   return {
     ...draft,
     enabled,
+    characterName: draft.characterName.trim() || "未命名角色",
     title: draft.title.trim() || "状态监测终端",
     accentColor: normalizeStatusBarAccentColor(draft.accentColor),
     items: draft.items.map((item) => ({
@@ -819,10 +828,10 @@ function normalizeDraftForSave(
 }
 
 const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
-  state,
+  state: rootState,
   collapsed,
   onCollapsedChange,
-  onStateChange,
+  onStateChange: onRootStateChange,
   onClearValues,
   onManualUpdate,
   providerOptions,
@@ -851,6 +860,58 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   onHeartbeatReminderVisibleChange,
 }: StatusBarSidebarProps) {
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
+  const [statusBarSection, setStatusBarSection] = useState<"protagonist" | "important">(
+    "protagonist",
+  );
+  const [selectedImportantCharacterId, setSelectedImportantCharacterId] = useState("");
+  const selectedImportantCharacter =
+    rootState.importantCharacters.find(
+      (character) => character.characterId === selectedImportantCharacterId,
+    ) ?? rootState.importantCharacters[0] ?? null;
+  const activeCharacterAvailable =
+    statusBarSection === "protagonist" || Boolean(selectedImportantCharacter);
+  const state = useMemo<StatusBarState>(() => {
+    if (statusBarSection === "protagonist" || !selectedImportantCharacter) {
+      return rootState;
+    }
+    return {
+      ...rootState,
+      ...selectedImportantCharacter,
+      enabled: rootState.enabled,
+      providerId: rootState.providerId,
+      modelId: rootState.modelId,
+      importantCharacters: rootState.importantCharacters,
+    };
+  }, [rootState, selectedImportantCharacter, statusBarSection]);
+  const onStateChange = useCallback((nextState: StatusBarState) => {
+    const timestamp = new Date().toISOString();
+    if (statusBarSection === "protagonist" || !selectedImportantCharacter) {
+      onRootStateChange({
+        ...nextState,
+        importantCharacters: rootState.importantCharacters,
+        updatedAt: timestamp,
+      });
+      return;
+    }
+    const nextCharacter: StatusBarCharacterState = {
+      characterId: selectedImportantCharacter.characterId,
+      characterName: nextState.characterName,
+      title: nextState.title,
+      accentColor: nextState.accentColor,
+      items: nextState.items,
+      values: nextState.values,
+      updatedAt: timestamp,
+    };
+    onRootStateChange({
+      ...rootState,
+      enabled: nextState.enabled,
+      providerId: nextState.providerId,
+      modelId: nextState.modelId,
+      importantCharacters: rootState.importantCharacters.map((character) =>
+        character.characterId === nextCharacter.characterId ? nextCharacter : character),
+      updatedAt: timestamp,
+    });
+  }, [onRootStateChange, rootState, selectedImportantCharacter, statusBarSection]);
   const [browserInitialized, setBrowserInitialized] = useState(false);
   const handleToolBack = useCallback(() => setActiveToolId("menu"), []);
   const handleToolClose = useCallback(() => onCollapsedChange(true), [onCollapsedChange]);
@@ -1047,6 +1108,12 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
     if (collapsed) setActiveToolId("menu");
   }, [collapsed]);
 
+  useEffect(() => {
+    setEditorOpen(false);
+    setStatusBarSection("protagonist");
+    setSelectedImportantCharacterId("");
+  }, [chatSessionId]);
+
   useEffect(
     () =>
       registerBrowserSidebarOpener(() => {
@@ -1141,6 +1208,39 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
       });
     };
   }, [editorOpen]);
+
+  const addImportantCharacter = () => {
+    if (rootState.importantCharacters.length >= MAX_STATUS_BAR_IMPORTANT_CHARACTERS) return;
+    const character = createImportantStatusBarCharacter(
+      `重要角色 ${rootState.importantCharacters.length + 1}`,
+    );
+    onRootStateChange({
+      ...rootState,
+      importantCharacters: [...rootState.importantCharacters, character],
+      updatedAt: new Date().toISOString(),
+    });
+    setStatusBarSection("important");
+    setSelectedImportantCharacterId(character.characterId);
+  };
+
+  const removeSelectedImportantCharacter = () => {
+    if (!selectedImportantCharacter) return;
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(`删除重要角色“${selectedImportantCharacter.characterName}”及其全部状态值？`)
+    ) {
+      return;
+    }
+    const remainingCharacters = rootState.importantCharacters.filter(
+      (character) => character.characterId !== selectedImportantCharacter.characterId,
+    );
+    onRootStateChange({
+      ...rootState,
+      importantCharacters: remainingCharacters,
+      updatedAt: new Date().toISOString(),
+    });
+    setSelectedImportantCharacterId(remainingCharacters[0]?.characterId ?? "");
+  };
 
   const openEditor = (event?: MouseEvent<HTMLButtonElement>) => {
     const activeElement = typeof document !== "undefined" ? document.activeElement : null;
@@ -1287,11 +1387,11 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   const clearSessionValues = () => {
     if (
       typeof window !== "undefined" &&
-      !window.confirm("清空当前会话的全部状态值？条目结构和初始值会保留。")
+      !window.confirm(`清空“${state.characterName}”角色卡的全部状态值？条目结构和初始值会保留。`)
     ) {
       return;
     }
-    onClearValues();
+    onClearValues(state.characterId);
     setValuesClearedInEditor(true);
     setDraft((current) => ({
       ...current,
@@ -1604,9 +1704,19 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                       </select>
                     </label>
                     <label>
-                      <span>面板标题</span>
+                      <span>角色名称</span>
                       <input
                         ref={editorInitialFocusRef}
+                        maxLength={64}
+                        onChange={(event) => updateDraft({ characterName: event.target.value })}
+                        placeholder={statusBarSection === "protagonist" ? "主角" : "重要角色"}
+                        type="text"
+                        value={draft.characterName}
+                      />
+                    </label>
+                    <label>
+                      <span>面板标题</span>
+                      <input
                         maxLength={48}
                         onChange={(event) => updateDraft({ title: event.target.value })}
                         placeholder="状态监测终端"
@@ -2114,7 +2224,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                 </button>
                 <div className="status-bar-sidebar-heading">
                   <span>SESSION STATUS</span>
-                  <strong>{state.title.trim() || "状态监测终端"}</strong>
+                  <strong>{state.characterName} · {state.title.trim() || "状态监测终端"}</strong>
                 </div>
               </div>
               <div className="status-bar-sidebar-actions">
@@ -2176,17 +2286,91 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                 <button
                   ref={editorFallbackFocusRef}
                   aria-label="编辑状态栏"
+                  disabled={!activeCharacterAvailable}
                   onClick={openEditor}
                   title="编辑状态栏"
                   type="button"
                 >
                   <Pencil size={16} />
                 </button>
+                {statusBarSection === "important" && selectedImportantCharacter ? (
+                  <button
+                    aria-label="删除当前重要角色卡"
+                    className="status-bar-delete-character"
+                    onClick={removeSelectedImportantCharacter}
+                    title="删除当前重要角色卡"
+                    type="button"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                ) : null}
               </div>
             </header>
 
+            <div className="status-bar-section-tabs" role="tablist" aria-label="状态栏角色分类">
+              <button
+                aria-selected={statusBarSection === "protagonist"}
+                className={statusBarSection === "protagonist" ? "is-active" : undefined}
+                onClick={() => setStatusBarSection("protagonist")}
+                role="tab"
+                type="button"
+              >
+                主角状态栏
+              </button>
+              <button
+                aria-selected={statusBarSection === "important"}
+                className={statusBarSection === "important" ? "is-active" : undefined}
+                onClick={() => setStatusBarSection("important")}
+                role="tab"
+                type="button"
+              >
+                重要角色状态栏
+                <small>{rootState.importantCharacters.length}</small>
+              </button>
+            </div>
+
+            {statusBarSection === "important" ? (
+              <div className="status-bar-character-strip" aria-label="重要角色卡片">
+                <div>
+                  {rootState.importantCharacters.map((character) => (
+                    <button
+                      aria-pressed={character.characterId === selectedImportantCharacter?.characterId}
+                      className={
+                        character.characterId === selectedImportantCharacter?.characterId
+                          ? "is-active"
+                          : undefined
+                      }
+                      key={character.characterId}
+                      onClick={() => setSelectedImportantCharacterId(character.characterId)}
+                      type="button"
+                    >
+                      {character.characterName}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  aria-label="添加重要角色卡"
+                  className="status-bar-add-character"
+                  disabled={
+                    rootState.importantCharacters.length >= MAX_STATUS_BAR_IMPORTANT_CHARACTERS
+                  }
+                  onClick={addImportantCharacter}
+                  title={`添加重要角色卡（最多 ${MAX_STATUS_BAR_IMPORTANT_CHARACTERS} 张）`}
+                  type="button"
+                >
+                  <Plus size={15} />
+                  添加角色
+                </button>
+              </div>
+            ) : null}
+
             <div className="status-bar-sidebar-body">
-              {!state.enabled ? (
+              {!activeCharacterAvailable ? (
+                <button className="status-bar-disabled-callout" onClick={addImportantCharacter} type="button">
+                  <span>还没有重要角色卡</span>
+                  <small>添加角色后，可为每个角色单独设计状态栏条目和保存状态值。</small>
+                </button>
+              ) : !state.enabled ? (
                 <button className="status-bar-disabled-callout" onClick={openEditor} type="button">
                   <span>状态栏尚未启用</span>
                   <small>开启后，AI 会在回复完成时更新发生变化的变量。</small>
@@ -2197,9 +2381,11 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                   <small>模型配置失效，重新保存后才能继续自动更新。</small>
                 </button>
               ) : null}
-              <div className={!state.enabled ? "status-bar-preview-disabled" : undefined}>
-                <StatusPanelPreview state={state} />
-              </div>
+              {activeCharacterAvailable ? (
+                <div className={!state.enabled ? "status-bar-preview-disabled" : undefined}>
+                  <StatusPanelPreview state={state} />
+                </div>
+              ) : null}
             </div>
 
             <footer className="status-bar-sidebar-footer">
@@ -2455,7 +2641,8 @@ export function StatusBarSidebar(props: StatusBarSidebarProps) {
     props.onCollapsedChange(collapsed));
   const onStateChange = useLatestCallback((state: StatusBarState) =>
     props.onStateChange(state));
-  const onClearValues = useLatestCallback(() => props.onClearValues());
+  const onClearValues = useLatestCallback((characterId: string) =>
+    props.onClearValues(characterId));
   const onManualUpdate = useLatestCallback(() => props.onManualUpdate());
   const onPresetsChange = useLatestCallback((presets: StatusBarPreset[]) =>
     props.onPresetsChange(presets));

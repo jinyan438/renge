@@ -16,6 +16,7 @@ import {
   createUniqueStatusBarVariableName,
   createDefaultStatusBarState,
   createStatusBarItem,
+  createStatusBarScopedItemId,
   getStatusBarVariableKey,
   getStatusBarItemValue,
   getUnresolvedStatusBarItemIds,
@@ -282,7 +283,8 @@ test("builds reducer payload and response schema", () => {
   assert.equal(reducerPayload.worldBookContext, "终点位于北境山谷");
   assert.deepEqual(
     reducerPayload.entries.map((entry) => entry.id),
-    ["mood", "progress", "hp"],
+    ["mood", "progress", "hp"].map((itemId) =>
+      createStatusBarScopedItemId("protagonist", itemId)),
   );
   assert.equal(
     reducerPayload.entries[0].description,
@@ -316,7 +318,8 @@ test("builds reducer payload and response schema", () => {
   );
   assert.deepEqual(
     responseFormat.json_schema.schema.properties.updates.items.properties.id.enum,
-    ["mood", "progress", "hp"],
+    ["mood", "progress", "hp"].map((itemId) =>
+      createStatusBarScopedItemId("protagonist", itemId)),
   );
   assert.equal(
     responseFormat.json_schema.schema.properties.updates.maxItems,
@@ -326,7 +329,7 @@ test("builds reducer payload and response schema", () => {
   assert.deepEqual(toolDefinition.function.parameters.required, ["delta"]);
   assert.match(
     toolDefinition.function.parameters.properties.delta.description,
-    /mood, progress, hp/,
+    /character\/protagonist\/mood.*character\/protagonist\/progress.*character\/protagonist\/hp/,
   );
   assert.match(buildStatusBarToolSystemPrompt(), /必须且只能调用一次/);
   assert.match(buildStatusBarMvuSystemPrompt(), /<UpdateVariable>/);
@@ -344,13 +347,17 @@ test("builds reducer payload and response schema", () => {
   assert.deepEqual(
     JSON.parse(
       buildStatusBarFocusedPayload(state, "抵达", "已经完成", {}, {
-        itemIds: ["mood", "progress"],
+        itemIds: ["mood", "progress"].map((itemId) =>
+          createStatusBarScopedItemId("protagonist", itemId)),
         includeIds: false,
       }),
     ).fields,
     [
       {
         slot: "V1",
+        characterId: "protagonist",
+        characterName: "主角",
+        characterKind: "protagonist",
         name: "情绪",
         rule: "仅在角色明确表现出情绪变化时更新，使用简短情绪词。",
         displayType: "banner",
@@ -361,6 +368,9 @@ test("builds reducer payload and response schema", () => {
       },
       {
         slot: "V2",
+        characterId: "protagonist",
+        characterName: "主角",
+        characterKind: "protagonist",
         name: "任务进度",
         rule: "",
         displayType: "progress",
@@ -378,12 +388,18 @@ test("builds reducer payload and response schema", () => {
         "抵达",
         "已经完成",
         {},
-        { itemIds: ["mood"], includeIds: false },
+        {
+          itemIds: [createStatusBarScopedItemId("protagonist", "mood")],
+          includeIds: false,
+        },
       ),
     ).fields,
     [
       {
         slot: "V1",
+        characterId: "protagonist",
+        characterName: "主角",
+        characterKind: "protagonist",
         name: "情绪",
         rule: "仅在角色明确表现出情绪变化时更新，使用简短情绪词。",
         displayType: "banner",
@@ -398,10 +414,95 @@ test("builds reducer payload and response schema", () => {
     JSON.parse(buildStatusBarSnapshotPayload(state, "抵达", "已经完成")).entries[0],
     {
       slot: "V1",
+      id: createStatusBarScopedItemId("protagonist", "mood"),
+      characterId: "protagonist",
+      characterName: "主角",
+      characterKind: "protagonist",
       variableName: "情绪",
       description: "仅在角色明确表现出情绪变化时更新，使用简短情绪词。",
       currentValue: "平静",
     },
+  );
+});
+
+test("keeps same-named variables isolated across protagonist and important character cards", () => {
+  const createImportantCharacter = (characterId, characterName, value) => ({
+    characterId,
+    characterName,
+    title: `${characterName}状态`,
+    accentColor: "#abcdef",
+    items: [
+      createStatusBarItem("banner", {
+        id: "shared-mood",
+        variableName: "情绪",
+        label: "情绪",
+        initialValue: "平静",
+      }),
+    ],
+    values: { "shared-mood": value },
+    updatedAt: "2026-07-23T00:00:00.000Z",
+  });
+  const state = createTestState({
+    characterName: "主角",
+    importantCharacters: [
+      createImportantCharacter("character-a", "角色 A", "警惕"),
+      createImportantCharacter("character-b", "角色 B", "放松"),
+    ],
+  });
+  const characterAId = createStatusBarScopedItemId("character-a", "shared-mood");
+  const characterBId = createStatusBarScopedItemId("character-b", "shared-mood");
+  const payload = JSON.parse(buildStatusBarReducerPayload(state, "", "角色 A 露出了笑容。"));
+  const conversationPrompt = buildStatusBarConversationSystemPrompt(state);
+
+  assert.deepEqual(
+    payload.entries.slice(-2).map((entry) => ({
+      id: entry.id,
+      characterId: entry.characterId,
+      characterName: entry.characterName,
+    })),
+    [
+      { id: characterAId, characterId: "character-a", characterName: "角色 A" },
+      { id: characterBId, characterId: "character-b", characterName: "角色 B" },
+    ],
+  );
+  assert.match(conversationPrompt, /"characterName": "角色 A"/);
+  assert.match(conversationPrompt, /"characterName": "角色 B"/);
+  assert.match(conversationPrompt, /严禁把一个角色的变量值/);
+
+  const singleCharacterPatch = parseStatusBarPatch(
+    JSON.stringify({ version: 1, updates: [{ id: characterAId, value: "开心" }] }),
+    state,
+  ).patch;
+  const afterSingleCharacterUpdate = mergeStatusBarPatch(state, singleCharacterPatch);
+  assert.equal(afterSingleCharacterUpdate.importantCharacters[0].values["shared-mood"], "开心");
+  assert.equal(afterSingleCharacterUpdate.importantCharacters[1].values["shared-mood"], "放松");
+
+  const multipleCharacterPatch = parseStatusBarPatch(
+    JSON.stringify({
+      version: 1,
+      updates: [
+        { id: characterAId, value: "兴奋" },
+        { id: characterBId, value: "紧张" },
+      ],
+    }),
+    state,
+  ).patch;
+  const afterMultipleCharacterUpdate = mergeStatusBarPatch(state, multipleCharacterPatch);
+  assert.equal(afterMultipleCharacterUpdate.importantCharacters[0].values["shared-mood"], "兴奋");
+  assert.equal(afterMultipleCharacterUpdate.importantCharacters[1].values["shared-mood"], "紧张");
+  assert.equal(
+    parseStatusBarPatch(
+      '{"version":1,"updates":[{"id":"shared-mood","value":"错误串写"}]}',
+      state,
+    ).patch.updates.length,
+    0,
+  );
+  assert.equal(
+    parseStatusBarPatch(
+      '{"version":1,"updates":[{"name":"情绪","value":"角色不明"}]}',
+      state,
+    ).patch.updates.length,
+    0,
   );
 });
 
@@ -822,15 +923,25 @@ test("tracks valid unchanged values so focused completion only retries omitted f
   );
 
   assert.deepEqual(completeSnapshot.patch.updates, [{ id: "hp", value: 85 }]);
-  assert.deepEqual(completeSnapshot.resolvedItemIds, ["mood", "progress", "hp"]);
+  assert.deepEqual(
+    completeSnapshot.resolvedItemIds,
+    ["mood", "progress", "hp"].map((itemId) =>
+      createStatusBarScopedItemId("protagonist", itemId)),
+  );
   assert.deepEqual(getUnresolvedStatusBarItemIds(state, completeSnapshot), []);
 
   const partialSnapshot = parseStatusBarPatch(
     '{"version":1,"updates":[{"id":"mood","value":"平静"}]}',
     state,
   );
-  assert.deepEqual(partialSnapshot.resolvedItemIds, ["mood"]);
-  assert.deepEqual(getUnresolvedStatusBarItemIds(state, partialSnapshot), ["progress", "hp"]);
+  assert.deepEqual(partialSnapshot.resolvedItemIds, [
+    createStatusBarScopedItemId("protagonist", "mood"),
+  ]);
+  assert.deepEqual(
+    getUnresolvedStatusBarItemIds(state, partialSnapshot),
+    ["progress", "hp"].map((itemId) =>
+      createStatusBarScopedItemId("protagonist", itemId)),
+  );
 });
 
 test("clamps progress updates and accepts numeric strings", () => {
@@ -876,7 +987,12 @@ test("keeps unresolved placeholders eligible for focused completion", () => {
   );
   assert.deepEqual(unresolvedPlaceholder.patch.updates, []);
   assert.equal(unresolvedPlaceholder.resolvedItemIds.includes("mood"), false);
-  assert.equal(getUnresolvedStatusBarItemIds(state, unresolvedPlaceholder).includes("mood"), true);
+  assert.equal(
+    getUnresolvedStatusBarItemIds(state, unresolvedPlaceholder).includes(
+      createStatusBarScopedItemId("protagonist", "mood"),
+    ),
+    true,
+  );
   assert.deepEqual(
     parseStatusBarPatch(
       '{"version":1,"updates":[{"id":"mood","value":null}]}',
