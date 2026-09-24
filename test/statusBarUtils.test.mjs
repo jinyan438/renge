@@ -13,12 +13,17 @@ import {
   buildStatusBarSnapshotSystemPrompt,
   buildStatusBarToolDefinition,
   buildStatusBarToolSystemPrompt,
+  createUniqueStatusBarVariableName,
   createDefaultStatusBarState,
   createStatusBarItem,
+  getStatusBarVariableKey,
   getStatusBarItemValue,
+  getUnresolvedStatusBarItemIds,
   mergeStatusBarPatch,
+  moveStatusBarItemBefore,
   normalizeStatusBarState,
   parseStatusBarPatch,
+  validateStatusBarItems,
 } from "../src/statusBarUtils.ts";
 
 function createTestState(overrides = {}) {
@@ -199,6 +204,62 @@ test("keeps legacy status bars compatible when model settings are absent", () =>
 
   assert.equal(state.providerId, "");
   assert.equal(state.modelId, "");
+});
+
+test("uses one canonical variable identity across normalization and editor validation", () => {
+  const state = normalizeStatusBarState({
+    items: [
+      {
+        id: "first",
+        variableName: "Ｍｏｏｄ",
+        label: "First",
+        type: "progress",
+        initialValue: 120.4,
+      },
+      {
+        id: "second",
+        variableName: "mood",
+        label: "Second",
+        type: "progress",
+        initialValue: -4,
+      },
+    ],
+    values: { first: 42.6, second: "105%" },
+  });
+
+  assert.equal(getStatusBarVariableKey(" Ｍｏｏｄ "), "mood");
+  assert.deepEqual(
+    state.items.map((item) => item.variableName),
+    ["Ｍｏｏｄ", "mood_2"],
+  );
+  assert.deepEqual(
+    state.items.map((item) => item.initialValue),
+    [100, 0],
+  );
+  assert.deepEqual(state.values, { first: 43, second: 100 });
+
+  const duplicateItems = [
+    createStatusBarItem("grid", { id: "a", variableName: "State" }),
+    createStatusBarItem("grid", { id: "b", variableName: "ｓｔａｔｅ" }),
+  ];
+  assert.deepEqual(Array.from(validateStatusBarItems(duplicateItems).keys()), ["a", "b"]);
+  assert.equal(createUniqueStatusBarVariableName(duplicateItems, "STATE"), "STATE2");
+});
+
+test("moves status items before the drop target consistently", () => {
+  const items = ["a", "b", "c"].map((id) =>
+    createStatusBarItem("grid", { id, variableName: id }),
+  );
+
+  assert.deepEqual(
+    moveStatusBarItemBefore(items, "a", "c").map((item) => item.id),
+    ["b", "a", "c"],
+  );
+  assert.deepEqual(
+    moveStatusBarItemBefore(items, "c", "a").map((item) => item.id),
+    ["c", "a", "b"],
+  );
+  assert.equal(moveStatusBarItemBefore(items, "a", "a"), items);
 });
 
 test("builds reducer payload and response schema", () => {
@@ -703,6 +764,32 @@ test("filters unknown IDs, unchanged values, and keeps the last duplicate update
   );
 });
 
+test("tracks valid unchanged values so focused completion only retries omitted fields", () => {
+  const state = createTestState();
+  const completeSnapshot = parseStatusBarPatch(
+    JSON.stringify({
+      version: 1,
+      updates: [
+        { id: "mood", value: "平静" },
+        { id: "progress", value: 40 },
+        { id: "hp", value: 85 },
+      ],
+    }),
+    state,
+  );
+
+  assert.deepEqual(completeSnapshot.patch.updates, [{ id: "hp", value: 85 }]);
+  assert.deepEqual(completeSnapshot.resolvedItemIds, ["mood", "progress", "hp"]);
+  assert.deepEqual(getUnresolvedStatusBarItemIds(state, completeSnapshot), []);
+
+  const partialSnapshot = parseStatusBarPatch(
+    '{"version":1,"updates":[{"id":"mood","value":"平静"}]}',
+    state,
+  );
+  assert.deepEqual(partialSnapshot.resolvedItemIds, ["mood"]);
+  assert.deepEqual(getUnresolvedStatusBarItemIds(state, partialSnapshot), ["progress", "hp"]);
+});
+
 test("clamps progress updates and accepts numeric strings", () => {
   const state = createTestState();
 
@@ -731,18 +818,22 @@ test("clamps progress updates and accepts numeric strings", () => {
     parseStatusBarPatch("任务进度：80%", state).patch.updates,
     [{ id: "progress", value: 80 }],
   );
+  assert.deepEqual(
+    parseStatusBarPatch("任务进度：75.6%", state).patch.updates,
+    [{ id: "progress", value: 76 }],
+  );
 });
 
 test("keeps unresolved placeholders eligible for focused completion", () => {
   const state = createTestState({ values: { mood: "待填入" } });
 
-  assert.deepEqual(
-    parseStatusBarPatch(
-      '{"version":1,"updates":[{"id":"mood","value":"未知"}]}',
-      state,
-    ).patch.updates,
-    [],
+  const unresolvedPlaceholder = parseStatusBarPatch(
+    '{"version":1,"updates":[{"id":"mood","value":"未知"}]}',
+    state,
   );
+  assert.deepEqual(unresolvedPlaceholder.patch.updates, []);
+  assert.equal(unresolvedPlaceholder.resolvedItemIds.includes("mood"), false);
+  assert.equal(getUnresolvedStatusBarItemIds(state, unresolvedPlaceholder).includes("mood"), true);
   assert.deepEqual(
     parseStatusBarPatch(
       '{"version":1,"updates":[{"id":"mood","value":null}]}',

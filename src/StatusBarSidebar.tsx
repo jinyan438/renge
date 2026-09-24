@@ -48,12 +48,19 @@ import {
   RIGHT_SIDEBAR_MIN_WIDTH,
 } from "./rightSidebarSizing";
 import {
+  createStatusBarItem,
+  createUniqueStatusBarVariableName,
   getStatusBarItemValue,
   isDefaultStatusBarPreset,
+  MAX_STATUS_BAR_ITEMS,
   MAX_STATUS_BAR_PRESETS,
+  moveStatusBarItemBefore,
+  normalizeStatusBarAccentColor,
+  normalizeStatusBarProgressValue,
   normalizeStatusBarState,
   type StatusBarPreset,
   type StatusBarState,
+  validateStatusBarItems,
 } from "./statusBarUtils";
 import type { AgentPersona } from "./types";
 import {
@@ -102,6 +109,17 @@ export type StatusBarProviderOption = {
   name: string;
   models: string[];
 };
+
+function getStatusBarModelConfigurationError(
+  providerId: string,
+  modelId: string,
+  providerOptions: StatusBarProviderOption[],
+) {
+  if (!providerOptions.some((provider) => provider.id === providerId)) {
+    return "请选择状态栏供应商";
+  }
+  return modelId.trim() ? "" : "请选择状态栏模型";
+}
 
 export type StatusBarSidebarProps = {
   state: StatusBarState;
@@ -286,7 +304,6 @@ function saveRightSidebarWidth(width: number) {
   }
 }
 
-const DEFAULT_ACCENT_COLOR = "#ff758c";
 const EDITOR_FOCUSABLE_SELECTOR = [
   "button:not([disabled])",
   "input:not([disabled]):not([type='hidden'])",
@@ -317,73 +334,12 @@ const STATUS_SIZE_OPTIONS: Array<{ value: StatusBarItemSize; label: string }> = 
   { value: "large", label: "大" },
 ];
 
-const ITEM_TYPE_DEFAULTS: Record<
-  StatusBarItemType,
-  Pick<StatusBarItem, "description" | "label" | "icon" | "width" | "size" | "initialValue">
-> = {
-  header: {
-    description: "",
-    label: "时间",
-    icon: "🕒",
-    width: "short",
-    size: "small",
-    initialValue: "待填入",
-  },
-  banner: {
-    description: "",
-    label: "心理",
-    icon: "🎭",
-    width: "long",
-    size: "medium",
-    initialValue: "平静",
-  },
-  grid: {
-    description: "",
-    label: "新属性",
-    icon: "✨",
-    width: "medium",
-    size: "medium",
-    initialValue: "待填入",
-  },
-  progress: {
-    description: "",
-    label: "进度",
-    icon: "📊",
-    width: "long",
-    size: "medium",
-    initialValue: 0,
-  },
-  list: {
-    description: "",
-    label: "条目",
-    icon: "📍",
-    width: "long",
-    size: "medium",
-    initialValue: "待填入",
-  },
-  divider: {
-    description: "",
-    label: "分割线",
-    icon: "",
-    width: "long",
-    size: "small",
-    initialValue: "",
-  },
-};
-
 function cloneStatusBarState(state: StatusBarState): StatusBarState {
   return {
     ...state,
     items: state.items.map((item) => ({ ...item })),
     values: { ...state.values },
   };
-}
-
-function createStatusItemId() {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `status-item-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
 function createStatusPresetId() {
@@ -411,39 +367,6 @@ function createUniquePresetName(presets: StatusBarPreset[], requestedName: strin
     suffix += 1;
   } while (existingNames.has(candidate.toLocaleLowerCase()));
   return candidate;
-}
-
-function createUniqueVariableName(items: StatusBarItem[], prefix = "新变量") {
-  const existingNames = new Set(
-    items
-      .filter((item) => item.type !== "divider")
-      .map((item) => item.variableName.trim().toLocaleLowerCase()),
-  );
-  if (!existingNames.has(prefix.toLocaleLowerCase())) return prefix;
-
-  let suffix = 2;
-  while (existingNames.has(`${prefix}${suffix}`.toLocaleLowerCase())) suffix += 1;
-  return `${prefix}${suffix}`;
-}
-
-function createStatusItem(type: StatusBarItemType, items: StatusBarItem[]): StatusBarItem {
-  const defaults = ITEM_TYPE_DEFAULTS[type];
-  return {
-    id: createStatusItemId(),
-    variableName: type === "divider" ? "" : createUniqueVariableName(items),
-    type,
-    ...defaults,
-  };
-}
-
-function getSafeAccentColor(value: string) {
-  return /^#[0-9a-f]{6}$/i.test(value.trim()) ? value.trim() : DEFAULT_ACCENT_COLOR;
-}
-
-function clampProgressValue(value: unknown) {
-  const numericValue = Number(value);
-  if (!Number.isFinite(numericValue)) return 0;
-  return Math.min(100, Math.max(0, Math.round(numericValue)));
 }
 
 function formatStatusValue(value: unknown) {
@@ -531,7 +454,7 @@ function StatusPanelItem({
   }
 
   if (item.type === "progress") {
-    const progress = clampProgressValue(value);
+    const progress = normalizeStatusBarProgressValue(value);
     return (
       <div className={itemClassName} title={item.variableName} {...previewProps}>
         <div className="status-progress-heading">
@@ -599,7 +522,7 @@ function StatusPanelPreview({
   onPointerDragStart,
   onPointerDragEnd,
 }: StatusPanelPreviewProps) {
-  const accentColor = getSafeAccentColor(state.accentColor);
+  const accentColor = normalizeStatusBarAccentColor(state.accentColor);
   const headerItems = state.items.filter((item) => item.type === "header");
   const bodyItems = state.items.filter((item) => item.type !== "header");
   const style = { "--status-accent": accentColor } as StatusBarCssProperties;
@@ -867,29 +790,6 @@ function StatusPanelPreview({
   );
 }
 
-function validateStatusItems(items: StatusBarItem[]) {
-  const errors = new Map<string, string>();
-  const groupedNames = new Map<string, string[]>();
-
-  items.forEach((item) => {
-    if (item.type === "divider") return;
-    const variableName = item.variableName.trim();
-    if (!variableName) {
-      errors.set(item.id, "变量名不能为空。AI 将通过变量名提交更新。" );
-      return;
-    }
-    const normalizedName = variableName.toLocaleLowerCase();
-    groupedNames.set(normalizedName, [...(groupedNames.get(normalizedName) ?? []), item.id]);
-  });
-
-  groupedNames.forEach((itemIds) => {
-    if (itemIds.length < 2) return;
-    itemIds.forEach((itemId) => errors.set(itemId, "变量名必须唯一。"));
-  });
-
-  return errors;
-}
-
 function normalizeDraftForSave(
   draft: StatusBarState,
   values: StatusBarState["values"],
@@ -899,7 +799,7 @@ function normalizeDraftForSave(
     ...draft,
     enabled,
     title: draft.title.trim() || "状态监测终端",
-    accentColor: getSafeAccentColor(draft.accentColor),
+    accentColor: normalizeStatusBarAccentColor(draft.accentColor),
     items: draft.items.map((item) => ({
       ...item,
       variableName: item.type === "divider" ? "" : item.variableName.trim(),
@@ -910,7 +810,7 @@ function normalizeDraftForSave(
         item.type === "divider"
           ? ""
           : item.type === "progress"
-            ? clampProgressValue(item.initialValue)
+            ? normalizeStatusBarProgressValue(item.initialValue)
             : item.initialValue,
     })),
     values,
@@ -988,7 +888,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   const editorFallbackFocusRef = useRef<HTMLButtonElement | null>(null);
   latestStateRef.current = state;
 
-  const validationErrors = useMemo(() => validateStatusItems(draft.items), [draft.items]);
+  const validationErrors = useMemo(() => validateStatusBarItems(draft.items), [draft.items]);
   const selectedStatusProvider = useMemo(
     () => providerOptions.find((provider) => provider.id === draft.providerId),
     [draft.providerId, providerOptions],
@@ -999,11 +899,16 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
       ? [draft.modelId, ...models]
       : models;
   }, [draft.modelId, selectedStatusProvider]);
-  const modelConfigurationError = !selectedStatusProvider
-    ? "请选择状态栏供应商"
-    : !draft.modelId.trim()
-      ? "请选择状态栏模型"
-      : "";
+  const modelConfigurationError = getStatusBarModelConfigurationError(
+    draft.providerId,
+    draft.modelId,
+    providerOptions,
+  );
+  const stateConfigurationError = getStatusBarModelConfigurationError(
+    state.providerId,
+    state.modelId,
+    providerOptions,
+  );
   const selectedPreset = useMemo(
     () => presets.find((preset) => preset.id === selectedPresetId) ?? null,
     [presets, selectedPresetId],
@@ -1013,8 +918,9 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
     () => presets.filter((preset) => !isDefaultStatusBarPreset(preset)).length,
     [presets],
   );
+  const itemLimitReached = draft.items.length >= MAX_STATUS_BAR_ITEMS;
   const sidebarStyle = {
-    "--status-accent": getSafeAccentColor(state.accentColor),
+    "--status-accent": normalizeStatusBarAccentColor(state.accentColor),
     "--right-sidebar-width": `${sidebarWidth}px`,
   } as StatusBarCssProperties;
 
@@ -1263,20 +1169,20 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
 
   const changeDraftItemType = (item: StatusBarItem, type: StatusBarItemType) => {
     if (type === item.type) return;
-    const defaults = ITEM_TYPE_DEFAULTS[type];
+    const defaults = createStatusBarItem(type, { id: item.id });
     updateDraftItem(item.id, {
       type,
       variableName:
         type === "divider"
           ? ""
-          : item.variableName.trim() || createUniqueVariableName(draft.items),
+          : item.variableName.trim() || createUniqueStatusBarVariableName(draft.items),
       width: type === "divider" ? "long" : item.width || defaults.width,
       size: type === "divider" ? "small" : item.size || defaults.size,
       initialValue:
         type === "divider"
           ? ""
           : type === "progress"
-            ? clampProgressValue(item.initialValue)
+            ? normalizeStatusBarProgressValue(item.initialValue)
             : item.initialValue === ""
               ? defaults.initialValue
               : item.initialValue,
@@ -1286,7 +1192,18 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   const addDraftItem = (type: StatusBarItemType) => {
     setDraft((current) => ({
       ...current,
-      items: [...current.items, createStatusItem(type, current.items)],
+      items:
+        current.items.length >= MAX_STATUS_BAR_ITEMS
+          ? current.items
+          : [
+              ...current.items,
+              createStatusBarItem(type, {
+                variableName:
+                  type === "divider"
+                    ? ""
+                    : createUniqueStatusBarVariableName(current.items),
+              }),
+            ],
     }));
   };
 
@@ -1327,13 +1244,8 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
 
   const reorderDraftItems = (sourceItemId: string, targetItemId: string) => {
     setDraft((current) => {
-      const sourceIndex = current.items.findIndex((item) => item.id === sourceItemId);
-      const targetIndex = current.items.findIndex((item) => item.id === targetItemId);
-      if (sourceIndex < 0 || targetIndex < 0) return current;
-      const nextItems = [...current.items];
-      const [movedItem] = nextItems.splice(sourceIndex, 1);
-      nextItems.splice(targetIndex, 0, movedItem);
-      return { ...current, items: nextItems };
+      const nextItems = moveStatusBarItemBefore(current.items, sourceItemId, targetItemId);
+      return nextItems === current.items ? current : { ...current, items: nextItems };
     });
   };
 
@@ -1405,7 +1317,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   };
 
   const validateDraftBeforePresetSave = () => {
-    const nextErrors = validateStatusItems(draft.items);
+    const nextErrors = validateStatusBarItems(draft.items);
     if (nextErrors.size === 0) return true;
     setShowValidation(true);
     setPresetFeedback("请先修正变量名，再保存预设。");
@@ -1460,10 +1372,9 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
       ...current,
       title: selectedPreset.title,
       accentColor: selectedPreset.accentColor,
-      items: clonePresetItems(selectedPreset.items).map((item) => ({
-        ...item,
-        id: createStatusItemId(),
-      })),
+      items: clonePresetItems(selectedPreset.items).map((item) =>
+        createStatusBarItem(item.type, item),
+      ),
       values: {} as StatusBarState["values"],
       updatedAt: new Date().toISOString(),
     }));
@@ -1494,7 +1405,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   };
 
   const saveDraft = () => {
-    const nextErrors = validateStatusItems(draft.items);
+    const nextErrors = validateStatusBarItems(draft.items);
     if (nextErrors.size > 0 || modelConfigurationError) {
       setShowValidation(true);
       return;
@@ -1536,7 +1447,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
               role="dialog"
               tabIndex={-1}
               style={{
-                "--status-accent": getSafeAccentColor(draft.accentColor),
+                "--status-accent": normalizeStatusBarAccentColor(draft.accentColor),
               } as StatusBarCssProperties}
             >
               <header className="status-bar-editor-header">
@@ -1561,7 +1472,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                     <div className="status-bar-preset-heading">
                       <div>
                         <strong>状态栏预设</strong>
-                        <span>跨会话保存模型、条目结构和样式，不保存实时变量值</span>
+                        <span>跨会话保存条目结构和样式，不保存模型绑定与实时变量值</span>
                       </div>
                       <small>{userPresetCount} / {MAX_STATUS_BAR_PRESETS}</small>
                     </div>
@@ -1710,7 +1621,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                           aria-label="选择状态栏强调色"
                           onChange={(event) => updateDraft({ accentColor: event.target.value })}
                           type="color"
-                          value={getSafeAccentColor(draft.accentColor)}
+                          value={normalizeStatusBarAccentColor(draft.accentColor)}
                         />
                         <input
                           maxLength={7}
@@ -1729,15 +1640,30 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                       <span>{draft.items.length} 项 · 拖动手柄调整顺序</span>
                     </div>
                     <div>
-                      <button onClick={() => addDraftItem("grid")} type="button">
+                      <button
+                        disabled={itemLimitReached}
+                        onClick={() => addDraftItem("grid")}
+                        title={itemLimitReached ? `最多可添加 ${MAX_STATUS_BAR_ITEMS} 个条目` : undefined}
+                        type="button"
+                      >
                         <Plus size={15} />
                         添加条目
                       </button>
-                      <button onClick={() => addDraftItem("progress")} type="button">
+                      <button
+                        disabled={itemLimitReached}
+                        onClick={() => addDraftItem("progress")}
+                        title={itemLimitReached ? `最多可添加 ${MAX_STATUS_BAR_ITEMS} 个条目` : undefined}
+                        type="button"
+                      >
                         <Plus size={15} />
                         进度条
                       </button>
-                      <button onClick={() => addDraftItem("divider")} type="button">
+                      <button
+                        disabled={itemLimitReached}
+                        onClick={() => addDraftItem("divider")}
+                        title={itemLimitReached ? `最多可添加 ${MAX_STATUS_BAR_ITEMS} 个条目` : undefined}
+                        type="button"
+                      >
                         <Plus size={15} />
                         分割线
                       </button>
@@ -1936,7 +1862,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                                         item.type === "progress"
                                           ? event.target.value === ""
                                             ? ""
-                                            : clampProgressValue(event.target.value)
+                                            : normalizeStatusBarProgressValue(event.target.value)
                                           : event.target.value,
                                     })
                                   }
@@ -2194,18 +2120,27 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
               <div className="status-bar-sidebar-actions">
                 <label
                   className="status-bar-enable-switch"
-                  title={state.enabled ? "关闭 AI 状态更新" : "开启 AI 状态更新"}
+                  title={
+                    state.enabled
+                      ? "关闭 AI 状态更新"
+                      : stateConfigurationError || "开启 AI 状态更新"
+                  }
                 >
                   <input
                     aria-label="启用状态栏"
                     checked={state.enabled}
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      if (event.target.checked && stateConfigurationError) {
+                        openEditor();
+                        setShowValidation(true);
+                        return;
+                      }
                       onStateChange({
                         ...state,
                         enabled: event.target.checked,
                         updatedAt: new Date().toISOString(),
-                      })
-                    }
+                      });
+                    }}
                     type="checkbox"
                   />
                   <span aria-hidden="true" />
@@ -2218,14 +2153,21 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                       ? "status-bar-manual-update is-updating"
                       : "status-bar-manual-update"
                   }
-                  disabled={!state.enabled || manualUpdateDisabled || manualUpdateRunning}
+                  disabled={
+                    !state.enabled ||
+                    Boolean(stateConfigurationError) ||
+                    manualUpdateDisabled ||
+                    manualUpdateRunning
+                  }
                   onClick={() => void onManualUpdate()}
                   title={
                     !state.enabled
                       ? "请先启用状态栏"
-                      : manualUpdateRunning
-                        ? "正在更新状态栏"
-                        : "根据当前会话手动更新状态栏"
+                      : stateConfigurationError
+                        ? stateConfigurationError
+                        : manualUpdateRunning
+                          ? "正在更新状态栏"
+                          : "根据当前会话手动更新状态栏"
                   }
                   type="button"
                 >
@@ -2249,6 +2191,11 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                   <span>状态栏尚未启用</span>
                   <small>开启后，AI 会在回复完成时更新发生变化的变量。</small>
                 </button>
+              ) : stateConfigurationError ? (
+                <button className="status-bar-disabled-callout" onClick={openEditor} type="button">
+                  <span>{stateConfigurationError}</span>
+                  <small>模型配置失效，重新保存后才能继续自动更新。</small>
+                </button>
               ) : null}
               <div className={!state.enabled ? "status-bar-preview-disabled" : undefined}>
                 <StatusPanelPreview state={state} />
@@ -2256,8 +2203,12 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
             </div>
 
             <footer className="status-bar-sidebar-footer">
-              <span className={state.enabled ? "is-enabled" : undefined}>
-                {state.enabled ? "AI 自动更新" : "自动更新已关闭"}
+              <span className={state.enabled && !stateConfigurationError ? "is-enabled" : undefined}>
+                {state.enabled
+                  ? stateConfigurationError
+                    ? "模型配置待修复"
+                    : "AI 自动更新"
+                  : "自动更新已关闭"}
               </span>
               <time dateTime={state.updatedAt}>{formatUpdatedAt(state.updatedAt)}</time>
             </footer>

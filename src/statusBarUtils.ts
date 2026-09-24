@@ -47,6 +47,8 @@ export const STATUS_BAR_PRESETS_STORAGE_KEY = "renge_status_bar_presets";
 export const DEFAULT_STATUS_BAR_PRESET_ID = "builtin:status-bar-default";
 export const DEFAULT_STATUS_BAR_PRESET_NAME = "状态栏默认预设";
 export const MAX_STATUS_BAR_PRESETS = 100;
+export const MAX_STATUS_BAR_ITEMS = 100;
+export const DEFAULT_STATUS_BAR_ACCENT_COLOR = "#ff758c";
 
 const DEFAULT_STATUS_BAR_PRESET_TIMESTAMP = "2026-07-25T00:00:00.000Z";
 
@@ -63,6 +65,8 @@ export type StatusBarPatch = {
 export type ParsedStatusBarPatch = {
   patch: StatusBarPatch;
   error?: string;
+  /** IDs for which the model returned a valid final value, including unchanged values. */
+  resolvedItemIds: string[];
 };
 
 export type StatusBarReducerReferenceContext = {
@@ -88,7 +92,6 @@ const STATUS_BAR_ITEM_SIZES = new Set<StatusBarItemSize>([
   "medium",
   "large",
 ]);
-const DEFAULT_ACCENT_COLOR = "#ff758c";
 const MAX_STATUS_BAR_RESPONSE_LENGTH = 64 * 1024;
 const MAX_STATUS_BAR_STRING_LENGTH = 4000;
 export const STATUS_BAR_UPDATE_TOOL_NAME = "renge_update_status_bar";
@@ -104,6 +107,27 @@ function createStableId(prefix = "status-item") {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+export function getStatusBarVariableKey(value: string) {
+  return value.trim().normalize("NFKC").toLocaleLowerCase();
+}
+
+export function normalizeStatusBarAccentColor(value: unknown) {
+  return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value.trim())
+    ? value.trim()
+    : DEFAULT_STATUS_BAR_ACCENT_COLOR;
+}
+
+export function normalizeStatusBarProgressValue(value: unknown, fallback = 0) {
+  const numericValue =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim()
+        ? Number(value.trim().replace(/%$/, ""))
+        : Number.NaN;
+  if (!Number.isFinite(numericValue)) return fallback;
+  return Math.round(Math.min(100, Math.max(0, numericValue)));
+}
+
 function normalizeScalar(value: unknown, fallback: StatusBarValue = ""): StatusBarValue {
   if (
     typeof value === "string" ||
@@ -111,13 +135,14 @@ function normalizeScalar(value: unknown, fallback: StatusBarValue = ""): StatusB
     typeof value === "boolean" ||
     value === null
   ) {
-    return typeof value === "number" && !Number.isFinite(value) ? fallback : value;
+    if (typeof value === "number" && !Number.isFinite(value)) return fallback;
+    return typeof value === "string" ? value.slice(0, MAX_STATUS_BAR_STRING_LENGTH) : value;
   }
   if (value === undefined) return fallback;
   try {
-    return JSON.stringify(value);
+    return JSON.stringify(value).slice(0, MAX_STATUS_BAR_STRING_LENGTH);
   } catch {
-    return String(value);
+    return String(value).slice(0, MAX_STATUS_BAR_STRING_LENGTH);
   }
 }
 
@@ -138,28 +163,102 @@ function getDefaultSize(type: StatusBarItemType): StatusBarItemSize {
   return type === "header" || type === "divider" ? "small" : "medium";
 }
 
+const STATUS_BAR_ITEM_DEFAULTS: Record<
+  StatusBarItemType,
+  Pick<StatusBarItem, "label" | "icon" | "initialValue">
+> = {
+  header: { label: "时间", icon: "🕒", initialValue: "待填入" },
+  banner: { label: "心理", icon: "🎭", initialValue: "平静" },
+  grid: { label: "新属性", icon: "✨", initialValue: "待填入" },
+  progress: { label: "进度", icon: "📊", initialValue: 0 },
+  list: { label: "条目", icon: "📍", initialValue: "待填入" },
+  divider: { label: "分割线", icon: "", initialValue: "" },
+};
+
 export function createStatusBarItem(
   type: StatusBarItemType = "grid",
   overrides: Partial<StatusBarItem> = {},
 ): StatusBarItem {
   const isDivider = type === "divider";
-  const defaultLabel = isDivider ? "分割线" : type === "progress" ? "进度" : "新属性";
+  const typeDefaults = STATUS_BAR_ITEM_DEFAULTS[type];
+  const initialValue = overrides.initialValue ?? typeDefaults.initialValue;
   return {
     id: overrides.id?.trim() || createStableId(),
     variableName: isDivider
       ? ""
-      : overrides.variableName?.trim() || (type === "progress" ? "进度" : "新变量"),
-    description: isDivider ? "" : overrides.description?.trim() || "",
-    label: overrides.label?.trim() || defaultLabel,
-    icon:
-      overrides.icon ??
-      (type === "progress" ? "📊" : type === "divider" ? "" : "✨"),
+      : (overrides.variableName?.trim() || (type === "progress" ? "进度" : "新变量")).slice(
+          0,
+          64,
+        ),
+    description: isDivider ? "" : (overrides.description?.trim() || "").slice(0, 1000),
+    label: (overrides.label?.trim() || typeDefaults.label).slice(0, 48),
+    icon: (overrides.icon ?? typeDefaults.icon).slice(0, 12),
     type,
     width: overrides.width ?? getDefaultWidth(type),
     size: overrides.size ?? getDefaultSize(type),
     initialValue:
-      overrides.initialValue ?? (type === "progress" ? 0 : ""),
+      type === "progress"
+        ? normalizeStatusBarProgressValue(initialValue)
+        : normalizeInitialValue(initialValue),
   };
+}
+
+export function createUniqueStatusBarVariableName(
+  items: StatusBarItem[],
+  prefix = "新变量",
+) {
+  const existingNames = new Set(
+    items
+      .filter((item) => item.type !== "divider")
+      .map((item) => getStatusBarVariableKey(item.variableName)),
+  );
+  if (!existingNames.has(getStatusBarVariableKey(prefix))) return prefix;
+
+  let suffix = 2;
+  while (existingNames.has(getStatusBarVariableKey(`${prefix}${suffix}`))) suffix += 1;
+  return `${prefix}${suffix}`;
+}
+
+export function validateStatusBarItems(items: StatusBarItem[]) {
+  const errors = new Map<string, string>();
+  const groupedNames = new Map<string, string[]>();
+
+  items.forEach((item) => {
+    if (item.type === "divider") return;
+    const variableName = item.variableName.trim();
+    if (!variableName) {
+      errors.set(item.id, "变量名不能为空。AI 将通过变量名提交更新。");
+      return;
+    }
+    const normalizedName = getStatusBarVariableKey(variableName);
+    groupedNames.set(normalizedName, [...(groupedNames.get(normalizedName) ?? []), item.id]);
+  });
+
+  groupedNames.forEach((itemIds) => {
+    if (itemIds.length < 2) return;
+    itemIds.forEach((itemId) => errors.set(itemId, "变量名必须唯一。"));
+  });
+
+  return errors;
+}
+
+export function moveStatusBarItemBefore(
+  items: StatusBarItem[],
+  sourceItemId: string,
+  beforeItemId: string | null,
+) {
+  if (sourceItemId === beforeItemId) return items;
+  const sourceIndex = items.findIndex((item) => item.id === sourceItemId);
+  if (sourceIndex < 0) return items;
+
+  const nextItems = [...items];
+  const [movedItem] = nextItems.splice(sourceIndex, 1);
+  const targetIndex = beforeItemId
+    ? nextItems.findIndex((item) => item.id === beforeItemId)
+    : nextItems.length;
+  if (targetIndex < 0) return items;
+  nextItems.splice(targetIndex, 0, movedItem);
+  return nextItems.every((item, index) => item.id === items[index]?.id) ? items : nextItems;
 }
 
 export function createDefaultStatusBarState(): StatusBarState {
@@ -358,7 +457,7 @@ export function createDefaultStatusBarState(): StatusBarState {
     providerId: "",
     modelId: "",
     title: "状态栏",
-    accentColor: DEFAULT_ACCENT_COLOR,
+    accentColor: DEFAULT_STATUS_BAR_ACCENT_COLOR,
     items: defaults.map(({ type, ...item }) => createStatusBarItem(type, item)),
     values: {},
     updatedAt: timestamp,
@@ -457,32 +556,39 @@ export function loadStatusBarPresetsFromStorage(): StatusBarPreset[] {
 }
 
 export function normalizeStatusBarState(rawValue: unknown): StatusBarState {
-  const fallback = createDefaultStatusBarState();
-  if (!isObjectRecord(rawValue)) return fallback;
+  if (!isObjectRecord(rawValue)) return createDefaultStatusBarState();
 
   const seenIds = new Set<string>();
   const seenVariables = new Set<string>();
-  const rawItems = Array.isArray(rawValue.items) ? rawValue.items : fallback.items;
+  const rawItems = Array.isArray(rawValue.items)
+    ? rawValue.items
+    : createDefaultStatusBarState().items;
   const items = rawItems.flatMap((rawItem, index): StatusBarItem[] => {
     if (!isObjectRecord(rawItem)) return [];
     const type = STATUS_BAR_ITEM_TYPES.has(rawItem.type as StatusBarItemType)
       ? (rawItem.type as StatusBarItemType)
       : "grid";
     let id = typeof rawItem.id === "string" ? rawItem.id.trim() : "";
-    if (!id || seenIds.has(id)) id = `status-item-${index}-${createStableId("item")}`;
-    seenIds.add(id);
+    let idKey = getStatusBarVariableKey(id);
+    if (!id || seenIds.has(idKey)) {
+      id = `status-item-${index}-${createStableId("item")}`;
+      idKey = getStatusBarVariableKey(id);
+    }
+    seenIds.add(idKey);
 
     let variableName =
       type === "divider" || typeof rawItem.variableName !== "string"
         ? ""
-        : rawItem.variableName.trim();
-    if (variableName && seenVariables.has(variableName)) {
+        : rawItem.variableName.trim().slice(0, 64);
+    let variableKey = getStatusBarVariableKey(variableName);
+    if (variableName && seenVariables.has(variableKey)) {
       let suffix = 2;
       const baseName = variableName;
-      while (seenVariables.has(`${baseName}_${suffix}`)) suffix += 1;
+      while (seenVariables.has(getStatusBarVariableKey(`${baseName}_${suffix}`))) suffix += 1;
       variableName = `${baseName}_${suffix}`;
+      variableKey = getStatusBarVariableKey(variableName);
     }
-    if (variableName) seenVariables.add(variableName);
+    if (variableName) seenVariables.add(variableKey);
 
     return [
       createStatusBarItem(type, {
@@ -494,32 +600,39 @@ export function normalizeStatusBarState(rawValue: unknown): StatusBarState {
             : "",
         label:
           typeof rawItem.label === "string" && rawItem.label.trim()
-            ? rawItem.label.trim()
+            ? rawItem.label.trim().slice(0, 48)
             : type === "divider"
               ? "分割线"
               : variableName || `变量 ${index + 1}`,
-        icon: typeof rawItem.icon === "string" ? rawItem.icon : "",
+        icon: typeof rawItem.icon === "string" ? rawItem.icon.slice(0, 12) : "",
         width: STATUS_BAR_ITEM_WIDTHS.has(rawItem.width as StatusBarItemWidth)
           ? (rawItem.width as StatusBarItemWidth)
           : getDefaultWidth(type),
         size: STATUS_BAR_ITEM_SIZES.has(rawItem.size as StatusBarItemSize)
           ? (rawItem.size as StatusBarItemSize)
           : getDefaultSize(type),
-        initialValue: normalizeInitialValue(rawItem.initialValue),
+        initialValue:
+          type === "progress"
+            ? normalizeStatusBarProgressValue(rawItem.initialValue)
+            : normalizeInitialValue(rawItem.initialValue),
       }),
     ];
   });
 
-  const allowedItemIds = new Set(
+  const allowedItemsById = new Map(
     items
       .filter((item) => item.type !== "divider")
-      .map((item) => item.id),
+      .map((item) => [item.id, item]),
   );
   const values = isObjectRecord(rawValue.values)
     ? Object.fromEntries(
         Object.entries(rawValue.values)
-          .filter(([itemId]) => allowedItemIds.has(itemId))
-          .map(([itemId, value]) => [itemId, normalizeScalar(value)]),
+          .flatMap(([itemId, value]) => {
+            const item = allowedItemsById.get(itemId);
+            if (!item) return [];
+            const normalizedValue = normalizePatchValue(item, value);
+            return normalizedValue === undefined ? [] : [[itemId, normalizedValue]];
+          }),
       )
     : {};
 
@@ -527,16 +640,13 @@ export function normalizeStatusBarState(rawValue: unknown): StatusBarState {
     enabled: rawValue.enabled === true,
     providerId:
       typeof rawValue.providerId === "string" ? rawValue.providerId.trim() : "",
-    modelId: typeof rawValue.modelId === "string" ? rawValue.modelId.trim() : "",
+    modelId:
+      typeof rawValue.modelId === "string" ? rawValue.modelId.trim() : "",
     title:
       typeof rawValue.title === "string" && rawValue.title.trim()
-        ? rawValue.title.trim()
-        : fallback.title,
-    accentColor:
-      typeof rawValue.accentColor === "string" &&
-      /^#[0-9a-f]{6}$/i.test(rawValue.accentColor.trim())
-        ? rawValue.accentColor.trim()
-        : fallback.accentColor,
+        ? rawValue.title.trim().slice(0, 48)
+        : "状态栏",
+    accentColor: normalizeStatusBarAccentColor(rawValue.accentColor),
     items,
     values,
     updatedAt:
@@ -1214,14 +1324,8 @@ function extractYamlStatusUpdates(content: string) {
 
 function normalizePatchValue(item: StatusBarItem, rawValue: unknown): StatusBarValue | undefined {
   if (item.type === "progress") {
-    const numericValue =
-      typeof rawValue === "number"
-        ? rawValue
-        : typeof rawValue === "string" && rawValue.trim()
-          ? Number(rawValue.trim().replace(/%$/, ""))
-          : Number.NaN;
-    if (!Number.isFinite(numericValue)) return undefined;
-    return Math.min(100, Math.max(0, numericValue));
+    const normalized = normalizeStatusBarProgressValue(rawValue, Number.NaN);
+    return Number.isFinite(normalized) ? normalized : undefined;
   }
   if (typeof rawValue === "string") {
     return rawValue.slice(0, MAX_STATUS_BAR_STRING_LENGTH);
@@ -1257,7 +1361,11 @@ export function parseStatusBarPatch(
 ): ParsedStatusBarPatch {
   const emptyPatch: StatusBarPatch = { version: 1, updates: [] };
   if (content.length > MAX_STATUS_BAR_RESPONSE_LENGTH) {
-    return { patch: emptyPatch, error: "状态栏更新响应过长，已忽略。" };
+    return {
+      patch: emptyPatch,
+      resolvedItemIds: [],
+      error: "状态栏更新响应过长，已忽略。",
+    };
   }
 
   const trackedItems = state.items.filter(
@@ -1266,13 +1374,13 @@ export function parseStatusBarPatch(
   const itemsById = new Map(trackedItems.map((item) => [item.id, item]));
   const itemsByReference = new Map<string, StatusBarItem>();
   trackedItems.forEach((item, index) => {
-    itemsByReference.set(item.id.toLocaleLowerCase(), item);
-    itemsByReference.set(item.variableName.toLocaleLowerCase(), item);
+    itemsByReference.set(getStatusBarVariableKey(item.id), item);
+    itemsByReference.set(getStatusBarVariableKey(item.variableName), item);
     itemsByReference.set(`v${index + 1}`, item);
   });
   const labelGroups = new Map<string, StatusBarItem[]>();
   trackedItems.forEach((item) => {
-    const label = item.label.trim().toLocaleLowerCase();
+    const label = getStatusBarVariableKey(item.label);
     if (label) labelGroups.set(label, [...(labelGroups.get(label) ?? []), item]);
   });
   labelGroups.forEach((items, label) => {
@@ -1282,10 +1390,9 @@ export function parseStatusBarPatch(
   });
   const resolveItem = (rawReference: unknown) => {
     if (typeof rawReference !== "string") return undefined;
-    const reference = rawReference
-      .trim()
-      .replace(/^[`'"“‘]|[`'"”’]$/g, "")
-      .toLocaleLowerCase();
+    const reference = getStatusBarVariableKey(
+      rawReference.trim().replace(/^[`'"“‘]|[`'"”’]$/g, ""),
+    );
     if (["__proto__", "constructor", "prototype"].includes(reference)) {
       return undefined;
     }
@@ -1438,6 +1545,7 @@ export function parseStatusBarPatch(
       }
       lineProtocolRecognized = true;
       if (/^(?:不变|无变化|保持(?:原值|不变)|unchanged|same)[。.!！]?$/i.test(rawValue.trim())) {
+        lineUpdates.push({ id: item.id, value: getStatusBarItemValue(state, item) });
         continue;
       }
       lineUpdates.push({ id: item.id, value: parseLooseScalar(rawValue) });
@@ -1448,6 +1556,7 @@ export function parseStatusBarPatch(
   if (rawUpdates === null) {
     return {
       patch: emptyPatch,
+      resolvedItemIds: [],
       error:
         parsedCandidates.length > 0
           ? "状态栏更新结构无效，已保留原状态。"
@@ -1502,12 +1611,14 @@ export function parseStatusBarPatch(
   if (rawUpdates.length > 0 && acceptedUpdateCount === 0) {
     return {
       patch: emptyPatch,
+      resolvedItemIds: [],
       error: rejectedAnalysisValue
         ? "状态栏更新返回了分析说明而不是最终值，已拒绝写入。"
         : "状态栏更新没有可用的变量和值，已保留原状态。",
     };
   }
 
+  const resolvedItemIds = new Set<string>();
   const updates = Array.from(updatesById.values()).filter((update) => {
     const item = itemsById.get(update.id);
     if (!item) return false;
@@ -1518,12 +1629,32 @@ export function parseStatusBarPatch(
     ) {
       return false;
     }
+    resolvedItemIds.add(update.id);
     return !Object.is(update.value, currentValue);
   });
 
   return {
     patch: { version: 1, updates },
+    resolvedItemIds: Array.from(resolvedItemIds),
   };
+}
+
+export function getUnresolvedStatusBarItemIds(
+  state: StatusBarState,
+  parsed: Pick<ParsedStatusBarPatch, "patch" | "resolvedItemIds">,
+) {
+  const resolvedIds = new Set([
+    ...parsed.resolvedItemIds,
+    ...parsed.patch.updates.map((update) => update.id),
+  ]);
+  return state.items
+    .filter(
+      (item) =>
+        item.type !== "divider" &&
+        Boolean(item.variableName) &&
+        !resolvedIds.has(item.id),
+    )
+    .map((item) => item.id);
 }
 
 export function mergeStatusBarPatch(

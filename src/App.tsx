@@ -451,6 +451,7 @@ import {
   buildStatusBarToolSystemPrompt,
   createDefaultStatusBarState,
   DEFAULT_STATUS_BAR_PRESET_ID,
+  getUnresolvedStatusBarItemIds,
   loadStatusBarPresetsFromStorage,
   mergeStatusBarPatch,
   normalizeStatusBarPresets,
@@ -24944,15 +24945,7 @@ export function App() {
         }
       }
       if (parsed.error) return { attempted: true, updated: 0, error: parsed.error };
-      const updatedItemIds = new Set(parsed.patch.updates.map((update) => update.id));
-      const unresolvedItemIds = statusBar.items
-        .filter(
-          (item) =>
-            item.type !== "divider" &&
-            item.variableName &&
-            !updatedItemIds.has(item.id),
-        )
-        .map((item) => item.id);
+      const unresolvedItemIds = getUnresolvedStatusBarItemIds(statusBar, parsed);
       if (unresolvedItemIds.length > 0) {
         const focusedMode: StatusBarResponseFormatMode = usesLocalPlainStatusProtocol
           ? "focused_lines"
@@ -24976,6 +24969,9 @@ export function App() {
             });
             parsed = {
               patch: { version: 1, updates: Array.from(mergedUpdates.values()) },
+              resolvedItemIds: Array.from(
+                new Set([...parsed.resolvedItemIds, ...focusedParsed.resolvedItemIds]),
+              ),
             };
           }
         }
