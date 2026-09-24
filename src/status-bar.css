@@ -1843,6 +1843,30 @@ body.right-sidebar-resizing * {
   border-right: 1px solid rgba(255, 255, 255, 0.075);
 }
 
+.status-bar-template-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 12px;
+}
+
+.status-bar-template-tabs button {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 9px;
+  color: #969ba8;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.status-bar-template-tabs button.is-active {
+  border-color: color-mix(in srgb, var(--status-accent) 54%, transparent);
+  color: #fff;
+  background: color-mix(in srgb, var(--status-accent) 17%, #1c1c25);
+}
+
 .status-bar-preset-manager {
   display: grid;
   gap: 10px;

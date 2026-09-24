@@ -36,6 +36,8 @@ export type StatusBarState = StatusBarCharacterState & {
   enabled: boolean;
   providerId: string;
   modelId: string;
+  appliedPresetId?: string;
+  appliedPresetTemplates?: Record<string, StatusBarPresetTemplate>;
   importantCharacters: StatusBarCharacterState[];
 };
 
@@ -48,13 +50,13 @@ export type StatusBarPresetTemplate = {
 export type StatusBarPreset = {
   id: string;
   name: string;
-  protagonistTemplate: StatusBarPresetTemplate;
-  importantCharacterTemplate: StatusBarPresetTemplate;
+  templates: Record<string, StatusBarPresetTemplate>;
   createdAt: string;
   updatedAt: string;
 };
 
 export const STATUS_BAR_PRESETS_STORAGE_KEY = "renge_status_bar_presets";
+export const ACTIVE_STATUS_BAR_PRESET_STORAGE_KEY = "renge_active_status_bar_preset";
 export const DEFAULT_STATUS_BAR_PRESET_ID = "builtin:status-bar-default";
 export const DEFAULT_STATUS_BAR_PRESET_NAME = "状态栏默认预设";
 export const MAX_STATUS_BAR_PRESETS = 100;
@@ -528,8 +530,10 @@ export function createDefaultStatusBarPreset(): StatusBarPreset {
   return {
     id: DEFAULT_STATUS_BAR_PRESET_ID,
     name: DEFAULT_STATUS_BAR_PRESET_NAME,
-    protagonistTemplate: createStatusBarPresetTemplate(protagonist),
-    importantCharacterTemplate: createStatusBarPresetTemplate(importantCharacter),
+    templates: {
+      protagonist: createStatusBarPresetTemplate(protagonist),
+      important: createStatusBarPresetTemplate(importantCharacter),
+    },
     createdAt: DEFAULT_STATUS_BAR_PRESET_TIMESTAMP,
     updatedAt: DEFAULT_STATUS_BAR_PRESET_TIMESTAMP,
   };
@@ -551,19 +555,29 @@ function normalizeStatusBarPreset(rawValue: unknown, index: number): StatusBarPr
         items: rawPreset.items,
       }
     : null;
+  const rawTemplates = isObjectRecord(rawPreset.templates) ? rawPreset.templates : {};
   const rawProtagonistTemplate = isObjectRecord(rawPreset.protagonistTemplate)
     ? rawPreset.protagonistTemplate
     : legacyTemplate;
   const rawImportantCharacterTemplate = isObjectRecord(rawPreset.importantCharacterTemplate)
     ? rawPreset.importantCharacterTemplate
     : legacyTemplate ?? rawProtagonistTemplate;
-  if (!rawProtagonistTemplate || !rawImportantCharacterTemplate) return null;
-
-  const protagonistTemplate = normalizeStatusBarPresetTemplate(rawProtagonistTemplate);
-  const importantCharacterTemplate = normalizeStatusBarPresetTemplate(
-    rawImportantCharacterTemplate,
-  );
-  if (!protagonistTemplate || !importantCharacterTemplate) return null;
+  const templates = Object.fromEntries(
+    Array.from(new Set([...Object.keys(rawTemplates), "protagonist", "important"])).flatMap(
+      (key) => {
+        const rawTemplate = isObjectRecord(rawTemplates[key])
+          ? rawTemplates[key]
+          : key === "protagonist"
+            ? rawProtagonistTemplate
+            : key === "important"
+              ? rawImportantCharacterTemplate
+              : null;
+        const normalizedTemplate = normalizeStatusBarPresetTemplate(rawTemplate);
+        return normalizedTemplate ? [[key, normalizedTemplate]] : [];
+      },
+    ),
+  ) as Record<string, StatusBarPresetTemplate>;
+  if (!templates.protagonist || !templates.important) return null;
   const name =
     typeof rawPreset.name === "string" && rawPreset.name.trim()
       ? rawPreset.name.trim().slice(0, 48)
@@ -576,8 +590,7 @@ function normalizeStatusBarPreset(rawValue: unknown, index: number): StatusBarPr
         ? rawPreset.id.trim()
         : createStableId(),
     name,
-    protagonistTemplate,
-    importantCharacterTemplate,
+    templates,
     createdAt:
       typeof rawPreset.createdAt === "string" ? rawPreset.createdAt : timestamp,
     updatedAt:
@@ -619,6 +632,25 @@ export function loadStatusBarPresetsFromStorage(): StatusBarPreset[] {
     );
   } catch {
     return normalizeStatusBarPresets([]);
+  }
+}
+
+export function loadLastUsedStatusBarPresetId() {
+  if (typeof localStorage === "undefined") return DEFAULT_STATUS_BAR_PRESET_ID;
+  try {
+    return localStorage.getItem(ACTIVE_STATUS_BAR_PRESET_STORAGE_KEY)?.trim() ||
+      DEFAULT_STATUS_BAR_PRESET_ID;
+  } catch {
+    return DEFAULT_STATUS_BAR_PRESET_ID;
+  }
+}
+
+export function saveLastUsedStatusBarPresetId(presetId: string) {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(ACTIVE_STATUS_BAR_PRESET_STORAGE_KEY, presetId);
+  } catch {
+    // Applying a preset should still work when browser storage is unavailable.
   }
 }
 
@@ -711,6 +743,14 @@ export function normalizeStatusBarState(rawValue: unknown): StatusBarState {
     typeof rawValue.characterName === "string" && rawValue.characterName.trim()
       ? rawValue.characterName.trim().slice(0, 64)
       : "主角";
+  const appliedPresetTemplates = isObjectRecord(rawValue.appliedPresetTemplates)
+    ? Object.fromEntries(
+        Object.entries(rawValue.appliedPresetTemplates).flatMap(([tabId, rawTemplate]) => {
+          const template = normalizeStatusBarPresetTemplate(rawTemplate);
+          return template ? [[tabId, template]] : [];
+        }),
+      ) as Record<string, StatusBarPresetTemplate>
+    : undefined;
   const seenCharacterIds = new Set([characterId]);
   const seenCharacterNames = new Set([getStatusBarVariableKey(characterName)]);
   const importantCharacters = (Array.isArray(rawValue.importantCharacters)
@@ -764,6 +804,10 @@ export function normalizeStatusBarState(rawValue: unknown): StatusBarState {
       typeof rawValue.providerId === "string" ? rawValue.providerId.trim() : "",
     modelId:
       typeof rawValue.modelId === "string" ? rawValue.modelId.trim() : "",
+    ...(typeof rawValue.appliedPresetId === "string" && rawValue.appliedPresetId.trim()
+      ? { appliedPresetId: rawValue.appliedPresetId.trim().slice(0, 128) }
+      : {}),
+    ...(appliedPresetTemplates ? { appliedPresetTemplates } : {}),
     characterId,
     characterName,
     title:
@@ -803,6 +847,63 @@ export function createStatusBarPresetTemplate(
     title: state.title.trim() || "状态栏",
     accentColor: normalizeStatusBarAccentColor(state.accentColor),
     items: state.items.map(({ id: _id, ...item }) => ({ ...item })),
+  };
+}
+
+export function getStatusBarPresetTemplate(
+  preset: StatusBarPreset,
+  tabId: string,
+) {
+  return preset.templates[tabId] ?? null;
+}
+
+export function applyStatusBarPresetTemplateToCharacter(
+  character: StatusBarCharacterState,
+  template: StatusBarPresetTemplate,
+  updatedAt = new Date().toISOString(),
+): StatusBarCharacterState {
+  return {
+    ...character,
+    title: template.title,
+    accentColor: normalizeStatusBarAccentColor(template.accentColor),
+    items: template.items.map((item) => createStatusBarItem(item.type, item)),
+    values: {},
+    updatedAt,
+  };
+}
+
+export function applyStatusBarPresetToState(
+  state: StatusBarState,
+  preset: StatusBarPreset,
+  enabled = state.enabled,
+): StatusBarState {
+  const protagonistTemplate = getStatusBarPresetTemplate(preset, "protagonist");
+  const importantTemplate = getStatusBarPresetTemplate(preset, "important");
+  if (!protagonistTemplate || !importantTemplate) return state;
+  const updatedAt = new Date().toISOString();
+  const protagonist = applyStatusBarPresetTemplateToCharacter(
+    state,
+    protagonistTemplate,
+    updatedAt,
+  );
+  return {
+    ...state,
+    ...protagonist,
+    enabled,
+    appliedPresetId: preset.id,
+    appliedPresetTemplates: Object.fromEntries(
+      Object.entries(preset.templates).map(([tabId, template]) => [
+        tabId,
+        {
+          ...template,
+          items: template.items.map((item) => ({ ...item })),
+        },
+      ]),
+    ),
+    importantCharacters: state.importantCharacters.map((character) =>
+      applyStatusBarPresetTemplateToCharacter(character, importantTemplate, updatedAt),
+    ),
+    updatedAt,
   };
 }
 

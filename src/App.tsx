@@ -2941,9 +2941,9 @@ function createChatSession(
         enabled: false,
         providerId: "",
         modelId: "",
-        title: savedDefaultStatusBarPreset.protagonistTemplate.title,
-        accentColor: savedDefaultStatusBarPreset.protagonistTemplate.accentColor,
-        items: savedDefaultStatusBarPreset.protagonistTemplate.items.map((item) => ({
+        title: savedDefaultStatusBarPreset.templates.protagonist.title,
+        accentColor: savedDefaultStatusBarPreset.templates.protagonist.accentColor,
+        items: savedDefaultStatusBarPreset.templates.protagonist.items.map((item) => ({
           ...item,
           initialValue:
             item.initialValue === "未设定" || item.initialValue === "待设定"

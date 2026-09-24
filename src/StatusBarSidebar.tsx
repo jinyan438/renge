@@ -51,9 +51,15 @@ import {
   createStatusBarItem,
   createImportantStatusBarCharacter,
   createStatusBarPresetTemplate,
+  applyStatusBarPresetTemplateToCharacter,
+  applyStatusBarPresetToState,
   createUniqueStatusBarVariableName,
+  DEFAULT_STATUS_BAR_PRESET_ID,
   getStatusBarItemValue,
+  getStatusBarPresetTemplate,
   isDefaultStatusBarPreset,
+  loadLastUsedStatusBarPresetId,
+  saveLastUsedStatusBarPresetId,
   MAX_STATUS_BAR_ITEMS,
   MAX_STATUS_BAR_IMPORTANT_CHARACTERS,
   MAX_STATUS_BAR_PRESETS,
@@ -342,6 +348,16 @@ const STATUS_SIZE_OPTIONS: Array<{ value: StatusBarItemSize; label: string }> = 
 function cloneStatusBarState(state: StatusBarState): StatusBarState {
   return {
     ...state,
+    ...(state.appliedPresetTemplates
+      ? {
+          appliedPresetTemplates: Object.fromEntries(
+            Object.entries(state.appliedPresetTemplates).map(([tabId, template]) => [
+              tabId,
+              { ...template, items: template.items.map((item) => ({ ...item })) },
+            ]),
+          ),
+        }
+      : {}),
     items: state.items.map((item) => ({ ...item })),
     values: { ...state.values },
     importantCharacters: state.importantCharacters.map((character) => ({
@@ -371,6 +387,8 @@ function clonePresetTemplate(template: StatusBarPresetTemplate): StatusBarPreset
     items: clonePresetItems(template.items),
   };
 }
+
+type StatusBarEditorTabId = "protagonist" | "important";
 
 function createUniquePresetName(presets: StatusBarPreset[], requestedName: string) {
   const userPresetCount = presets.filter((preset) => !isDefaultStatusBarPreset(preset)).length;
@@ -871,9 +889,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   onHeartbeatReminderVisibleChange,
 }: StatusBarSidebarProps) {
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
-  const [statusBarSection, setStatusBarSection] = useState<"protagonist" | "important">(
-    "protagonist",
-  );
+  const [statusBarSection, setStatusBarSection] = useState<StatusBarEditorTabId>("protagonist");
   const [selectedImportantCharacterId, setSelectedImportantCharacterId] = useState("");
   const selectedImportantCharacter =
     rootState.importantCharacters.find(
@@ -896,7 +912,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   }, [rootState, selectedImportantCharacter, statusBarSection]);
   const onStateChange = useCallback((nextState: StatusBarState) => {
     const timestamp = new Date().toISOString();
-    if (statusBarSection === "protagonist" || !selectedImportantCharacter) {
+    if (statusBarSection === "protagonist") {
       onRootStateChange({
         ...nextState,
         importantCharacters: rootState.importantCharacters,
@@ -904,8 +920,10 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
       });
       return;
     }
+    const currentImportantCharacter =
+      selectedImportantCharacter ?? createImportantStatusBarCharacter();
     const nextCharacter: StatusBarCharacterState = {
-      characterId: selectedImportantCharacter.characterId,
+      characterId: currentImportantCharacter.characterId,
       characterName: nextState.characterName,
       title: nextState.title,
       accentColor: nextState.accentColor,
@@ -918,8 +936,12 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
       enabled: nextState.enabled,
       providerId: nextState.providerId,
       modelId: nextState.modelId,
-      importantCharacters: rootState.importantCharacters.map((character) =>
-        character.characterId === nextCharacter.characterId ? nextCharacter : character),
+      importantCharacters: rootState.importantCharacters.some(
+        (character) => character.characterId === nextCharacter.characterId,
+      )
+        ? rootState.importantCharacters.map((character) =>
+            character.characterId === nextCharacter.characterId ? nextCharacter : character)
+        : [...rootState.importantCharacters, nextCharacter],
       updatedAt: timestamp,
     });
   }, [onRootStateChange, rootState, selectedImportantCharacter, statusBarSection]);
@@ -944,11 +966,17 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   });
   const [editorOpen, setEditorOpen] = useState(false);
   const [draft, setDraft] = useState<StatusBarState>(() => cloneStatusBarState(state));
+  const draftByTabRef = useRef<Record<string, StatusBarState>>({});
   const [draggedItemId, setDraggedItemId] = useState("");
   const [dragOverItemId, setDragOverItemId] = useState("");
   const [showValidation, setShowValidation] = useState(false);
   const [valuesClearedInEditor, setValuesClearedInEditor] = useState(false);
-  const [selectedPresetId, setSelectedPresetId] = useState("");
+  const [selectedPresetId, setSelectedPresetId] = useState(() => {
+    const lastUsedPresetId = loadLastUsedStatusBarPresetId();
+    return presets.some((preset) => preset.id === lastUsedPresetId)
+      ? lastUsedPresetId
+      : DEFAULT_STATUS_BAR_PRESET_ID;
+  });
   const [presetName, setPresetName] = useState("");
   const [presetFeedback, setPresetFeedback] = useState("");
   const [deleteConfirmationPresetId, setDeleteConfirmationPresetId] = useState("");
@@ -993,6 +1021,63 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   const activePresetTemplateLabel =
     statusBarSection === "protagonist" ? "主角模板" : "重要角色模板";
   const itemLimitReached = draft.items.length >= MAX_STATUS_BAR_ITEMS;
+  const createDraftForSection = (section: StatusBarEditorTabId) => {
+    if (section === "protagonist") return cloneStatusBarState(rootState);
+    const character = selectedImportantCharacter ?? createImportantStatusBarCharacter();
+    return normalizeStatusBarState({
+      ...rootState,
+      ...character,
+      enabled: rootState.enabled,
+      providerId: rootState.providerId,
+      modelId: rootState.modelId,
+      importantCharacters: rootState.importantCharacters,
+    });
+  };
+  const createDraftFromTemplate = (
+    tabId: string,
+    template: StatusBarPresetTemplate,
+  ) => {
+    const baseDraft = createDraftForSection(
+      tabId === "important" ? "important" : "protagonist",
+    );
+    const character = applyStatusBarPresetTemplateToCharacter(baseDraft, template);
+    return normalizeStatusBarState({
+      ...baseDraft,
+      ...character,
+      enabled: rootState.enabled,
+      providerId: rootState.providerId,
+      modelId: rootState.modelId,
+      importantCharacters: rootState.importantCharacters,
+    });
+  };
+  const getEditorDraftsByTab = () => ({
+    ...draftByTabRef.current,
+    [statusBarSection]: cloneStatusBarState(draft),
+  });
+  const switchEditorTab = (nextSection: StatusBarEditorTabId) => {
+    if (nextSection === statusBarSection) return;
+    draftByTabRef.current[statusBarSection] = cloneStatusBarState(draft);
+    const nextDraft = draftByTabRef.current[nextSection] ?? createDraftForSection(nextSection);
+    draftByTabRef.current[nextSection] = cloneStatusBarState(nextDraft);
+    setStatusBarSection(nextSection);
+    setDraft(cloneStatusBarState(nextDraft));
+    setValuesClearedInEditor(false);
+    setShowValidation(false);
+  };
+  const loadPresetIntoEditorDrafts = (preset: StatusBarPreset) => {
+    const nextDrafts = Object.fromEntries(
+      Object.entries(preset.templates).map(([tabId, template]) => [
+        tabId,
+        createDraftFromTemplate(tabId, template),
+      ]),
+    );
+    nextDrafts.protagonist ??= createDraftForSection("protagonist");
+    nextDrafts.important ??= createDraftForSection("important");
+    draftByTabRef.current = nextDrafts;
+    const nextDraft = nextDrafts[statusBarSection] as StatusBarState;
+    setDraft(cloneStatusBarState(nextDraft));
+    setValuesClearedInEditor(true);
+  };
   const sidebarStyle = {
     "--status-accent": normalizeStatusBarAccentColor(state.accentColor),
     "--right-sidebar-width": `${sidebarWidth}px`,
@@ -1125,6 +1210,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
     setEditorOpen(false);
     setStatusBarSection("protagonist");
     setSelectedImportantCharacterId("");
+    draftByTabRef.current = {};
   }, [chatSessionId]);
 
   useEffect(
@@ -1224,9 +1310,16 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
 
   const addImportantCharacter = () => {
     if (rootState.importantCharacters.length >= MAX_STATUS_BAR_IMPORTANT_CHARACTERS) return;
-    const character = createImportantStatusBarCharacter(
+    const baseCharacter = createImportantStatusBarCharacter(
       `重要角色 ${rootState.importantCharacters.length + 1}`,
     );
+    const appliedPreset = presets.find((preset) => preset.id === rootState.appliedPresetId);
+    const importantTemplate =
+      rootState.appliedPresetTemplates?.important ??
+      (appliedPreset ? getStatusBarPresetTemplate(appliedPreset, "important") : null);
+    const character = importantTemplate
+      ? applyStatusBarPresetTemplateToCharacter(baseCharacter, importantTemplate)
+      : baseCharacter;
     onRootStateChange({
       ...rootState,
       importantCharacters: [...rootState.importantCharacters, character],
@@ -1259,7 +1352,12 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
     const activeElement = typeof document !== "undefined" ? document.activeElement : null;
     editorTriggerRef.current =
       event?.currentTarget ?? (activeElement instanceof HTMLElement ? activeElement : null);
-    setDraft(cloneStatusBarState(state));
+    const nextDrafts: Record<string, StatusBarState> = {
+      protagonist: createDraftForSection("protagonist"),
+      important: createDraftForSection("important"),
+    };
+    draftByTabRef.current = nextDrafts;
+    setDraft(cloneStatusBarState(nextDrafts[statusBarSection] ?? state));
     setShowValidation(false);
     setValuesClearedInEditor(false);
     setDraggedItemId("");
@@ -1270,14 +1368,22 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   };
 
   const updateDraft = (patch: Partial<StatusBarState>) => {
-    setDraft((current) => ({ ...current, ...patch }));
+    setDraft((current) => {
+      const nextDraft = { ...current, ...patch };
+      draftByTabRef.current[statusBarSection] = cloneStatusBarState(nextDraft);
+      return nextDraft;
+    });
   };
 
   const updateDraftItem = (itemId: string, patch: Partial<StatusBarItem>) => {
-    setDraft((current) => ({
-      ...current,
-      items: current.items.map((item) => (item.id === itemId ? { ...item, ...patch } : item)),
-    }));
+    setDraft((current) => {
+      const nextDraft = {
+        ...current,
+        items: current.items.map((item) => (item.id === itemId ? { ...item, ...patch } : item)),
+      };
+      draftByTabRef.current[statusBarSection] = cloneStatusBarState(nextDraft);
+      return nextDraft;
+    });
   };
 
   const changeDraftItemType = (item: StatusBarItem, type: StatusBarItemType) => {
@@ -1418,37 +1524,35 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
     createdAt: string,
     existingPreset?: StatusBarPreset,
   ) => {
-    const normalizedDraft = normalizeDraftForSave(
-      draft,
-      {} as StatusBarState["values"],
-      false,
+    const templates = Object.fromEntries(
+      Object.entries(existingPreset?.templates ?? selectedPreset?.templates ?? {}).map(
+        ([tabId, template]) => [tabId, clonePresetTemplate(template)],
+      ),
+    ) as Record<string, StatusBarPresetTemplate>;
+    const editorDrafts = getEditorDraftsByTab();
+    for (const [tabId, tabDraft] of Object.entries(editorDrafts)) {
+      templates[tabId] = createStatusBarPresetTemplate(
+        normalizeDraftForSave(tabDraft, {} as StatusBarState["values"], false),
+      );
+    }
+    templates.protagonist ??= createStatusBarPresetTemplate(rootState);
+    templates.important ??= createStatusBarPresetTemplate(
+      selectedImportantCharacter ?? createImportantStatusBarCharacter(),
     );
-    const activeTemplate = createStatusBarPresetTemplate(normalizedDraft);
-    const fallbackImportantCharacter =
-      selectedImportantCharacter ?? createImportantStatusBarCharacter();
     return {
       id,
       name,
-      protagonistTemplate:
-        statusBarSection === "protagonist"
-          ? activeTemplate
-          : existingPreset
-            ? clonePresetTemplate(existingPreset.protagonistTemplate)
-            : createStatusBarPresetTemplate(rootState),
-      importantCharacterTemplate:
-        statusBarSection === "important"
-          ? activeTemplate
-          : existingPreset
-            ? clonePresetTemplate(existingPreset.importantCharacterTemplate)
-            : createStatusBarPresetTemplate(fallbackImportantCharacter),
+      templates,
       createdAt,
       updatedAt: new Date().toISOString(),
     } satisfies StatusBarPreset;
   };
 
   const validateDraftBeforePresetSave = () => {
-    const nextErrors = validateStatusBarItems(draft.items);
-    if (nextErrors.size === 0) return true;
+    const hasErrors = Object.values(getEditorDraftsByTab()).some(
+      (tabDraft) => validateStatusBarItems(tabDraft.items).size > 0,
+    );
+    if (!hasErrors) return true;
     setShowValidation(true);
     setPresetFeedback("请先修正变量名，再保存预设。");
     return false;
@@ -1463,11 +1567,12 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
     }
     const timestamp = new Date().toISOString();
     const name = createUniquePresetName(presets, presetName);
-    const preset = createPresetFromDraft(createStatusPresetId(), name, timestamp);
+    const preset = createPresetFromDraft(createStatusPresetId(), name, timestamp, selectedPreset ?? undefined);
     onPresetsChange([...presets, preset]);
     setSelectedPresetId(preset.id);
+    saveLastUsedStatusBarPresetId(preset.id);
     setPresetName(preset.name);
-    setPresetFeedback(`已保存新预设“${preset.name}”，主角与重要角色模板已分别保存。`);
+    setPresetFeedback(`已保存新预设“${preset.name}”，包含全部标签页的独立模板。`);
   };
 
   const updateSelectedPreset = () => {
@@ -1493,31 +1598,43 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
       presets.map((preset) => (preset.id === selectedPreset.id ? nextPreset : preset)),
     );
     setPresetName(name);
-    setPresetFeedback(`已更新“${name}”的${activePresetTemplateLabel}，另一套模板保持不变。`);
+    saveLastUsedStatusBarPresetId(nextPreset.id);
+    setPresetFeedback(`已更新“${name}”的全部标签页模板。`);
   };
 
   const applySelectedPreset = () => {
     if (!selectedPreset) return;
     setDeleteConfirmationPresetId("");
-    const selectedTemplate =
-      statusBarSection === "protagonist"
-        ? selectedPreset.protagonistTemplate
-        : selectedPreset.importantCharacterTemplate;
-    setDraft((current) => ({
-      ...current,
-      title: selectedTemplate.title,
-      accentColor: selectedTemplate.accentColor,
-      items: clonePresetItems(selectedTemplate.items).map((item) =>
-        createStatusBarItem(item.type, item),
-      ),
-      values: {} as StatusBarState["values"],
-      updatedAt: new Date().toISOString(),
-    }));
+    const nextState = applyStatusBarPresetToState(rootState, selectedPreset);
+    onRootStateChange(nextState);
+    const importantCharacterForEditor =
+      nextState.importantCharacters.find(
+        (character) => character.characterId === selectedImportantCharacter?.characterId,
+      ) ?? nextState.importantCharacters[0];
+    const importantDraft = importantCharacterForEditor
+      ? normalizeStatusBarState({
+          ...nextState,
+          ...importantCharacterForEditor,
+          enabled: nextState.enabled,
+          providerId: nextState.providerId,
+          modelId: nextState.modelId,
+          importantCharacters: nextState.importantCharacters,
+        })
+      : createDraftFromTemplate(
+          "important",
+          getStatusBarPresetTemplate(selectedPreset, "important")!,
+        );
+    draftByTabRef.current = {
+      protagonist: cloneStatusBarState(nextState),
+      important: cloneStatusBarState(importantDraft),
+    };
+    setDraft(cloneStatusBarState(draftByTabRef.current[statusBarSection]));
     setValuesClearedInEditor(true);
     setShowValidation(false);
+    saveLastUsedStatusBarPresetId(selectedPreset.id);
     setPresetName(selectedPreset.name);
     setPresetFeedback(
-      `已载入“${selectedPreset.name}”的${activePresetTemplateLabel}，保存状态栏后应用到当前角色卡。`,
+      `已将“${selectedPreset.name}”应用到当前会话：主角状态栏及 ${nextState.importantCharacters.length} 张重要角色卡已更新。`,
     );
   };
 
@@ -1605,12 +1722,36 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
 
               <div className="status-bar-editor-content">
                 <section className="status-bar-editor-form" aria-label="状态栏条目配置">
+                  <nav
+                    aria-label="状态栏预设标签页"
+                    className="status-bar-template-tabs"
+                    role="tablist"
+                  >
+                    <button
+                      aria-selected={statusBarSection === "protagonist"}
+                      className={statusBarSection === "protagonist" ? "is-active" : undefined}
+                      onClick={() => switchEditorTab("protagonist")}
+                      role="tab"
+                      type="button"
+                    >
+                      主角状态栏
+                    </button>
+                    <button
+                      aria-selected={statusBarSection === "important"}
+                      className={statusBarSection === "important" ? "is-active" : undefined}
+                      onClick={() => switchEditorTab("important")}
+                      role="tab"
+                      type="button"
+                    >
+                      重要角色状态栏
+                    </button>
+                  </nav>
                   <div className="status-bar-preset-manager">
                     <div className="status-bar-preset-heading">
                       <div>
                         <strong>状态栏预设</strong>
                         <span>
-                          每个预设分别保存主角模板和重要角色模板；当前编辑：
+                          每个预设保存全部标签页的独立模板；当前编辑：
                           {activePresetTemplateLabel}
                         </span>
                       </div>
@@ -1626,10 +1767,15 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                             const nextPreset = presets.find((preset) => preset.id === nextId);
                             setSelectedPresetId(nextId);
                             setPresetName(nextPreset?.name ?? "");
+                            if (nextPreset) {
+                              loadPresetIntoEditorDrafts(nextPreset);
+                            }
                             setPresetFeedback(
-                              isDefaultStatusBarPreset(nextPreset)
-                                ? "应用默认预设为内置只读预设；修改后请保存为新预设。"
-                                : "",
+                              !nextPreset
+                                ? ""
+                                : isDefaultStatusBarPreset(nextPreset)
+                                  ? "已载入默认预设的全部标签页模板；内置预设只读。"
+                                  : "已载入所选预设的全部标签页模板，可分别切换编辑。",
                             );
                             setDeleteConfirmationPresetId("");
                           }}
@@ -1658,7 +1804,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                     <div className="status-bar-preset-actions">
                       <button disabled={!selectedPreset} onClick={applySelectedPreset} type="button">
                         <RotateCcw size={15} />
-                        应用{activePresetTemplateLabel}
+                        应用到本会话
                       </button>
                       <button onClick={saveDraftAsNewPreset} type="button">
                         <Plus size={15} />
@@ -1670,12 +1816,12 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                         title={
                           selectedPresetIsDefault
                             ? "应用默认预设不可修改，请保存为新预设"
-                            : `只更新所选预设的${activePresetTemplateLabel}`
+                            : "更新所选预设的全部标签页模板"
                         }
                         type="button"
                       >
                         <Save size={15} />
-                        更新{activePresetTemplateLabel}
+                        更新整个预设
                       </button>
                       <button
                         className="danger"
@@ -2285,11 +2431,30 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                         setShowValidation(true);
                         return;
                       }
-                      onStateChange({
-                        ...state,
-                        enabled: event.target.checked,
-                        updatedAt: new Date().toISOString(),
-                      });
+                      if (!event.target.checked) {
+                        onRootStateChange({
+                          ...rootState,
+                          enabled: false,
+                          updatedAt: new Date().toISOString(),
+                        });
+                        return;
+                      }
+                      const lastUsedPresetId = loadLastUsedStatusBarPresetId();
+                      const preset =
+                        presets.find((candidate) => candidate.id === lastUsedPresetId) ??
+                        presets.find((candidate) => candidate.id === selectedPresetId) ??
+                        presets[0];
+                      if (preset) {
+                        onRootStateChange(applyStatusBarPresetToState(rootState, preset, true));
+                        setSelectedPresetId(preset.id);
+                        saveLastUsedStatusBarPresetId(preset.id);
+                      } else {
+                        onRootStateChange({
+                          ...rootState,
+                          enabled: true,
+                          updatedAt: new Date().toISOString(),
+                        });
+                      }
                     }}
                     type="checkbox"
                   />
