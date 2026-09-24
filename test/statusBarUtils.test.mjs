@@ -32,6 +32,7 @@ import {
   moveStatusBarItemBefore,
   normalizeStatusBarState,
   parseStatusBarPatch,
+  resolveStatusBarContextMacros,
   validateStatusBarItems,
 } from "../src/statusBarUtils.ts";
 
@@ -68,6 +69,14 @@ test("keeps opening and recent conversation evidence for manual status refresh",
   assert.match(history, /中间较早对话因长度限制已省略/);
   assert.match(history, /最近正文：主角继续前进/);
   assert.ok(history.length <= 2_000);
+});
+
+test("resolves the user macro consistently before status evaluation", () => {
+  assert.equal(
+    resolveStatusBarContextMacros("欢迎你，{{ user }}。{{USER}}的状态待更新。", " 林风 "),
+    "欢迎你，林风。林风的状态待更新。",
+  );
+  assert.equal(resolveStatusBarContextMacros("{{user}}", ""), "用户");
 });
 
 function createTestState(overrides = {}) {
@@ -310,6 +319,7 @@ test("builds reducer payload and response schema", () => {
   const state = createTestState();
   const reducerPayload = JSON.parse(
     buildStatusBarReducerPayload(state, "我抵达了终点", "任务已经完成。", {
+      protagonistContext: "{{user}} 的实际显示名称是“林风”",
       personaContext: "谨慎而可靠的向导",
       worldBookContext: "终点位于北境山谷",
     }),
@@ -325,6 +335,7 @@ test("builds reducer payload and response schema", () => {
   assert.equal(reducerPayload.schemaRevision, state.updatedAt);
   assert.equal(reducerPayload.latestUser, "我抵达了终点");
   assert.equal(reducerPayload.finalAssistant, "任务已经完成。");
+  assert.equal(reducerPayload.protagonistContext, "{{user}} 的实际显示名称是“林风”");
   assert.equal(reducerPayload.personaContext, "谨慎而可靠的向导");
   assert.equal(reducerPayload.worldBookContext, "终点位于北境山谷");
   assert.deepEqual(
@@ -401,6 +412,7 @@ test("builds reducer payload and response schema", () => {
   assert.match(buildStatusBarSnapshotSystemPrompt(), /placeholder 为 true/);
   assert.match(buildStatusBarSnapshotSystemPrompt(), /第二人称身份都属于主角/);
   assert.match(buildStatusBarSnapshotSystemPrompt(), /未提及.*缺失标记/);
+  assert.match(buildStatusBarSnapshotSystemPrompt(), /sourceVariableName 为 \{\{user\}\}/);
   assert.match(buildStatusBarSnapshotSystemPrompt(), /progress.*0–100 整数/);
   assert.match(buildStatusBarSnapshotSystemPrompt(), /没有直接写数字或百分比/);
   assert.match(buildStatusBarSnapshotLineSystemPrompt(), /每个 slot/);
@@ -540,11 +552,22 @@ test("retries missing markers and maps second-person evidence to the protagonist
 
   assert.equal(protagonistName.currentValue, null);
   assert.equal(protagonistName.placeholder, true);
+  assert.equal(protagonistName.sourceVariableName, "{{user}}");
   assert.match(protagonistName.description, /第二人称身份都属于主角/);
   assert.match(protagonistName.description, /补充要求：主角的姓名/);
   assert.match(snapshot.conversationHistory, /林风/);
   assert.match(importantName.description, /叶澜的姓名/);
   assert.match(importantName.description, /不得使用主角或其他角色的姓名/);
+
+  const focusedName = JSON.parse(
+    buildStatusBarFocusedPayload(state, "继续", "主角继续前进。", {
+      protagonistContext: "本会话中 {{user}} 的实际显示名称是“林风”。",
+    }, {
+      itemIds: [protagonistName.id],
+    }),
+  );
+  assert.equal(focusedName.fields[0].sourceName, "{{user}}");
+  assert.match(focusedName.protagonistContext, /林风/);
 
   const missingResult = parseStatusBarPatch(
     JSON.stringify({
