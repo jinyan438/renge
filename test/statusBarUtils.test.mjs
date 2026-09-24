@@ -15,6 +15,7 @@ import {
   buildStatusBarSnapshotSystemPrompt,
   buildStatusBarToolDefinition,
   buildStatusBarToolSystemPrompt,
+  createImportantStatusBarCharacter,
   createUniqueStatusBarVariableName,
   createDefaultStatusBarState,
   createStatusBarFocusedItemBatches,
@@ -128,7 +129,7 @@ test("creates the default status bar and progress item defaults", () => {
     state.items.map((item) => item.variableName),
     [
       "时间",
-      "{{char}}",
+      "姓名",
       "性别",
       "年龄",
       "罩杯",
@@ -383,6 +384,8 @@ test("builds reducer payload and response schema", () => {
   assert.match(buildStatusBarSnapshotSystemPrompt(), /entries 中的每一个条目/);
   assert.match(buildStatusBarSnapshotSystemPrompt(), /原样复制.*currentValue/);
   assert.match(buildStatusBarSnapshotSystemPrompt(), /placeholder 为 true/);
+  assert.match(buildStatusBarSnapshotSystemPrompt(), /第二人称身份都属于主角/);
+  assert.match(buildStatusBarSnapshotSystemPrompt(), /未提及.*缺失标记/);
   assert.match(buildStatusBarSnapshotSystemPrompt(), /progress.*0–100 整数/);
   assert.match(buildStatusBarSnapshotSystemPrompt(), /没有直接写数字或百分比/);
   assert.match(buildStatusBarSnapshotLineSystemPrompt(), /每个 slot/);
@@ -453,7 +456,7 @@ test("builds reducer payload and response schema", () => {
         current: null,
         placeholder: true,
         guidance:
-          "旧值是无效占位符，必须根据 rule 和剧情填写一个新的最终值，严禁输出占位词或 null。输出一个可直接展示的简洁字符串、有限数字、布尔值或 null；优先提取或归纳剧情事实，不要复述说明。",
+          "旧值是无效缺失标记。必须先逐字检查全部输入，有证据就根据 rule 填写事实值；确实无任何依据时返回 null 以保持待补全，严禁输出“未提及”等缺失标记。输出一个可直接展示的简洁字符串、有限数字、布尔值或 null；优先提取或归纳剧情事实，不要复述说明。",
       },
     ],
   );
@@ -491,6 +494,77 @@ test("builds reducer payload and response schema", () => {
       placeholder: true,
     },
   );
+});
+
+test("retries missing markers and maps second-person evidence to the protagonist name", () => {
+  const state = createDefaultStatusBarState();
+  const nameItem = state.items.find((item) => item.id === "status-character-name");
+  assert.ok(nameItem);
+  nameItem.variableName = "{{char}}";
+  nameItem.description = "对方最主要角色的姓名，而非主角的姓名";
+  state.values[nameItem.id] = "未提及";
+  const importantCharacter = createImportantStatusBarCharacter("叶澜");
+  state.importantCharacters = [importantCharacter];
+
+  const snapshot = JSON.parse(
+    buildStatusBarSnapshotPayload(
+      state,
+      "继续",
+      "【欢迎你，来自编号 CN-4419 世界的幸存者，林风。】",
+    ),
+  );
+  const protagonistName = snapshot.entries.find(
+    (entry) => entry.characterKind === "protagonist" && entry.variableName === "姓名",
+  );
+  const importantName = snapshot.entries.find(
+    (entry) => entry.characterKind === "important" && entry.variableName === "姓名",
+  );
+
+  assert.equal(protagonistName.currentValue, null);
+  assert.equal(protagonistName.placeholder, true);
+  assert.match(protagonistName.description, /第二人称身份都属于主角/);
+  assert.doesNotMatch(protagonistName.description, /而非主角的姓名/);
+  assert.match(importantName.description, /叶澜的姓名/);
+  assert.match(importantName.description, /不得使用主角或其他角色的姓名/);
+
+  const missingResult = parseStatusBarPatch(
+    JSON.stringify({
+      version: 1,
+      updates: [{ id: protagonistName.id, value: "未提及" }],
+    }),
+    state,
+  );
+  assert.deepEqual(missingResult.patch.updates, []);
+  assert.deepEqual(missingResult.resolvedItemIds, []);
+  assert.ok(
+    getUnresolvedStatusBarItemIds(state, missingResult, { placeholdersOnly: true }).includes(
+      protagonistName.id,
+    ),
+  );
+
+  const validState = normalizeStatusBarState({
+    ...state,
+    values: { ...state.values, [nameItem.id]: "林风" },
+  });
+  const regressiveResult = parseStatusBarPatch(
+    JSON.stringify({
+      version: 1,
+      updates: [{ id: protagonistName.id, value: "正文未提及。" }],
+    }),
+    validState,
+  );
+  assert.deepEqual(regressiveResult.patch.updates, []);
+  assert.deepEqual(regressiveResult.resolvedItemIds, []);
+
+  const resolvedResult = parseStatusBarPatch(
+    JSON.stringify({
+      version: 1,
+      updates: [{ id: protagonistName.id, value: "林风" }],
+    }),
+    state,
+  );
+  assert.deepEqual(resolvedResult.patch.updates, [{ id: protagonistName.id, value: "林风" }]);
+  assert.deepEqual(resolvedResult.resolvedItemIds, [protagonistName.id]);
 });
 
 test("keeps same-named variables isolated across protagonist and important character cards", () => {
