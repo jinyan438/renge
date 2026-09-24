@@ -106,8 +106,8 @@ const sidebarTerminalManager = createSidebarTerminalManager({
 });
 
 function showConversationCompletedNotification() {
-  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isFocused()) {
-    return { ok: false, reason: "window-active" };
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return { ok: false, reason: "window-unavailable" };
   }
   if (!Notification.isSupported()) return { ok: false, reason: "unsupported" };
 

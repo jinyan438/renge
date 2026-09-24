@@ -33600,7 +33600,7 @@ export function App() {
                 <div className="llm-setting-copy">
                   <h3>会话完成推送</h3>
                   <p>
-                    开启后，桌面端和 Android 端在应用处于后台时，会在会话输出完成后显示系统通知，点击通知可返回会话。
+                    开启后，桌面端会在会话输出完成后显示系统通知；Android 端在应用处于后台时显示通知，点击通知可返回会话。
                   </p>
                 </div>
                 <label className="tool-toggle llm-feature-toggle">
@@ -33632,7 +33632,9 @@ export function App() {
                     {!window.rengeDesktop?.isElectron && !window.RengeAndroidNative
                       ? "浏览器版不提供原生会话完成推送。"
                       : llmPushNotificationsEnabled
-                        ? "应用切到后台后，回复完成会显示系统通知。"
+                        ? window.rengeDesktop?.isElectron
+                          ? "回复完成后会显示桌面系统通知。"
+                          : "应用切到后台后，回复完成会显示 Android 系统通知。"
                         : "不会显示会话完成系统通知。"}
                   </span>
                 </div>
