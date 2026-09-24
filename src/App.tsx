@@ -1605,6 +1605,7 @@ type PiStreamEvent = {
 const PROVIDER_STORAGE_KEY = "renge_provider_channels";
 const ACTIVE_PROVIDER_STORAGE_KEY = "renge_active_provider";
 const CHAT_SESSIONS_STORAGE_KEY = "renge_chat_sessions";
+const ACTIVE_CHAT_SESSION_STORAGE_KEY = "renge_active_chat_session";
 const CHAT_MODE_STORAGE_KEY = "renge_chat_mode";
 const MULTI_AGENT_WORKFLOW_STORAGE_KEY = "renge_multi_agent_workflow";
 const MULTI_AGENT_PERSONAS_STORAGE_KEY = "renge_multi_agent_personas";
@@ -3512,6 +3513,18 @@ function collectRengeLocalStorage() {
     entries[key] = localStorage.getItem(key) ?? "";
   }
   return entries;
+}
+
+function restoreActiveChatSessionId(sessions: ChatSession[]) {
+  try {
+    const storedSessionId = localStorage.getItem(ACTIVE_CHAT_SESSION_STORAGE_KEY);
+    if (storedSessionId && sessions.some((session) => session.id === storedSessionId)) {
+      return storedSessionId;
+    }
+  } catch {
+    // Fall back to the first available session when local storage is unavailable.
+  }
+  return sessions[0]?.id ?? "";
 }
 
 function normalizeCompleteBackupManagedFilePath(value: unknown) {
@@ -13552,6 +13565,11 @@ export function App() {
   }, [activeChatSessionId]);
 
   useEffect(() => {
+    if (!appDataLoaded) return;
+    setLocalStorageValueSafely(ACTIVE_CHAT_SESSION_STORAGE_KEY, activeChatSessionId);
+  }, [activeChatSessionId, appDataLoaded]);
+
+  useEffect(() => {
     chatModeRef.current = chatMode;
   }, [chatMode]);
 
@@ -14296,6 +14314,7 @@ export function App() {
     pendingSessionSelectionRef.current = session.id;
     activeChatSessionIdRef.current = session.id;
     chatMessagesRef.current = session.messages;
+    setLocalStorageValueSafely(ACTIVE_CHAT_SESSION_STORAGE_KEY, session.id);
     setActiveChatSessionId(session.id);
     setChatMessages(session.messages);
   };
@@ -14501,6 +14520,10 @@ export function App() {
         persistentData?.chatSessions && persistentData.chatSessions.length > 0
           ? persistentData.chatSessions.map(normalizeChatSession)
           : loadChatSessions();
+      const restoredSessionId = restoreActiveChatSessionId(normalizedChatSessions);
+      const restoredSession = normalizedChatSessions.find(
+        (session) => session.id === restoredSessionId,
+      );
       const normalizedSystemPrompts = mergeBuiltInSystemPrompts(
         persistentData?.systemPrompts && persistentData.systemPrompts.length > 0
           ? persistentData.systemPrompts.map(normalizeSystemPromptProfile)
@@ -14901,8 +14924,10 @@ export function App() {
       setActiveSkillId(nextSkills[0]?.id ?? "");
       setExtensions(nextExtensions);
       setChatSessions(normalizedChatSessions);
-      setActiveChatSessionId(normalizedChatSessions[0]?.id ?? "");
-      setChatMessages(normalizedChatSessions[0]?.messages ?? []);
+      activeChatSessionIdRef.current = restoredSessionId;
+      chatMessagesRef.current = restoredSession?.messages ?? [];
+      setActiveChatSessionId(restoredSessionId);
+      setChatMessages(restoredSession?.messages ?? []);
       setPcServerUrl(nextPcServerUrl);
       setPcTransferWorkspace(nextPcWorkspace);
       pendingPersistentStoreBaselineRef.current = pendingPersistentStoreBaseline;
@@ -14931,6 +14956,10 @@ export function App() {
       const fallbackSessions = chatSessions.length > 0
         ? chatSessions
         : [createChatSession()];
+      const fallbackSessionId = restoreActiveChatSessionId(fallbackSessions);
+      const fallbackSession = fallbackSessions.find(
+        (session) => session.id === fallbackSessionId,
+      );
       const fallbackActivePersonaId = fallbackPersonas.some(
         (persona) => persona.id === activePersonaId,
       )
@@ -14939,8 +14968,10 @@ export function App() {
       setPersonas(fallbackPersonas);
       setActivePersonaId(fallbackActivePersonaId);
       setChatSessions(fallbackSessions);
-      setActiveChatSessionId(fallbackSessions[0]?.id ?? "");
-      setChatMessages(fallbackSessions[0]?.messages ?? []);
+      activeChatSessionIdRef.current = fallbackSessionId;
+      chatMessagesRef.current = fallbackSession?.messages ?? [];
+      setActiveChatSessionId(fallbackSessionId);
+      setChatMessages(fallbackSession?.messages ?? []);
       setChatStatus({
         status: "error",
         message: "部分持久化数据无法加载，已使用本地缓存继续启动。",
