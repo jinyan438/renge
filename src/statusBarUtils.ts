@@ -1136,6 +1136,60 @@ function isPlaceholderStatusValue(value: StatusBarValue) {
   );
 }
 
+function extractExplicitProtagonistName(evidence: string) {
+  const patterns = [
+    /(?:欢迎你|欢迎回来)[\s\S]{0,80}?(?:幸存者|玩家|用户|绑定者|契约者)[，,:：\s“”"']+([\p{Script=Han}A-Za-z][\p{Script=Han}A-Za-z0-9·._-]{1,31})(?=[。！？!?，,；;：:\s】）)])/gu,
+    /(?:主角|玩家|用户|你)(?:的)?(?:姓名|名字|登记(?:姓名|名))\s*(?:是|为|叫作|叫做|叫)?[：:\s“”"']*([\p{Script=Han}A-Za-z][\p{Script=Han}A-Za-z0-9·._-]{1,31})(?=[。！？!?，,；;：:\s】）)])/gu,
+    /(?:你叫|你的名字是|你的姓名是)\s*[“”"']*([\p{Script=Han}A-Za-z][\p{Script=Han}A-Za-z0-9·._-]{1,31})(?=[。！？!?，,；;：:\s】）)])/gu,
+  ];
+  const rejectedNames = new Set([
+    "主角",
+    "玩家",
+    "用户",
+    "幸存者",
+    "绑定者",
+    "契约者",
+    "未知",
+    "未提及",
+    "待填入",
+  ]);
+  let extractedName = "";
+  patterns.forEach((pattern) => {
+    for (const match of evidence.matchAll(pattern)) {
+      const candidate = match[1]?.trim();
+      if (candidate && !rejectedNames.has(candidate)) extractedName = candidate;
+    }
+  });
+  return extractedName;
+}
+
+export function buildStatusBarExplicitEvidencePatch(
+  state: StatusBarState,
+  evidence: string,
+): StatusBarPatch {
+  const normalizedState = normalizeStatusBarState(state);
+  const nameItem = normalizedState.items.find(
+    (item) =>
+      item.type !== "divider" &&
+      isStatusBarNameItem(item) &&
+      isPlaceholderStatusValue(getStatusBarItemValue(normalizedState, item)),
+  );
+  if (!nameItem) return { version: 1, updates: [] };
+
+  const explicitName = extractExplicitProtagonistName(evidence);
+  return explicitName
+    ? {
+        version: 1,
+        updates: [
+          {
+            id: createStatusBarScopedItemId(normalizedState.characterId, nameItem.id),
+            value: explicitName,
+          },
+        ],
+      }
+    : { version: 1, updates: [] };
+}
+
 export function buildStatusBarFocusedSystemPrompt(outputMode: "json" | "lines") {
   const sharedRules = [
     "你是遗漏状态变量的聚焦补全器。任务是根据 latestUser、finalAssistant、conversationHistory、personaContext 和 worldBookContext，为 fields 中每一项填写本轮结束时可直接展示的最终值；不要判断样式，也不要寻找正文中的固定格式。",

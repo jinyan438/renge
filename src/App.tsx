@@ -439,6 +439,7 @@ import {
 import {
   buildStatusBarConversationSystemPrompt,
   buildStatusBarConversationHistory,
+  buildStatusBarExplicitEvidencePatch,
   buildStatusBarReducerPayload,
   buildStatusBarReducerSystemPrompt,
   buildStatusBarSnapshotLineSystemPrompt,
@@ -24736,12 +24737,23 @@ export function App() {
             },
           )
         : "";
+    const conversationHistoryContext =
+      conversationHistory?.trim() ||
+      buildStatusBarConversationHistory(worldBookSourceMessages);
     const reducerReferenceContext = {
       personaContext,
       worldBookContext: [worldBookContext, characterWorldBookContext]
         .filter(Boolean)
         .join("\n\n"),
-      conversationHistory,
+      conversationHistory: conversationHistoryContext,
+    };
+    const explicitEvidencePatch = buildStatusBarExplicitEvidencePatch(
+      statusBar,
+      [conversationHistoryContext, latestUser, finalAssistant].filter(Boolean).join("\n\n"),
+    );
+    const explicitEvidenceParsed = {
+      patch: explicitEvidencePatch,
+      resolvedItemIds: explicitEvidencePatch.updates.map((update) => update.id),
     };
 
     type StatusBarResponseFormatMode =
@@ -25005,7 +25017,11 @@ export function App() {
           );
         }
       }
+      if (parsed.error && explicitEvidencePatch.updates.length > 0) {
+        parsed = explicitEvidenceParsed;
+      }
       if (parsed.error) return { attempted: true, updated: 0, error: parsed.error };
+      parsed = mergeParsedStatusBarPatches(statusBar, parsed, explicitEvidenceParsed);
       const focusedMode: StatusBarResponseFormatMode = usesLocalPlainStatusProtocol
         ? "focused_lines"
         : "focused_json";
