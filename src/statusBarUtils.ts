@@ -1209,6 +1209,45 @@ export function buildStatusBarToolDefinition(state: StatusBarState) {
   } as const;
 }
 
+const STATUS_BAR_RESPONSE_TEXT_KEYS = ["output_text", "text", "content", "parts"] as const;
+
+/**
+ * Reads text returned by OpenAI-compatible providers without assuming that their
+ * legacy text fields are always strings. Some gateways return content-part arrays
+ * or already-parsed structured output objects in those fields.
+ */
+export function getStatusBarResponseText(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (value === null || value === undefined) return "";
+
+  if (Array.isArray(value)) {
+    const textParts = value.flatMap((part) => {
+      if (typeof part === "string") return part.trim() ? [part.trim()] : [];
+      if (!isObjectRecord(part)) return [];
+      for (const key of STATUS_BAR_RESPONSE_TEXT_KEYS) {
+        if (!(key in part)) continue;
+        const text = getStatusBarResponseText(part[key]);
+        if (text) return [text];
+      }
+      return [];
+    });
+    if (textParts.length > 0) return textParts.join("\n").trim();
+  } else if (isObjectRecord(value)) {
+    for (const key of STATUS_BAR_RESPONSE_TEXT_KEYS) {
+      if (!(key in value)) continue;
+      const text = getStatusBarResponseText(value[key]);
+      if (text) return text;
+    }
+  }
+
+  try {
+    const serialized = JSON.stringify(value);
+    return typeof serialized === "string" ? serialized.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
 function getReducerJsonText(content: string) {
   const trimmed = content.trim();
   const fencedMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);

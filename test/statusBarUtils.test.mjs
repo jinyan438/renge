@@ -17,6 +17,7 @@ import {
   createDefaultStatusBarState,
   createStatusBarItem,
   createStatusBarScopedItemId,
+  getStatusBarResponseText,
   getStatusBarVariableKey,
   getStatusBarItemValue,
   getUnresolvedStatusBarItemIds,
@@ -27,6 +28,27 @@ import {
   parseStatusBarPatch,
   validateStatusBarItems,
 } from "../src/statusBarUtils.ts";
+
+test("reads status update text from non-string provider response fields", () => {
+  const patch = { version: 1, updates: [{ id: "mood", value: "开心" }] };
+
+  assert.equal(getStatusBarResponseText("  plain text  "), "plain text");
+  assert.equal(
+    getStatusBarResponseText([
+      { type: "output_text", text: "  first line  " },
+      { type: "output_text", text: "second line" },
+    ]),
+    "first line\nsecond line",
+  );
+  assert.equal(
+    getStatusBarResponseText({ content: [{ type: "text", text: JSON.stringify(patch) }] }),
+    JSON.stringify(patch),
+  );
+  assert.equal(getStatusBarResponseText(patch), JSON.stringify(patch));
+  assert.equal(getStatusBarResponseText(42), "42");
+  assert.equal(getStatusBarResponseText(null), "");
+  assert.equal(getStatusBarResponseText(Symbol("unsupported")), "");
+});
 
 function createTestState(overrides = {}) {
   return normalizeStatusBarState({

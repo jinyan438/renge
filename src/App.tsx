@@ -451,6 +451,7 @@ import {
   buildStatusBarToolSystemPrompt,
   createDefaultStatusBarState,
   DEFAULT_STATUS_BAR_PRESET_ID,
+  getStatusBarResponseText,
   getUnresolvedStatusBarItemIds,
   getStatusBarTrackedItemCount,
   injectStatusBarConversationContext,
@@ -24865,9 +24866,9 @@ export function App() {
       });
       const payload = (await readChatCompletionPayload(response)) as {
         error?: string | { message?: string };
-        choices?: Array<{ message?: ChatApiMessage; text?: string }>;
-        output_text?: string;
-        text?: string;
+        choices?: Array<{ message?: ChatApiMessage; text?: unknown }>;
+        output_text?: unknown;
+        text?: unknown;
       };
       return { response, payload };
     };
@@ -24921,9 +24922,9 @@ export function App() {
       return result;
     };
     const getRawStatusBarPatch = (payload: {
-      choices?: Array<{ message?: ChatApiMessage; text?: string }>;
-      output_text?: string;
-      text?: string;
+      choices?: Array<{ message?: ChatApiMessage; text?: unknown }>;
+      output_text?: unknown;
+      text?: unknown;
     }) => {
       const choice = payload.choices?.[0];
       const statusToolCall = choice?.message?.tool_calls
@@ -24937,10 +24938,10 @@ export function App() {
         );
       if (statusToolCall) return statusToolCall.function.arguments.trim();
       const primaryText =
-        getChatApiMessageText(choice?.message).trim() ||
-        choice?.text?.trim() ||
-        payload.output_text?.trim() ||
-        payload.text?.trim() ||
+        getStatusBarResponseText(choice?.message?.content) ||
+        getStatusBarResponseText(choice?.text) ||
+        getStatusBarResponseText(payload.output_text) ||
+        getStatusBarResponseText(payload.text) ||
         "";
       if (primaryText) return primaryText;
       const reasoning = getChatCompletionPayloadReasoning(payload).trim();
