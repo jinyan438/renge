@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("rengeDesktop", {
   isElectron: true,
+  notifyConversationCompleted: () => ipcRenderer.invoke("notification:conversation-completed"),
   clearAppStorage: () => ipcRenderer.invoke("app-data:clear-storage"),
   showTextContextMenu: (options) => ipcRenderer.invoke("text-context-menu:show", options),
   loadDesktopProjectPositions: () => ipcRenderer.invoke("desktop-layout:load"),

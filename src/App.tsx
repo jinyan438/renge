@@ -1111,6 +1111,7 @@ type RengeAppData = {
   chatDialogueRewriteEnabled?: boolean;
   chatRenderedEditingEnabled?: boolean;
   llmFullAccessEnabled?: boolean;
+  llmPushNotificationsEnabled?: boolean;
   llmContextSettings?: LlmContextSettings;
   contextCompressionSettings?: ContextCompressionSettings;
   chatPersonalization?: ChatPersonalizationSettings;
@@ -1287,6 +1288,7 @@ type SidebarTerminalReadResult = Omit<SidebarTerminalSession, "buffer"> & {
 
 type RengeDesktopApi = {
   isElectron: boolean;
+  notifyConversationCompleted?(): Promise<{ ok: boolean }>;
   clearAppStorage?(): Promise<{ ok: boolean }>;
   showTextContextMenu?(options: { hasSelection: boolean }): Promise<{ ok: boolean }>;
   loadDesktopProjectPositions?(): Promise<unknown>;
@@ -1502,6 +1504,7 @@ type RengeAndroidApi = {
 
 type RengeAndroidNativeBridge = {
   notifyConversationCompleted?(): void;
+  requestNotificationPermission?(): void;
   openBrowser?(optionsJson: string): string;
   browserCommand?(optionsJson: string): string;
   browserRequest?(requestId: string, optionsJson: string): void;
@@ -1643,6 +1646,7 @@ const CHAT_CHOICE_TOOLS_ENABLED_STORAGE_KEY = "renge_chat_choice_tools_enabled";
 const CHAT_DIALOGUE_REWRITE_ENABLED_STORAGE_KEY = "renge_chat_dialogue_rewrite_enabled";
 const CHAT_RENDERED_EDITING_ENABLED_STORAGE_KEY = "renge_chat_rendered_editing_enabled";
 const LLM_FULL_ACCESS_ENABLED_STORAGE_KEY = "renge_llm_full_access_enabled";
+const LLM_PUSH_NOTIFICATIONS_ENABLED_STORAGE_KEY = "renge_llm_push_notifications_enabled";
 const LLM_CONTEXT_SETTINGS_STORAGE_KEY = "renge_llm_context_settings";
 const CONTEXT_COMPRESSION_SETTINGS_STORAGE_KEY = "renge_context_compression_settings";
 const CHAT_PERSONALIZATION_STORAGE_KEY = "renge_chat_personalization";
@@ -3502,6 +3506,10 @@ function persistAppDataToLocalStores(
   setLocalStorageValueSafely(
     LLM_FULL_ACCESS_ENABLED_STORAGE_KEY,
     String(data.llmFullAccessEnabled ?? false),
+  );
+  setLocalStorageValueSafely(
+    LLM_PUSH_NOTIFICATIONS_ENABLED_STORAGE_KEY,
+    String(data.llmPushNotificationsEnabled ?? true),
   );
   setLocalStorageJsonSafely(
     LLM_CONTEXT_SETTINGS_STORAGE_KEY,
@@ -12868,6 +12876,9 @@ export function App() {
   const [llmFullAccessEnabled, setLlmFullAccessEnabled] = useState(
     () => localStorage.getItem(LLM_FULL_ACCESS_ENABLED_STORAGE_KEY) === "true",
   );
+  const [llmPushNotificationsEnabled, setLlmPushNotificationsEnabled] = useState(
+    () => localStorage.getItem(LLM_PUSH_NOTIFICATIONS_ENABLED_STORAGE_KEY) !== "false",
+  );
   const [llmContextSettings, setLlmContextSettings] =
     useState<LlmContextSettings>(loadLlmContextSettings);
   const [llmContextSettingsMode, setLlmContextSettingsMode] =
@@ -13167,6 +13178,7 @@ export function App() {
   const activeChatSessionIdRef = useRef("");
   const pendingSessionSelectionRef = useRef<string | null>(null);
   const chatModeRef = useRef<ChatMode>(chatMode);
+  const llmPushNotificationsEnabledRef = useRef(llmPushNotificationsEnabled);
   const tavernScriptRuntimeRef = useRef<TavernScriptRuntime | null>(null);
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const activeAiMessageIdentityRef = useRef<AiChatMessageIdentity | null>(null);
@@ -13588,6 +13600,10 @@ export function App() {
   useEffect(() => {
     chatModeRef.current = chatMode;
   }, [chatMode]);
+
+  useEffect(() => {
+    llmPushNotificationsEnabledRef.current = llmPushNotificationsEnabled;
+  }, [llmPushNotificationsEnabled]);
 
   const setChatModeForActiveSession = (nextMode: ChatMode) => {
     const normalizedMode = normalizeChatMode(nextMode);
@@ -14293,13 +14309,37 @@ export function App() {
     return controller;
   };
 
-  const notifyAndroidConversationCompleted = () => {
+  const notifyConversationCompleted = () => {
+    if (!llmPushNotificationsEnabledRef.current) return;
+    try {
+      const notification = window.rengeDesktop?.notifyConversationCompleted?.();
+      if (notification) {
+        void notification.catch((error) => {
+          console.warn("桌面端会话完成通知发送失败", error);
+        });
+      }
+    } catch (error) {
+      console.warn("桌面端会话完成通知发送失败", error);
+    }
     try {
       window.RengeAndroidNative?.notifyConversationCompleted?.();
     } catch (error) {
       console.warn("Android 会话完成通知发送失败", error);
     }
   };
+
+  useEffect(() => {
+    if (
+      !appDataLoaded ||
+      !llmPushNotificationsEnabled ||
+      !window.RengeAndroidNative?.requestNotificationPermission
+    ) return;
+    try {
+      window.RengeAndroidNative.requestNotificationPermission();
+    } catch (error) {
+      console.warn("Android 通知权限请求失败", error);
+    }
+  }, [appDataLoaded, llmPushNotificationsEnabled]);
 
   const finishChatGeneration = async (
     controller: AbortController,
@@ -14489,6 +14529,7 @@ export function App() {
       chatDialogueRewriteEnabled,
       chatRenderedEditingEnabled,
       llmFullAccessEnabled,
+      llmPushNotificationsEnabled,
       llmContextSettings,
       contextCompressionSettings,
       chatPersonalization,
@@ -14498,7 +14539,7 @@ export function App() {
       pcConnection: appDataPcConnection,
       updatedAt: snapshotUpdatedAt,
     };
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataPcConnection, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, contextCompressionSettings, extensions, llmContextSettings, llmFullAccessEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, tavernExtensionSettings, tavernSettingsStore, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataPcConnection, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, contextCompressionSettings, extensions, llmContextSettings, llmFullAccessEnabled, llmPushNotificationsEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, tavernExtensionSettings, tavernSettingsStore, userProfile, worldBooks]);
 
   flushTavernPersistenceRef.current = async () => {
     if (!appDataLoaded || appDataPersistenceSuspendedRef.current) {
@@ -14737,6 +14778,10 @@ export function App() {
         typeof persistentData?.llmFullAccessEnabled === "boolean"
           ? persistentData.llmFullAccessEnabled
           : localStorage.getItem(LLM_FULL_ACCESS_ENABLED_STORAGE_KEY) === "true";
+      const nextLlmPushNotificationsEnabled =
+        typeof persistentData?.llmPushNotificationsEnabled === "boolean"
+          ? persistentData.llmPushNotificationsEnabled
+          : localStorage.getItem(LLM_PUSH_NOTIFICATIONS_ENABLED_STORAGE_KEY) !== "false";
       const nextLlmContextSettings = normalizeLlmContextSettings(
         persistentData?.llmContextSettings ?? loadLlmContextSettings(),
       );
@@ -14972,6 +15017,7 @@ export function App() {
       setChatDialogueRewriteEnabled(nextChatDialogueRewriteEnabled);
       setChatRenderedEditingEnabled(nextChatRenderedEditingEnabled);
       setLlmFullAccessEnabled(nextLlmFullAccessEnabled);
+      setLlmPushNotificationsEnabled(nextLlmPushNotificationsEnabled);
       setLlmContextSettings(nextLlmContextSettings);
       setContextCompressionSettings(nextContextCompressionSettings);
       setChatPersonalization(nextChatPersonalization);
@@ -27544,7 +27590,7 @@ export function App() {
         if (!options.exposeHeartbeatTools && options.multiAgentIndex === undefined
             && !options.multiAgentSupervisorMode && !abortSignal.aborted
             && finalAssistantMessage.outputStatus !== "incomplete") {
-          notifyAndroidConversationCompleted();
+          notifyConversationCompleted();
         }
         return (
           chatMessagesRef.current.find(
@@ -27555,7 +27601,7 @@ export function App() {
       if (!options.exposeHeartbeatTools && options.multiAgentIndex === undefined
           && !options.multiAgentSupervisorMode && !abortSignal.aborted
           && finalAssistantMessage.outputStatus !== "incomplete") {
-        notifyAndroidConversationCompleted();
+        notifyConversationCompleted();
       }
       return finalAssistantMessage;
     } catch (error) {
@@ -28044,7 +28090,7 @@ export function App() {
         });
       }
       if (result.completed && result.finalMessage.outputStatus !== "incomplete") {
-        notifyAndroidConversationCompleted();
+        notifyConversationCompleted();
       }
     } catch (error) {
       if (isChatAbortError(error)) {
@@ -29860,7 +29906,7 @@ export function App() {
       if (!abortSignal?.aborted && chatMessagesRef.current.find(
         (message) => message.id === assistantMessageId,
       )?.outputStatus !== "incomplete") {
-        notifyAndroidConversationCompleted();
+        notifyConversationCompleted();
       }
     } catch (error) {
       if (isChatAbortError(error)) {
@@ -30853,7 +30899,7 @@ export function App() {
           });
         }
         if (result.completed && result.finalMessage.outputStatus !== "incomplete") {
-          notifyAndroidConversationCompleted();
+          notifyConversationCompleted();
         }
       } else {
         const assistantMessage = await generateAssistantForMessages(nextMessages, requestSender, {
@@ -33550,6 +33596,47 @@ export function App() {
                   <p>控制聊天中可选的语言模型交互增强能力。</p>
                 </div>
               </div>
+              <article className="llm-setting-card">
+                <div className="llm-setting-copy">
+                  <h3>会话完成推送</h3>
+                  <p>
+                    开启后，桌面端和 Android 端在应用处于后台时，会在会话输出完成后显示系统通知，点击通知可返回会话。
+                  </p>
+                </div>
+                <label className="tool-toggle llm-feature-toggle">
+                  <input
+                    type="checkbox"
+                    checked={llmPushNotificationsEnabled}
+                    disabled={!window.rengeDesktop?.isElectron && !window.RengeAndroidNative}
+                    onChange={(event) => setLlmPushNotificationsEnabled(event.target.checked)}
+                  />
+                  <span>开启推送</span>
+                </label>
+                <div
+                  className={`llm-setting-status ${
+                    window.rengeDesktop?.isElectron || window.RengeAndroidNative
+                      ? llmPushNotificationsEnabled
+                        ? "enabled"
+                        : "disabled"
+                      : "disabled"
+                  }`}
+                >
+                  <strong>
+                    {!window.rengeDesktop?.isElectron && !window.RengeAndroidNative
+                      ? "仅桌面端和 Android 端可用"
+                      : llmPushNotificationsEnabled
+                        ? "已开启"
+                        : "已关闭"}
+                  </strong>
+                  <span>
+                    {!window.rengeDesktop?.isElectron && !window.RengeAndroidNative
+                      ? "浏览器版不提供原生会话完成推送。"
+                      : llmPushNotificationsEnabled
+                        ? "应用切到后台后，回复完成会显示系统通知。"
+                        : "不会显示会话完成系统通知。"}
+                  </span>
+                </div>
+              </article>
               <article className="llm-setting-card llm-context-settings-card">
                 <div className="llm-setting-copy">
                   <h3>按会话模式注入上下文</h3>

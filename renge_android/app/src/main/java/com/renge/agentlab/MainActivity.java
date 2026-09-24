@@ -253,7 +253,6 @@ public class MainActivity extends Activity {
             }
         });
 
-        requestNotificationPermission();
         try {
             Intent serviceIntent = new Intent(this, BackgroundRuntimeService.class);
             startService(serviceIntent);
@@ -288,7 +287,7 @@ public class MainActivity extends Activity {
         );
     }
 
-    private void requestNotificationPermission() {
+    void requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED) {

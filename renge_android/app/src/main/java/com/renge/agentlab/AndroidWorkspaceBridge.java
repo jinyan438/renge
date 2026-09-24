@@ -157,6 +157,11 @@ public class AndroidWorkspaceBridge {
     }
 
     @JavascriptInterface
+    public void requestNotificationPermission() {
+        activity.runOnUiThread(() -> ((MainActivity) activity).requestNotificationPermission());
+    }
+
+    @JavascriptInterface
     public void scheduleBackgroundTimer(int timerId, long delayMs, boolean repeating) {
         if (timerId >= 0) return;
         long normalizedDelay = Math.max(0L, Math.min(Integer.MAX_VALUE, delayMs));

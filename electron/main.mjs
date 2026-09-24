@@ -5,6 +5,7 @@ import {
   dialog,
   ipcMain,
   Menu,
+  Notification,
   nativeImage,
   safeStorage,
   screen,
@@ -103,6 +104,27 @@ const sidebarTerminalManager = createSidebarTerminalManager({
   getWorkspaceRoot: () => workspaceRoot,
   getFallbackCwd: () => app.getPath("home"),
 });
+
+function showConversationCompletedNotification() {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isFocused()) {
+    return { ok: false, reason: "window-active" };
+  }
+  if (!Notification.isSupported()) return { ok: false, reason: "unsupported" };
+
+  const notification = new Notification({
+    title: "会话输出完成",
+    body: "回复已生成，点击返回会话查看",
+    icon: appIconPath,
+  });
+  notification.on("click", () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+  notification.show();
+  return { ok: true };
+}
 
 function getPersistentDataDir() {
   if (process.env.RENGE_DATA_DIR) return resolve(process.env.RENGE_DATA_DIR);
@@ -1103,6 +1125,13 @@ async function runPackageScript({ script, args = [] }) {
 }
 
 function registerIpcHandlers() {
+  ipcMain.handle("notification:conversation-completed", (event) => {
+    if (mainWindow?.webContents && event.sender !== mainWindow.webContents) {
+      return { ok: false, reason: "invalid-sender" };
+    }
+    return showConversationCompletedNotification();
+  });
+
   ipcMain.handle("sidebar-terminal:list", (event, options = {}) =>
     sidebarTerminalManager.list(event, options));
   ipcMain.handle("sidebar-terminal:create", (event, options = {}) =>
