@@ -50,6 +50,7 @@ import {
 import {
   createStatusBarItem,
   createImportantStatusBarCharacter,
+  createStatusBarPresetTemplate,
   createUniqueStatusBarVariableName,
   getStatusBarItemValue,
   isDefaultStatusBarPreset,
@@ -61,6 +62,7 @@ import {
   normalizeStatusBarProgressValue,
   normalizeStatusBarState,
   type StatusBarPreset,
+  type StatusBarPresetTemplate,
   type StatusBarCharacterState,
   type StatusBarState,
   validateStatusBarItems,
@@ -357,8 +359,17 @@ function createStatusPresetId() {
   return `status-preset-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
-function clonePresetItems(items: StatusBarPreset["items"]): StatusBarPreset["items"] {
+function clonePresetItems(
+  items: StatusBarPresetTemplate["items"],
+): StatusBarPresetTemplate["items"] {
   return items.map((item) => ({ ...item }));
+}
+
+function clonePresetTemplate(template: StatusBarPresetTemplate): StatusBarPresetTemplate {
+  return {
+    ...template,
+    items: clonePresetItems(template.items),
+  };
 }
 
 function createUniquePresetName(presets: StatusBarPreset[], requestedName: string) {
@@ -979,6 +990,8 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
     () => presets.filter((preset) => !isDefaultStatusBarPreset(preset)).length,
     [presets],
   );
+  const activePresetTemplateLabel =
+    statusBarSection === "protagonist" ? "主角模板" : "重要角色模板";
   const itemLimitReached = draft.items.length >= MAX_STATUS_BAR_ITEMS;
   const sidebarStyle = {
     "--status-accent": normalizeStatusBarAccentColor(state.accentColor),
@@ -1399,18 +1412,35 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
     }));
   };
 
-  const createPresetFromDraft = (id: string, name: string, createdAt: string) => {
+  const createPresetFromDraft = (
+    id: string,
+    name: string,
+    createdAt: string,
+    existingPreset?: StatusBarPreset,
+  ) => {
     const normalizedDraft = normalizeDraftForSave(
       draft,
       {} as StatusBarState["values"],
       false,
     );
+    const activeTemplate = createStatusBarPresetTemplate(normalizedDraft);
+    const fallbackImportantCharacter =
+      selectedImportantCharacter ?? createImportantStatusBarCharacter();
     return {
       id,
       name,
-      title: normalizedDraft.title,
-      accentColor: normalizedDraft.accentColor,
-      items: normalizedDraft.items.map(({ id: _id, ...item }) => item),
+      protagonistTemplate:
+        statusBarSection === "protagonist"
+          ? activeTemplate
+          : existingPreset
+            ? clonePresetTemplate(existingPreset.protagonistTemplate)
+            : createStatusBarPresetTemplate(rootState),
+      importantCharacterTemplate:
+        statusBarSection === "important"
+          ? activeTemplate
+          : existingPreset
+            ? clonePresetTemplate(existingPreset.importantCharacterTemplate)
+            : createStatusBarPresetTemplate(fallbackImportantCharacter),
       createdAt,
       updatedAt: new Date().toISOString(),
     } satisfies StatusBarPreset;
@@ -1437,7 +1467,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
     onPresetsChange([...presets, preset]);
     setSelectedPresetId(preset.id);
     setPresetName(preset.name);
-    setPresetFeedback(`已保存新预设“${preset.name}”。`);
+    setPresetFeedback(`已保存新预设“${preset.name}”，主角与重要角色模板已分别保存。`);
   };
 
   const updateSelectedPreset = () => {
@@ -1457,22 +1487,27 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
       selectedPreset.id,
       name,
       selectedPreset.createdAt,
+      selectedPreset,
     );
     onPresetsChange(
       presets.map((preset) => (preset.id === selectedPreset.id ? nextPreset : preset)),
     );
     setPresetName(name);
-    setPresetFeedback(`已更新预设“${name}”。`);
+    setPresetFeedback(`已更新“${name}”的${activePresetTemplateLabel}，另一套模板保持不变。`);
   };
 
   const applySelectedPreset = () => {
     if (!selectedPreset) return;
     setDeleteConfirmationPresetId("");
+    const selectedTemplate =
+      statusBarSection === "protagonist"
+        ? selectedPreset.protagonistTemplate
+        : selectedPreset.importantCharacterTemplate;
     setDraft((current) => ({
       ...current,
-      title: selectedPreset.title,
-      accentColor: selectedPreset.accentColor,
-      items: clonePresetItems(selectedPreset.items).map((item) =>
+      title: selectedTemplate.title,
+      accentColor: selectedTemplate.accentColor,
+      items: clonePresetItems(selectedTemplate.items).map((item) =>
         createStatusBarItem(item.type, item),
       ),
       values: {} as StatusBarState["values"],
@@ -1481,7 +1516,9 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
     setValuesClearedInEditor(true);
     setShowValidation(false);
     setPresetName(selectedPreset.name);
-    setPresetFeedback(`已载入“${selectedPreset.name}”，保存状态栏后应用到当前会话。`);
+    setPresetFeedback(
+      `已载入“${selectedPreset.name}”的${activePresetTemplateLabel}，保存状态栏后应用到当前角色卡。`,
+    );
   };
 
   const deleteSelectedPreset = () => {
@@ -1572,7 +1609,10 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                     <div className="status-bar-preset-heading">
                       <div>
                         <strong>状态栏预设</strong>
-                        <span>跨会话保存条目结构和样式，不保存模型绑定与实时变量值</span>
+                        <span>
+                          每个预设分别保存主角模板和重要角色模板；当前编辑：
+                          {activePresetTemplateLabel}
+                        </span>
                       </div>
                       <small>{userPresetCount} / {MAX_STATUS_BAR_PRESETS}</small>
                     </div>
@@ -1618,7 +1658,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                     <div className="status-bar-preset-actions">
                       <button disabled={!selectedPreset} onClick={applySelectedPreset} type="button">
                         <RotateCcw size={15} />
-                        应用所选
+                        应用{activePresetTemplateLabel}
                       </button>
                       <button onClick={saveDraftAsNewPreset} type="button">
                         <Plus size={15} />
@@ -1630,12 +1670,12 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                         title={
                           selectedPresetIsDefault
                             ? "应用默认预设不可修改，请保存为新预设"
-                            : "更新所选预设"
+                            : `只更新所选预设的${activePresetTemplateLabel}`
                         }
                         type="button"
                       >
                         <Save size={15} />
-                        更新所选
+                        更新{activePresetTemplateLabel}
                       </button>
                       <button
                         className="danger"
