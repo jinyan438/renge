@@ -1973,10 +1973,19 @@ function loadContextCompressionSettings() {
 function loadLlmContextSettings() {
   try {
     const rawValue = localStorage.getItem(LLM_CONTEXT_SETTINGS_STORAGE_KEY);
-    return normalizeLlmContextSettings(rawValue ? JSON.parse(rawValue) : null);
+    return mergePersonaAndMultiAgentContextSettings(
+      normalizeLlmContextSettings(rawValue ? JSON.parse(rawValue) : null),
+    );
   } catch {
-    return normalizeLlmContextSettings(null);
+    return mergePersonaAndMultiAgentContextSettings(normalizeLlmContextSettings(null));
   }
+}
+
+function mergePersonaAndMultiAgentContextSettings(settings: LlmContextSettings) {
+  return {
+    ...settings,
+    multi: { ...settings.persona },
+  };
 }
 
 function createMcpServerConfig(name = "MCP Server"): McpServerConfig {
@@ -14795,8 +14804,10 @@ export function App() {
         typeof persistentData?.llmPushNotificationsEnabled === "boolean"
           ? persistentData.llmPushNotificationsEnabled
           : localStorage.getItem(LLM_PUSH_NOTIFICATIONS_ENABLED_STORAGE_KEY) !== "false";
-      const nextLlmContextSettings = normalizeLlmContextSettings(
-        persistentData?.llmContextSettings ?? loadLlmContextSettings(),
+      const nextLlmContextSettings = mergePersonaAndMultiAgentContextSettings(
+        normalizeLlmContextSettings(
+          persistentData?.llmContextSettings ?? loadLlmContextSettings(),
+        ),
       );
       const nextContextCompressionSettings = normalizeContextCompressionSettings(
         persistentData?.contextCompressionSettings ?? loadContextCompressionSettings(),
@@ -20705,9 +20716,12 @@ export function App() {
     source: LlmContextSource,
     enabled: boolean,
   ) => {
-    setLlmContextSettings((current) =>
-      updateLlmContextSource(current, mode, source, enabled),
-    );
+    setLlmContextSettings((current) => {
+      const updated = updateLlmContextSource(current, mode, source, enabled);
+      return mode === "persona"
+        ? { ...updated, multi: { ...updated.persona } }
+        : updated;
+    });
     setContextRuntimeUsageByKey({});
   };
 
@@ -33262,7 +33276,7 @@ export function App() {
             type="button"
             className={`settings-tab ${settingsTab === "llm" ? "active" : ""}`}
             onClick={() => {
-              setLlmContextSettingsMode(chatMode);
+              setLlmContextSettingsMode(chatMode === "multi" ? "persona" : chatMode);
               setSettingsTab("llm");
               closeMobileSidebar();
             }}
@@ -33672,7 +33686,7 @@ export function App() {
                   恢复推荐设置
                 </button>
                 <div className="llm-context-mode-switch" role="tablist" aria-label="会话模式">
-                  {LLM_CONTEXT_MODES.map((mode) => (
+                  {LLM_CONTEXT_MODES.filter((mode) => mode !== "multi").map((mode) => (
                     <button
                       type="button"
                       role="tab"
@@ -39311,7 +39325,7 @@ export function App() {
                           type="button"
                           className="ghost-action"
                           onClick={(event) => {
-                            setLlmContextSettingsMode(chatMode);
+                            setLlmContextSettingsMode(chatMode === "multi" ? "persona" : chatMode);
                             setSettingsTab("llm");
                             openWindow("settings");
                             event.currentTarget.closest("details")?.removeAttribute("open");
