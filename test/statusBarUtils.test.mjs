@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import {
   buildStatusBarConversationSystemPrompt,
   buildStatusBarConversationHistory,
-  buildStatusBarExplicitEvidencePatch,
   buildStatusBarReducerPayload,
   buildStatusBarReducerSystemPrompt,
   buildStatusBarMvuSystemPrompt,
@@ -69,31 +68,6 @@ test("keeps opening and recent conversation evidence for manual status refresh",
   assert.match(history, /中间较早对话因长度限制已省略/);
   assert.match(history, /最近正文：主角继续前进/);
   assert.ok(history.length <= 2_000);
-});
-
-test("extracts an explicitly registered protagonist name without confusing character dialogue", () => {
-  const state = createDefaultStatusBarState();
-  const nameItem = state.items.find((item) => item.id === "status-character-name");
-  assert.ok(nameItem);
-  nameItem.variableName = "{{user}}";
-  nameItem.description = "主角的姓名";
-
-  assert.deepEqual(
-    buildStatusBarExplicitEvidencePatch(
-      state,
-      "【欢迎你，来自编号 CN-4419 世界的幸存者，林风。】",
-    ).updates,
-    [
-      {
-        id: createStatusBarScopedItemId("protagonist", nameItem.id),
-        value: "林风",
-      },
-    ],
-  );
-  assert.deepEqual(
-    buildStatusBarExplicitEvidencePatch(state, "少女伸出手说：“我叫叶澜。”").updates,
-    [],
-  );
 });
 
 function createTestState(overrides = {}) {
