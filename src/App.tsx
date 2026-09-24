@@ -17421,7 +17421,7 @@ export function App() {
     chatMode === "multi"
       ? multiAgentModelsReady
         ? multiAgentWorkflow === "supervisor"
-          ? `主从协作 · ${configuredMultiAgentPersonas.length} 个 Agent`
+          ? `主从 Agent · ${configuredMultiAgentPersonas.length} 个 Agent`
           : `${multiAgentPersonas.length} 个 Agent 独立模型`
         : "Agent 模型待配置"
       : chatMode === "roleplay"
@@ -27687,13 +27687,13 @@ export function App() {
   const getMultiAgentConfigurationError = () => {
     if (multiAgentWorkflow === "supervisor") {
       if (!multiAgentPrimaryPersona) {
-        return "主从协作模式需要选择 1 个主 Agent。";
+        return "主从 Agent 模式需要选择 1 个主 Agent。";
       }
       if (multiAgentSubPersonas.length < 1) {
-        return "主从协作模式至少需要选择 1 个子 Agent。";
+        return "主从 Agent 模式至少需要选择 1 个子 Agent。";
       }
     } else if (multiAgentPersonas.length < 2) {
-      return "固定顺序模式至少需要按顺序选择 2 个 Agent。";
+      return "多人 Agent 模式至少需要按顺序选择 2 个 Agent。";
     }
 
     const requestPersonas =
@@ -27709,7 +27709,7 @@ export function App() {
         multiAgentWorkflow === "supervisor" &&
         isImageGenerationModelId(modelId)
       ) {
-        return `主从协作中的 ${persona.name} 必须使用可返回文本的模型。`;
+        return `主从 Agent 中的 ${persona.name} 必须使用可返回文本的模型。`;
       }
     }
 
@@ -38725,11 +38725,11 @@ export function App() {
                           ? "AI直连"
                           : chatMode === "multi"
                             ? multiAgentWorkflow === "supervisor"
-                              ? `主从 · ${multiAgentPrimaryPersona ? 1 : 0}+${multiAgentSubPersonas.length}`
-                              : `多Agent · ${multiAgentPersonas.length}`
+                              ? `主从 Agent · ${multiAgentPrimaryPersona ? 1 : 0}+${multiAgentSubPersonas.length}`
+                              : `多人 Agent · ${multiAgentPersonas.length}`
                             : chatMode === "roleplay"
                               ? activeSessionRoleplayCard?.name ?? "选择角色卡"
-                            : `单人 · ${activePersona.name}`}
+                            : activePersona.name}
                       </span>
                     </summary>
                     <div
@@ -38771,7 +38771,7 @@ export function App() {
                               }}
                             >
                               <Boxes size={14} />
-                              固定顺序
+                              多人 Agent
                             </button>
                             <button
                               type="button"
@@ -38789,7 +38789,7 @@ export function App() {
                               }}
                             >
                               <Crown size={14} />
-                              主从协作
+                              主从 Agent
                             </button>
                           </div>
                           {chatMode === "persona" ? (
