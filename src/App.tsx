@@ -905,6 +905,7 @@ type ChatSession = {
   workspacePath?: string;
   title: string;
   messages: ChatMessage[];
+  mode: ChatMode;
   heartbeat: ChatHeartbeatConfig;
   memoryPersonaIds: string[];
   roleplayCharacterCardId?: string;
@@ -2895,6 +2896,7 @@ function createChatSession(
   workspaceName = DEFAULT_WORKSPACE_NAME,
   workspacePath = normalizeWorkspaceSessionPath(workspaceKey, undefined),
   roleplay?: { characterCardId: string; greetingIndex?: number },
+  mode: ChatMode = loadChatMode(),
 ): ChatSession {
   const timestamp = new Date().toISOString();
   const savedDefaultStatusBarPreset = loadStatusBarPresetsFromStorage().find(
@@ -2928,6 +2930,7 @@ function createChatSession(
       : {}),
     title: "新会话",
     messages: [],
+    mode,
     heartbeat: createDefaultHeartbeatConfig(),
     memoryPersonaIds: [],
     scriptVariables: {},
@@ -2944,7 +2947,7 @@ function createChatSession(
   };
 }
 
-function normalizeChatSession(rawValue: unknown): ChatSession {
+function normalizeChatSession(rawValue: unknown, fallbackMode: ChatMode = loadChatMode()): ChatSession {
   const rawSession = isObjectRecord(rawValue) ? rawValue : {};
   const messages = Array.isArray(rawSession.messages)
     ? rawSession.messages.map((message) =>
@@ -2958,6 +2961,17 @@ function normalizeChatSession(rawValue: unknown): ChatSession {
   const title = rawTitle.trim().startsWith("【心跳检查】")
     ? inferChatSessionTitle(messages)
     : rawTitle;
+  const roleplayCharacterCardId =
+    typeof rawSession.roleplayCharacterCardId === "string" &&
+    rawSession.roleplayCharacterCardId.trim()
+      ? rawSession.roleplayCharacterCardId
+      : "";
+  const mode =
+    rawSession.mode === undefined
+      ? roleplayCharacterCardId
+        ? "roleplay"
+        : fallbackMode
+      : normalizeChatMode(rawSession.mode);
   const workspaceKey =
     typeof rawSession.workspaceKey === "string" && rawSession.workspaceKey
       ? rawSession.workspaceKey
@@ -2989,6 +3003,7 @@ function normalizeChatSession(rawValue: unknown): ChatSession {
       : {}),
     title,
     messages,
+    mode,
     heartbeat: normalizeHeartbeatConfig(
       isObjectRecord(rawSession.heartbeat)
         ? rawSession.heartbeat as Partial<ChatHeartbeatConfig>
@@ -3003,10 +3018,9 @@ function normalizeChatSession(rawValue: unknown): ChatSession {
     scriptVariables: normalizeTavernVariables(rawSession.scriptVariables),
     tavernMetadata: normalizeTavernVariables(rawSession.tavernMetadata),
     statusBar: normalizeStatusBarState(rawSession.statusBar),
-    ...(typeof rawSession.roleplayCharacterCardId === "string" &&
-    rawSession.roleplayCharacterCardId.trim()
+    ...(roleplayCharacterCardId
       ? {
-          roleplayCharacterCardId: rawSession.roleplayCharacterCardId,
+          roleplayCharacterCardId,
           roleplayGreetingIndex: Math.max(
             0,
             Math.floor(Number(rawSession.roleplayGreetingIndex) || 0),
@@ -3149,17 +3163,19 @@ function deleteChatSessionsWithMemoryCleanup(
     .filter((session) => !shouldDelete(session));
 }
 
-function loadChatSessions() {
+function loadChatSessions(fallbackMode: ChatMode = loadChatMode()) {
   try {
     const rawValue = localStorage.getItem(CHAT_SESSIONS_STORAGE_KEY);
-    if (!rawValue) return [createChatSession()];
+    if (!rawValue) return [createChatSession(undefined, undefined, undefined, undefined, fallbackMode)];
     const parsedValue = JSON.parse(rawValue) as Partial<ChatSession>[];
     const sessions = Array.isArray(parsedValue)
-      ? parsedValue.map(normalizeChatSession)
+      ? parsedValue.map((session) => normalizeChatSession(session, fallbackMode))
       : [];
-    return sessions.length > 0 ? sessions : [createChatSession()];
+    return sessions.length > 0
+      ? sessions
+      : [createChatSession(undefined, undefined, undefined, undefined, fallbackMode)];
   } catch {
-    return [createChatSession()];
+    return [createChatSession(undefined, undefined, undefined, undefined, fallbackMode)];
   }
 }
 
@@ -13573,6 +13589,41 @@ export function App() {
     chatModeRef.current = chatMode;
   }, [chatMode]);
 
+  const setChatModeForActiveSession = (nextMode: ChatMode) => {
+    const normalizedMode = normalizeChatMode(nextMode);
+    chatModeRef.current = normalizedMode;
+    setChatMode(normalizedMode);
+    if (!appDataLoaded) return;
+
+    const sessionId = activeChatSessionIdRef.current;
+    if (!sessionId) return;
+    const currentSessions = chatSessionsRef.current;
+    const targetSession = currentSessions.find((session) => session.id === sessionId);
+    if (!targetSession || targetSession.mode === normalizedMode) return;
+
+    const nextSessions = currentSessions.map((session) =>
+      session.id === sessionId
+        ? { ...session, mode: normalizedMode, updatedAt: new Date().toISOString() }
+        : session,
+    );
+    chatSessionsRef.current = nextSessions;
+    setChatSessions(nextSessions);
+  };
+
+  useEffect(() => {
+    if (!appDataLoaded || !activeChatSessionId) return;
+    const targetSession = chatSessions.find((session) => session.id === activeChatSessionId);
+    if (!targetSession || targetSession.mode === chatMode) return;
+
+    const nextSessions = chatSessions.map((session) =>
+      session.id === activeChatSessionId
+        ? { ...session, mode: chatMode, updatedAt: new Date().toISOString() }
+        : session,
+    );
+    chatSessionsRef.current = nextSessions;
+    setChatSessions(nextSessions);
+  }, [activeChatSessionId, appDataLoaded, chatMode, chatSessions]);
+
   useEffect(() => {
     chatMessagesRef.current = chatMessages;
   }, [chatMessages]);
@@ -14310,12 +14361,15 @@ export function App() {
     return true;
   };
 
-  const showChatSession = (session: Pick<ChatSession, "id" | "messages">) => {
+  const showChatSession = (session: Pick<ChatSession, "id" | "messages" | "mode">) => {
     pendingSessionSelectionRef.current = session.id;
     activeChatSessionIdRef.current = session.id;
     chatMessagesRef.current = session.messages;
     setLocalStorageValueSafely(ACTIVE_CHAT_SESSION_STORAGE_KEY, session.id);
     setActiveChatSessionId(session.id);
+    const nextMode = normalizeChatMode(session.mode);
+    chatModeRef.current = nextMode;
+    setChatMode(nextMode);
     setChatMessages(session.messages);
   };
 
@@ -14516,10 +14570,13 @@ export function App() {
         persistentData?.providers && persistentData.providers.length > 0
           ? persistentData.providers.map(normalizeProviderChannel)
           : loadProviderChannels();
+      const storedChatMode = normalizeChatMode(persistentData?.chatMode ?? loadChatMode());
       let normalizedChatSessions =
         persistentData?.chatSessions && persistentData.chatSessions.length > 0
-          ? persistentData.chatSessions.map(normalizeChatSession)
-          : loadChatSessions();
+          ? persistentData.chatSessions.map((session) =>
+              normalizeChatSession(session, storedChatMode),
+            )
+          : loadChatSessions(storedChatMode);
       const restoredSessionId = restoreActiveChatSessionId(normalizedChatSessions);
       const restoredSession = normalizedChatSessions.find(
         (session) => session.id === restoredSessionId,
@@ -14594,7 +14651,7 @@ export function App() {
         persistentData?.chatSender ?? loadChatSender(),
         normalizedPersonas,
       );
-      const nextChatMode = normalizeChatMode(persistentData?.chatMode ?? loadChatMode());
+      const nextChatMode = normalizeChatMode(restoredSession?.mode ?? storedChatMode);
       const nextMultiAgentWorkflow = normalizeMultiAgentWorkflow(
         persistentData?.multiAgentWorkflow ?? loadMultiAgentWorkflow(),
       );
@@ -14955,7 +15012,7 @@ export function App() {
       if (cancelled) return;
       const fallbackSessions = chatSessions.length > 0
         ? chatSessions
-        : [createChatSession()];
+        : [createChatSession(undefined, undefined, undefined, undefined, chatMode)];
       const fallbackSessionId = restoreActiveChatSessionId(fallbackSessions);
       const fallbackSession = fallbackSessions.find(
         (session) => session.id === fallbackSessionId,
@@ -14967,6 +15024,7 @@ export function App() {
         : fallbackPersonas[0]?.id ?? "";
       setPersonas(fallbackPersonas);
       setActivePersonaId(fallbackActivePersonaId);
+      setChatMode(fallbackSession?.mode ?? loadChatMode());
       setChatSessions(fallbackSessions);
       activeChatSessionIdRef.current = fallbackSessionId;
       chatMessagesRef.current = fallbackSession?.messages ?? [];
@@ -15248,6 +15306,7 @@ export function App() {
     if (activeChatSessionId || chatSessions.length === 0) return;
 
     setActiveChatSessionId(chatSessions[0].id);
+    setChatMode(normalizeChatMode(chatSessions[0].mode));
     setChatMessages(chatSessions[0].messages);
   }, [activeChatSessionId, appDataLoaded, chatSessions]);
 
@@ -19910,6 +19969,7 @@ export function App() {
     );
     return {
       ...session,
+      mode: "roleplay" as const,
       title: `角色：${card.name}`,
       messages: greeting ? [greeting] : [],
       scriptVariables: normalizeTavernVariables(card.tavernVariables),
@@ -20004,7 +20064,6 @@ export function App() {
   const activateRoleplaySession = (session: ChatSession) => {
     if (activeSessionChangeIsBlocked()) return;
     setActiveCharacterCardId(session.roleplayCharacterCardId ?? "");
-    setChatMode("roleplay");
     showChatSession(session);
     setEditingChatMessage(null);
     setChatMessageMenu(null);
@@ -20031,6 +20090,7 @@ export function App() {
           activeChatSession?.workspaceName ?? workspaceInfo.name,
           activeChatSession?.workspacePath ?? workspaceInfo.path,
           { characterCardId: card.id, greetingIndex },
+          "roleplay",
         );
     const session = buildRoleplaySession(baseSession, card, greetingIndex);
 
@@ -20070,6 +20130,7 @@ export function App() {
         DEFAULT_WORKSPACE_NAME,
         undefined,
         { characterCardId: card.id, greetingIndex: 0 },
+        "roleplay",
       ),
       card,
       0,
@@ -21212,7 +21273,6 @@ export function App() {
     setEditingChatMessage(null);
     setChatMessageMenu(null);
     if (session.roleplayCharacterCardId) {
-      setChatMode("roleplay");
       setActiveCharacterCardId(session.roleplayCharacterCardId);
     }
 
@@ -21395,6 +21455,8 @@ export function App() {
       workspaceKey,
       workspaceName,
       workspaceKey === workspaceInfo.key ? workspaceInfo.path : knownWorkspacePath,
+      undefined,
+      chatMode,
     );
     setChatSessions((current) => [...current, session]);
     showChatSession(session);
@@ -21423,6 +21485,8 @@ export function App() {
         deletedSession.workspaceKey,
         deletedSession.workspaceName,
         deletedSession.workspacePath,
+        undefined,
+        chatMode,
       );
       safeRemaining.splice(
         Math.min(Math.max(deletedSessionIndex, 0), safeRemaining.length),
@@ -21430,7 +21494,7 @@ export function App() {
         replacementSession,
       );
     } else if (safeRemaining.length === 0) {
-      safeRemaining.push(createChatSession());
+      safeRemaining.push(createChatSession(undefined, undefined, undefined, undefined, chatMode));
     }
 
     setChatSessions(safeRemaining);
@@ -21471,7 +21535,9 @@ export function App() {
       chatSessions,
       (session) => session.workspaceKey === workspaceKey,
     );
-    const safeRemaining = remaining.length > 0 ? remaining : [createChatSession()];
+    const safeRemaining = remaining.length > 0
+      ? remaining
+      : [createChatSession(undefined, undefined, undefined, undefined, chatMode)];
     const activeWasDeleted = chatSessions.some(
       (session) => session.workspaceKey === workspaceKey && session.id === activeChatSessionId,
     );
@@ -21524,6 +21590,8 @@ export function App() {
       nextWorkspaceInfo.key,
       nextWorkspaceInfo.name,
       nextWorkspaceInfo.path,
+      undefined,
+      chatMode,
     );
     setChatSessions((current) => [...current, session]);
     showChatSession(session);
@@ -37191,6 +37259,7 @@ export function App() {
         currentSession.workspaceName,
         currentSession.workspacePath,
         roleplayCardId ? { characterCardId: roleplayCardId, greetingIndex: 0 } : undefined,
+        currentSession.mode,
       );
       let resetSession: ChatSession = {
         ...freshSession,
@@ -37445,7 +37514,7 @@ export function App() {
               <button
                 type="button"
                 className={chatMode === "ai" ? "active" : ""}
-                onClick={() => setChatMode("ai")}
+                onClick={() => setChatModeForActiveSession("ai")}
               >
                 <Sparkles size={15} />
                 AI
@@ -37453,7 +37522,7 @@ export function App() {
               <button
                 type="button"
                 className={chatMode === "persona" || chatMode === "multi" ? "active" : ""}
-                onClick={() => setChatMode("persona")}
+                onClick={() => setChatModeForActiveSession("persona")}
               >
                 <Bot size={15} />
                 人格 Agent
@@ -37461,7 +37530,7 @@ export function App() {
               <button
                 type="button"
                 className={chatMode === "roleplay" ? "active" : ""}
-                onClick={() => setChatMode("roleplay")}
+                onClick={() => setChatModeForActiveSession("roleplay")}
               >
                 <BookOpen size={15} />
                 角色扮演
@@ -38750,7 +38819,7 @@ export function App() {
                               type="button"
                               className={chatMode === "persona" ? "active" : ""}
                               aria-pressed={chatMode === "persona"}
-                              onClick={() => setChatMode("persona")}
+                              onClick={() => setChatModeForActiveSession("persona")}
                             >
                               <Bot size={14} />
                               单人 Agent
@@ -38767,7 +38836,7 @@ export function App() {
                               }
                               onClick={() => {
                                 setMultiAgentWorkflow("sequence");
-                                setChatMode("multi");
+                                setChatModeForActiveSession("multi");
                               }}
                             >
                               <Boxes size={14} />
@@ -38785,7 +38854,7 @@ export function App() {
                               }
                               onClick={() => {
                                 setMultiAgentWorkflow("supervisor");
-                                setChatMode("multi");
+                                setChatModeForActiveSession("multi");
                               }}
                             >
                               <Crown size={14} />
