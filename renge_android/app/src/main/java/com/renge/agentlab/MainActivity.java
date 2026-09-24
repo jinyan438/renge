@@ -298,7 +298,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    void notifyConversationCompleted() {
+    void notifyConversationCompleted(String content) {
         if (!activityPaused || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED)) return;
@@ -324,10 +324,13 @@ public class MainActivity extends Activity {
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? new Notification.Builder(this, COMPLETION_CHANNEL_ID)
                 : new Notification.Builder(this).setPriority(Notification.PRIORITY_DEFAULT);
+        String notificationContent = content == null || content.trim().isEmpty()
+                ? getString(R.string.conversation_completed_message)
+                : content;
         manager.notify(COMPLETION_NOTIFICATION_ID, builder
                 .setSmallIcon(R.drawable.ic_stat_renge)
                 .setContentTitle(getString(R.string.conversation_completed_title))
-                .setContentText(getString(R.string.conversation_completed_message))
+                .setContentText(notificationContent)
                 .setContentIntent(contentIntent)
                 .setCategory(Notification.CATEGORY_MESSAGE)
                 .setAutoCancel(true)

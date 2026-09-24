@@ -105,7 +105,16 @@ const sidebarTerminalManager = createSidebarTerminalManager({
   getFallbackCwd: () => app.getPath("home"),
 });
 
-function showConversationCompletedNotification() {
+function formatConversationNotificationContent(content) {
+  const normalized = String(content ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "回复已生成，点击返回会话查看";
+  const characters = Array.from(normalized);
+  return characters.length > 120
+    ? `${characters.slice(0, 120).join("")}…`
+    : normalized;
+}
+
+function showConversationCompletedNotification(content) {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return { ok: false, reason: "window-unavailable" };
   }
@@ -113,7 +122,7 @@ function showConversationCompletedNotification() {
 
   const notification = new Notification({
     title: "会话输出完成",
-    body: "回复已生成，点击返回会话查看",
+    body: formatConversationNotificationContent(content),
     icon: appIconPath,
   });
   notification.on("click", () => {
@@ -1125,11 +1134,11 @@ async function runPackageScript({ script, args = [] }) {
 }
 
 function registerIpcHandlers() {
-  ipcMain.handle("notification:conversation-completed", (event) => {
+  ipcMain.handle("notification:conversation-completed", (event, options = {}) => {
     if (mainWindow?.webContents && event.sender !== mainWindow.webContents) {
       return { ok: false, reason: "invalid-sender" };
     }
-    return showConversationCompletedNotification();
+    return showConversationCompletedNotification(options?.content);
   });
 
   ipcMain.handle("sidebar-terminal:list", (event, options = {}) =>

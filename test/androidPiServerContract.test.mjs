@@ -128,13 +128,16 @@ test("Android completion notifications are gated by background state and permiss
     readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
     readFile(new URL("../renge_android/app/src/main/res/values/strings.xml", import.meta.url), "utf8"),
   ]);
-  assert.match(bridgeSource, /@JavascriptInterface\s+public void notifyConversationCompleted\(\)/);
-  assert.match(activitySource, /void notifyConversationCompleted\(\)\s*\{\s*if \(!activityPaused/);
+  assert.match(bridgeSource, /@JavascriptInterface\s+public void notifyConversationCompleted\(String content\)/);
+  assert.match(activitySource, /void notifyConversationCompleted\(String content\)\s*\{\s*if \(!activityPaused/);
   assert.match(activitySource, /checkSelfPermission\(Manifest\.permission\.POST_NOTIFICATIONS\)/);
   assert.match(activitySource, /COMPLETION_CHANNEL_ID[\s\S]*NotificationManager\.IMPORTANCE_DEFAULT/);
   assert.match(activitySource, /setAutoCancel\(true\)/);
   assert.match(appSource, /if \(result\.completed && result\.finalMessage\.outputStatus !== "incomplete"\)/);
   assert.match(appSource, /!options\.exposeHeartbeatTools && options\.multiAgentIndex === undefined/);
+  assert.match(appSource, /buildCompletionNotificationContent/);
+  assert.match(appSource, /notifyConversationCompleted\(finalAssistantMessage\.content\)/);
+  assert.match(activitySource, /setContentText\(notificationContent\)/);
   assert.match(stringsSource, /name="conversation_completed_title">会话输出完成/);
 });
 

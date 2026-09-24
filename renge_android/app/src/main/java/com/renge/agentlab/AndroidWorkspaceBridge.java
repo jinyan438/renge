@@ -152,8 +152,8 @@ public class AndroidWorkspaceBridge {
     }
 
     @JavascriptInterface
-    public void notifyConversationCompleted() {
-        activity.runOnUiThread(() -> ((MainActivity) activity).notifyConversationCompleted());
+    public void notifyConversationCompleted(String content) {
+        activity.runOnUiThread(() -> ((MainActivity) activity).notifyConversationCompleted(content));
     }
 
     @JavascriptInterface

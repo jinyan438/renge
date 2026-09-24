@@ -1288,7 +1288,7 @@ type SidebarTerminalReadResult = Omit<SidebarTerminalSession, "buffer"> & {
 
 type RengeDesktopApi = {
   isElectron: boolean;
-  notifyConversationCompleted?(): Promise<{ ok: boolean }>;
+  notifyConversationCompleted?(options: { content: string }): Promise<{ ok: boolean }>;
   clearAppStorage?(): Promise<{ ok: boolean }>;
   showTextContextMenu?(options: { hasSelection: boolean }): Promise<{ ok: boolean }>;
   loadDesktopProjectPositions?(): Promise<unknown>;
@@ -1503,7 +1503,7 @@ type RengeAndroidApi = {
 };
 
 type RengeAndroidNativeBridge = {
-  notifyConversationCompleted?(): void;
+  notifyConversationCompleted?(content: string): void;
   requestNotificationPermission?(): void;
   openBrowser?(optionsJson: string): string;
   browserCommand?(optionsJson: string): string;
@@ -1671,6 +1671,16 @@ const SYSTEM_WORKSPACE_HANDLE: SystemWorkspaceHandle = {
 const CHAT_TIME_GROUP_MS = 5 * 60 * 1000;
 const DEFAULT_HEARTBEAT_INTERVAL_MINUTES = 5;
 const MIN_HEARTBEAT_INTERVAL_MINUTES = 1;
+const MAX_COMPLETION_NOTIFICATION_CONTENT_LENGTH = 120;
+
+function buildCompletionNotificationContent(content: unknown) {
+  const normalized = String(content ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "回复已生成";
+  const characters = Array.from(normalized);
+  return characters.length > MAX_COMPLETION_NOTIFICATION_CONTENT_LENGTH
+    ? `${characters.slice(0, MAX_COMPLETION_NOTIFICATION_CONTENT_LENGTH).join("")}…`
+    : normalized;
+}
 
 function buildCharacterTranslationSystemPrompt(additionalPrompt: string) {
   const normalizedAdditionalPrompt = additionalPrompt.trim();
@@ -14309,10 +14319,13 @@ export function App() {
     return controller;
   };
 
-  const notifyConversationCompleted = () => {
+  const notifyConversationCompleted = (content: unknown) => {
     if (!llmPushNotificationsEnabledRef.current) return;
+    const notificationContent = buildCompletionNotificationContent(content);
     try {
-      const notification = window.rengeDesktop?.notifyConversationCompleted?.();
+      const notification = window.rengeDesktop?.notifyConversationCompleted?.({
+        content: notificationContent,
+      });
       if (notification) {
         void notification.catch((error) => {
           console.warn("桌面端会话完成通知发送失败", error);
@@ -14322,7 +14335,7 @@ export function App() {
       console.warn("桌面端会话完成通知发送失败", error);
     }
     try {
-      window.RengeAndroidNative?.notifyConversationCompleted?.();
+      window.RengeAndroidNative?.notifyConversationCompleted?.(notificationContent);
     } catch (error) {
       console.warn("Android 会话完成通知发送失败", error);
     }
@@ -27590,7 +27603,7 @@ export function App() {
         if (!options.exposeHeartbeatTools && options.multiAgentIndex === undefined
             && !options.multiAgentSupervisorMode && !abortSignal.aborted
             && finalAssistantMessage.outputStatus !== "incomplete") {
-          notifyConversationCompleted();
+          notifyConversationCompleted(finalAssistantMessage.content);
         }
         return (
           chatMessagesRef.current.find(
@@ -27601,7 +27614,7 @@ export function App() {
       if (!options.exposeHeartbeatTools && options.multiAgentIndex === undefined
           && !options.multiAgentSupervisorMode && !abortSignal.aborted
           && finalAssistantMessage.outputStatus !== "incomplete") {
-        notifyConversationCompleted();
+        notifyConversationCompleted(finalAssistantMessage.content);
       }
       return finalAssistantMessage;
     } catch (error) {
@@ -28090,7 +28103,7 @@ export function App() {
         });
       }
       if (result.completed && result.finalMessage.outputStatus !== "incomplete") {
-        notifyConversationCompleted();
+        notifyConversationCompleted(result.finalMessage.content);
       }
     } catch (error) {
       if (isChatAbortError(error)) {
@@ -29906,7 +29919,10 @@ export function App() {
       if (!abortSignal?.aborted && chatMessagesRef.current.find(
         (message) => message.id === assistantMessageId,
       )?.outputStatus !== "incomplete") {
-        notifyConversationCompleted();
+        notifyConversationCompleted(
+          chatMessagesRef.current.find((message) => message.id === assistantMessageId)?.content ??
+            assistantContent,
+        );
       }
     } catch (error) {
       if (isChatAbortError(error)) {
@@ -30899,7 +30915,7 @@ export function App() {
           });
         }
         if (result.completed && result.finalMessage.outputStatus !== "incomplete") {
-          notifyConversationCompleted();
+          notifyConversationCompleted(result.finalMessage.content);
         }
       } else {
         const assistantMessage = await generateAssistantForMessages(nextMessages, requestSender, {
