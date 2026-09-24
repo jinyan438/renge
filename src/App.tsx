@@ -12494,6 +12494,8 @@ export function App() {
     useState(false);
   const [chatStatusSidebarCollapsed, setChatStatusSidebarCollapsed] = useState(true);
   const [chatClearConfirmationOpen, setChatClearConfirmationOpen] = useState(false);
+  const [chatClearResetting, setChatClearResetting] = useState(false);
+  const [chatClearResetError, setChatClearResetError] = useState("");
   const [mobilePromptPreviewOpen, setMobilePromptPreviewOpen] = useState(false);
 
   useEffect(() => {
@@ -12723,6 +12725,7 @@ export function App() {
   };
   const [tavernRuntimeStatus, setTavernRuntimeStatus] =
     useState<TavernRuntimeStatus>({ state: "idle", message: "" });
+  const [tavernRuntimeResetRevision, setTavernRuntimeResetRevision] = useState(0);
   const tavernRuntimeConfigurationKeyRef = useRef("");
   const tavernRuntimeInitializationRef = useRef<{
     configurationKey: string;
@@ -17701,7 +17704,7 @@ export function App() {
   );
   const htmlPreviewDesiredMountKey = `${activeChatSessionId}:${getHtmlPreviewContentRevision(
     tavernRuntimeConfigurationKey,
-  )}`;
+  )}:${tavernRuntimeResetRevision}`;
   const htmlPreviewSessionReady =
     Boolean(activeChatSessionId) && htmlPreviewReadyMountKey === htmlPreviewDesiredMountKey;
   const promptTemplateExtension = useMemo(
@@ -19669,12 +19672,13 @@ export function App() {
       runtime.destroy();
     };
   }, [
-    // A chat change is delivered through CHAT_CHANGED; rebuilding here would reload
-    // every multi-megabyte Tavern script. Rebuild only when availability/config changes.
+    // Session switches use CHAT_CHANGED to avoid reloading large scripts. A full
+    // session reset increments the revision to rebuild the card runtime explicitly.
     Boolean(activeChatSessionId),
     appDataLoaded,
     promptTemplateEnabled,
     promptTemplateExtension?.updatedAt,
+    tavernRuntimeResetRevision,
     tavernRuntimeConfigurationKey,
   ]);
 
@@ -37058,37 +37062,182 @@ export function App() {
       chatStatus.status === "loading" ||
       (chatMode === "roleplay" && !activeSessionRoleplayCard),
   };
-  const confirmClearActiveChatSession = () => {
+  const reloadCharacterCardsForSessionReset = async (session: ChatSession) => {
+    const currentCards = characterCardsRef.current;
+    const requiredCardId = session.roleplayCharacterCardId;
+    const targetCardId = requiredCardId || activeCharacterCardId;
+    const hasTargetCard = (cards: CharacterCard[]) =>
+      !targetCardId || cards.some((card) => card.id === targetCardId);
+
+    try {
+      await flushTavernPersistenceRef.current();
+    } catch {
+      // Try the card database and its fallbacks even if another app-data store
+      // is temporarily unavailable.
+    }
+
+    let reloadedCards: CharacterCard[] | null = null;
+    if (await saveCharacterCardsToDatabase(currentCards)) {
+      reloadedCards = await loadCharacterCardsFromDatabase();
+    }
+
+    if (!reloadedCards || !hasTargetCard(reloadedCards)) {
+      const persistedData = await loadPersistentAppData();
+      const persistedCards = persistedData.data?.characterCards;
+      if (Array.isArray(persistedCards)) {
+        const normalizedCards = persistedCards.map((card, index) =>
+          normalizeStoredCharacterCard(card, index),
+        );
+        if (hasTargetCard(normalizedCards)) reloadedCards = normalizedCards;
+      }
+    }
+
+    if (!reloadedCards || !hasTargetCard(reloadedCards)) {
+      const localCards = loadCharacterCardsFromStorage(CHARACTER_CARDS_STORAGE_KEY);
+      if (hasTargetCard(localCards)) reloadedCards = localCards;
+    }
+
+    if (!reloadedCards || !hasTargetCard(reloadedCards)) {
+      if (requiredCardId && currentCards.some((card) => card.id === requiredCardId)) {
+        throw new Error("无法从已保存数据重新读取当前绑定的角色卡，请检查角色卡存储后重试。");
+      }
+      return reloadedCards ?? currentCards;
+    }
+
+    const currentCardsById = new Map(currentCards.map((card) => [card.id, card]));
+    return reloadedCards.map((card) =>
+      card.avatarDataUrl
+        ? card
+        : {
+            ...card,
+            avatarDataUrl: currentCardsById.get(card.id)?.avatarDataUrl ?? "",
+          },
+    );
+  };
+
+  const confirmClearActiveChatSession = async () => {
+    if (chatClearResetting) return;
     const sessionId = activeChatSessionIdRef.current;
-    const greeting =
-      chatMode === "roleplay" && activeSessionRoleplayCard
-        ? createRoleplayGreetingMessage(
-            activeSessionRoleplayCard,
-            activeChatSession?.roleplayGreetingIndex ?? 0,
-          )
-        : null;
-    const nextMessages = greeting ? [greeting] : [];
-    commitActiveSessionMessagesAndStatusBar(
-      sessionId,
-      nextMessages,
-      (current) => rebuildStatusBarStateFromMessages(current, nextMessages),
-    );
-    const usageKeyPrefix = `${sessionId}\u0000`;
-    setContextRuntimeUsageByKey((current) =>
-      Object.fromEntries(
-        Object.entries(current).filter(([key]) => !key.startsWith(usageKeyPrefix)),
-      ),
-    );
-    setPiContextUsageByKey((current) =>
-      Object.fromEntries(
-        Object.entries(current).filter(([key]) => !key.startsWith(usageKeyPrefix)),
-      ),
-    );
-    // The visible messages and Pi's persisted session tree are separate stores.
-    // Reset the tree as well so the next turn cannot resume cleared context.
-    void resetPiSession(sessionId).catch(() => undefined);
-    setChatStatus({ status: "idle", message: "" });
-    setChatClearConfirmationOpen(false);
+    const currentSession = chatSessionsRef.current.find((session) => session.id === sessionId);
+    if (!sessionId || !currentSession) {
+      setChatClearResetError("找不到当前会话，请关闭此窗口后重试。");
+      return;
+    }
+    if (
+      activeChatAbortControllerRef.current ||
+      chatGenerationState !== "idle" ||
+      chatStatus.status === "loading" ||
+      heartbeatRunningRef.current ||
+      pendingHeartbeatUpdateRef.current?.sessionId === sessionId
+    ) {
+      setChatClearResetError("请等当前回复结束后再重置会话。");
+      return;
+    }
+
+    setChatClearResetting(true);
+    setChatClearResetError("");
+    setChatStatus({ status: "loading", message: "正在重置当前会话…" });
+
+    try {
+      const reloadedCards = await reloadCharacterCardsForSessionReset(currentSession);
+      if (activeChatSessionIdRef.current !== sessionId) {
+        throw new Error("当前会话已切换，请重新打开重置确认框。");
+      }
+
+      // Visible messages and Pi's persisted tree are separate stores. Wait for
+      // Pi to clear successfully before replacing the session state.
+      await resetPiSession(sessionId);
+
+      const roleplayCardId = currentSession.roleplayCharacterCardId &&
+        reloadedCards.some((card) => card.id === currentSession.roleplayCharacterCardId)
+        ? currentSession.roleplayCharacterCardId
+        : undefined;
+      const roleplayCard = roleplayCardId
+        ? reloadedCards.find((card) => card.id === roleplayCardId)
+        : undefined;
+      const freshSession = createChatSession(
+        currentSession.workspaceKey,
+        currentSession.workspaceName,
+        currentSession.workspacePath,
+        roleplayCardId ? { characterCardId: roleplayCardId, greetingIndex: 0 } : undefined,
+      );
+      let resetSession: ChatSession = {
+        ...freshSession,
+        id: currentSession.id,
+        createdAt: currentSession.createdAt,
+        ...(roleplayCardId && !roleplayCard
+          ? { title: currentSession.title }
+          : {}),
+      };
+      if (roleplayCard) {
+        resetSession = buildRoleplaySession(resetSession, roleplayCard, 0);
+        if (chatModeRef.current !== "roleplay") {
+          resetSession = { ...resetSession, messages: [] };
+        }
+      }
+
+      const nextSessions = chatSessionsRef.current.map((session) =>
+        session.id === sessionId ? resetSession : session,
+      );
+      characterCardsRef.current = reloadedCards;
+      chatSessionsRef.current = nextSessions;
+      chatMessagesRef.current = resetSession.messages;
+      activeAiMessageIdentityRef.current = null;
+      chatScrollFollowLatestRef.current = true;
+      chatReadingFocusRef.current = false;
+      setCharacterCards(reloadedCards);
+      if (!reloadedCards.some((card) => card.id === activeCharacterCardId)) {
+        setActiveCharacterCardId(reloadedCards[0]?.id ?? "");
+      }
+      setChatSessions(nextSessions);
+      setChatMessages(resetSession.messages);
+      setChatInput("");
+      setChatAttachments([]);
+      setEditingChatMessage(null);
+      setChatMessageMenu(null);
+      setChatChoiceDrafts({});
+      setContextRuntimeUsageByKey((current) => {
+        const usageKeyPrefix = `${sessionId}\u0000`;
+        return Object.fromEntries(
+          Object.entries(current).filter(([key]) => !key.startsWith(usageKeyPrefix)),
+        );
+      });
+      setPiContextUsageByKey((current) => {
+        const usageKeyPrefix = `${sessionId}\u0000`;
+        return Object.fromEntries(
+          Object.entries(current).filter(([key]) => !key.startsWith(usageKeyPrefix)),
+        );
+      });
+      contextSummaryCacheRef.current.clear();
+      setPiCompactionPending(false);
+      setTavernRuntimeLogs([]);
+      setTavernRuntimeResetRevision((revision) => revision + 1);
+
+      if (roleplayCard && chatModeRef.current === "roleplay") {
+        processRoleplayGreeting(resetSession, roleplayCard);
+      }
+
+      let persistenceError = "";
+      try {
+        await flushTavernPersistenceRef.current();
+      } catch (error) {
+        persistenceError = error instanceof Error ? error.message : String(error);
+      }
+
+      setChatClearConfirmationOpen(false);
+      setChatStatus({
+        status: persistenceError ? "warning" : "success",
+        message: persistenceError
+          ? `会话已重置，但保存失败：${persistenceError}`
+          : "会话已重置，角色卡已重新读取。",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "会话重置失败。";
+      setChatClearResetError(message);
+      setChatStatus({ status: "error", message });
+    } finally {
+      setChatClearResetting(false);
+    }
   };
   const chatClearConfirmationModal =
     chatClearConfirmationOpen && chatWindowState && !chatWindowState.minimized ? (
@@ -37099,13 +37248,13 @@ export function App() {
         aria-labelledby="chat-clear-confirmation-title"
         aria-describedby="chat-clear-confirmation-description"
         onKeyDown={(event) => {
-          if (event.key === "Escape") {
+          if (event.key === "Escape" && !chatClearResetting) {
             event.preventDefault();
             setChatClearConfirmationOpen(false);
           }
         }}
         onMouseDown={(event) => {
-          if (event.target === event.currentTarget) {
+          if (event.target === event.currentTarget && !chatClearResetting) {
             setChatClearConfirmationOpen(false);
           }
         }}
@@ -37115,16 +37264,22 @@ export function App() {
             <Trash2 size={20} />
           </span>
           <div className="chat-clear-confirmation-copy">
-            <h2 id="chat-clear-confirmation-title">清空当前会话？</h2>
+            <h2 id="chat-clear-confirmation-title">重置当前会话？</h2>
             <p id="chat-clear-confirmation-description">
-              当前对话内容将被清空，相关动态状态会重新计算。此操作无法撤销。
+              消息、脚本变量、元数据、心跳、记忆绑定和状态栏会重置；绑定角色卡将从已保存数据重新读取并重新初始化。此操作无法撤销。
             </p>
+            {chatClearResetError ? (
+              <p className="chat-clear-confirmation-error" role="alert">
+                {chatClearResetError}
+              </p>
+            ) : null}
           </div>
           <div className="chat-clear-confirmation-actions">
             <button
               type="button"
               className="ghost-action"
               autoFocus
+              disabled={chatClearResetting}
               onClick={() => setChatClearConfirmationOpen(false)}
             >
               取消
@@ -37132,10 +37287,11 @@ export function App() {
             <button
               type="button"
               className="chat-clear-confirm-button"
+              disabled={chatClearResetting}
               onClick={confirmClearActiveChatSession}
             >
               <Trash2 size={15} />
-              确认清空
+              {chatClearResetting ? "正在重置…" : "确认重置"}
             </button>
           </div>
         </section>
@@ -37625,10 +37781,17 @@ export function App() {
               <button
                 type="button"
                 className="ghost-action chat-header-icon-action chat-clear-action"
-                disabled={chatMessages.length === 0 || chatStatus.status === "loading"}
-                title="清空当前会话"
-                aria-label="清空当前会话"
-                onClick={() => setChatClearConfirmationOpen(true)}
+                disabled={
+                  !activeChatSession ||
+                  chatGenerationState !== "idle" ||
+                  chatStatus.status === "loading"
+                }
+                title="重置当前会话"
+                aria-label="重置当前会话"
+                onClick={() => {
+                  setChatClearResetError("");
+                  setChatClearConfirmationOpen(true);
+                }}
               >
                 <X size={16} />
               </button>

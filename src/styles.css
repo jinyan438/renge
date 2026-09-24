@@ -5821,6 +5821,11 @@ summary:focus-visible {
   line-height: 1.6;
 }
 
+.chat-clear-confirmation-copy .chat-clear-confirmation-error {
+  margin-top: 8px;
+  color: #a51f29;
+}
+
 .chat-clear-confirmation-actions {
   display: flex;
   grid-column: 1 / -1;
@@ -5852,6 +5857,11 @@ summary:focus-visible {
 .chat-clear-confirm-button:focus-visible {
   background: #971c27;
   outline: 0;
+}
+
+.chat-clear-confirm-button:disabled {
+  cursor: wait;
+  opacity: 0.7;
 }
 
 .roleplay-greeting-selector-backdrop {
