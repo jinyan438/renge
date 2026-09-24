@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildStatusBarConversationSystemPrompt,
+  buildStatusBarConversationHistory,
   buildStatusBarReducerPayload,
   buildStatusBarReducerSystemPrompt,
   buildStatusBarMvuSystemPrompt,
@@ -53,6 +54,20 @@ test("reads status update text from non-string provider response fields", () => 
   assert.equal(getStatusBarResponseText(42), "42");
   assert.equal(getStatusBarResponseText(null), "");
   assert.equal(getStatusBarResponseText(Symbol("unsupported")), "");
+});
+
+test("keeps opening and recent conversation evidence for manual status refresh", () => {
+  const messages = [
+    { role: "assistant", content: "【欢迎你，幸存者，林风。】" },
+    { role: "user", content: "x".repeat(2_000) },
+    { role: "assistant", content: "最近正文：主角继续前进。" },
+  ];
+  const history = buildStatusBarConversationHistory(messages, 2_000);
+
+  assert.match(history, /林风/);
+  assert.match(history, /中间较早对话因长度限制已省略/);
+  assert.match(history, /最近正文：主角继续前进/);
+  assert.ok(history.length <= 2_000);
 });
 
 function createTestState(overrides = {}) {
@@ -500,8 +515,8 @@ test("retries missing markers and maps second-person evidence to the protagonist
   const state = createDefaultStatusBarState();
   const nameItem = state.items.find((item) => item.id === "status-character-name");
   assert.ok(nameItem);
-  nameItem.variableName = "{{char}}";
-  nameItem.description = "对方最主要角色的姓名，而非主角的姓名";
+  nameItem.variableName = "{{user}}";
+  nameItem.description = "主角的姓名";
   state.values[nameItem.id] = "未提及";
   const importantCharacter = createImportantStatusBarCharacter("叶澜");
   state.importantCharacters = [importantCharacter];
@@ -510,7 +525,10 @@ test("retries missing markers and maps second-person evidence to the protagonist
     buildStatusBarSnapshotPayload(
       state,
       "继续",
-      "【欢迎你，来自编号 CN-4419 世界的幸存者，林风。】",
+      "主角继续前进。",
+      {
+        conversationHistory: "【AI 消息 1】\n【欢迎你，来自编号 CN-4419 世界的幸存者，林风。】",
+      },
     ),
   );
   const protagonistName = snapshot.entries.find(
@@ -523,7 +541,8 @@ test("retries missing markers and maps second-person evidence to the protagonist
   assert.equal(protagonistName.currentValue, null);
   assert.equal(protagonistName.placeholder, true);
   assert.match(protagonistName.description, /第二人称身份都属于主角/);
-  assert.doesNotMatch(protagonistName.description, /而非主角的姓名/);
+  assert.match(protagonistName.description, /补充要求：主角的姓名/);
+  assert.match(snapshot.conversationHistory, /林风/);
   assert.match(importantName.description, /叶澜的姓名/);
   assert.match(importantName.description, /不得使用主角或其他角色的姓名/);
 
