@@ -210,6 +210,25 @@ test("trailing assistant history stays in context for Pi continuation requests",
   assert.equal(result.history[1].role, "assistant");
 });
 
+test("Pi exposes the latest user turn as a fallback behind an assistant prefill", () => {
+  const result = convertOpenAiMessagesToPi([
+    { role: "system", content: "Roleplay rules" },
+    { role: "assistant", content: "Opening greeting" },
+    { role: "user", content: "Open the window" },
+    { role: "assistant", content: "<roleplay-response>" },
+  ], {
+    lastUserPromptFallback: true,
+  });
+
+  assert.equal(result.promptMessage, null);
+  assert.equal(result.fallbackPromptMessage.content, "Open the window");
+  assert.deepEqual(result.history.map((message) => message.role), [
+    "assistant",
+    "user",
+    "assistant",
+  ]);
+});
+
 test("Pi image conversion always supplies a valid MIME type", () => {
   const result = convertOpenAiMessagesToPi([
     {

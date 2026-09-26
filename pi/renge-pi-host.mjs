@@ -573,6 +573,7 @@ export function createRengePiHost({
         providerId,
         apiType: provider.apiType,
         modelId: provider.modelId,
+        lastUserPromptFallback: body?.piLastUserPromptFallback === true,
       });
       const settingsManager = SettingsManager.create(cwd, agentDir);
       settingsManager.applyOverrides({
@@ -632,7 +633,8 @@ export function createRengePiHost({
       const sessionFile = sessionKey;
       await ensureSessionFile(sessionFile, piSessionId, cwd);
       const sessionManager = SessionManager.open(sessionFile, sessionDir, cwd);
-      if (sessionManager.buildSessionContext().messages.length === 0) {
+      const isNewSession = sessionManager.buildSessionContext().messages.length === 0;
+      if (isNewSession) {
         if (converted.history.length > 0) {
           sessionManager.appendModelChange(providerId, provider.modelId);
         }
@@ -807,7 +809,13 @@ export function createRengePiHost({
         }
       });
 
-      const prompt = resolvePrompt(converted.promptMessage);
+      // Roleplay presets commonly end with an assistant prefill. On the first
+      // run that full ordering is seeded as history; on later runs history is
+      // already owned by Pi, so recover the new user turn instead of silently
+      // replacing it with "Continue the conversation.".
+      const prompt = resolvePrompt(
+        converted.promptMessage ?? (!isNewSession ? converted.fallbackPromptMessage : null),
+      );
       const pendingPromptTokens = estimatePendingPromptTokens(prompt);
       // PiDeck performs native auto-compaction before a prompt when the
       // context is over the reserve threshold. Keep that behavior even when

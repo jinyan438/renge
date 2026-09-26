@@ -256,10 +256,13 @@ export function convertOpenAiMessagesToPi(messages, options = {}) {
 
   const promptIndex = transcript.at(-1)?.role === "user" ? transcript.length - 1 : -1;
   const promptMessage = promptIndex >= 0 ? transcript[promptIndex] : null;
+  const fallbackPromptMessage = options.lastUserPromptFallback === true && promptIndex < 0
+    ? [...transcript].reverse().find((message) => message.role === "user") ?? null
+    : null;
   const history = promptIndex >= 0
     ? transcript.filter((_, index) => index !== promptIndex)
     : transcript;
-  return { systemPrompt, history, promptMessage };
+  return { systemPrompt, history, promptMessage, fallbackPromptMessage };
 }
 
 export function getPiSamplingParams(request) {

@@ -26102,6 +26102,8 @@ export function App() {
                   ) ?? activeChatPreset?.maxContext ?? 128_000,
                   piCompaction: piCompactionSettings,
                   piSessionScope: getPiSessionScope("main", requestProvider, requestModelId),
+                  piLastUserPromptFallback:
+                    !isContinuation && !isDialogueRewrite && !isLocalRewrite,
                   piSkillPaths: requestPiSkillPaths,
                   mcpConfig: {
                     mcpServers: requestContextSettings.mcpTools
@@ -29349,6 +29351,7 @@ export function App() {
                   ) ?? activeChatPreset?.maxContext ?? 128_000,
                   piCompaction: piCompactionSettings,
                   piSessionScope: getPiSessionScope("main", chatProvider, requestModelId),
+                  piLastUserPromptFallback: true,
                   piSkillPaths: requestPiSkillPaths,
                   mcpConfig: {
                     mcpServers: activeLlmContextSettings.mcpTools

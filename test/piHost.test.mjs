@@ -974,7 +974,7 @@ test("Pi Host resumes the persisted Pi session for the next Renge turn", async (
   const upstreamPort = await listen(upstream);
   const renge = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
   try {
-    const request = (content) => fetch(`${renge.url}/api/pi/chat`, {
+    const request = (content, options = {}) => fetch(`${renge.url}/api/pi/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -982,7 +982,19 @@ test("Pi Host resumes the persisted Pi session for the next Renge turn", async (
         apiBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
         apiKey: "test-key",
         apiType: "chat-completions",
-        request: { model: "test-model", messages: [{ role: "user", content }], stream: true },
+        ...(options.assistantPrefill ? { piLastUserPromptFallback: true } : {}),
+        request: {
+          model: "test-model",
+          messages: options.assistantPrefill
+            ? [
+                { role: "user", content: "first turn" },
+                { role: "assistant", content: "reply-1" },
+                { role: "user", content },
+                { role: "assistant", content: options.assistantPrefill },
+              ]
+            : [{ role: "user", content }],
+          stream: true,
+        },
       }),
     });
     assert.equal((await (await request("first turn")).text()).includes("reply-1"), true);
@@ -993,15 +1005,25 @@ test("Pi Host resumes the persisted Pi session for the next Renge turn", async (
     assert.match(JSON.stringify(resumedMessages), /first turn/);
     assert.match(JSON.stringify(resumedMessages), /second turn/);
 
+    assert.equal(
+      (await (await request("prefilled turn", { assistantPrefill: "<roleplay-response>" })).text())
+        .includes("reply-3"),
+      true,
+    );
+    assert.equal(upstreamRequests.length, 3);
+    const prefilledMessages = upstreamRequests[2].messages;
+    assert.match(JSON.stringify(prefilledMessages), /prefilled turn/);
+    assert.doesNotMatch(JSON.stringify(prefilledMessages), /Continue the conversation/);
+
     const resetResponse = await fetch(`${renge.url}/api/pi/session`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sessionId: "persisted-session" }),
     });
     assert.equal(resetResponse.status, 200);
-    assert.equal((await (await request("fresh turn")).text()).includes("reply-3"), true);
-    assert.equal(upstreamRequests[2].messages.filter((message) => message.role === "user").length, 1);
-    assert.doesNotMatch(JSON.stringify(upstreamRequests[2].messages), /first turn/);
+    assert.equal((await (await request("fresh turn")).text()).includes("reply-4"), true);
+    assert.equal(upstreamRequests[3].messages.filter((message) => message.role === "user").length, 1);
+    assert.doesNotMatch(JSON.stringify(upstreamRequests[3].messages), /first turn/);
   } finally {
     await close(renge.server);
     await close(upstream);
