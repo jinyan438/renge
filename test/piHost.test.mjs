@@ -1015,15 +1015,89 @@ test("Pi Host resumes the persisted Pi session for the next Renge turn", async (
     assert.match(JSON.stringify(prefilledMessages), /prefilled turn/);
     assert.doesNotMatch(JSON.stringify(prefilledMessages), /Continue the conversation/);
 
+    assert.equal(
+      (await (await request("next prefilled turn", { assistantPrefill: "<roleplay-response>" })).text())
+        .includes("reply-4"),
+      true,
+    );
+    assert.equal(upstreamRequests.length, 4);
+    const nextPrefilledMessages = upstreamRequests[3].messages;
+    assert.match(JSON.stringify(nextPrefilledMessages), /next prefilled turn/);
+    assert.match(JSON.stringify(nextPrefilledMessages), /prefilled turn/);
+    assert.doesNotMatch(JSON.stringify(nextPrefilledMessages), /Continue the conversation/);
+
     const resetResponse = await fetch(`${renge.url}/api/pi/session`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sessionId: "persisted-session" }),
     });
     assert.equal(resetResponse.status, 200);
-    assert.equal((await (await request("fresh turn")).text()).includes("reply-4"), true);
-    assert.equal(upstreamRequests[3].messages.filter((message) => message.role === "user").length, 1);
-    assert.doesNotMatch(JSON.stringify(upstreamRequests[3].messages), /first turn/);
+    assert.equal((await (await request("fresh turn")).text()).includes("reply-5"), true);
+    assert.equal(upstreamRequests[4].messages.filter((message) => message.role === "user").length, 1);
+    assert.doesNotMatch(JSON.stringify(upstreamRequests[4].messages), /first turn/);
+  } finally {
+    await close(renge.server);
+    await close(upstream);
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Pi Host treats the current user turn as the prompt when a fresh session ends in an assistant prefill", async () => {
+  let upstreamRequest;
+  const upstream = createServer(async (request, response) => {
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    upstreamRequest = JSON.parse(raw);
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    const base = {
+      id: "fresh-prefill",
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: "test-model",
+    };
+    sendChunk(response, {
+      ...base,
+      choices: [{ index: 0, delta: { role: "assistant", content: "I pet her head." }, finish_reason: null }],
+    });
+    sendChunk(response, {
+      ...base,
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    });
+    response.end("data: [DONE]\n\n");
+  });
+
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-pi-fresh-prefill-test-"));
+  const upstreamPort = await listen(upstream);
+  const renge = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  try {
+    const response = await fetch(`${renge.url}/api/pi/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "fresh-prefill-session",
+        piLastUserPromptFallback: true,
+        apiBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+        apiKey: "test-key",
+        apiType: "chat-completions",
+        request: {
+          model: "test-model",
+          messages: [
+            { role: "assistant", content: "Opening greeting" },
+            { role: "user", content: "摸摸苏念的脑袋" },
+            { role: "assistant", content: "<roleplay-response>" },
+          ],
+          stream: true,
+        },
+      }),
+    });
+
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /I pet her head/);
+    assert.match(JSON.stringify(upstreamRequest.messages), /摸摸苏念的脑袋/);
+    assert.match(JSON.stringify(upstreamRequest.messages), /Opening greeting/);
+    assert.doesNotMatch(JSON.stringify(upstreamRequest.messages), /<roleplay-response>/);
+    assert.doesNotMatch(JSON.stringify(upstreamRequest.messages), /Continue the conversation/);
+    assert.equal(upstreamRequest.messages.filter((message) => message.role === "user").length, 1);
   } finally {
     await close(renge.server);
     await close(upstream);

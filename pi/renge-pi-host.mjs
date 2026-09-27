@@ -809,12 +809,8 @@ export function createRengePiHost({
         }
       });
 
-      // Roleplay presets commonly end with an assistant prefill. On the first
-      // run that full ordering is seeded as history; on later runs history is
-      // already owned by Pi, so recover the new user turn instead of silently
-      // replacing it with "Continue the conversation.".
       const prompt = resolvePrompt(
-        converted.promptMessage ?? (!isNewSession ? converted.fallbackPromptMessage : null),
+        converted.promptMessage ?? converted.fallbackPromptMessage,
       );
       const pendingPromptTokens = estimatePendingPromptTokens(prompt);
       // PiDeck performs native auto-compaction before a prompt when the

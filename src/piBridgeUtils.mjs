@@ -259,9 +259,17 @@ export function convertOpenAiMessagesToPi(messages, options = {}) {
   const fallbackPromptMessage = options.lastUserPromptFallback === true && promptIndex < 0
     ? [...transcript].reverse().find((message) => message.role === "user") ?? null
     : null;
+  const fallbackPromptIndex = fallbackPromptMessage
+    ? transcript.lastIndexOf(fallbackPromptMessage)
+    : -1;
+  const prefillIndex = fallbackPromptIndex >= 0 && transcript.at(-1)?.role === "assistant"
+    ? transcript.length - 1
+    : -1;
   const history = promptIndex >= 0
     ? transcript.filter((_, index) => index !== promptIndex)
-    : transcript;
+    : fallbackPromptIndex >= 0
+      ? transcript.filter((_, index) => index !== fallbackPromptIndex && index !== prefillIndex)
+      : transcript;
   return { systemPrompt, history, promptMessage, fallbackPromptMessage };
 }
 

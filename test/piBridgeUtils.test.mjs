@@ -224,8 +224,6 @@ test("Pi exposes the latest user turn as a fallback behind an assistant prefill"
   assert.equal(result.fallbackPromptMessage.content, "Open the window");
   assert.deepEqual(result.history.map((message) => message.role), [
     "assistant",
-    "user",
-    "assistant",
   ]);
 });
 
