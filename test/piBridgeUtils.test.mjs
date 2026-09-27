@@ -13,6 +13,7 @@ import {
   PI_KERNEL_ID,
   shouldEnablePiTools,
 } from "../src/piBridgeUtils.mjs";
+import { removeAssistantPrefillAfterLatestUser } from "../src/piRoleplayPromptUtils.ts";
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
@@ -38,6 +39,32 @@ test("Pi sampling params leave token-limit field selection to the provider adapt
     top_p: 0.9,
     top_k: 40,
   });
+});
+
+test("roleplay prompt normalization removes assistant prefills after the latest user turn", () => {
+  const messages = [
+    { role: "system", content: "roleplay rules" },
+    { role: "assistant", content: "opening scene" },
+    { role: "user", content: "先去趟厕所" },
+    { role: "assistant", content: "<roleplay-response>" },
+    { role: "system", content: "post-history instructions" },
+  ];
+
+  assert.deepEqual(removeAssistantPrefillAfterLatestUser(messages), [
+    messages[0],
+    messages[1],
+    messages[2],
+    messages[4],
+  ]);
+});
+
+test("roleplay prompt normalization keeps assistant history before the latest user turn", () => {
+  const messages = [
+    { role: "assistant", content: "opening scene" },
+    { role: "user", content: "先去趟厕所" },
+  ];
+
+  assert.strictEqual(removeAssistantPrefillAfterLatestUser(messages), messages);
 });
 
 test("Pi owns reasoning controls so a partial-progress continuation can disable rethinking", () => {

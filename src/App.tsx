@@ -286,6 +286,7 @@ import {
 } from "./chatToolProgressUtils";
 import { createPiStreamingTimeline } from "./piStreamingTimeline";
 import { resolvePiToolAnchor } from "./piToolMessageOrderUtils";
+import { removeAssistantPrefillAfterLatestUser } from "./piRoleplayPromptUtils";
 import {
   chatBubbleStatusLabels,
   getChatBubbleStatus,
@@ -25711,6 +25712,12 @@ export function App() {
         }),
         requestSessionId,
       );
+      if (responseMode === "roleplay") {
+        const normalizedRoleplayMessages = removeAssistantPrefillAfterLatestUser(apiMessages);
+        if (normalizedRoleplayMessages !== apiMessages) {
+          apiMessages.splice(0, apiMessages.length, ...normalizedRoleplayMessages);
+        }
+      }
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);
@@ -29035,6 +29042,12 @@ export function App() {
         }),
         requestSessionId,
       );
+      if (chatMode === "roleplay") {
+        const normalizedRoleplayMessages = removeAssistantPrefillAfterLatestUser(apiMessages);
+        if (normalizedRoleplayMessages !== apiMessages) {
+          apiMessages.splice(0, apiMessages.length, ...normalizedRoleplayMessages);
+        }
+      }
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);
