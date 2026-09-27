@@ -28791,6 +28791,14 @@ export function App() {
       nextMessages = prepared.messages;
       activeUserRequestTextRef.current = effectiveContent;
 
+      // Roleplay prompts may end with an assistant prefill. The persisted Pi
+      // tree cannot be reconciled with the visible Renge history by simply
+      // reusing it, so rebuild the tree from this turn's complete messages in
+      // the same way edited user messages are resent.
+      if (chatMode === "roleplay") {
+        await resetPiSession(requestSessionId);
+      }
+
       abortController = beginChatGeneration();
       activeAiMessageIdentityRef.current = aiMessageIdentity ?? null;
       abortSignal = abortController.signal;
