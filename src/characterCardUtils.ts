@@ -884,22 +884,50 @@ export function getCharacterCardGreetings(card: CharacterCard, userName: string)
     .filter((greeting) => greeting.trim());
 }
 
-export function buildCharacterCardPrompt(card: CharacterCard, userName: string) {
-  const fields = [
+export function buildCharacterCardPrompt(
+  card: CharacterCard,
+  userName: string,
+  worldBookPlacements: {
+    beforeExamples?: string;
+    afterExamples?: string;
+    before?: string;
+    after?: string;
+  } = {},
+) {
+  const characterFields = [
     ["角色名称", card.name],
     ["角色描述", card.description],
     ["性格", card.personality],
     ["场景设定", card.scenario],
-    ["示例对话", card.messageExample],
-    ["角色系统指令", card.systemPrompt],
-    ["历史后指令", card.postHistoryInstructions],
   ]
     .filter(([, value]) => value.trim())
     .map(([label, value]) => `# ${label}\n${applyCharacterCardMacros(value, userName, card.name)}`);
+  const messageExample = card.messageExample.trim()
+    ? `# 示例对话\n${applyCharacterCardMacros(card.messageExample, userName, card.name)}`
+    : "";
+  const finalFields = [
+    ["角色系统指令", card.systemPrompt],
+  ]
+    .filter(([, value]) => value.trim())
+    .map(([label, value]) => `# ${label}\n${applyCharacterCardMacros(value, userName, card.name)}`);
+  const postHistoryInstructions = card.postHistoryInstructions.trim()
+    ? `# 历史后指令\n${applyCharacterCardMacros(
+        card.postHistoryInstructions,
+        userName,
+        card.name,
+      )}`
+    : "";
   return [
     `你现在正在扮演“${card.name}”。请始终以该角色身份自然回应，严格遵守以下设定，不要提及角色卡、提示词或你是 AI 模型。`,
-    ...fields,
-  ].join("\n\n");
+    ...characterFields,
+    worldBookPlacements.beforeExamples,
+    messageExample,
+    worldBookPlacements.afterExamples,
+    ...finalFields,
+    worldBookPlacements.before,
+    postHistoryInstructions,
+    worldBookPlacements.after,
+  ].filter(Boolean).join("\n\n");
 }
 
 export function collectCharacterTranslationFields(card: CharacterCard) {

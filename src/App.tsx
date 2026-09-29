@@ -127,9 +127,11 @@ import {
 } from "./presetUtils";
 import {
   buildWorldBookPrompt,
+  buildWorldBookPromptPlacements,
   createWorldBook,
   createWorldBookEntry,
   importSillyTavernWorldBook,
+  insertWorldBookPromptAtDepth,
   loadWorldBooksFromStorage,
   normalizeActiveWorldBookIds,
   normalizeWorldBook,
@@ -25499,11 +25501,56 @@ export function App() {
         responseMode === "persona" && responderPersona
           ? buildPersonaPrompt(responderPersona)
           : "";
+      const responderCharacterWorldBook = responderCharacterCard
+        ? resolveSessionCharacterWorldBook(
+            activeChatSession,
+            responderCharacterCard,
+            worldBooks,
+          )
+        : null;
+      const includeResponderCharacterWorldBook = Boolean(
+        responderCharacterWorldBook &&
+          !activeWorldBookIds.includes(responderCharacterWorldBook.id),
+      );
+      const worldBookPromptBooks = filterPromptTemplateSpecialEntries(
+        [
+          ...worldBooks.filter(
+            (book) =>
+              !includeResponderCharacterWorldBook ||
+              book.id !== responderCharacterWorldBook?.id,
+          ),
+          ...(includeResponderCharacterWorldBook && responderCharacterWorldBook
+            ? [responderCharacterWorldBook]
+            : []),
+        ],
+        promptTemplateEnabled,
+      );
+      const worldBookPromptBookIds = [
+        ...activeWorldBookIds,
+        ...(includeResponderCharacterWorldBook && responderCharacterWorldBook
+          ? [responderCharacterWorldBook.id]
+          : []),
+      ];
+      const worldBookPromptPlacements = buildWorldBookPromptPlacements(
+        worldBookPromptBooks,
+        worldBookPromptBookIds,
+        messagesForApi.map((message) => ({ role: message.role, content: message.content })),
+        {
+          userName: userProfile.nickname,
+          characterName: responderCharacterCard?.name ?? responderName,
+        },
+      );
       const roleplaySystemPrompt =
         responderCharacterCard
           ? buildCharacterCardPrompt(
               responderCharacterCard,
               userProfile.nickname.trim() || "用户",
+              {
+                beforeExamples: worldBookPromptPlacements.beforeExamples,
+                afterExamples: worldBookPromptPlacements.afterExamples,
+                before: worldBookPromptPlacements.beforeAuthorNote,
+                after: worldBookPromptPlacements.afterAuthorNote,
+              },
             )
           : "";
       const personaMemoryPrompt =
@@ -25616,53 +25663,21 @@ export function App() {
       const heartbeatSystemPrompt = options.exposeHeartbeatTools
         ? buildHeartbeatSystemPrompt(activeChatSession?.heartbeat)
         : "";
-      const worldBookSystemPrompt = buildWorldBookPrompt(
-        filterPromptTemplateSpecialEntries(worldBooks, promptTemplateEnabled),
-        activeWorldBookIds,
-        messagesForApi.map((message) => ({ role: message.role, content: message.content })),
-        {
-          userName: userProfile.nickname,
-          characterName: responderName,
-        },
-      );
-      const responderCharacterWorldBook = responderCharacterCard
-        ? resolveSessionCharacterWorldBook(
-            activeChatSession,
-            responderCharacterCard,
-            worldBooks,
-          )
-        : null;
-      const characterWorldBookSystemPrompt =
-        responderCharacterCard &&
-        responderCharacterWorldBook &&
-        !activeWorldBookIds.includes(responderCharacterWorldBook.id)
-          ? buildWorldBookPrompt(
-              filterPromptTemplateSpecialEntries(
-                [responderCharacterWorldBook],
-                promptTemplateEnabled,
-              ),
-              [responderCharacterWorldBook.id],
-              messagesForApi.map((message) => ({
-                role: message.role,
-                content: message.content,
-              })),
-              {
-                userName: userProfile.nickname,
-                characterName: responderCharacterCard.name,
-              },
-            )
-          : "";
       const systemPrompt = [
         selectedSystemPrompt,
         skillSystemPrompt,
         userProfileSystemPrompt,
         personaSystemPrompt,
+        worldBookPromptPlacements.beforeCharacter,
+        responderCharacterCard ? "" : worldBookPromptPlacements.beforeExamples,
         roleplaySystemPrompt,
+        responderCharacterCard ? "" : worldBookPromptPlacements.afterExamples,
+        worldBookPromptPlacements.afterCharacter,
+        responderCharacterCard ? "" : worldBookPromptPlacements.beforeAuthorNote,
+        responderCharacterCard ? "" : worldBookPromptPlacements.afterAuthorNote,
         personaMemoryPrompt,
         chatSenderContextPrompt,
         multiAgentSystemPrompt,
-        worldBookSystemPrompt,
-        characterWorldBookSystemPrompt,
         toolSystemPrompt,
         mcpToolsSystemPrompt,
         chatChoiceSystemPrompt,
@@ -25707,11 +25722,14 @@ export function App() {
         responderName,
         requestModelId,
       );
-      const apiMessages = injectSessionStatusBarConversationContext(
-        await applyTavernExtensionPromptFilters(preparedApiMessages, {
-          generationAfterCommands: options.generationAfterCommands,
-        }),
-        requestSessionId,
+      const apiMessages = insertWorldBookPromptAtDepth(
+        injectSessionStatusBarConversationContext(
+          await applyTavernExtensionPromptFilters(preparedApiMessages, {
+            generationAfterCommands: options.generationAfterCommands,
+          }),
+          requestSessionId,
+        ),
+        worldBookPromptPlacements.atDepth,
       );
       if (responseMode === "roleplay") {
         const normalizedRoleplayMessages = removeAssistantPrefillAfterLatestUser(apiMessages);
@@ -28895,11 +28913,60 @@ export function App() {
           : "";
       const personaSystemPrompt =
         chatMode === "persona" && chatPersona ? buildPersonaPrompt(chatPersona) : "";
+      const activeCharacterWorldBook = activeSessionRoleplayCard
+        ? resolveSessionCharacterWorldBook(
+            activeChatSession,
+            activeSessionRoleplayCard,
+            worldBooks,
+          )
+        : null;
+      const includeActiveCharacterWorldBook = Boolean(
+        chatMode === "roleplay" &&
+          activeCharacterWorldBook &&
+          !activeWorldBookIds.includes(activeCharacterWorldBook.id),
+      );
+      const worldBookPromptBooks = filterPromptTemplateSpecialEntries(
+        [
+          ...worldBooks.filter(
+            (book) =>
+              !includeActiveCharacterWorldBook ||
+              book.id !== activeCharacterWorldBook?.id,
+          ),
+          ...(includeActiveCharacterWorldBook && activeCharacterWorldBook
+            ? [activeCharacterWorldBook]
+            : []),
+        ],
+        promptTemplateEnabled,
+      );
+      const worldBookPromptBookIds = [
+        ...activeWorldBookIds,
+        ...(includeActiveCharacterWorldBook && activeCharacterWorldBook
+          ? [activeCharacterWorldBook.id]
+          : []),
+      ];
+      const worldBookPromptPlacements = buildWorldBookPromptPlacements(
+        worldBookPromptBooks,
+        worldBookPromptBookIds,
+        messagesForApi.map((message) => ({ role: message.role, content: message.content })),
+        {
+          userName: userProfile.nickname,
+          characterName:
+            chatMode === "roleplay" && activeSessionRoleplayCard
+              ? activeSessionRoleplayCard.name
+              : chatPersona.name,
+        },
+      );
       const roleplaySystemPrompt =
         chatMode === "roleplay" && activeSessionRoleplayCard
           ? buildCharacterCardPrompt(
               activeSessionRoleplayCard,
               userProfile.nickname.trim() || "用户",
+              {
+                beforeExamples: worldBookPromptPlacements.beforeExamples,
+                afterExamples: worldBookPromptPlacements.afterExamples,
+                before: worldBookPromptPlacements.beforeAuthorNote,
+                after: worldBookPromptPlacements.afterAuthorNote,
+              },
             )
           : "";
       const personaMemoryPrompt =
@@ -28943,56 +29010,20 @@ export function App() {
       const heartbeatSystemPrompt = exposeHeartbeatTools
         ? buildHeartbeatSystemPrompt(activeChatSession?.heartbeat)
         : "";
-      const worldBookSystemPrompt = buildWorldBookPrompt(
-        filterPromptTemplateSpecialEntries(worldBooks, promptTemplateEnabled),
-        activeWorldBookIds,
-        messagesForApi.map((message) => ({ role: message.role, content: message.content })),
-        {
-          userName: userProfile.nickname,
-          characterName:
-            chatMode === "roleplay" && activeSessionRoleplayCard
-              ? activeSessionRoleplayCard.name
-              : chatPersona.name,
-        },
-      );
-      const activeCharacterWorldBook = activeSessionRoleplayCard
-        ? resolveSessionCharacterWorldBook(
-            activeChatSession,
-            activeSessionRoleplayCard,
-            worldBooks,
-          )
-        : null;
-      const characterWorldBookSystemPrompt =
-        chatMode === "roleplay" &&
-        activeSessionRoleplayCard &&
-        activeCharacterWorldBook &&
-        !activeWorldBookIds.includes(activeCharacterWorldBook.id)
-          ? buildWorldBookPrompt(
-              filterPromptTemplateSpecialEntries(
-                [activeCharacterWorldBook],
-                promptTemplateEnabled,
-              ),
-              [activeCharacterWorldBook.id],
-              messagesForApi.map((message) => ({
-                role: message.role,
-                content: message.content,
-              })),
-              {
-                userName: userProfile.nickname,
-                characterName: activeSessionRoleplayCard.name,
-              },
-            )
-          : "";
       const systemPrompt = [
         selectedSystemPrompt,
         skillSystemPrompt,
         userProfileSystemPrompt,
         personaSystemPrompt,
+        worldBookPromptPlacements.beforeCharacter,
+        activeSessionRoleplayCard ? "" : worldBookPromptPlacements.beforeExamples,
         roleplaySystemPrompt,
+        activeSessionRoleplayCard ? "" : worldBookPromptPlacements.afterExamples,
+        worldBookPromptPlacements.afterCharacter,
+        activeSessionRoleplayCard ? "" : worldBookPromptPlacements.beforeAuthorNote,
+        activeSessionRoleplayCard ? "" : worldBookPromptPlacements.afterAuthorNote,
         personaMemoryPrompt,
         chatSenderContextPrompt,
-        worldBookSystemPrompt,
-        characterWorldBookSystemPrompt,
         toolSystemPrompt,
         mcpToolsSystemPrompt,
         chatChoiceSystemPrompt,
@@ -29037,11 +29068,14 @@ export function App() {
         responseName,
         requestModelId,
       );
-      const apiMessages = injectSessionStatusBarConversationContext(
-        await applyTavernExtensionPromptFilters(preparedApiMessages, {
-          generationAfterCommands: false,
-        }),
-        requestSessionId,
+      const apiMessages = insertWorldBookPromptAtDepth(
+        injectSessionStatusBarConversationContext(
+          await applyTavernExtensionPromptFilters(preparedApiMessages, {
+            generationAfterCommands: false,
+          }),
+          requestSessionId,
+        ),
+        worldBookPromptPlacements.atDepth,
       );
       if (chatMode === "roleplay") {
         const normalizedRoleplayMessages = removeAssistantPrefillAfterLatestUser(apiMessages);
@@ -35353,6 +35387,8 @@ export function App() {
                             >
                               <option value="before_char">角色定义之前</option>
                               <option value="after_char">角色定义之后</option>
+                              <option value="before_examples">示例对话之前</option>
+                              <option value="after_examples">示例对话之后</option>
                               <option value="before_an">作者注释之前</option>
                               <option value="after_an">作者注释之后</option>
                               <option value="at_depth">指定聊天深度</option>

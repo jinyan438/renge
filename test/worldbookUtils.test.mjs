@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  buildWorldBookPromptPlacements,
   getMatchedWorldBookEntries,
+  insertWorldBookPromptAtDepth,
   normalizeWorldBook,
   normalizeWorldBookEntry,
 } from "../src/worldbookUtils.ts";
 import {
+  buildCharacterCardPrompt,
   exportCharacterCardJson,
   normalizeCharacterCard,
 } from "../src/characterCardUtils.ts";
@@ -69,6 +72,18 @@ test("entry scan depth limits scanned messages and zero disables keyword scans",
   assert.equal(matched(entry, messages, { defaultScanDepth: 0 }), false);
 
   assert.equal(normalizeWorldBookEntry({ scan_depth: 0 }).scanDepth, 0);
+  assert.equal(normalizeWorldBookEntry({ position: 2 }).position, "before_examples");
+  assert.equal(normalizeWorldBookEntry({ position: 3 }).position, "after_examples");
+  assert.equal(
+    normalizeWorldBookEntry({ position: "before_example_messages" }).position,
+    "before_examples",
+  );
+  assert.equal(
+    normalizeWorldBookEntry({ position: "after_example_messages" }).position,
+    "after_examples",
+  );
+  assert.equal(normalizeWorldBookEntry({ position: 5 }).position, "before_an");
+  assert.equal(normalizeWorldBookEntry({ position: 6 }).position, "after_an");
 });
 
 test("SillyTavern slash-delimited regex keys match with their own flags", () => {
@@ -129,6 +144,8 @@ test("character card export and import preserve editable worldbook entry setting
     spec_version: "2.0",
     data: {
       name: "测试角色",
+      mes_example: "示例对话正文。",
+      post_history_instructions: "留在角色中回应。",
       character_book: {
         name: "角色设定",
         entries: [{
@@ -180,4 +197,69 @@ test("character card export and import preserve editable worldbook entry setting
   ]) {
     assert.deepEqual(restoredEntry[key], originalEntry[key], `${key} should survive export/import`);
   }
+
+  const prompt = buildCharacterCardPrompt(card, "User", {
+    beforeExamples: "示例之前的世界书",
+    afterExamples: "示例之后的世界书",
+    before: "作者注释之前的世界书",
+    after: "作者注释之后的世界书",
+  });
+  assert.ok(
+    prompt.indexOf("示例之前的世界书") < prompt.indexOf("# 示例对话"),
+  );
+  assert.ok(
+    prompt.indexOf("# 示例对话") < prompt.indexOf("示例之后的世界书"),
+  );
+  assert.ok(
+    prompt.indexOf("作者注释之前的世界书") < prompt.indexOf("# 历史后指令"),
+  );
+  assert.ok(
+    prompt.indexOf("# 历史后指令") < prompt.indexOf("作者注释之后的世界书"),
+  );
+});
+
+test("worldbook insertion positions produce separate prompt placements", () => {
+  const book = createBook([
+    { uid: "before", keys: ["dragon"], content: "BEFORE", position: "before_char" },
+    { uid: "after", keys: ["dragon"], content: "AFTER", position: "after_char" },
+    { uid: "before-examples", keys: ["dragon"], content: "BEFORE-EXAMPLES", position: "before_examples" },
+    { uid: "after-examples", keys: ["dragon"], content: "AFTER-EXAMPLES", position: "after_examples" },
+    { uid: "before-an", keys: ["dragon"], content: "BEFORE-AN", position: "before_an" },
+    { uid: "after-an", keys: ["dragon"], content: "AFTER-AN", position: "after_an" },
+    { uid: "depth-1", keys: ["dragon"], content: "DEPTH-1", position: "at_depth", depth: 1 },
+    { uid: "depth-3", keys: ["dragon"], content: "DEPTH-3", position: "at_depth", depth: 3 },
+  ]);
+  const placements = buildWorldBookPromptPlacements(
+    [book],
+    [book.id],
+    [{ role: "user", content: "dragon" }],
+  );
+
+  assert.match(placements.beforeCharacter, /BEFORE/);
+  assert.match(placements.afterCharacter, /AFTER/);
+  assert.match(placements.beforeExamples, /BEFORE-EXAMPLES/);
+  assert.match(placements.afterExamples, /AFTER-EXAMPLES/);
+  assert.match(placements.beforeAuthorNote, /BEFORE-AN/);
+  assert.match(placements.afterAuthorNote, /AFTER-AN/);
+  assert.deepEqual(placements.atDepth.map(({ depth }) => depth), [1, 3]);
+  assert.match(placements.atDepth[0].content, /DEPTH-1/);
+  assert.match(placements.atDepth[1].content, /DEPTH-3/);
+});
+
+test("depth insertions are placed relative to chat history", () => {
+  const messages = [
+    { role: "user", content: "old user" },
+    { role: "assistant", content: "old assistant" },
+    { role: "user", content: "latest user" },
+  ];
+  const result = insertWorldBookPromptAtDepth(messages, [
+    { depth: 0, content: "AT-BOTTOM" },
+    { depth: 2, content: "DEPTH-TWO" },
+    { depth: 20, content: "AT-TOP" },
+  ]);
+
+  assert.deepEqual(
+    result.map((message) => message.content),
+    ["AT-TOP", "old user", "DEPTH-TWO", "old assistant", "latest user", "AT-BOTTOM"],
+  );
 });

@@ -147,6 +147,8 @@ export function WorldBookEntryFields({
           >
             <option value="before_char">角色定义之前</option>
             <option value="after_char">角色定义之后</option>
+            <option value="before_examples">示例对话之前</option>
+            <option value="after_examples">示例对话之后</option>
             <option value="before_an">作者注释之前</option>
             <option value="after_an">作者注释之后</option>
             <option value="at_depth">指定聊天深度</option>

@@ -51,7 +51,14 @@ export type TavernRuntimeWorldBookEntry = {
   constant: boolean;
   selective: boolean;
   selectiveLogic: number;
-  position: "before_char" | "after_char" | "before_an" | "after_an" | "at_depth";
+  position:
+    | "before_char"
+    | "after_char"
+    | "before_examples"
+    | "after_examples"
+    | "before_an"
+    | "after_an"
+    | "at_depth";
   depth: number;
   scanDepth: number | null;
   order: number;
@@ -1182,10 +1189,16 @@ function normalizeTavernWorldBookPosition(
   const normalized = String(value ?? "").trim().toLowerCase();
   if (normalized === "before_char" || normalized === "before_character_definition" || normalized === "0") return "before_char";
   if (normalized === "after_char" || normalized === "after_character_definition" || normalized === "1") return "after_char";
-  if (normalized === "before_an" || normalized === "2" || normalized === "5") {
+  if (normalized === "before_examples" || normalized === "before_example_messages" || normalized === "2") {
+    return "before_examples";
+  }
+  if (normalized === "after_examples" || normalized === "after_example_messages" || normalized === "3") {
+    return "after_examples";
+  }
+  if (normalized === "before_an" || normalized === "5") {
     return "before_an";
   }
-  if (normalized === "after_an" || normalized === "3" || normalized === "6") {
+  if (normalized === "after_an" || normalized === "6") {
     return "after_an";
   }
   if (normalized === "at_depth" || normalized.startsWith("at_depth_as_") || normalized === "4") return "at_depth";
@@ -2598,6 +2611,8 @@ export class TavernScriptRuntime {
         type: entry.constant ? "constant" : "selective",
         position: entry.position === "at_depth" ? "at_depth_as_system"
           : entry.position === "before_char" ? "before_character_definition"
+            : entry.position === "before_examples" ? "before_example_messages"
+              : entry.position === "after_examples" ? "after_example_messages"
             : entry.position === "after_char" ? "after_character_definition" : entry.position,
       }));
     };

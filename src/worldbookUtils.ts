@@ -1,6 +1,8 @@
 export type WorldBookPosition =
   | "before_char"
   | "after_char"
+  | "before_examples"
+  | "after_examples"
   | "before_an"
   | "after_an"
   | "at_depth";
@@ -50,6 +52,21 @@ export type BuildWorldBookPromptOptions = {
   probabilitySeed?: string;
 };
 
+export type WorldBookPromptDepthInsertion = {
+  depth: number;
+  content: string;
+};
+
+export type WorldBookPromptPlacements = {
+  beforeCharacter: string;
+  afterCharacter: string;
+  beforeExamples: string;
+  afterExamples: string;
+  beforeAuthorNote: string;
+  afterAuthorNote: string;
+  atDepth: WorldBookPromptDepthInsertion[];
+};
+
 type UnknownRecord = Record<string, unknown>;
 
 const DEFAULT_SCAN_DEPTH = 8;
@@ -94,11 +111,33 @@ function createId(prefix: string) {
 
 function normalizePosition(value: unknown): WorldBookPosition {
   const normalized = String(value ?? "").trim().toLowerCase();
-  if (normalized === "before_char" || normalized === "0") return "before_char";
-  if (normalized === "after_char" || normalized === "1") return "after_char";
-  if (normalized === "before_an" || normalized === "2" || normalized === "5") return "before_an";
-  if (normalized === "after_an" || normalized === "3" || normalized === "6") return "after_an";
-  if (normalized === "at_depth" || normalized === "4") return "at_depth";
+  if (
+    normalized === "before_char" ||
+    normalized === "before_character_definition" ||
+    normalized === "0"
+  ) return "before_char";
+  if (
+    normalized === "after_char" ||
+    normalized === "after_character_definition" ||
+    normalized === "1"
+  ) return "after_char";
+  if (
+    normalized === "before_examples" ||
+    normalized === "before_example_messages" ||
+    normalized === "2"
+  ) return "before_examples";
+  if (
+    normalized === "after_examples" ||
+    normalized === "after_example_messages" ||
+    normalized === "3"
+  ) return "after_examples";
+  if (normalized === "before_an" || normalized === "5") return "before_an";
+  if (normalized === "after_an" || normalized === "6") return "after_an";
+  if (
+    normalized === "at_depth" ||
+    normalized.startsWith("at_depth_as_") ||
+    normalized === "4"
+  ) return "at_depth";
   return "after_char";
 }
 
@@ -425,13 +464,112 @@ function getPositionOrder(position: WorldBookPosition) {
       return 0;
     case "after_char":
       return 1;
-    case "before_an":
+    case "before_examples":
       return 2;
-    case "after_an":
+    case "after_examples":
       return 3;
-    case "at_depth":
+    case "before_an":
       return 4;
+    case "after_an":
+      return 5;
+    case "at_depth":
+      return 6;
   }
+}
+
+function formatWorldBookPromptMatches(
+  matchedEntries: ReturnType<typeof getMatchedWorldBookEntries>,
+  userName: string,
+  characterName: string,
+) {
+  if (matchedEntries.length === 0) return "";
+
+  const groups: Array<{
+    book: WorldBook;
+    matches: ReturnType<typeof getMatchedWorldBookEntries>;
+  }> = [];
+  matchedEntries.forEach((match) => {
+    const current = groups[groups.length - 1];
+    if (current?.book.id === match.book.id) {
+      current.matches.push(match);
+    } else {
+      groups.push({ book: match.book, matches: [match] });
+    }
+  });
+
+  const sections = groups.map(({ book, matches }) => {
+    const entries = matches.map(({ entry }) => {
+      const title = entry.comment.trim() ? `【条目：${entry.comment.trim()}】\n` : "";
+      return `${title}${applyWorldBookMacros(entry.content.trim(), userName, characterName)}`;
+    });
+    const description = book.description.trim() ? `\n${book.description.trim()}` : "";
+    return `【世界书：${book.name}】${description}\n\n${entries.join("\n\n")}`;
+  });
+
+  return [
+    "以下是当前对话已触发的世界书设定。请将其作为事实、规则与背景约束自然应用；不要向用户复述世界书或触发过程。",
+    ...sections,
+  ].join("\n\n");
+}
+
+export function buildWorldBookPromptPlacements(
+  books: WorldBook[],
+  activeBookIds: string[],
+  messages: WorldBookChatMessage[],
+  options: BuildWorldBookPromptOptions = {},
+): WorldBookPromptPlacements {
+  const userName = options.userName?.trim() || "用户";
+  const characterName = options.characterName?.trim() || "助手";
+  const matchedEntries = getMatchedWorldBookEntries(books, activeBookIds, messages, options);
+  const formatPosition = (position: WorldBookPosition) =>
+    formatWorldBookPromptMatches(
+      matchedEntries.filter((match) => match.entry.position === position),
+      userName,
+      characterName,
+    );
+  const atDepthMatches = matchedEntries.filter(
+    (match) => match.entry.position === "at_depth",
+  );
+  const depths = Array.from(new Set(atDepthMatches.map(({ entry }) => entry.depth))).sort(
+    (left, right) => left - right,
+  );
+
+  return {
+    beforeCharacter: formatPosition("before_char"),
+    afterCharacter: formatPosition("after_char"),
+    beforeExamples: formatPosition("before_examples"),
+    afterExamples: formatPosition("after_examples"),
+    beforeAuthorNote: formatPosition("before_an"),
+    afterAuthorNote: formatPosition("after_an"),
+    atDepth: depths.map((depth) => ({
+      depth,
+      content: formatWorldBookPromptMatches(
+        atDepthMatches.filter((match) => match.entry.depth === depth),
+        userName,
+        characterName,
+      ),
+    })),
+  };
+}
+
+export function insertWorldBookPromptAtDepth<T extends { role: string; content: unknown }>(
+  messages: T[],
+  insertions: WorldBookPromptDepthInsertion[],
+): Array<T | { role: "system"; content: string }> {
+  const next: Array<T | { role: "system"; content: string }> = [...messages];
+  const originalLength = next.length;
+  let insertedCount = 0;
+
+  [...insertions]
+    .sort((left, right) => right.depth - left.depth)
+    .forEach(({ depth, content }) => {
+      const baseIndex = Math.max(0, originalLength - Math.max(0, Math.floor(depth)));
+      const index = Math.min(next.length, baseIndex + insertedCount);
+      next.splice(index, 0, { role: "system", content });
+      insertedCount += 1;
+    });
+
+  return next;
 }
 
 export function getMatchedWorldBookEntries(
@@ -475,32 +613,16 @@ export function buildWorldBookPrompt(
   messages: WorldBookChatMessage[],
   options: BuildWorldBookPromptOptions = {},
 ) {
-  const userName = options.userName?.trim() || "用户";
-  const characterName = options.characterName?.trim() || "助手";
-  const matchedEntries = getMatchedWorldBookEntries(books, activeBookIds, messages, options);
-  if (matchedEntries.length === 0) return "";
-
-  const groups: Array<{ book: WorldBook; matches: typeof matchedEntries }> = [];
-  matchedEntries.forEach((match) => {
-    const current = groups[groups.length - 1];
-    if (current?.book.id === match.book.id) {
-      current.matches.push(match);
-    } else {
-      groups.push({ book: match.book, matches: [match] });
-    }
-  });
-
-  const sections = groups.map(({ book, matches }) => {
-    const entries = matches.map(({ entry }) => {
-      const title = entry.comment.trim() ? `【条目：${entry.comment.trim()}】\n` : "";
-      return `${title}${applyWorldBookMacros(entry.content.trim(), userName, characterName)}`;
-    });
-    const description = book.description.trim() ? `\n${book.description.trim()}` : "";
-    return `【世界书：${book.name}】${description}\n\n${entries.join("\n\n")}`;
-  });
-
+  const placements = buildWorldBookPromptPlacements(books, activeBookIds, messages, options);
   return [
-    "以下是当前对话已触发的世界书设定。请将其作为事实、规则与背景约束自然应用；不要向用户复述世界书或触发过程。",
-    ...sections,
-  ].join("\n\n");
+    placements.beforeCharacter,
+    placements.afterCharacter,
+    placements.beforeExamples,
+    placements.afterExamples,
+    placements.beforeAuthorNote,
+    placements.afterAuthorNote,
+    ...placements.atDepth.map(({ content }) => content),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
