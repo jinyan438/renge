@@ -47,6 +47,7 @@ export type BuildWorldBookPromptOptions = {
   userName?: string;
   characterName?: string;
   defaultScanDepth?: number;
+  probabilitySeed?: string;
 };
 
 type UnknownRecord = Record<string, unknown>;
@@ -137,6 +138,17 @@ export function normalizeWorldBookEntry(rawValue: unknown, index = 0): WorldBook
   const strategyType = String(strategy.type ?? "").trim().toLowerCase();
   const fallback = createWorldBookEntry(index);
   const rawEnabled = firstDefined(rawEntry.enabled, rawEntry.disable === undefined ? undefined : !rawEntry.disable);
+  const rawScanDepth = [
+    rawEntry.scanDepth,
+    rawEntry.scan_depth,
+    strategy.scan_depth,
+    extensions.scan_depth,
+  ].find((value) => value !== undefined);
+  const rawProbability = firstDefined(
+    rawEntry.probability,
+    strategy.probability,
+    extensions.probability,
+  );
   return {
     ...fallback,
     id: typeof rawEntry.id === "string" && rawEntry.id.trim() ? rawEntry.id : fallback.id,
@@ -180,34 +192,9 @@ export function normalizeWorldBookEntry(rawValue: unknown, index = 0): WorldBook
       ),
     ),
     scanDepth:
-      firstDefined(
-        rawEntry.scanDepth,
-        rawEntry.scan_depth,
-        strategy.scan_depth,
-        extensions.scan_depth,
-      ) === undefined
+      rawScanDepth === undefined || rawScanDepth === null
         ? null
-        : firstDefined(
-              rawEntry.scanDepth,
-              rawEntry.scan_depth,
-              strategy.scan_depth,
-              extensions.scan_depth,
-            ) === null
-          ? null
-          : Math.max(
-              1,
-              Math.round(
-                toFiniteNumber(
-                  firstDefined(
-                    rawEntry.scanDepth,
-                    rawEntry.scan_depth,
-                    strategy.scan_depth,
-                    extensions.scan_depth,
-                  ),
-                  DEFAULT_SCAN_DEPTH,
-                ),
-              ),
-            ),
+        : Math.max(0, Math.round(toFiniteNumber(rawScanDepth, DEFAULT_SCAN_DEPTH))),
     order: Math.round(
       toFiniteNumber(
         firstDefined(
@@ -224,7 +211,7 @@ export function normalizeWorldBookEntry(rawValue: unknown, index = 0): WorldBook
       Math.max(
         0,
         toFiniteNumber(
-          firstDefined(rawEntry.probability, strategy.probability, extensions.probability),
+          rawProbability,
           100,
         ),
       ),
@@ -236,7 +223,7 @@ export function normalizeWorldBookEntry(rawValue: unknown, index = 0): WorldBook
         strategy.use_probability,
         extensions.useProbability,
       ),
-      false,
+      rawProbability !== undefined,
     ),
     caseSensitive: toBoolean(
       firstDefined(
@@ -351,9 +338,14 @@ function keywordMatches(
 ) {
   if (!keyword) return false;
   const flags = entry.caseSensitive ? "u" : "iu";
-  if (entry.useRegex) {
+  const regexLiteral = keyword.match(/^\/((?:\\.|[^/])*)\/([dgimsuvy]*)$/);
+  if (entry.useRegex || regexLiteral) {
     try {
-      return new RegExp(keyword, flags).test(text);
+      const source = regexLiteral
+        ? regexLiteral[1].replace(/\\\//g, "/")
+        : keyword;
+      const regexFlags = regexLiteral?.[2] || flags;
+      return new RegExp(source, regexFlags).test(text);
     } catch {
       // Invalid imported regular expressions fall back to literal matching.
     }
@@ -389,11 +381,18 @@ function entryMatchesContext(entry: WorldBookEntry, context: string) {
   }
 }
 
-function stableProbabilityPass(entry: WorldBookEntry, context: string) {
+function probabilityPass(
+  entry: WorldBookEntry,
+  context: string,
+  probabilitySeed?: string,
+) {
   if (!entry.useProbability || entry.probability >= 100) return true;
   if (entry.probability <= 0) return false;
+
+  if (!probabilitySeed) return Math.random() * 100 < entry.probability;
+
   let hash = 2166136261;
-  const seed = `${entry.uid}\u0000${context}`;
+  const seed = `${probabilitySeed}\u0000${entry.uid}\u0000${context}`;
   for (let index = 0; index < seed.length; index += 1) {
     hash ^= seed.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
@@ -413,8 +412,9 @@ function getEntryContext(
   defaultScanDepth: number,
 ) {
   const scanDepth = entry.scanDepth ?? defaultScanDepth;
+  if (scanDepth <= 0) return "";
   return messages
-    .slice(-Math.max(1, scanDepth))
+    .slice(-Math.max(1, Math.floor(scanDepth)))
     .map((message) => message.content)
     .join("\n");
 }
@@ -441,7 +441,10 @@ export function getMatchedWorldBookEntries(
   options: BuildWorldBookPromptOptions = {},
 ) {
   const activeIds = new Set(activeBookIds);
-  const defaultScanDepth = Math.max(1, options.defaultScanDepth ?? DEFAULT_SCAN_DEPTH);
+  const defaultScanDepth = Math.max(
+    0,
+    Math.floor(toFiniteNumber(options.defaultScanDepth, DEFAULT_SCAN_DEPTH)),
+  );
   return books
     .filter((book) => activeIds.has(book.id))
     .flatMap((book, bookIndex) =>
@@ -450,7 +453,11 @@ export function getMatchedWorldBookEntries(
         .filter(({ entry }) => {
           if (!entry.enabled || !entry.content.trim()) return false;
           const context = getEntryContext(messages, entry, defaultScanDepth);
-          return entryMatchesContext(entry, context) && stableProbabilityPass(entry, context);
+          if (!entry.constant && (entry.scanDepth ?? defaultScanDepth) <= 0) return false;
+          return (
+            entryMatchesContext(entry, context) &&
+            probabilityPass(entry, context, options.probabilitySeed)
+          );
         }),
     )
     .sort(

@@ -136,6 +136,7 @@ import {
   type WorldBook,
   type WorldBookEntry,
 } from "./worldbookUtils";
+import { WorldBookEntryFields } from "./WorldBookEntryFields";
 import {
   applyRegexScripts,
   createRegexScript,
@@ -32751,35 +32752,25 @@ export function App() {
                                 <small>{entry.enabled ? "启用" : "停用"}</small>
                               </summary>
                               <div>
-                                <div className="character-inline-grid">
-                                  <label className="field">
-                                    <span>条目名称</span>
-                                    <input value={entry.comment} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
-                                      characterBook: { ...editingCharacterCard.characterBook!, entries: editingCharacterCard.characterBook!.entries.map((item) => item.id === entry.id ? { ...item, comment: event.target.value } : item) },
-                                    })} />
-                                  </label>
-                                  <label className="toggle-field compact-toggle">
-                                    <input type="checkbox" checked={entry.enabled} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
-                                      characterBook: { ...editingCharacterCard.characterBook!, entries: editingCharacterCard.characterBook!.entries.map((item) => item.id === entry.id ? { ...item, enabled: event.target.checked } : item) },
-                                    })} />
-                                    <span>启用</span>
-                                  </label>
-                                </div>
-                                <label className="field">
-                                  <span>主关键词（逗号或换行）</span>
-                                  <input value={entry.keys.join(", ")} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
-                                    characterBook: { ...editingCharacterCard.characterBook!, entries: editingCharacterCard.characterBook!.entries.map((item) => item.id === entry.id ? { ...item, keys: event.target.value.split(/[,，\n]/).map((key) => key.trim()).filter(Boolean) } : item) },
-                                  })} />
-                                </label>
-                                <label className="field">
-                                  <span>条目内容</span>
-                                  <textarea rows={16} value={entry.content} onChange={(event) => updateCharacterCard(editingCharacterCard.id, {
-                                    characterBook: { ...editingCharacterCard.characterBook!, entries: editingCharacterCard.characterBook!.entries.map((item) => item.id === entry.id ? { ...item, content: event.target.value } : item) },
-                                  })} />
-                                </label>
-                                <button type="button" className="ghost-action danger" onClick={() => updateCharacterCard(editingCharacterCard.id, {
-                                  characterBook: { ...editingCharacterCard.characterBook!, entries: editingCharacterCard.characterBook!.entries.filter((item) => item.id !== entry.id) },
-                                })}><Trash2 size={14} />删除条目</button>
+                                <WorldBookEntryFields
+                                  entry={entry}
+                                  onChange={(patch) => updateCharacterCard(editingCharacterCard.id, {
+                                    characterBook: {
+                                      ...editingCharacterCard.characterBook!,
+                                      entries: editingCharacterCard.characterBook!.entries.map((item) =>
+                                        item.id === entry.id ? { ...item, ...patch } : item,
+                                      ),
+                                    },
+                                  })}
+                                  onDelete={() => updateCharacterCard(editingCharacterCard.id, {
+                                    characterBook: {
+                                      ...editingCharacterCard.characterBook!,
+                                      entries: editingCharacterCard.characterBook!.entries.filter(
+                                        (item) => item.id !== entry.id,
+                                      ),
+                                    },
+                                  })}
+                                />
                               </div>
                             </details>
                           ))}
@@ -35385,14 +35376,14 @@ export function App() {
                             <span>扫描深度</span>
                             <input
                               type="number"
-                              min="1"
+                              min="0"
                               step="1"
                               value={selectedWorldBookEntry.scanDepth ?? ""}
                               placeholder="默认 8"
                               onChange={(event) =>
                                 updateWorldBookEntry(selectedWorldBookEntry.id, {
                                   scanDepth: event.target.value
-                                    ? Math.max(1, Number(event.target.value))
+                                    ? Math.max(0, Number(event.target.value))
                                     : null,
                                 })
                               }
