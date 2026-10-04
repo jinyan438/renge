@@ -63,6 +63,18 @@ Electron 端和 Web 端共用同一套「项目化桌面」外壳（`src/Desktop
 
 已知边界：脚本本体及其依赖仍需联网加载；原生 Claude / Gemini 协议和酒馆连接管理器预设不是完整实现，建议使用本应用主 API 或 OpenAI-compatible 自定义接口。
 
+### 本地芋圆机脚本
+
+已有 `yuyuan.readable.js`、`assets-list.txt` 和 `yuyuan-assets` 的本地资源包时，在项目目录运行：
+
+```powershell
+node scripts/install-yuyuan.mjs E:\AI\yuyuan
+```
+
+安装器将源码和资源写入应用数据目录的 `tavern-script-assets/yuyuan`，并输出可导入的 `yuyuan.renge.script.json` 路径。在「酒馆脚本」导入该 JSON 后启用，再进入会话点「芋圆机按钮」。默认数据目录为 `%APPDATA%\Renge Agent Lab`，可通过 `RENGE_DATA_DIR` 或安装器第二个参数指定。
+
+本地资源通过 `/tavern-script-assets/` 提供，旧加载器的 `/yuyuan/` 路径也可使用。文件随完整备份保存，重新构建或启动 Electron 不会清除；更新芋圆机资源包时再运行安装器。脚本 iframe 使用 `document.baseURI` 定位宿主页地址。缺失资源返回 404，不会被应用首页 HTML 替代。
+
 ## 运行形态
 
 | 形态 | 启动方式 | 适合场景 | 主要限制或特性 |

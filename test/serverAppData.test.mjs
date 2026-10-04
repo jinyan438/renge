@@ -3,10 +3,11 @@ import { EnvHttpProxyAgent } from "undici";
 import { createUpstreamDispatcherCache, describeUpstreamNetworkError } from "../src/upstreamNetworkUtils.mjs";
 import assert from "node:assert/strict";
 import { createServer, request } from "node:http";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { strToU8, zipSync } from "fflate";
+import { installYuyuan } from "../scripts/install-yuyuan.mjs";
 import {
   normalizeUpstreamErrorMessage,
   parseWindowsProxyServer,
@@ -16,6 +17,60 @@ import {
   normalizeTavernFileName,
   startRengeServer,
 } from "../server.mjs";
+
+test("installed Tavern script assets survive server restarts and missing modules never return HTML", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "renge-local-script-assets-"));
+  const dataDir = join(root, "data");
+  const sourceDir = join(root, "source");
+  await mkdir(join(sourceDir, "yuyuan-assets"), { recursive: true });
+  await writeFile(join(sourceDir, "yuyuan.readable.js"), "window.fixtureLoaded = true;\n");
+  await writeFile(join(sourceDir, "assets-list.txt"), "010_fixture.webp\n");
+  await writeFile(join(sourceDir, "yuyuan-assets", "010_fixture.webp"), Buffer.from("RIFFfixtureWEBP"));
+  const installed = await installYuyuan({ sourceDir, dataDir });
+  const imported = JSON.parse(await readFile(installed.importFile, "utf8"));
+  assert.equal(imported.enabled, false);
+  assert.match(imported.content, /document\.baseURI/);
+  assert.match(imported.content, /\/tavern-script-assets\/yuyuan\//);
+  assert.equal(imported.button.buttons[0].name, "芋圆机按钮");
+  let controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  t.after(async () => {
+    await new Promise(resolve => controller.server.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  });
+  for (const route of ["/tavern-script-assets/yuyuan", "/yuyuan"]) {
+    const script = await fetch(`${controller.url}${route}/yuyuan.readable.js?v=fixture`);
+    assert.equal(script.status, 200);
+    assert.match(script.headers.get("content-type"), /javascript/);
+    assert.equal(script.headers.get("cache-control"), "no-store");
+    assert.equal(await script.text(), "window.fixtureLoaded = true;\n");
+    const image = await fetch(`${controller.url}${route}/yuyuan-assets/010_fixture.webp`);
+    assert.equal(image.headers.get("content-type"), "image/webp");
+    assert.equal(await image.text(), "RIFFfixtureWEBP");
+    const head = await fetch(`${controller.url}${route}/yuyuan.readable.js`, { method: "HEAD" });
+    assert.equal(head.status, 200);
+    assert.equal(await head.text(), "");
+    const missing = await fetch(`${controller.url}${route}/missing.js`);
+    assert.equal(missing.status, 404);
+    assert.match(missing.headers.get("content-type"), /application\/json/);
+    assert.doesNotMatch(await missing.text(), /<!doctype|<html/i);
+    assert.equal((await fetch(`${controller.url}${route}/yuyuan.readable.js`, { method: "POST" })).status, 405);
+  }
+  for (const route of ["/tavern-script-assets/yuyuan/%2e%2e%2fapp-data.json", "/tavern-script-assets/yuyuan/%5coutside.js", "/yuyuan/%00file.js"]) {
+    assert.equal((await fetch(controller.url + route)).status, 400, route);
+  }
+  const outside = join(root, "outside");
+  await mkdir(outside);
+  await writeFile(join(outside, "secret.js"), "outside");
+  await symlink(outside, join(installed.targetRoot, "escape"), "junction");
+  assert.equal((await fetch(`${controller.url}/tavern-script-assets/yuyuan/escape/secret.js`)).status, 403);
+  const backup = await (await fetch(`${controller.url}/api/app-data/backup-files`)).json();
+  assert.ok(backup.files.some(file => file.path === "tavern-script-assets/yuyuan/yuyuan.readable.js"));
+  await new Promise(resolve => controller.server.close(resolve));
+  controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  const restarted = await fetch(`${controller.url}/yuyuan/yuyuan.readable.js`);
+  assert.equal(restarted.status, 200);
+  assert.equal(await restarted.text(), "window.fixtureLoaded = true;\n");
+});
 
 test("upstream routing follows proxy changes without restarting the app", async (t) => {
   const upstream = createServer((_request, response) => response.end("reachable"));
@@ -414,6 +469,8 @@ test("complete backup export and import include managed application files and im
   await mkdir(join(dataDir, "skills", "existing-skill"), { recursive: true });
   await writeFile(join(dataDir, ".pi", "sessions", "current-session.jsonl"), "current session", "utf8");
   await writeFile(join(dataDir, "skills", "existing-skill", "SKILL.md"), "existing skill", "utf8");
+  await mkdir(join(dataDir, "tavern-script-assets", "yuyuan"), { recursive: true });
+  await writeFile(join(dataDir, "tavern-script-assets", "yuyuan", "stale.js"), "stale script", "utf8");
 
   const controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
   t.after(async () => {
@@ -429,6 +486,7 @@ test("complete backup export and import include managed application files and im
   assert.deepEqual(indexedFiles.map(({ path }) => path), [
     ".pi/sessions/current-session.jsonl",
     "skills/existing-skill/SKILL.md",
+    "tavern-script-assets/yuyuan/stale.js",
   ]);
   const fileResponse = await fetch(
     `${controller.url}/api/app-data/backup-file?path=${encodeURIComponent(indexedFiles[0].path)}`,
@@ -443,6 +501,7 @@ test("complete backup export and import include managed application files and im
     { path: ".pi/sessions/restored-session.jsonl", size: Buffer.byteLength("restored session") },
     { path: "skills/new-skill/SKILL.md", size: Buffer.byteLength("restored skill") },
     { path: "tavern-files/vectors.json", size: Buffer.byteLength("restored vector") },
+    { path: "tavern-script-assets/yuyuan/yuyuan.readable.js", size: Buffer.byteLength("restored script") },
   ];
   const backup = {
     format: "renge-agent-complete-backup",
@@ -481,6 +540,7 @@ test("complete backup export and import include managed application files and im
     "files/.pi/sessions/restored-session.jsonl": strToU8("restored session"),
     "files/skills/new-skill/SKILL.md": strToU8("restored skill"),
     "files/tavern-files/vectors.json": strToU8("restored vector"),
+    "files/tavern-script-assets/yuyuan/yuyuan.readable.js": strToU8("restored script"),
     "unexpected.txt": strToU8("ignored during direct restore"),
   }, { level: 6 });
   const importResponse = await fetch(`${controller.url}/api/app-data/import-complete`, {
@@ -510,6 +570,10 @@ test("complete backup export and import include managed application files and im
     "restored vector",
   );
   await assert.rejects(readFile(join(dataDir, "skills", "existing-skill", "SKILL.md")));
+  await assert.rejects(readFile(join(dataDir, "tavern-script-assets", "yuyuan", "stale.js")));
+  const restoredScript = await fetch(`${controller.url}/tavern-script-assets/yuyuan/yuyuan.readable.js`);
+  assert.equal(restoredScript.status, 200);
+  assert.equal(await restoredScript.text(), "restored script");
   await assert.rejects(readFile(join(dataDir, "unexpected.txt")));
   assert.deepEqual(
     Buffer.from(await (await fetch(`${controller.url}/api/app-data/assets/image-0001.png`)).arrayBuffer()),

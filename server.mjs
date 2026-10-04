@@ -4,7 +4,7 @@ import { copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, renam
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { homedir, networkInterfaces, tmpdir } from "node:os";
-import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
@@ -36,6 +36,7 @@ const completeBackupManagedRoots = [
   "session-images",
   "skills",
   "tavern-files",
+  "tavern-script-assets",
 ];
 const completeBackupMaxBytes = 512 * 1024 * 1024;
 const appDataWriteQueues = new Map();
@@ -672,7 +673,7 @@ async function clearAppData(dataFilePath) {
       );
       ownedFiles.forEach((filePath) => validatedAppDataFiles.delete(filePath));
       await Promise.all(
-        [".pi", "app-data-assets", "extensions", "generated-images", "session-images", "skills", "tavern-files"].map((name) =>
+        ["app-data-assets", ...completeBackupManagedRoots].map((name) =>
           rm(join(dataDirectory, name), { recursive: true, force: true }),
         ),
       );
@@ -3681,6 +3682,54 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
   }
 }
 
+async function serveTavernScriptAsset(request, response, pathname, dataDir) {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    response.writeHead(405, { Allow: "GET, HEAD" });
+    response.end("Method not allowed");
+    return;
+  }
+  let parts;
+  try {
+    // Keep existing locally imported Yuyuan loaders working after migration.
+    const assetPath = pathname.startsWith("/yuyuan/")
+      ? pathname.slice(1)
+      : pathname.slice("/tavern-script-assets/".length);
+    parts = assetPath.split("/").map(decodeURIComponent);
+  } catch {
+    sendJson(response, 400, { error: "非法脚本资源路径" });
+    return;
+  }
+  if (!parts.length || parts.some(part => !part || part === "." || part === ".." || /[\\/:\x00-\x1f]/.test(part))) {
+    sendJson(response, 400, { error: "非法脚本资源路径" });
+    return;
+  }
+  const root = join(dataDir, "tavern-script-assets");
+  try {
+    const rootInfo = await lstat(root);
+    if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) throw new Error("Invalid asset root");
+    const canonicalRoot = await realpath(root);
+    const filePath = await realpath(resolve(root, ...parts));
+    const fromRoot = relative(canonicalRoot, filePath);
+    if (!fromRoot || fromRoot === ".." || fromRoot.startsWith(".." + sep) || isAbsolute(fromRoot)) {
+      sendJson(response, 403, { error: "脚本资源路径越界" });
+      return;
+    }
+    const fileInfo = await stat(filePath);
+    if (!fileInfo.isFile()) throw new Error("Not a file");
+    response.writeHead(200, {
+      "Content-Type": mimeTypes[extname(filePath).toLowerCase()] ?? "application/octet-stream",
+      "Content-Length": fileInfo.size,
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff"
+    });
+    if (request.method === "HEAD") response.end();
+    else await pipeline(createReadStream(filePath), response);
+  } catch {
+    if (!response.headersSent) sendJson(response, 404, { error: "脚本资源不存在，请先安装到应用数据目录。" });
+    else if (!response.writableEnded) response.end();
+  }
+}
+
 async function serveStatic(request, response, pathname) {
   const requestedPath = pathname === "/" ? "/index.html" : pathname;
   const normalizedPath = normalize(decodeURIComponent(requestedPath)).replace(/^(\.\.[/\\])+/, "");
@@ -3810,6 +3859,15 @@ export function startRengeServer(options = {}) {
         url.pathname.startsWith("/api/"))
     ) {
       sendJson(response, 404, { error: "Not found" });
+      return;
+    }
+
+    if (url.pathname.startsWith("/tavern-script-assets/") || url.pathname.startsWith("/yuyuan/")) {
+      if (isHtmlPreviewOrigin) {
+        sendJson(response, 404, { error: "Not found" });
+        return;
+      }
+      await serveTavernScriptAsset(request, response, url.pathname, dataDir);
       return;
     }
 
