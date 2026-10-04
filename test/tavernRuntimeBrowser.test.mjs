@@ -31,6 +31,10 @@ try {
     }],
     characterCards: [{
       id: "fixture-card", name: "Fixture", firstMessage: "The story begins.",
+      extensions: {
+        rengeHeavyExtension: "renge-heavy-extension:" + "embedded script source;".repeat(50000),
+        placeholder: "https://via.placeholder.com/120x80/abcdef/123456?text=local",
+      },
       characterBook: { id: "fixture-book", name: "Fixture World", entries: [
         { uid: "1", comment: "untouched", content: "Keep this entry" },
         { uid: "2", comment: "database", content: "Database content" },
@@ -47,6 +51,45 @@ try {
     await page.waitForFunction(() => window.__rengeRuntimeFixtureReady || window.__ACU_STAR_DB_III_LOADED__, null, { timeout: 90000 });
   };
   await waitForRuntime(page);
+  await page.evaluate(() => {
+    const originalClone = window.structuredClone;
+    const OriginalURL = window.URL;
+    let extensionClones = 0;
+    let scriptUrlParses = 0;
+    window.structuredClone = function (value, ...args) {
+      if (value?.rengeHeavyExtension || value?.extensions?.rengeHeavyExtension) extensionClones += 1;
+      return originalClone(value, ...args);
+    };
+    window.URL = class extends OriginalURL {
+      constructor(value, ...args) {
+        if (String(value).startsWith("renge-heavy-extension:")) scriptUrlParses += 1;
+        super(value, ...args);
+      }
+    };
+    try {
+      for (let index = 0; index < 100; index += 1) {
+        const ctx = window.SillyTavern.getContext();
+        if (ctx.name2 !== "Fixture" || ctx.characters[ctx.characterId].name !== "Fixture") throw new Error("Character identity changed");
+        void window.SillyTavern.characterId;
+        void window.SillyTavern.name2;
+        void window.TavernHelper.getCharData().name;
+      }
+      if (extensionClones !== 0) throw new Error(`Identity polling cloned large extensions ${extensionClones} times`);
+      const data = window.TavernHelper.getCharData();
+      const extensions = data.extensions;
+      if (data.extensions !== extensions || extensionClones !== 1) throw new Error("Extension reads did not reuse their snapshot");
+      if (scriptUrlParses !== 0) throw new Error("Embedded script source was parsed as a URL");
+      if (!extensions.placeholder.startsWith("data:image/svg+xml") || extensions.world !== "Fixture World") throw new Error("Extension compatibility was lost");
+      extensions.rengeHeavyExtension = "local edit";
+      if (!window.TavernHelper.getCharData().extensions.rengeHeavyExtension.startsWith("renge-heavy-extension:")) throw new Error("Extension edits leaked into the character card");
+      data.extensions = { replaced: true };
+      if (data.extensions.replaced !== true) throw new Error("Extension replacement failed");
+      if (!JSON.parse(JSON.stringify(data)).extensions.replaced) throw new Error("Extensions were omitted from serialization");
+    } finally {
+      window.structuredClone = originalClone;
+      window.URL = OriginalURL;
+    }
+  });
   const xinghe = await page.evaluate(() => Boolean(window.__ACU_STAR_DB_III_LOADED__));
   if (xinghe) {
     await page.getByText("SP·数据库 IX", { exact: true }).click();

@@ -1087,6 +1087,8 @@ function mergeVariableRecords(
 }
 
 function buildLocalTavernPlaceholderImage(value: string) {
+  // Most values are prose, embedded scripts or data URLs, not remote images.
+  if (!/^[\x00-\x20]*https?:/i.test(value)) return value;
   let url: URL;
   try {
     url = new URL(value);
@@ -3105,38 +3107,41 @@ export class TavernScriptRuntime {
           chatCompletionSettings.model_openai,
         ].find((value) => typeof value === "string" && value.trim()) ?? "",
       ).trim() || (this.adapter.getModelId?.() ?? "");
-    const getContext = () => ({
-      chat: this.getSillyTavernChat(),
-      characters: this.getSillyTavernCharacters(),
-      characterId: getCharacter() ? "0" : undefined,
-      this_chid: getCharacter() ? 0 : undefined,
-      name1: this.adapter.getUserName() || "User",
-      name2: getCharacter()?.name || "Assistant",
-      chatId: this.adapter.getChatId(),
-      eventSource,
-      eventTypes: TAVERN_EVENTS,
-      event_types: TAVERN_EVENTS,
-      chatMetadata,
-      chat_metadata: chatMetadata,
-      extensionSettings,
-      extension_settings: extensionSettings,
-      saveChat,
-      saveSettingsDebounced,
-      setChatMessages,
-      deleteLastMessage,
-      stopGeneration,
-      updateChatMetadata,
-      loadWorldInfo,
-      getWorldBooks: getLorebooks,
-      createOrReplaceWorldbook,
-      replaceWorldbook,
-      deleteWorldbook,
-      rebindGlobalWorldbooks,
-      getOrCreateChatWorldbook,
-      chatCompletionSettings,
-      powerUserSettings: {},
-      getRequestHeaders: () => ({ "Content-Type": "application/json" }),
-    });
+    const getContext = () => {
+      const character = this.adapter.getCharacter();
+      return {
+        chat: this.getSillyTavernChat(),
+        characters: this.getSillyTavernCharacters(),
+        characterId: character ? "0" : undefined,
+        this_chid: character ? 0 : undefined,
+        name1: this.adapter.getUserName() || "User",
+        name2: character?.name || "Assistant",
+        chatId: this.adapter.getChatId(),
+        eventSource,
+        eventTypes: TAVERN_EVENTS,
+        event_types: TAVERN_EVENTS,
+        chatMetadata,
+        chat_metadata: chatMetadata,
+        extensionSettings,
+        extension_settings: extensionSettings,
+        saveChat,
+        saveSettingsDebounced,
+        setChatMessages,
+        deleteLastMessage,
+        stopGeneration,
+        updateChatMetadata,
+        loadWorldInfo,
+        getWorldBooks: getLorebooks,
+        createOrReplaceWorldbook,
+        replaceWorldbook,
+        deleteWorldbook,
+        rebindGlobalWorldbooks,
+        getOrCreateChatWorldbook,
+        chatCompletionSettings,
+        powerUserSettings: {},
+        getRequestHeaders: () => ({ "Content-Type": "application/json" }),
+      };
+    };
 
     const toastr = {
       success: (message: unknown, title?: unknown) =>
@@ -3291,10 +3296,10 @@ export class TavernScriptRuntime {
     Object.defineProperties(sillyTavern, {
       chat: { get: () => this.getSillyTavernChat(), configurable: true },
       characters: { get: () => this.getSillyTavernCharacters(), configurable: true },
-      characterId: { get: () => (getCharacter() ? "0" : undefined), configurable: true },
-      this_chid: { get: () => (getCharacter() ? 0 : undefined), configurable: true },
+      characterId: { get: () => (this.adapter.getCharacter() ? "0" : undefined), configurable: true },
+      this_chid: { get: () => (this.adapter.getCharacter() ? 0 : undefined), configurable: true },
       name1: { get: () => this.adapter.getUserName() || "User", configurable: true },
-      name2: { get: () => getCharacter()?.name || "Assistant", configurable: true },
+      name2: { get: () => this.adapter.getCharacter()?.name || "Assistant", configurable: true },
       chatId: { get: () => this.adapter.getChatId(), configurable: true },
       generating: { get: () => this.adapter.isGenerating?.() ?? false, configurable: true },
     });
@@ -3515,7 +3520,7 @@ export class TavernScriptRuntime {
       eventClearEvent: (eventName: unknown) => this.eventHandlers.delete(String(eventName)),
       eventClearListener,
       eventClearAll: () => this.eventHandlers.clear(),
-      getCharData: () => getCharacter() ? this.getSillyTavernCharacters()[0]?.data ?? null : null,
+      getCharData: () => this.adapter.getCharacter() ? this.getSillyTavernCharacters()[0]?.data ?? null : null,
       getWorldbookNames,
       getGlobalWorldbookNames,
       getWorldbook,
@@ -3599,9 +3604,9 @@ export class TavernScriptRuntime {
     Object.defineProperties(win, {
       chat: { get: () => this.getSillyTavernChat(), configurable: true },
       characters: { get: () => this.getSillyTavernCharacters(), configurable: true },
-      this_chid: { get: () => (getCharacter() ? 0 : undefined), configurable: true },
+      this_chid: { get: () => (this.adapter.getCharacter() ? 0 : undefined), configurable: true },
       name1: { get: () => this.adapter.getUserName() || "User", configurable: true },
-      name2: { get: () => getCharacter()?.name || "Assistant", configurable: true },
+      name2: { get: () => this.adapter.getCharacter()?.name || "Assistant", configurable: true },
     });
     const promptTemplateApi = (
       globalThis as typeof globalThis & { EjsTemplate?: Record<string, unknown> }
@@ -4019,6 +4024,10 @@ export class TavernScriptRuntime {
       .filter((entry) => entry.id !== character?.id)
       .map((entry) => ({ name: entry.name, avatar: entry.avatarDataUrl || `${entry.id}.png`, data: { name: entry.name } }));
     if (!character) return otherCharacters;
+    // Identity polling should not copy bundled scripts and extension databases.
+    // Materialize an isolated, mutable extension snapshot only when it is read.
+    let extensions: Record<string, unknown> | undefined;
+    const localizeExtensions = () => this.localizePlaceholderImages(cloneValue(character.extensions));
     return [
       {
         name: character.name,
@@ -4030,9 +4039,14 @@ export class TavernScriptRuntime {
           scenario: character.scenario,
           first_mes: character.firstMessage,
           mes_example: character.messageExample,
-          extensions: {
-            ...this.localizePlaceholderImages(cloneValue(character.extensions)),
-            ...(character.worldBook ? { world: character.worldBook.name } : {}),
+          get extensions() {
+            return extensions ??= {
+              ...localizeExtensions(),
+              ...(character.worldBook ? { world: character.worldBook.name } : {}),
+            };
+          },
+          set extensions(value: Record<string, unknown>) {
+            extensions = value;
           },
           character_book: character.worldBook,
         },
