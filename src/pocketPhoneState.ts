@@ -87,6 +87,14 @@ export function normalizePocketState(value: unknown): PocketState {
 
 export function pocketStorageKey(sessionId: string) { return `renge_pocket_phone_v1:${sessionId || "default"}`; }
 
+export function getPocketMessageBubbles(message: Pick<PocketMessage, "role" | "content">): string[] {
+  if (message.role === "user" || /```|~~~/.test(message.content)) return [message.content];
+  const lines = message.content.replace(/\r\n?/g, "\n").split("\n").map(line => line.trim()).filter(Boolean);
+  // Keep lists, tables and other structured replies together.
+  if (lines.some(line => /^(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|\|)/.test(line))) return [message.content];
+  return lines;
+}
+
 export function makePocketContact(input: Pick<PocketContact, "name" | "avatar" | "personality" | "greeting" | "sourceLabel" | "sourceCharacterCardId">): PocketContact {
   if (!input.name.trim()) throw new Error("给这位朋友起个名字吧。");
   if (!input.personality.trim()) throw new Error("写一点角色设定，让 TA 更了解自己吧。");

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 
 import { ArrowLeft, BatteryFull, Check, ChevronRight, Heart, MessageCircle, MoreHorizontal, Plus, Search, Send, Settings, Signal, Sparkles, Square, Users, Wifi, X } from "lucide-react";
 import type { CharacterCard } from "./characterCardUtils";
 import type { AgentPersona } from "./types";
-import { emptyPocketState, makePocketContact, normalizePocketState, pocketId, pocketStorageKey, POCKET_AVATARS, POCKET_THEMES, safePocketAvatar, type PocketContact, type PocketSettings, type PocketState } from "./pocketPhoneState";
+import { emptyPocketState, getPocketMessageBubbles, makePocketContact, normalizePocketState, pocketId, pocketStorageKey, POCKET_AVATARS, POCKET_THEMES, safePocketAvatar, type PocketContact, type PocketSettings, type PocketState } from "./pocketPhoneState";
 import type { PocketContextSync, PocketConversationBuilder } from "./pocketPhoneContext";
 import { requestPocketReply, resolvePocketModel, type PocketProvider } from "./pocketPhoneChat";
 import "./pocket-phone.css";
@@ -216,9 +216,9 @@ export function PocketPhone(props: PocketPhoneProps) {
               <header className="pocket-wechat-header"><button type="button" onClick={() => activeContact ? setContactId("") : setApp("home")} aria-label={activeContact ? "返回微信列表" : "返回手机桌面"}><ArrowLeft size={19} /></button><span><strong>{activeContact?.name || (tab === "contacts" ? "通讯录" : tab === "me" ? "我" : "微信")}</strong>{activeContact && pendingContactId === activeContact.id && <small>对方正在输入…</small>}</span><button type="button" onClick={() => activeContact ? editContact(activeContact) : addContact()} aria-label={activeContact ? "编辑联系人" : "添加联系人"}>{activeContact ? <MoreHorizontal size={22} /> : <Plus size={22} />}</button></header>
               {activeContact ? <>
                 <div className="pocket-conversation pocket-scroll" ref={conversationRef} role="log" aria-label={`${activeContact.name}的聊天记录`} aria-live="polite">
-                  {activeContact.messages.map((message, index) => <div key={message.id}>
+                  {activeContact.messages.map((message, index) => <div key={message.id} className="pocket-message-group" data-message-id={message.id}>
                     {(index === 0 || new Date(message.createdAt).getTime() - new Date(activeContact.messages[index - 1].createdAt).getTime() > 300000) && <time className="pocket-message-time">{new Date(message.createdAt).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })} {formatTime(message.createdAt)}</time>}
-                    <div className={`pocket-message ${message.role}`}><Avatar avatar={message.role === "user" ? props.userProfile.avatarImage || "🍓" : activeContact.avatar} name={message.role === "user" ? nickname : activeContact.name} self={message.role === "user"} /><div className="pocket-message-bubble">{message.content}</div></div>
+                    {getPocketMessageBubbles(message).map((content, segmentIndex) => <div key={segmentIndex} className={`pocket-message ${message.role}`}><Avatar avatar={message.role === "user" ? props.userProfile.avatarImage || "🍓" : activeContact.avatar} name={message.role === "user" ? nickname : activeContact.name} self={message.role === "user"} /><div className="pocket-message-bubble">{content}</div></div>)}
                   </div>)}
                   {pendingContactId === activeContact.id && <div className="pocket-message assistant"><Avatar avatar={activeContact.avatar} name={activeContact.name} /><div className="pocket-typing" aria-label="对方正在输入"><i /><i /><i /></div></div>}
                   {errors[activeContact.id] && <div className="pocket-chat-error" role="alert"><span>{errors[activeContact.id]}</span><div>{canChat && activeContact.messages.at(-1)?.role === "user" && <button type="button" disabled={!!pendingContactId} onClick={() => void sendMessage(true)}>重试回复</button>}<button type="button" onClick={() => setApp("settings")}>手机设置</button></div></div>}

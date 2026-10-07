@@ -16,6 +16,7 @@ let browser;
 let page;
 let server;
 const reply = "给你留了最甜的草莓，我们一起吃吧 🍓";
+let fixtureReply = reply;
 const upstream = createServer(async (request, response) => {
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
@@ -30,8 +31,8 @@ const upstream = createServer(async (request, response) => {
   if (mode === "slow") { mode = "success"; await new Promise(resolve => { releaseSlowReply = resolve; }); }
   response.writeHead(200, { "Content-Type": "application/json" });
   response.end(JSON.stringify(request.url.endsWith("responses")
-    ? { output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: reply }] }] }
-    : { choices: [{ message: { role: "assistant", content: reply } }] }));
+    ? { output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: fixtureReply }] }] }
+    : { choices: [{ message: { role: "assistant", content: fixtureReply } }] }));
 });
 
 try {
@@ -239,6 +240,27 @@ try {
   assert.equal(await page.locator(".chat-message.user").filter({ hasText: "今天想吃草莓" }).count(), 1);
   assert.equal(await page.locator(".chat-message.assistant").filter({ hasText: reply }).count(), 3);
   console.log("PASS: session isolation and saved contacts, history, model and appearance after reload");
+
+  const splitParts = ["哪科没写啊", "抄整份不行的，老李看得出来。哪道不会我下课讲给你。"];
+  fixtureReply = splitParts.join("\r\n\r\n");
+  await send("手机分段测试");
+  const splitGroup = phone.locator(".pocket-message-group").filter({ hasText: splitParts[0] });
+  await splitGroup.locator(".pocket-message-bubble").filter({ hasText: splitParts[1] }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  assert.deepEqual(await splitGroup.locator(".pocket-message-bubble").allTextContents(), splitParts);
+  assert.equal(await splitGroup.locator(".pocket-avatar").count(), 2);
+  const storedReply = await page.evaluate(() => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:phone-one")).contacts.find(contact => contact.name === "奶糖").messages.at(-1));
+  assert.equal(storedReply.content, fixtureReply);
+  fixtureReply = reply;
+  await send("保留原文检验");
+  await phone.locator(".pocket-message.assistant").filter({ hasText: reply }).nth(3).waitFor();
+  assert.equal(requests.at(-1).body.input.filter(message => JSON.stringify(message.content).includes(splitParts[0]) && JSON.stringify(message.content).includes(splitParts[1])).length, 1);
+  await page.reload();
+  await openPhone();
+  await phone.getByRole("button", { name: "打开微信", exact: true }).click();
+  await phone.locator(".pocket-contact-row").filter({ hasText: "奶糖" }).click();
+  assert.deepEqual(await phone.locator(".pocket-message-group").filter({ hasText: splitParts[0] }).locator(".pocket-message-bubble").allTextContents(), splitParts);
+  console.log("PASS: reply paragraphs render as separate bubbles after reload, while storage and shared context retain one original message");
 
   const handle = page.locator(".right-sidebar-resize-handle");
   const bounds = await handle.boundingBox();
