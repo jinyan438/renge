@@ -107,6 +107,24 @@ try {
     assert.equal(mainRequests.length, count + 1);
     await page.locator(".chat-message.assistant").filter({ hasText: mainReply }).nth(count).waitFor();
   }
+  async function openMainMessageMenu(content) {
+    const button = page.locator(".chat-message").filter({ hasText: content }).first().locator(".chat-message-more");
+    await button.scrollIntoViewIfNeeded();
+    // Scrolling intentionally closes message menus. Let that scroll settle
+    // before opening the menu, just as a user clicks after reaching the message.
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await button.click();
+  }
+  async function editMainMessage(content, edited) {
+    await openMainMessageMenu(content);
+    await page.locator(".chat-message-menu").getByRole("button", { name: "编辑", exact: true }).click();
+    await page.locator(".chat-inline-editor textarea").fill(edited);
+    await page.locator(".chat-inline-editor-actions").getByRole("button", { name: "保存", exact: true }).click();
+  }
+  async function deleteMainMessage(content) {
+    await openMainMessageMenu(content);
+    await page.locator(".chat-message-menu").getByRole("button", { name: "删除", exact: true }).click();
+  }
   await page.goto(server.url);
   await openPhone();
   await page.locator(".chat-session-item").filter({ hasText: "Phone One" }).click();
@@ -262,12 +280,27 @@ try {
   await phone.getByLabel("搜索联系人").fill("找不到的朋友");
   await phone.getByText("还没有找到这位朋友", { exact: true }).waitFor();
   console.log("PASS: search and destructive actions require confirmation");
+  // App-data writes are debounced. Wait for the cleared/deleted contact's main
+  // mirrors to reach disk before testing a reload, rather than restoring a stale snapshot.
+  await page.waitForFunction(async () => {
+    const { data } = await fetch("/api/app-data").then(response => response.json());
+    const messages = data.chatSessions.find(session => session.id === "phone-one").messages;
+    return messages.filter(message => message.content === "今天路过花店，看见一盆向日葵，突然想和你分享。").length === 2
+      && messages.filter(message => message.content === "给你留了最甜的草莓，我们一起吃吧 🍓").length === 3
+      && !messages.some(message => message.content === "小月，今天也想和你一起回家。" || message.content === "一起走吧");
+  }, undefined, { polling: 100 });
 
   await page.locator(".chat-session-item").filter({ hasText: "Phone Two" }).click();
   await phone.getByRole("button", { name: "打开微信", exact: true }).click();
   assert.equal(await phone.locator(".pocket-contact-row").count(), 0);
   await page.locator(".chat-session-item").filter({ hasText: "Phone One" }).click();
   assert.equal(await phone.locator(".pocket-device.theme-mint.large-text").count(), 1);
+  await page.waitForFunction(async () => {
+    const { data } = await fetch("/api/app-data").then(response => response.json());
+    const messages = data.chatSessions.find(session => session.id === "phone-one").messages;
+    return messages.filter(message => message.content === "给你留了最甜的草莓，我们一起吃吧 🍓").length === 3
+      && !messages.some(message => message.content === "一起走吧");
+  }, undefined, { polling: 100 });
   await page.reload();
   await openPhone();
   assert.equal(await phone.locator(".pocket-device.theme-mint.large-text").count(), 1);
@@ -450,6 +483,29 @@ try {
   await phone.getByText("queued：月岛的群消息", { exact: true }).waitFor();
   console.log("PASS: group snapshot excludes late sends until the next round, member editing, session isolation and reload persistence");
 
+  await editMainMessage("我们在草莓花园见", "群里改为北街花园见");
+  await phone.getByText("群里改为北街花园见", { exact: true }).waitFor();
+  const editedGroupReply = ["会话改过的月岛群消息", "另一段群消息"];
+  await editMainMessage("queued：月岛的群消息", editedGroupReply.join("\n\n"));
+  const editedGroup = phone.locator(".pocket-message-group").filter({ hasText: editedGroupReply[0] });
+  assert.deepEqual(await editedGroup.locator(".pocket-message-bubble").allTextContents(), editedGroupReply);
+  assert.deepEqual(await editedGroup.locator(".pocket-speaker-name").allTextContents(), ["月岛", "月岛"]);
+  await deleteMainMessage("queued：奶糖的群消息");
+  assert.equal(await phone.getByText("queued：奶糖的群消息", { exact: true }).count(), 0);
+  await deleteMainMessage("@奶糖 放学去画画吗？");
+  assert.equal(await phone.getByText("@奶糖 放学去画画吗？", { exact: true }).count(), 0);
+  const syncedGroup = await page.evaluate(() => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:phone-one")).groups[0]);
+  assert.equal(syncedGroup.messages.find(message => message.content === editedGroupReply.join("\n\n")).speaker.name, "月岛");
+  await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click();
+  await phone.getByRole("button", { name: "打开手机设置", exact: true }).click();
+  await phone.getByRole("button", { name: "草莓奶霜", exact: true }).click();
+  assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:phone-one")).groups[0]), syncedGroup);
+  await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click();
+  await phone.getByRole("button", { name: "打开微信", exact: true }).click();
+  await phone.locator(".pocket-contact-row").filter({ hasText: "草莓茶话会" }).click();
+  await phone.getByText(editedGroupReply[0], { exact: true }).waitFor();
+  console.log("PASS: editing/deleting incoming and outgoing main group records updates phone paragraphs and preserves speakers, with no stale echo");
+
   await phone.getByRole("button", { name: "群聊设置", exact: true }).click();
   await phone.getByRole("button", { name: "清空聊天", exact: true }).click();
   await phone.getByRole("alertdialog").getByRole("button", { name: "确认", exact: true }).click();
@@ -474,6 +530,55 @@ try {
   assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:phone-one")).groups), []);
   groupResponder = undefined;
   console.log("PASS: confirmed clear and dissolve remove only that group's mirrored records, while empty groups can initiate chats");
+
+  await phone.locator(".pocket-contact-row").filter({ hasText: "奶糖" }).click();
+  await editMainMessage("放学一起去画画", "改成周末一起去画画");
+  await phone.getByText("改成周末一起去画画", { exact: true }).waitFor();
+  const editedSingleReply = ["会话改过的奶糖消息", "奶糖的新第二段"];
+  await editMainMessage(batchReply, editedSingleReply.join("\n\n"));
+  assert.deepEqual(await phone.locator(".pocket-message-group").filter({ hasText: editedSingleReply[0] }).locator(".pocket-message-bubble").allTextContents(), editedSingleReply);
+  await deleteMainMessage("记得带上水彩和画本");
+  assert.equal(await phone.getByText("记得带上水彩和画本", { exact: true }).count(), 0);
+  await phone.getByRole("button", { name: "返回右侧工具", exact: true }).click();
+  assert.equal(await phone.count(), 0);
+  await editMainMessage(queuedReply, "关闭手机时改过的消息");
+  await deleteMainMessage(inFlightReply);
+  await page.getByRole("button", { name: /手机.*可爱手机/ }).click();
+  await phone.getByRole("button", { name: "打开微信", exact: true }).click();
+  await phone.locator(".pocket-contact-row").filter({ hasText: "奶糖" }).click();
+  await phone.getByText("关闭手机时改过的消息", { exact: true }).waitFor();
+  assert.equal(await phone.getByText(inFlightReply, { exact: true }).count(), 0);
+  assert.equal(await page.locator(".chat-message").filter({ hasText: inFlightReply }).count(), 0);
+  await page.waitForFunction(async () => {
+    const { data } = await fetch("/api/app-data").then(response => response.json());
+    const messages = data.chatSessions.find(session => session.id === "phone-one").messages;
+    return messages.some(message => message.content === "关闭手机时改过的消息") && !messages.some(message => message.content === "我先看看你发的第一件事。");
+  });
+  await page.reload(); await openPhone();
+  await phone.getByRole("button", { name: "打开微信", exact: true }).click();
+  await phone.locator(".pocket-contact-row").filter({ hasText: "奶糖" }).click();
+  await phone.getByText("关闭手机时改过的消息", { exact: true }).waitFor();
+  assert.equal(await phone.getByText(inFlightReply, { exact: true }).count(), 0);
+  assert.equal(await phone.getByText("记得带上水彩和画本", { exact: true }).count(), 0);
+  assert.deepEqual(await phone.locator(".pocket-message-group").filter({ hasText: editedSingleReply[0] }).locator(".pocket-message-bubble").allTextContents(), editedSingleReply);
+  const syncedReply = "根据修改后的记录收到啦。";
+  fixtureReply = syncedReply;
+  await send("同步后的上下文检查");
+  await phone.getByText(syncedReply, { exact: true }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  for (const text of ["改成周末一起去画画", "会话改过的奶糖消息", "关闭手机时改过的消息"]) assert.ok(JSON.stringify(requests.at(-1).body).includes(text));
+  assert.doesNotMatch(JSON.stringify(requests.at(-1).body), /记得带上水彩和画本|我先看看你发的第一件事。/);
+  mode = "slow"; releaseSlowReply = undefined; fixtureReply = "旧上下文的回复不能保存";
+  await send("会话中稍后修改的待回复消息");
+  while (!releaseSlowReply) await new Promise(resolve => setTimeout(resolve, 10));
+  await editMainMessage("会话中稍后修改的待回复消息", "生成期间改过的待回复消息");
+  releaseSlowReply();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  await phone.getByText("生成期间改过的待回复消息", { exact: true }).waitFor();
+  assert.equal(await phone.getByText(fixtureReply, { exact: true }).count(), 0);
+  assert.equal(await phone.getByRole("button", { name: "发送消息", exact: true }).getAttribute("title"), "生成回复");
+  fixtureReply = reply;
+  console.log("PASS: main single-chat edits/deletes persist with phone closed and after reload, update generation context, and cancel stale in-flight replies");
 
   const handle = page.locator(".right-sidebar-resize-handle");
   const bounds = await handle.boundingBox();

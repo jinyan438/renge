@@ -1,4 +1,4 @@
-import { DEFAULT_POCKET_AVATAR, buildPocketConversation, getPocketPendingMessages, isPocketGroup, safePocketAvatar, type PocketConversation, type PocketGroupMember, type PocketGenerationMode, type PocketRequestMessage } from "./pocketPhoneState";
+import { DEFAULT_POCKET_AVATAR, buildPocketConversation, getPocketPendingMessages, isPocketGroup, safePocketAvatar, type PocketContextDeletion, type PocketConversation, type PocketGroupMember, type PocketGenerationMode, type PocketRequestMessage } from "./pocketPhoneState";
 import { buildWorldBookPromptPlacements, insertWorldBookPromptAtDepth, type WorldBook } from "./worldbookUtils";
 
 export type PocketContextMessage = {
@@ -18,7 +18,7 @@ export type PocketMessageIdentity = {
   groupName?: string;
   speakerId?: string;
 };
-export type PocketContextSync = (sessionId: string, previous: PocketConversation[] | null, contacts: PocketConversation[], nickname: string) => void;
+export type PocketContextSync = (sessionId: string, previous: PocketConversation[] | null, contacts: PocketConversation[], nickname: string, deletedMessages?: PocketContextDeletion[]) => void;
 export type PocketConversationBuilder = (sessionId: string, contact: PocketConversation, user: { nickname: string; bio: string }, mode: PocketGenerationMode, speaker?: PocketGroupMember, excludedMessageIds?: string[]) => PocketRequestMessage[];
 
 export function getPocketMessageIdentity(message: Pick<PocketContextMessage, "source" | "extra">): PocketMessageIdentity | null {
@@ -60,10 +60,11 @@ export function buildPocketHistoryMessage(message: PocketContextMessage, contact
 
 // Existing records keep their injection positions. A live update appends its new
 // records; only a first import sorts the missing local history across contacts.
-export function syncPocketContext<T extends PocketContextMessage>(history: T[], previous: PocketConversation[] | null, contacts: PocketConversation[], nickname: string): Array<T | PocketContextMessage> {
+export function syncPocketContext<T extends PocketContextMessage>(history: T[], previous: PocketConversation[] | null, contacts: PocketConversation[], nickname: string, deletedMessages: PocketContextDeletion[] = []): Array<T | PocketContextMessage> {
   const key = (contactId: string, messageId: string) => JSON.stringify([contactId, messageId]);
   const nextByKey = new Map(contacts.flatMap(contact => contact.messages.map(message => [key(contact.id, message.id), { contact, message }] as const)));
   const previousKeys = new Set(previous?.flatMap(contact => contact.messages.map(message => key(contact.id, message.id))) ?? []);
+  deletedMessages.forEach(message => previousKeys.add(key(message.contactId, message.messageId)));
   const identify = (contact: PocketConversation, message: PocketConversation["messages"][number]): PocketMessageIdentity => ({
     contactId: contact.id, messageId: message.id,
     contactName: isPocketGroup(contact) && message.role === "assistant" ? message.speaker!.name : contact.name,

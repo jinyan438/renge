@@ -127,6 +127,7 @@ import {
 } from "./presetUtils";
 import { buildPocketHistoryMessage, buildSharedPocketConversation, formatPocketContextMessage, getPocketMessageIdentity, pocketContextRevision, syncPocketContext, type PocketContextSync, type PocketConversationBuilder } from "./pocketPhoneContext";
 import { isPocketGroup } from "./pocketPhoneState";
+import { syncPocketPhoneFromContext } from "./pocketPhoneSync";
 import {
   buildWorldBookPrompt,
   buildWorldBookPromptPlacements,
@@ -13408,6 +13409,7 @@ export function App() {
       nextMessages,
       activeAiMessageIdentityRef.current,
     );
+    syncPocketPhoneFromContext(activeChatSessionIdRef.current, currentMessages, decoratedMessages);
     chatMessagesRef.current = decoratedMessages;
     setChatMessages(decoratedMessages);
   };
@@ -13442,6 +13444,7 @@ export function App() {
     updater: (current: StatusBarState) => StatusBarState,
   ) => {
     if (!sessionId || activeChatSessionIdRef.current !== sessionId) return false;
+    syncPocketPhoneFromContext(sessionId, chatMessagesRef.current, nextMessages);
     const timestamp = new Date().toISOString();
     const nextSessions = chatSessionsRef.current.map((session) =>
       session.id === sessionId
@@ -13578,11 +13581,11 @@ export function App() {
     return `${getPiSessionScope("main", provider, modelId)}${typeof revision === "string" && revision ? `-pocket-${revision}` : ""}`;
   };
 
-  const syncPhoneContext: PocketContextSync = (sessionId, previous, contacts, nickname) => {
+  const syncPhoneContext: PocketContextSync = (sessionId, previous, contacts, nickname, deletedMessages) => {
     const session = chatSessionsRef.current.find(candidate => candidate.id === sessionId);
     if (!session) return;
     const history = getMessagesForSession(sessionId);
-    const messages = syncPocketContext(history, previous, contacts, nickname);
+    const messages = syncPocketContext(history, previous, contacts, nickname, deletedMessages);
     if (messages === history) return;
     const timestamp = new Date().toISOString();
     const sessions = chatSessionsRef.current.map(candidate => candidate.id === sessionId ? {

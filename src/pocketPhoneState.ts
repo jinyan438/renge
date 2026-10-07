@@ -40,7 +40,8 @@ export type PocketSettings = {
   modelId: string;
   largeText: boolean;
 };
-export type PocketState = { version: 1; contacts: PocketContact[]; groups: PocketGroup[]; settings: PocketSettings };
+export type PocketContextDeletion = { contactId: string; messageId: string };
+export type PocketState = { version: 1; contacts: PocketContact[]; groups: PocketGroup[]; settings: PocketSettings; deletedContextMessages: PocketContextDeletion[] };
 export type PocketGenerationMode = "reply" | "proactive";
 export type PocketRequestMessage = Pick<PocketMessage, "role" | "content"> | { role: "system"; content: string };
 
@@ -59,7 +60,7 @@ export function pocketId() {
 }
 
 export function emptyPocketState(): PocketState {
-  return { version: 1, contacts: [], groups: [], settings: { theme: "rose", nickname: "", providerId: "", modelId: "", largeText: false } };
+  return { version: 1, contacts: [], groups: [], settings: { theme: "rose", nickname: "", providerId: "", modelId: "", largeText: false }, deletedContextMessages: [] };
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -94,6 +95,14 @@ export function safePocketAvatar(value: unknown) {
 export function normalizePocketState(value: unknown): PocketState {
   const state = emptyPocketState();
   if (!record(value) || value.version !== 1) return state;
+  const deletedKeys = new Set<string>();
+  state.deletedContextMessages = (Array.isArray(value.deletedContextMessages) ? value.deletedContextMessages : []).flatMap(item => {
+    if (!record(item) || !text(item.contactId) || !text(item.messageId)) return [];
+    const key = JSON.stringify([item.contactId, item.messageId]);
+    if (deletedKeys.has(key)) return [];
+    deletedKeys.add(key);
+    return [{ contactId: text(item.contactId), messageId: text(item.messageId) }];
+  });
   if (record(value.settings)) {
     const settings = value.settings;
     state.settings = {

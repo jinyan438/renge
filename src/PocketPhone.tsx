@@ -6,6 +6,7 @@ import { DEFAULT_POCKET_AVATAR, DEFAULT_POCKET_USER_AVATAR, emptyPocketState, ge
 import { makePocketGroup, parsePocketGroupReply, pocketGroupMember, resolvePocketGroup } from "./pocketPhoneGroup";
 import type { PocketContextSync, PocketConversationBuilder } from "./pocketPhoneContext";
 import { requestPocketReply, resolvePocketModel, type PocketProvider } from "./pocketPhoneChat";
+import { applyPocketContextChanges, recordPocketContextDeletions, subscribePocketContextChanges } from "./pocketPhoneSync";
 import "./pocket-phone.css";
 
 type PocketPhoneProps = {
@@ -87,10 +88,10 @@ export function PocketPhone(props: PocketPhoneProps) {
   function updateState(change: (previous: PocketState) => PocketState) {
     const previous = stateRef.current;
     const changed = change(previous);
-    const next = { ...changed, groups: changed.groups.map(group => resolvePocketGroup(group, changed.contacts)) };
+    const next = recordPocketContextDeletions(previous, { ...changed, groups: changed.groups.map(group => resolvePocketGroup(group, changed.contacts)) });
     stateRef.current = next;
     setState(next);
-    props.onSyncContext(props.sessionId, getPocketConversations(previous), getPocketConversations(next), next.settings.nickname.trim() || props.userProfile.nickname.trim() || "小小的我");
+    props.onSyncContext(props.sessionId, getPocketConversations(previous), getPocketConversations(next), next.settings.nickname.trim() || props.userProfile.nickname.trim() || "小小的我", next.deletedContextMessages);
     try { localStorage.setItem(storageKey, JSON.stringify(next)); setStorageWarning(""); }
     catch { setStorageWarning("手机存储空间不足或不可用，这次改动暂未保存。请保留当前页面。"); }
   }
@@ -117,9 +118,21 @@ export function PocketPhone(props: PocketPhoneProps) {
   }
 
   useEffect(() => { const timer = setInterval(() => setNow(new Date()), 15000); return () => clearInterval(timer); }, []);
+  useEffect(() => subscribePocketContextChanges(props.sessionId, (changes, warning) => {
+    const previous = stateRef.current;
+    const next = applyPocketContextChanges(previous, changes);
+    if (next === previous) return;
+    const pending = getPocketConversations(previous).find(conversation => conversation.id === pendingContactId);
+    if (pending && getPocketConversations(next).find(conversation => conversation.id === pending.id) !== pending) {
+      controllerRef.current?.abort();
+    }
+    stateRef.current = next;
+    setState(next);
+    setStorageWarning(warning);
+  }), [props.sessionId, pendingContactId]);
   useEffect(() => {
     mountedRef.current = true;
-    props.onSyncContext(props.sessionId, null, getPocketConversations(stateRef.current), nickname);
+    props.onSyncContext(props.sessionId, null, getPocketConversations(stateRef.current), nickname, stateRef.current.deletedContextMessages);
     return () => { mountedRef.current = false; controllerRef.current?.abort(); };
   }, []);
   useEffect(() => { const node = conversationRef.current; if (node) node.scrollTop = node.scrollHeight; }, [contactId, activeContact?.messages.length, pendingContactId, errors[contactId]]);
