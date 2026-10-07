@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildPocketConversation, DEFAULT_POCKET_AVATAR, emptyPocketState, getPocketGenerationMode, makePocketContact, normalizePocketState, pocketStorageKey, safePocketAvatar } from "../src/pocketPhoneState.ts";
+import { buildPocketConversation, DEFAULT_POCKET_AVATAR, emptyPocketState, getPocketGenerationMode, makePocketContact, normalizePocketState, pocketStorageKey, resetPocketContactChat, safePocketAvatar } from "../src/pocketPhoneState.ts";
 
 const draft = { name: " 奶糖 ", avatar: "🐰", personality: "{{char}} 是 {{user}} 温柔的朋友，喜欢草莓。", greeting: "今天过得好吗？", sourceLabel: "自定义角色" };
 
@@ -37,6 +37,36 @@ test("creating a character requires a name and a role, and preserves the explici
   assert.equal(contact.messages[0].role, "assistant");
   assert.equal(contact.messages[0].content, draft.greeting);
   assert.deepEqual(makePocketContact({ ...draft, greeting: "" }).messages, []);
+});
+
+test("clearing an established chat restores the latest greeting while preserving the saved role and contact", () => {
+  const original = makePocketContact({ ...draft, sourceCharacterCardId: "card" });
+  const contact = { ...original, name: "奶糖同学", personality: "最新设定：{{char}}喜欢蓝莓。", greeting: " {{USER}}，{{CHAR}}带了蓝莓。 ",
+    messages: [...original.messages, { id: "user", role: "user", content: "旧消息", createdAt: original.createdAt },
+      { id: "reply", role: "assistant", content: "旧回复", replyContextMessageId: "user", createdAt: original.createdAt }] };
+  const cleared = resetPocketContactChat(contact, "小月");
+  assert.deepEqual({ ...cleared, messages: [] }, { ...contact, messages: [] });
+  assert.equal(cleared.messages.length, 1);
+  assert.equal(cleared.messages[0].role, "assistant");
+  assert.equal(cleared.messages[0].content, "小月，奶糖同学带了蓝莓。");
+  assert.ok(contact.messages.every(message => message.id !== cleared.messages[0].id));
+  assert.equal(getPocketGenerationMode(cleared), "proactive");
+  const restored = normalizePocketState(JSON.parse(JSON.stringify({ ...emptyPocketState(), contacts: [cleared] }))).contacts[0];
+  assert.deepEqual(restored, cleared);
+  const request = buildPocketConversation(restored, { nickname: "小月", bio: "" });
+  assert.match(request[0].content, /最新设定：奶糖同学喜欢蓝莓/);
+  assert.equal(request[1].content, cleared.messages[0].content);
+  assert.equal(request.some(message => message.content === "旧消息" || message.content === "旧回复"), false);
+  assert.notEqual(resetPocketContactChat(cleared, "小月").messages[0].id, cleared.messages[0].id);
+});
+
+test("clearing a chat without a configured greeting leaves it empty", () => {
+  const contact = makePocketContact({ ...draft, greeting: " " });
+  contact.messages.push({ id: "old", role: "user", content: "你好", createdAt: contact.createdAt });
+  const cleared = resetPocketContactChat(contact, "小月");
+  assert.deepEqual(cleared.messages, []);
+  assert.equal(cleared.personality, contact.personality);
+  assert.equal(getPocketGenerationMode(cleared), "proactive");
 });
 
 test("restoring a phone rejects malformed contacts, duplicate IDs and injected message roles", () => {

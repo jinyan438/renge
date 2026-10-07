@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 
 import { ArrowLeft, BatteryFull, Check, ChevronRight, Heart, MessageCircle, MoreHorizontal, Plus, Search, Send, Settings, Signal, Sparkles, Square, Users, Wifi, X } from "lucide-react";
 import type { CharacterCard } from "./characterCardUtils";
 import type { AgentPersona } from "./types";
-import { DEFAULT_POCKET_AVATAR, DEFAULT_POCKET_USER_AVATAR, emptyPocketState, getPocketConversations, getPocketGenerationMode, getPocketMessageBubbles, isPocketGroup, makePocketContact, normalizePocketState, pocketId, pocketStorageKey, POCKET_AVATARS, POCKET_THEMES, safePocketAvatar, type PocketContact, type PocketConversation, type PocketGroup, type PocketGroupMember, type PocketMessage, type PocketSettings, type PocketState } from "./pocketPhoneState";
+import { DEFAULT_POCKET_AVATAR, DEFAULT_POCKET_USER_AVATAR, emptyPocketState, getPocketConversations, getPocketGenerationMode, getPocketMessageBubbles, isPocketGroup, makePocketContact, normalizePocketState, pocketId, pocketStorageKey, POCKET_AVATARS, POCKET_THEMES, resetPocketContactChat, safePocketAvatar, type PocketContact, type PocketConversation, type PocketGroup, type PocketGroupMember, type PocketMessage, type PocketSettings, type PocketState } from "./pocketPhoneState";
 import { makePocketGroup, parsePocketGroupReply, pocketGroupMember, resolvePocketGroup } from "./pocketPhoneGroup";
 import type { PocketContextSync, PocketConversationBuilder } from "./pocketPhoneContext";
 import { requestPocketReply, resolvePocketModel, type PocketProvider } from "./pocketPhoneChat";
@@ -160,10 +160,16 @@ export function PocketPhone(props: PocketPhoneProps) {
     if (!editor) return;
     try {
       const validated = makePocketContact(editor.draft);
-      if (editor.id) updateContact(editor.id, contact => ({ ...contact, ...editor.draft, name: validated.name, personality: validated.personality, avatar: validated.avatar, greeting: validated.greeting }));
+      if (editor.id) {
+        const previous = stateRef.current.contacts.find(contact => contact.id === editor.id);
+        const roleChanged = previous && (previous.name !== validated.name || previous.personality !== validated.personality || previous.sourceCharacterCardId !== validated.sourceCharacterCardId);
+        const pending = getPocketConversations(stateRef.current).find(contact => contact.id === pendingContactId);
+        // A reply already in flight carries the old role, including group rounds.
+        if (roleChanged && pending && (pending.id === editor.id || isPocketGroup(pending) && pending.members.some(member => member.id === editor.id))) controllerRef.current?.abort();
+        updateContact(editor.id, contact => ({ ...contact, ...editor.draft, name: validated.name, personality: validated.personality, avatar: validated.avatar, greeting: validated.greeting }));
+      }
       else {
-        const greeting = validated.greeting.replace(/\{\{char\}\}/gi, validated.name).replace(/\{\{user\}\}/gi, nickname);
-        const contact = { ...validated, messages: validated.messages.map(message => ({ ...message, content: greeting })) };
+        const contact = resetPocketContactChat(validated, nickname);
         updateState(previous => ({ ...previous, contacts: [...previous.contacts, contact] }));
         openContact(contact);
       }
@@ -303,7 +309,7 @@ export function PocketPhone(props: PocketPhoneProps) {
             <label className="pocket-field">角色设定 <span>性格、身份，以及你们的关系</span><textarea required rows={4} placeholder="TA 是谁？说话是什么语气？和你有什么关系？越具体，聊天就越有角色的感觉。" value={editor.draft.personality} onChange={event => patchDraft({ personality: event.target.value })} /></label>
             <label className="pocket-field">第一句招呼 <span>可选</span><textarea rows={2} placeholder="嗨，今天有没有想我呀？" value={editor.draft.greeting} onChange={event => patchDraft({ greeting: event.target.value })} /></label>{editorError && <p className="pocket-editor-error" role="alert">{editorError}</p>}
             <button type="submit" className="pocket-primary"><Heart size={16} />{editor.id ? "保存小档案" : "添加到通讯录"}</button>
-            {editor.id && <div className="pocket-contact-actions"><button type="button" disabled={pendingContactId === editor.id} onClick={() => { const id = editor.id!; setConfirmation({ title: "清空这段聊天？", description: "联系人会保留，微信及当前会话中的对应记录将清空，无法恢复。", action: () => { updateContact(id, contact => ({ ...contact, messages: [] })); setErrors(previous => ({ ...previous, [id]: "" })); setEditor(null); } }); }}>清空聊天</button><button type="button" disabled={pendingContactId === editor.id} onClick={() => { const id = editor.id!; setConfirmation({ title: "删除这位联系人？", description: "这位朋友和你们的聊天记录将从手机及当前会话中删除。", action: () => { updateState(previous => ({ ...previous, contacts: previous.contacts.filter(contact => contact.id !== id) })); setContactId(""); setEditor(null); } }); }}>删除联系人</button></div>}
+            {editor.id && <div className="pocket-contact-actions"><button type="button" disabled={pendingContactId === editor.id} onClick={() => { const id = editor.id!; setConfirmation({ title: "清空这段聊天？", description: "联系人会保留，微信及当前会话中的对应记录将清空，无法恢复。", action: () => { updateContact(id, contact => resetPocketContactChat(contact, nickname)); setErrors(previous => ({ ...previous, [id]: "" })); setEditor(null); } }); }}>清空聊天</button><button type="button" disabled={pendingContactId === editor.id} onClick={() => { const id = editor.id!; setConfirmation({ title: "删除这位联系人？", description: "这位朋友和你们的聊天记录将从手机及当前会话中删除。", action: () => { updateState(previous => ({ ...previous, contacts: previous.contacts.filter(contact => contact.id !== id) })); setContactId(""); setEditor(null); } }); }}>删除联系人</button></div>}
           </form></div>}
           {groupEditor && <div className="pocket-sheet-backdrop"><form ref={editorRef} className="pocket-sheet pocket-scroll" inert={confirmation ? true : undefined} role="dialog" aria-modal="true" aria-labelledby="pocket-group-title" onSubmit={saveGroup}>
             <header><h3 id="pocket-group-title">{groupEditor.id ? "群聊设置" : "发起群聊"}</h3><button type="button" aria-label="关闭群聊设置" onClick={() => setGroupEditor(null)}><X size={18} /></button></header>

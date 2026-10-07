@@ -180,6 +180,11 @@ export function makePocketContact(input: Pick<PocketContact, "name" | "avatar" |
   };
 }
 
+export function resetPocketContactChat(contact: PocketContact, nickname: string): PocketContact {
+  const greeting = contact.greeting.trim().replace(/\{\{char\}\}/gi, contact.name).replace(/\{\{user\}\}/gi, nickname);
+  return { ...contact, messages: greeting ? [{ id: pocketId(), role: "assistant", content: greeting, createdAt: new Date().toISOString() }] : [] };
+}
+
 export function buildPocketConversation(contact: PocketContact, user: { nickname: string; bio: string }): PocketRequestMessage[] {
   const nickname = user.nickname.trim() || "我";
   const expand = (value: string) => value.replace(/\{\{char\}\}/gi, contact.name).replace(/\{\{user\}\}/gi, nickname);

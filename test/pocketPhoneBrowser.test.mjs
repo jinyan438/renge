@@ -80,6 +80,8 @@ try {
   const pageErrors = [];
   page.on("pageerror", error => pageErrors.push(error.message));
   const phone = page.locator(".pocket-panel");
+  const inputText = message => typeof message.content === "string" ? message.content : message.content.map(part => part.text || "").join("");
+  const readContact = name => page.evaluate(name => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:phone-one")).contacts.find(contact => contact.name === name), name);
   async function openPhone() {
     await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
     await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
@@ -264,17 +266,94 @@ try {
   assert.match(JSON.stringify(requests.at(-1).body), /月岛角色卡世界书/);
   console.log("PASS: character-card import, selectable model, Responses API, themes and large text");
 
+  const originalCardContact = await readContact("月岛");
+  const changedPersonality = "最新角色设定：{{char}}是{{user}}的绘画搭档，说话冷静简洁，喜欢蓝莓。";
+  const changedGreeting = "{{user}}，{{char}}带来了蓝莓画本。";
+  const expandedGreeting = "小月，月岛带来了蓝莓画本。";
+  await phone.getByRole("button", { name: "编辑联系人", exact: true }).click();
+  editor = phone.getByRole("dialog");
+  await editor.getByLabel(/角色设定/).fill(changedPersonality);
+  await editor.getByLabel(/第一句招呼/).fill(changedGreeting);
+  await editor.getByRole("button", { name: "保存小档案", exact: true }).click();
+  assert.deepEqual((await readContact("月岛")).messages, originalCardContact.messages);
+  fixtureReply = "新设定的绘画搭档回复。";
+  await send("修改设定后聊一句");
+  await phone.getByText(fixtureReply, { exact: true }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  let rolePrompt = inputText(requests.at(-1).body.input[0]);
+  assert.match(rolePrompt, /最新角色设定：月岛是小月的绘画搭档，说话冷静简洁，喜欢蓝莓/);
+  assert.doesNotMatch(rolePrompt, /青梅竹马|耐心、可爱/);
+  assert.match(JSON.stringify(requests.at(-1).body), /一起走吧/);
+  assert.match(rolePrompt, /月岛角色卡世界书/);
+  assert.match(rolePrompt, /历史聊天中的人设、称谓或关系若与当前设定冲突，以当前设定为准/);
+  console.log("PASS: editing a role after chatting preserves history and sends the newly saved role to the model");
+
   await phone.getByRole("button", { name: "编辑联系人", exact: true }).click();
   await phone.getByRole("button", { name: "清空聊天", exact: true }).click();
   await phone.getByRole("alertdialog").getByRole("button", { name: "再想想", exact: true }).click();
   await phone.getByRole("button", { name: "关闭联系人编辑", exact: true }).click();
-  assert.equal(await phone.locator(".pocket-message").count(), 3);
+  assert.equal(await phone.locator(".pocket-message").count(), 5);
   await phone.getByRole("button", { name: "编辑联系人", exact: true }).click();
   await phone.getByRole("button", { name: "清空聊天", exact: true }).click();
   await phone.getByRole("alertdialog").getByRole("button", { name: "确认", exact: true }).click();
-  assert.equal(await phone.locator(".pocket-message").count(), 0);
+  assert.equal(await phone.locator(".pocket-message").count(), 1);
+  await phone.getByText(expandedGreeting, { exact: true }).waitFor();
+  assert.equal(await page.locator(".chat-message").filter({ hasText: expandedGreeting }).count(), 1);
   assert.equal(await page.locator(".chat-message").filter({ hasText: "小月，今天也想和你一起回家。" }).count(), 0);
   assert.equal(await page.locator(".chat-message").filter({ hasText: "一起走吧" }).count(), 0);
+  assert.equal(await page.locator(".chat-message").filter({ hasText: "修改设定后聊一句" }).count(), 0);
+  const clearedContact = await readContact("月岛");
+  assert.equal(clearedContact.id, originalCardContact.id);
+  assert.equal(clearedContact.sourceCharacterCardId, "fixture-card");
+  assert.equal(clearedContact.personality, changedPersonality);
+  assert.equal(clearedContact.greeting, changedGreeting);
+  assert.ok(originalCardContact.messages.every(message => message.id !== clearedContact.messages[0].id));
+
+  fixtureReply = "清空后主动发来的蓝莓消息。";
+  await generate();
+  await phone.getByText(fixtureReply, { exact: true }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  rolePrompt = inputText(requests.at(-1).body.input[0]);
+  assert.match(rolePrompt, /最新角色设定：月岛是小月的绘画搭档/);
+  assert.match(rolePrompt, /本次是主动发消息/);
+  assert.ok(requests.at(-1).body.input.some(message => inputText(message) === expandedGreeting));
+  assert.doesNotMatch(JSON.stringify(requests.at(-1).body), /一起走吧|修改设定后聊一句|新设定的绘画搭档回复/);
+
+  const postClearPersonality = "清空后保存的角色设定：{{char}}是{{user}}的摄影搭档，喜欢拍云朵。";
+  await phone.getByRole("button", { name: "编辑联系人", exact: true }).click();
+  editor = phone.getByRole("dialog");
+  await editor.getByLabel(/角色设定/).fill(postClearPersonality);
+  await editor.getByRole("button", { name: "保存小档案", exact: true }).click();
+  fixtureReply = "清空后保存的摄影搭档回复。";
+  await send("清空后设定检查");
+  await phone.getByText(fixtureReply, { exact: true }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  rolePrompt = inputText(requests.at(-1).body.input[0]);
+  assert.match(rolePrompt, /清空后保存的角色设定：月岛是小月的摄影搭档，喜欢拍云朵/);
+  assert.doesNotMatch(rolePrompt, /最新角色设定|青梅竹马/);
+  assert.match(rolePrompt, /月岛角色卡世界书/);
+  const postClearContact = await readContact("月岛");
+  await page.waitForFunction(async greeting => {
+    const { data } = await fetch("/api/app-data").then(response => response.json());
+    const messages = data.chatSessions.find(session => session.id === "phone-one").messages;
+    return messages.some(message => message.content === "清空后保存的摄影搭档回复。")
+      && messages.filter(message => message.content === greeting).length === 1
+      && !messages.some(message => message.content === "一起走吧");
+  }, expandedGreeting);
+  await page.reload(); await openPhone();
+  await phone.getByRole("button", { name: "打开微信", exact: true }).click();
+  await phone.locator(".pocket-contact-row").filter({ hasText: "月岛" }).click();
+  assert.deepEqual(await readContact("月岛"), postClearContact);
+  assert.equal(await phone.getByText(expandedGreeting, { exact: true }).count(), 1);
+  assert.equal(await page.locator(".chat-message").filter({ hasText: expandedGreeting }).count(), 1);
+  fixtureReply = "刷新后仍使用摄影搭档设定。";
+  await generate();
+  await phone.getByText(fixtureReply, { exact: true }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  assert.match(inputText(requests.at(-1).body.input[0]), /清空后保存的角色设定：月岛是小月的摄影搭档/);
+  fixtureReply = reply;
+  console.log("PASS: clearing restores the configured greeting once in both views; saved roles still apply after clearing, editing and reloading");
+
   await phone.getByRole("button", { name: "编辑联系人", exact: true }).click();
   await phone.getByRole("button", { name: "删除联系人", exact: true }).click();
   await phone.getByRole("alertdialog").getByRole("button", { name: "确认", exact: true }).click();
@@ -353,7 +432,6 @@ try {
   assert.equal(requests.length, beforeBatch + 1);
   const batchInput = requests.at(-1).body.input;
   const batchTexts = ["放学一起去画画", "记得带上水彩和画本"];
-  const inputText = message => typeof message.content === "string" ? message.content : message.content.map(part => part.text || "").join("");
   assert.deepEqual(batchInput.filter(message => message.role === "user" && batchTexts.includes(inputText(message))).map(inputText), batchTexts);
 
   const inFlightReply = "我先看看你发的第一件事。";
@@ -583,6 +661,27 @@ try {
   assert.equal(await phone.getByRole("button", { name: "发送消息", exact: true }).getAttribute("title"), "生成回复");
   fixtureReply = reply;
   console.log("PASS: main single-chat edits/deletes persist with phone closed and after reload, update generation context, and cancel stale in-flight replies");
+
+  const roleBeforePendingEdit = await readContact("奶糖");
+  mode = "slow"; releaseSlowReply = undefined; fixtureReply = "旧角色设定的回复不能保存";
+  await generate();
+  while (!releaseSlowReply) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.match(inputText(requests.at(-1).body.input[0]), /活泼可爱，喜欢草莓甜点/);
+  await phone.getByRole("button", { name: "编辑联系人", exact: true }).click();
+  editor = phone.getByRole("dialog");
+  await editor.getByLabel(/角色设定/).fill("更新后的设定：{{char}}是{{user}}的安静朋友，喜欢看星星。");
+  await editor.getByRole("button", { name: "保存小档案", exact: true }).click();
+  releaseSlowReply();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  assert.deepEqual((await readContact("奶糖")).messages, roleBeforePendingEdit.messages);
+  assert.equal(await phone.getByText(fixtureReply, { exact: true }).count(), 0);
+  fixtureReply = "更新后的角色回复。";
+  await generate();
+  await phone.getByText(fixtureReply, { exact: true }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  assert.match(inputText(requests.at(-1).body.input[0]), /更新后的设定：奶糖是小月的安静朋友，喜欢看星星/);
+  assert.doesNotMatch(inputText(requests.at(-1).body.input[0]), /活泼可爱，喜欢草莓甜点/);
+  console.log("PASS: saving a changed role cancels the old in-flight reply and the next generation uses the latest role");
 
   const handle = page.locator(".right-sidebar-resize-handle");
   const bounds = await handle.boundingBox();

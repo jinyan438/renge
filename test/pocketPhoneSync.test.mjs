@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { syncPocketContext } from "../src/pocketPhoneContext.ts";
-import { emptyPocketState, getPocketConversations, getPocketPendingMessages, normalizePocketState } from "../src/pocketPhoneState.ts";
+import { emptyPocketState, getPocketConversations, getPocketPendingMessages, normalizePocketState, resetPocketContactChat } from "../src/pocketPhoneState.ts";
 import { applyPocketContextChanges, getPocketContextChanges, recordPocketContextDeletions, subscribePocketContextChanges, syncPocketPhoneFromContext } from "../src/pocketPhoneSync.ts";
 
 const message = (id, role = "user", extra = {}) => ({ id, role, content: id, createdAt: "2026-10-07T12:00:00Z", ...extra });
@@ -57,6 +57,21 @@ test("saved deletion markers remove stale restored main records while preserving
   assert.equal(recordPocketContextDeletions(cleared, cleared), cleared);
   assert.deepEqual(applyPocketContextChanges(emptyPocketState(), [{ contactId: "restored-only", messageId: "deleted", content: null }]).deletedContextMessages,
     [{ contactId: "restored-only", messageId: "deleted" }]);
+});
+
+test("reset greetings receive fresh identities, mirror at reset time and never restore cleared messages", () => {
+  const friend = { ...contact("friend", [message("greeting", "assistant", { content: "小月，你好！" }), message("sent"), message("reply", "assistant")]), greeting: "{{user}}，你好！", personality: "最新设定" };
+  const state = stateWith([friend, contact("other", [message("other-reply", "assistant")])]);
+  const stale = [...mirror(state), message("main-after-chat")];
+  const cleared = recordPocketContextDeletions(state, { ...state, contacts: [resetPocketContactChat(friend, "小月"), state.contacts[1]] });
+  const next = syncPocketContext(stale, getPocketConversations(state), getPocketConversations(cleared), "小月", cleared.deletedContextMessages);
+  assert.deepEqual(next.map(message => message.content), ["main", "other-reply", "main-after-chat", "小月，你好！"]);
+  assert.equal(next.at(-1).extra.pocketPhone.messageId, cleared.contacts[0].messages[0].id);
+  assert.notEqual(next.at(-1).extra.pocketPhone.messageId, "greeting");
+  const restored = normalizePocketState(JSON.parse(JSON.stringify(cleared)));
+  assert.deepEqual(syncPocketContext(stale, null, getPocketConversations(restored), "小月", restored.deletedContextMessages).map(message => message.content), next.map(message => message.content));
+  assert.equal(syncPocketContext(next, null, getPocketConversations(restored), "小月", restored.deletedContextMessages), next);
+  assert.equal(restored.contacts[0].personality, "最新设定");
 });
 
 test("deleting a covered message repairs reply markers without treating earlier answered messages as pending", () => {
