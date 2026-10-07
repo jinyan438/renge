@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildPocketConversation, emptyPocketState, getPocketGenerationMode, makePocketContact, normalizePocketState, pocketStorageKey, safePocketAvatar } from "../src/pocketPhoneState.ts";
+import { buildPocketConversation, DEFAULT_POCKET_AVATAR, emptyPocketState, getPocketGenerationMode, makePocketContact, normalizePocketState, pocketStorageKey, safePocketAvatar } from "../src/pocketPhoneState.ts";
 
 const draft = { name: " 奶糖 ", avatar: "🐰", personality: "{{char}} 是 {{user}} 温柔的朋友，喜欢草莓。", greeting: "今天过得好吗？", sourceLabel: "自定义角色" };
 
@@ -56,11 +56,26 @@ test("contacts, theme and model selection survive a storage round trip", () => {
   assert.deepEqual(normalizePocketState(JSON.parse(JSON.stringify(state))), state);
 });
 
-test("avatar sources cannot cause remote tracking requests or execute markup", () => {
-  assert.equal(safePocketAvatar("https://example.com/tracker.gif"), "🐰");
-  assert.equal(safePocketAvatar("data:image/svg+xml;base64,PHN2Zz4="), "🐰");
+test("built-in images and legacy choices survive safely, without remote tracking or markup", () => {
+  assert.equal(safePocketAvatar("https://example.com/tracker.gif"), DEFAULT_POCKET_AVATAR);
+  assert.equal(safePocketAvatar("data:image/svg+xml;base64,PHN2Zz4="), DEFAULT_POCKET_AVATAR);
   assert.equal(safePocketAvatar("/api/app-data/assets/local-avatar.png"), "/api/app-data/assets/local-avatar.png");
-  assert.equal(safePocketAvatar("🍓"), "🍓");
+  for (let number = 1; number <= 20; number++) assert.equal(safePocketAvatar(`/touxiang/${number}.png`), `/touxiang/${number}.png`);
+  for (const invalid of ["/touxiang/21.png", "/touxiang/../private.png", "/touxiang/1.png?remote=1"]) assert.equal(safePocketAvatar(invalid), DEFAULT_POCKET_AVATAR);
+  assert.equal(safePocketAvatar("🐰"), "/touxiang/1.png");
+  assert.equal(safePocketAvatar("🍓"), "/touxiang/8.png");
+});
+
+test("old contacts, group members and stored group speakers migrate from emoji to images without losing chat history", () => {
+  const contact = { ...makePocketContact(draft), avatar: "🐱" };
+  const group = { id: "group", name: "朋友群", members: [{ id: contact.id, name: contact.name, avatar: "🌷", personality: contact.personality }],
+    messages: [{ id: "reply", role: "assistant", content: "一起去画画吧", createdAt: contact.createdAt, speaker: { id: contact.id, name: contact.name, avatar: "🦋" } }], createdAt: contact.createdAt };
+  const restored = normalizePocketState({ ...emptyPocketState(), contacts: [contact], groups: [group] });
+  assert.equal(restored.contacts[0].avatar, "/touxiang/2.png");
+  assert.deepEqual(restored.contacts[0].messages, contact.messages);
+  assert.equal(restored.groups[0].members[0].avatar, "/touxiang/7.png");
+  assert.equal(restored.groups[0].messages[0].speaker.avatar, "/touxiang/11.png");
+  assert.equal(restored.groups[0].messages[0].content, "一起去画画吧");
 });
 
 test("role requests expand character macros and only include that contact's recent conversation", () => {

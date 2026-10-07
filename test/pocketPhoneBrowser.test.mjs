@@ -41,6 +41,12 @@ try {
   await mkdir(".runtime", { recursive: true });
   await new Promise(resolve => upstream.listen(0, "127.0.0.1", resolve));
   server = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir: join(root, "data") });
+  await Promise.all(Array.from({ length: 20 }, async (_, index) => {
+    const response = await fetch(`${server.url}/touxiang/${index + 1}.png`);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type"), /^image\/png/);
+    assert.deepEqual([...new Uint8Array(await response.arrayBuffer()).slice(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+  }));
   const now = new Date().toISOString();
   const provider = { id: "fixture-chat", name: "Phone Fixture", apiBaseUrl: `http://127.0.0.1:${upstream.address().port}/v1`, apiKey: "fixture-key", apiType: "chat-completions", modelId: "phone-chat", models: ["phone-chat"], updatedAt: now };
   const seed = {
@@ -112,6 +118,12 @@ try {
   await editor.getByLabel("朋友的名字", { exact: true }).fill("奶糖");
   await editor.getByLabel(/角色设定/).fill("奶糖是小月的好朋友，活泼可爱，喜欢草莓甜点。");
   await editor.getByLabel(/第一句招呼/).fill("{{user}}，一起去买草莓吧！");
+  assert.equal(await editor.locator(".pocket-avatar-picker button").count(), 20);
+  assert.equal(await editor.locator(".pocket-avatar-picker img").count(), 20);
+  await editor.getByRole("button", { name: "选择头像9", exact: true }).click();
+  assert.equal(await editor.locator(".pocket-editor-avatar img").getAttribute("src"), "/touxiang/9.png");
+  await editor.locator(".pocket-avatar-picker").scrollIntoViewIfNeeded();
+  await phone.screenshot({ path: ".runtime/pocket-image-avatars.png", animations: "disabled" });
   await editor.getByRole("button", { name: "添加到通讯录", exact: true }).click();
   await phone.getByText("小月，一起去买草莓吧！", { exact: true }).waitFor();
   await send("今天想吃草莓");
@@ -264,6 +276,8 @@ try {
   await phone.locator(".pocket-contact-row").filter({ hasText: "奶糖" }).click();
   assert.equal(await phone.locator(".pocket-message.user").count(), 3);
   assert.equal(await phone.locator(".pocket-message.assistant").count(), 4);
+  assert.equal(await phone.locator(".pocket-message.assistant .pocket-avatar img").first().getAttribute("src"), "/touxiang/9.png");
+  assert.equal(await phone.locator(".pocket-message.user .pocket-avatar img").first().getAttribute("src"), "/touxiang/20.png");
   assert.equal(await page.locator(".chat-message.user").filter({ hasText: "今天想吃草莓" }).count(), 1);
   assert.equal(await page.locator(".chat-message.assistant").filter({ hasText: reply }).count(), 3);
   console.log("PASS: session isolation and saved contacts, history, model and appearance after reload");

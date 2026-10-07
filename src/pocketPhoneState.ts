@@ -44,7 +44,10 @@ export type PocketState = { version: 1; contacts: PocketContact[]; groups: Pocke
 export type PocketGenerationMode = "reply" | "proactive";
 export type PocketRequestMessage = Pick<PocketMessage, "role" | "content"> | { role: "system"; content: string };
 
-export const POCKET_AVATARS = ["🐰", "🐱", "🐻", "🦊", "🐼", "🐶", "🌷", "🍓", "🌙", "🧸", "🦋", "🍑"];
+export const POCKET_AVATARS = Array.from({ length: 20 }, (_, index) => `/touxiang/${index + 1}.png`);
+export const DEFAULT_POCKET_AVATAR = POCKET_AVATARS[0];
+export const DEFAULT_POCKET_USER_AVATAR = POCKET_AVATARS[19];
+const LEGACY_POCKET_AVATARS = ["🐰", "🐱", "🐻", "🦊", "🐼", "🐶", "🌷", "🍓", "🌙", "🧸", "🦋", "🍑"];
 export const POCKET_THEMES: { id: PocketTheme; name: string; color: string; note: string }[] = [
   { id: "rose", name: "草莓奶霜", color: "#efb4c6", note: "一点点甜，刚刚好" },
   { id: "mint", name: "薄荷布丁", color: "#a9cfc1", note: "把清新的风装进口袋" },
@@ -81,7 +84,11 @@ function normalizeMessages(value: unknown, group = false): PocketMessage[] {
 
 export function safePocketAvatar(value: unknown) {
   const avatar = text(value);
-  return POCKET_AVATARS.includes(avatar) || /^(data:image\/(?:png|jpeg|webp|gif);base64,|\/api\/app-data\/assets\/)/i.test(avatar) ? avatar : "🐰";
+  if (POCKET_AVATARS.includes(avatar) || /^(data:image\/(?:png|jpeg|webp|gif);base64,|\/api\/app-data\/assets\/)/i.test(avatar)) return avatar;
+  // Restore old contacts and group speakers with image avatars, preserving
+  // distinct choices without displaying the retired emoji options.
+  const legacyIndex = LEGACY_POCKET_AVATARS.indexOf(avatar);
+  return legacyIndex >= 0 ? POCKET_AVATARS[legacyIndex] : DEFAULT_POCKET_AVATAR;
 }
 
 export function normalizePocketState(value: unknown): PocketState {

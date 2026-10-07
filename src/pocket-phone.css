@@ -176,7 +176,8 @@
 .pocket-editor-avatar { display: flex; align-items: center; gap: 10px; margin-top: 19px; }
 .pocket-editor-avatar > span:nth-child(2) { display: grid; gap: 5px; font-size: 11px; }
 .pocket-avatar-picker { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; margin: 12px 0 19px; }
-.pocket-avatar-picker button { border-radius: 10px; background: #f6efec; font-family: "Segoe UI Emoji", sans-serif; font-size: 21px; height: 34px; padding: 2px; border: 1px solid transparent; }
+.pocket-avatar-picker button { display: grid; aspect-ratio: 1; min-width: 0; border-radius: 10px; background: #f6efec; padding: 3px; border: 1px solid transparent; }
+.pocket-avatar-picker img { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: 7px; }
 .pocket-avatar-picker button.is-selected { background: var(--pocket-pale); border-color: var(--pocket-accent); }
 .pocket-sheet > .pocket-primary { width: 100%; }
 .pocket-contact-actions { display: flex; gap: 8px; margin-top: 14px; }

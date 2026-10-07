@@ -1,4 +1,4 @@
-import { buildPocketConversation, getPocketPendingMessages, isPocketGroup, safePocketAvatar, type PocketConversation, type PocketGroupMember, type PocketGenerationMode, type PocketRequestMessage } from "./pocketPhoneState";
+import { DEFAULT_POCKET_AVATAR, buildPocketConversation, getPocketPendingMessages, isPocketGroup, safePocketAvatar, type PocketConversation, type PocketGroupMember, type PocketGenerationMode, type PocketRequestMessage } from "./pocketPhoneState";
 import { buildWorldBookPromptPlacements, insertWorldBookPromptAtDepth, type WorldBook } from "./worldbookUtils";
 
 export type PocketContextMessage = {
@@ -68,7 +68,7 @@ export function syncPocketContext<T extends PocketContextMessage>(history: T[], 
     contactId: contact.id, messageId: message.id,
     contactName: isPocketGroup(contact) && message.role === "assistant" ? message.speaker!.name : contact.name,
     userName: nickname,
-    contactAvatar: isPocketGroup(contact) ? message.speaker?.avatar || "🐰" : contact.avatar,
+    contactAvatar: safePocketAvatar(isPocketGroup(contact) ? message.speaker?.avatar || DEFAULT_POCKET_AVATAR : contact.avatar),
     ...(isPocketGroup(contact) ? { groupName: contact.name, ...(message.speaker ? { speakerId: message.speaker.id } : {}) } : {}),
   });
   const seen = new Set<string>();
