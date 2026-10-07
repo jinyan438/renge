@@ -131,6 +131,10 @@ try {
   await sendMain("先记住明天一起画画");
   await phone.screenshot({ path: ".runtime/pocket-home.png", animations: "disabled" });
   await phone.getByRole("button", { name: "打开微信", exact: true }).click();
+  await phone.screenshot({ path: ".runtime/pocket-empty-wechat.png", animations: "disabled" });
+  await phone.getByRole("navigation", { name: "微信导航" }).getByRole("button", { name: "通讯录", exact: true }).click();
+  await phone.screenshot({ path: ".runtime/pocket-empty-contacts.png", animations: "disabled" });
+  await phone.getByRole("navigation", { name: "微信导航" }).getByRole("button", { name: "微信", exact: true }).click();
   await phone.getByRole("button", { name: "添加第一位朋友", exact: true }).click();
   let editor = phone.getByRole("dialog");
   await editor.getByLabel("朋友的名字", { exact: true }).fill("奶糖");

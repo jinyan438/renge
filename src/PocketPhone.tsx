@@ -17,24 +17,9 @@ type PocketPhoneProps = {
   onBack: () => void; onClose: () => void;
 };
 type PhoneApp = "home" | "wechat" | "settings";
-type WechatTab = "chats" | "contacts" | "me";
+type WechatTab = "chats" | "contacts";
 type ContactDraft = Pick<PocketContact, "name" | "avatar" | "personality" | "greeting" | "sourceLabel" | "sourceCharacterCardId">;
 type Confirmation = { title: string; description: string; action: () => void };
-
-function Rabbit() {
-  return <svg className="pocket-rabbit" viewBox="0 0 240 240" fill="none" aria-hidden="true">
-    <ellipse cx="123" cy="214" rx="69" ry="11" fill="currentColor" opacity=".12" />
-    <path d="M83 102C62 82 64 27 82 27C98 27 106 69 102 96M135 95C130 64 144 22 160 29C177 37 163 80 154 105" fill="#fffaf5" stroke="#d7b9ac" strokeWidth="3" />
-    <path d="M82 44C76 61 83 83 89 88M151 45C151 61 144 77 144 83" stroke="#edbac2" strokeWidth="9" strokeLinecap="round" />
-    <path d="M71 145C46 168 65 211 93 211H156C184 211 198 169 172 147" fill="#fffaf5" stroke="#d7b9ac" strokeWidth="3" />
-    <path d="M56 122C54 86 86 81 122 81C160 81 188 96 185 126C184 153 158 165 122 165C86 165 59 153 56 122Z" fill="#fffaf5" stroke="#d7b9ac" strokeWidth="3" />
-    <ellipse cx="86" cy="132" rx="12" ry="7" fill="#f3b6c0" opacity=".8" /><ellipse cx="158" cy="132" rx="12" ry="7" fill="#f3b6c0" opacity=".8" />
-    <path d="M97 115V121M146 115V121" stroke="#70554d" strokeWidth="4.5" strokeLinecap="round" /><path d="M115 130L121 134L128 130M121 134V139" stroke="#70554d" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-    <path d="M122 202C117 198 82 176 82 159C82 140 106 139 122 156C138 139 163 140 163 159C163 176 127 198 122 202Z" fill="currentColor" />
-    <path d="M69 176C83 184 90 179 90 172M172 176C157 184 151 179 151 172" stroke="#d7b9ac" strokeWidth="3" strokeLinecap="round" />
-    <path d="M24 100L27 108L35 111L27 114L24 122L21 114L13 111L21 108Z" fill="#f5cc83" /><path d="M213 143L216 151L224 154L216 157L213 165L210 157L202 154L210 151Z" fill="#f5cc83" />
-  </svg>;
-}
 
 function Avatar({ avatar, name, self = false }: { avatar: string; name: string; self?: boolean }) {
   const safeAvatar = safePocketAvatar(avatar);
@@ -241,7 +226,6 @@ export function PocketPhone(props: PocketPhoneProps) {
 
   const searchedContacts = conversations.filter(contact => contact.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
   const listedContacts = [...searchedContacts].sort((a, b) => tab === "contacts" ? a.name.localeCompare(b.name, "zh-CN") : (b.messages.at(-1)?.createdAt || b.createdAt).localeCompare(a.messages.at(-1)?.createdAt || a.createdAt));
-  const totalMessages = conversations.reduce((sum, contact) => sum + contact.messages.length, 0);
   const draft = activeContact ? drafts[activeContact.id] || "" : "";
   const patchDraft = (patch: Partial<ContactDraft>) => setEditor(previous => previous ? { ...previous, draft: { ...previous.draft, ...patch } } : null);
   const groupChoices = groupEditor ? [...state.contacts.map(pocketGroupMember), ...groupEditor.members.filter(member => !state.contacts.some(contact => contact.id === member.id))] : [];
@@ -287,7 +271,7 @@ export function PocketPhone(props: PocketPhoneProps) {
               </div>
               <button className="pocket-setting-toggle" type="button" role="switch" aria-checked={state.settings.largeText} onClick={() => updateSettings({ largeText: !state.settings.largeText })}><span><strong>大一点的聊天文字</strong></span><i className={state.settings.largeText ? "is-on" : ""} /></button>
             </div> : <div className="pocket-wechat">
-              <header className="pocket-wechat-header"><button type="button" onClick={() => activeContact ? setContactId("") : setApp("home")} aria-label={activeContact ? "返回微信列表" : "返回手机桌面"}><ArrowLeft size={19} /></button><span><strong>{activeContact?.name || (tab === "contacts" ? "通讯录" : tab === "me" ? "我" : "微信")}{activeContact && isPocketGroup(activeContact) && <em> ({activeContact.members.length + 1})</em>}</strong>{activeContact && pendingContactId === activeContact.id && <small>{pendingSpeaker ? `${pendingSpeaker.name}正在输入…` : "对方正在输入…"}</small>}</span>{!activeContact && <button type="button" onClick={() => editGroup()} aria-label="发起群聊" title="发起群聊"><Users size={20} /></button>}<button type="button" onClick={() => activeContact ? isPocketGroup(activeContact) ? editGroup(activeContact) : editContact(activeContact) : addContact()} aria-label={activeContact ? isPocketGroup(activeContact) ? "群聊设置" : "编辑联系人" : "添加联系人"}>{activeContact ? <MoreHorizontal size={22} /> : <Plus size={22} />}</button></header>
+              <header className="pocket-wechat-header"><button type="button" onClick={() => activeContact ? setContactId("") : setApp("home")} aria-label={activeContact ? "返回微信列表" : "返回手机桌面"}><ArrowLeft size={19} /></button><span><strong>{activeContact?.name || (tab === "contacts" ? "通讯录" : "微信")}{activeContact && isPocketGroup(activeContact) && <em> ({activeContact.members.length + 1})</em>}</strong>{activeContact && pendingContactId === activeContact.id && <small>{pendingSpeaker ? `${pendingSpeaker.name}正在输入…` : "对方正在输入…"}</small>}</span>{!activeContact && <button type="button" onClick={() => editGroup()} aria-label="发起群聊" title="发起群聊"><Users size={20} /></button>}<button type="button" onClick={() => activeContact ? isPocketGroup(activeContact) ? editGroup(activeContact) : editContact(activeContact) : addContact()} aria-label={activeContact ? isPocketGroup(activeContact) ? "群聊设置" : "编辑联系人" : "添加联系人"}>{activeContact ? <MoreHorizontal size={22} /> : <Plus size={22} />}</button></header>
               {activeContact ? <>
                 <div className="pocket-conversation pocket-scroll" ref={conversationRef} role="log" aria-label={`${activeContact.name}的聊天记录`} aria-live="polite">
                   {activeContact.messages.map((message, index) => <div key={message.id} className="pocket-message-group" data-message-id={message.id}>
@@ -300,14 +284,14 @@ export function PocketPhone(props: PocketPhoneProps) {
                 </div>
                 <form className="pocket-composer" onSubmit={event => { event.preventDefault(); void sendMessage(); }}><textarea rows={1} aria-label={`给${activeContact.name}发消息`} placeholder="分享一点今天的小事…" value={draft} onChange={event => setDrafts(previous => ({ ...previous, [activeContact.id]: event.target.value }))} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} />{pendingContactId === activeContact.id && !draft.trim() ? <button type="button" aria-label="停止回复" onClick={event => { event.preventDefault(); controllerRef.current?.abort(); setErrors(previous => ({ ...previous, [activeContact.id]: "已停止等待，可以重试回复。" })); }}><Square size={15} fill="currentColor" /></button> : <button className="pocket-send" type="submit" aria-label="发送消息" title={draft.trim() ? "发送消息" : getPocketGenerationMode(activeContact) === "reply" ? "生成回复" : "让对方主动发消息"} disabled={!draft.trim() && !!pendingContactId}><Send size={17} /></button>}</form>
               </> : <>
-                {tab === "me" ? <div className="pocket-me pocket-scroll"><div className="pocket-profile-card"><Avatar avatar={props.userProfile.avatarImage || DEFAULT_POCKET_USER_AVATAR} name={nickname} self /><span><strong>{nickname}</strong><small>把每一次相遇，温柔收藏</small></span></div><div className="pocket-me-stats"><span><strong>{state.contacts.length}</strong>位朋友</span><span><strong>{totalMessages}</strong>条回忆</span></div><button className="pocket-menu-row" type="button" onClick={() => setApp("settings")}><Settings size={20} /><span>手机设置<small>主题、昵称与聊天模型</small></span><ChevronRight size={17} /></button><Rabbit /><p>想说的话，总有人愿意听 ♡</p></div> : <div className="pocket-list-body pocket-scroll">
+                <div className="pocket-list-body pocket-scroll">
                   <label className="pocket-search"><Search size={15} /><input aria-label="搜索联系人" placeholder="搜索" value={query} onChange={event => setQuery(event.target.value)} /></label>
                   {tab === "contacts" && <button className="pocket-new-friend" type="button" onClick={addContact}><span><Plus size={21} /></span><strong>新的朋友</strong><small>添加</small><ChevronRight size={15} /></button>}
                   {!!listedContacts.length && <div className="pocket-list-label">{tab === "contacts" ? `我的朋友 · ${listedContacts.length}` : "最近的聊天"}</div>}
                   {listedContacts.map(contact => <button className="pocket-contact-row" type="button" key={contact.id} onClick={() => openContact(contact)}><ConversationAvatar conversation={contact} /><span><strong>{contact.name}</strong><small>{pendingContactId === contact.id ? "对方正在输入…" : tab === "contacts" ? isPocketGroup(contact) ? `${contact.members.length + 1} 位群成员` : contact.sourceLabel || "自定义角色" : contact.messages.at(-1) ? `${isPocketGroup(contact) && contact.messages.at(-1)?.speaker ? `${contact.messages.at(-1)!.speaker!.name}：` : ""}${contact.messages.at(-1)!.content}` : "轻轻打个招呼吧 ♡"}</small></span><time>{tab === "contacts" ? <ChevronRight size={14} /> : formatTime(contact.messages.at(-1)?.createdAt || "")}</time></button>)}
-                  {!listedContacts.length && <div className="pocket-empty"><Rabbit /><strong>{query ? "还没有找到这位朋友" : "想念的人，近在口袋"}</strong><p>{query ? "换个名字再找找吧" : "为喜欢的角色添加一个联系人，\n聊日常，也聊属于你们的故事。"}</p>{!query && <button className="pocket-primary" type="button" onClick={addContact}><Plus size={16} /> 添加第一位朋友</button>}</div>}
-                </div>}
-                <nav className="pocket-wechat-tabs" aria-label="微信导航">{([{ id: "chats", label: "微信", icon: MessageCircle }, { id: "contacts", label: "通讯录", icon: Users }, { id: "me", label: "我", icon: Heart }] as const).map(item => <button type="button" key={item.id} className={tab === item.id ? "is-active" : ""} aria-current={tab === item.id ? "page" : undefined} onClick={() => { setTab(item.id); setQuery(""); }}><item.icon size={21} /><span>{item.label}</span></button>)}</nav>
+                  {!listedContacts.length && <div className="pocket-empty">{query ? <span>还没有找到这位朋友</span> : <button className="pocket-primary" type="button" onClick={addContact}><Plus size={16} /> 添加第一位朋友</button>}</div>}
+                </div>
+                <nav className="pocket-wechat-tabs" aria-label="微信导航">{([{ id: "chats", label: "微信", icon: MessageCircle }, { id: "contacts", label: "通讯录", icon: Users }] as const).map(item => <button type="button" key={item.id} className={tab === item.id ? "is-active" : ""} aria-current={tab === item.id ? "page" : undefined} onClick={() => { setTab(item.id); setQuery(""); }}><item.icon size={21} /><span>{item.label}</span></button>)}</nav>
               </>}
             </div>}
           </div>

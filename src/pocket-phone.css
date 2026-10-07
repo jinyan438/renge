@@ -60,7 +60,6 @@
 .pocket-home-date { display: grid; justify-items: center; margin-top: 9px; flex-shrink: 0; }
 .pocket-home-date > span { font-size: 11px; letter-spacing: 2px; }
 .pocket-home-date strong { font-family: "Segoe UI", sans-serif; font-size: clamp(40px, 14cqw, 55px); line-height: 1.2; font-weight: 300; letter-spacing: -2px; }
-.pocket-rabbit { width: 100%; max-width: 205px; height: auto; flex-shrink: 0; color: var(--pocket-accent); filter: drop-shadow(0 5px 2px #b8778110); }
 .pocket-app-grid { display: flex; gap: 24px; padding: 21px 10px 14px; flex-shrink: 0; }
 .pocket-app-icon { background: none; display: flex; flex-direction: column; align-items: center; gap: 7px; width: 59px; }
 .pocket-app-icon > span { position: relative; display: grid; width: 56px; height: 56px; border-radius: 18px; place-items: center; box-shadow: inset 0 1px 2px #ffffff9c, 0 4px 8px #84656616; transition: transform .18s; }
@@ -126,10 +125,8 @@
 .pocket-contact-row strong { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pocket-contact-row small { font-size: 10px; opacity: .6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pocket-contact-row time { font-family: "Segoe UI", sans-serif; font-size: 9px; opacity: .4; align-self: flex-start; padding-top: 3px; flex-shrink: 0; }
-.pocket-empty { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 42px 4px 25px; }
-.pocket-empty .pocket-rabbit { width: 135px; }
-.pocket-empty > strong { font-size: 14px; margin: 9px 0 4px; }
-.pocket-empty p { margin: 5px 0 20px; font-size: 11px; line-height: 1.9; white-space: pre-line; opacity: .6; }
+.pocket-empty { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 24px 4px; }
+.pocket-empty > span { font-size: 11px; opacity: .6; }
 .pocket-primary { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 12px 16px; border-radius: 13px; background: var(--pocket-accent); color: white !important; font-size: 12px !important; box-shadow: 0 4px 12px color-mix(in srgb, var(--pocket-accent) 20%, transparent); }
 .pocket-wechat-tabs { display: flex; flex-shrink: 0; gap: 5px; padding: 10px 15px 3px; border-top: 1px solid #efdfd640; background: #fffaf7; }
 .pocket-wechat-tabs button { display: flex; flex: 1; flex-direction: column; align-items: center; gap: 4px; padding: 3px; color: #b5a5a1; background: transparent; }
@@ -154,16 +151,6 @@
 .pocket-chat-error > div { display: flex; gap: 10px; margin-top: 7px; }
 .pocket-chat-error button { font-size: 10px; background: transparent; text-decoration: underline; padding: 2px 0; }
 .pocket-model-hint { display: flex; align-items: center; gap: 6px; width: 100%; padding: 11px; background: #ffffff90; border-radius: 12px; color: var(--pocket-accent) !important; font-size: 10px !important; }
-.pocket-me { flex: 1; padding: 18px 15px; text-align: center; }
-.pocket-me .pocket-profile-card { text-align: left; }
-.pocket-me-stats { display: flex; justify-content: center; gap: 50px; margin: 23px 0; }
-.pocket-me-stats > span { display: grid; gap: 5px; font-size: 10px; }
-.pocket-me-stats strong { font-family: Georgia, serif; color: var(--pocket-accent); font-size: 22px; }
-.pocket-menu-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 14px 12px; border-radius: 14px; background: #f5eeea; text-align: left; }
-.pocket-menu-row > span { display: grid; gap: 5px; flex: 1; font-size: 12px; }
-.pocket-menu-row small { font-size: 10px; opacity: .6; }
-.pocket-me > .pocket-rabbit { width: 150px; margin-top: 26px; }
-.pocket-me > p { font-size: 11px; opacity: .6; }
 .pocket-sheet-backdrop, .pocket-confirm-backdrop { position: absolute; inset: 0; z-index: 5; display: flex; align-items: flex-end; background: #57404640; backdrop-filter: blur(4px); }
 .pocket-sheet { width: 100%; max-height: calc(100% - 35px); padding: 20px 17px 22px; background: #fffaf7; border-radius: 24px 24px 0 0; box-shadow: 0 -5px 30px #67514f18; animation: pocket-sheet .2s ease-out; }
 .pocket-sheet > header { display: flex; align-items: center; gap: 10px; justify-content: space-between; margin-bottom: 19px; }
