@@ -197,7 +197,7 @@
 .pocket-group-avatar .pocket-avatar { width: 17px; height: 17px; min-width: 0; border-radius: 5px; font-size: 12px; }
 .pocket-message-body { min-width: 0; max-width: calc(100% - 40px); }
 .pocket-message-body .pocket-message-bubble { max-width: none; }
-.pocket-speaker-name { display: block; max-width: 100%; text-align: left; font-size: 10px; color: #9b8580; padding: 0 2px 5px; overflow-wrap: anywhere; }
+.pocket-panel .pocket-speaker-name { display: block; max-width: 100%; text-align: left; font-size: 10px; font-weight: 400; line-height: 1.4; color: #9b8580; background: transparent; padding: 0 2px 5px; overflow-wrap: anywhere; }
 .pocket-group-label { font-size: 11px; font-weight: 700; margin: 18px 0 9px; }
 .pocket-member-self, .pocket-member-choice { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid #bba09d16; font-size: 12px; }
 .pocket-member-self > span:last-child { margin-left: auto; opacity: .5; font-size: 10px; }
