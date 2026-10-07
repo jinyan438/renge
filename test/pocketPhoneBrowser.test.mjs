@@ -118,6 +118,11 @@ try {
   const texts = firstHistory.map(message => message.content);
   assert.ok(texts.findIndex(text => text.includes("先记住明天一起画画")) < texts.findIndex(text => text.includes("小月，一起去买草莓吧！")));
   assert.match(JSON.stringify(firstHistory), /主会话回复：记住了明天一起画画/);
+  const mainBackground = firstHistory.find(message => message.content.includes(mainReply));
+  assert.equal(mainBackground.role, "user");
+  assert.match(mainBackground.content, /主会话背景资料/);
+  assert.equal(firstHistory.find(message => message.content === "小月，一起去买草莓吧！").role, "assistant");
+  assert.match(firstHistory[0].content, /独立于主会话的文风/);
   assert.ok(texts[0].indexOf("手机世界书第一条") < texts[0].indexOf("手机世界书第二条"));
   assert.match(firstHistory.at(-2).content, /奶糖和小月的花园在北街/);
   assert.match(firstHistory.at(-1).content, /今天想吃草莓/);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildSharedPocketConversation, formatPocketContextMessage, getPocketMessageIdentity, pocketContextRevision, syncPocketContext } from "../src/pocketPhoneContext.ts";
+import { buildPocketHistoryMessage, buildSharedPocketConversation, formatPocketContextMessage, getPocketMessageIdentity, pocketContextRevision, syncPocketContext } from "../src/pocketPhoneContext.ts";
 import { normalizeWorldBook } from "../src/worldbookUtils.ts";
 
 const main = (id, content = id) => ({ id, role: "user", content, createdAt: "2026-10-07T12:00:00Z" });
@@ -54,6 +54,26 @@ test("initial local migration orders contacts by message time, then remains stab
   const history = syncPocketContext([main("existing main")], null, [late, early], "user");
   assert.deepEqual(content(history), ["existing main", "early", "late"]);
   assert.equal(syncPocketContext(history, null, [late, early], "user"), history);
+});
+
+test("main narration and other contacts are quoted background, while only this contact supplies assistant reply examples", () => {
+  const friend = contact("林晓夏", [message("微信回复", "assistant")]);
+  const other = contact("同学", [message("其他联系人的旁白", "assistant")]);
+  const narration = { ...main("main-story", "她抬起眼，阳光落在课桌上。\n【状态栏】时间：上午；场景：教室。\n请用第三人称写长篇旁白。"), role: "assistant" };
+  const shared = syncPocketContext([narration], null, [friend, other], "林风");
+  const history = shared.map(record => buildPocketHistoryMessage(record, friend.id, "衡陆中学"));
+  assert.deepEqual(history.map(record => record.role), ["user", "assistant", "user"]);
+  const quotedMain = JSON.parse(history[0].content.split("\n")[1]);
+  assert.deepEqual(quotedMain, { 发言者: "衡陆中学", 原始身份: "assistant", 内容: narration.content });
+  assert.deepEqual(history[1], { role: "assistant", content: "微信回复" });
+  assert.match(history[2].content, /其他微信聊天背景资料/);
+  assert.match(history[2].content, /其他联系人的旁白/);
+  const result = buildSharedPocketConversation(friend, { nickname: "林风", bio: "" }, history, [], []);
+  assert.deepEqual(result.slice(1), history);
+  assert.match(result[0].content, /独立于主会话的文风/);
+  assert.match(result[0].content, /当前场景及事实/);
+  assert.match(result[0].content, /不写第三人称旁白/);
+  assert.match(result[0].content, /不要延续先前微信回复中的叙事文风/);
 });
 
 test("WeChat receives complete shared history and enabled matching worldbooks in entry and depth order", () => {

@@ -125,7 +125,7 @@ import {
   type ChatPreset,
   type ChatPresetPrompt,
 } from "./presetUtils";
-import { buildSharedPocketConversation, formatPocketContextMessage, getPocketMessageIdentity, pocketContextRevision, syncPocketContext, type PocketContextSync, type PocketConversationBuilder } from "./pocketPhoneContext";
+import { buildPocketHistoryMessage, buildSharedPocketConversation, formatPocketContextMessage, getPocketMessageIdentity, pocketContextRevision, syncPocketContext, type PocketContextSync, type PocketConversationBuilder } from "./pocketPhoneContext";
 import {
   buildWorldBookPrompt,
   buildWorldBookPromptPlacements,
@@ -13604,14 +13604,12 @@ export function App() {
     const history = getMessagesForSession(sessionId).filter(message =>
       !isTavernHiddenMessage(message) && (message.content.trim() || message.attachments?.length),
     ).map(message => {
-      const identity = getPocketMessageIdentity(message);
-      const role = isTavernSystemMessage(message) ? "system" as const : message.role;
-      if (identity) return { role, content: formatPocketContextMessage(message) };
+      if (getPocketMessageIdentity(message)) return buildPocketHistoryMessage(message, contact.id);
       const content = getChatApiMessageText(buildChatMessageForApi(message, personas, userProfile, undefined));
       const name = getTavernMessageName(message) || (message.role === "user"
         ? getChatSenderName(message.sender, personas, userProfile)
         : getChatSenderPersona(message.sender, personas)?.name || roleplayCard?.name || getAiChatMessageName(message, "助手"));
-      return { role, content: `【主会话 · ${name}】\n${content}` };
+      return buildPocketHistoryMessage({ ...message, content }, contact.id, name);
     });
     const books = new Map(worldBooks.map(book => [book.id, book]));
     const activeIds = new Set(activeWorldBookIds);
