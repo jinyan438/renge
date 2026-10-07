@@ -12,6 +12,7 @@ export type PocketContact = {
   personality: string;
   greeting: string;
   sourceLabel: string;
+  sourceCharacterCardId?: string;
   messages: PocketMessage[];
   createdAt: string;
 };
@@ -77,6 +78,7 @@ export function normalizePocketState(value: unknown): PocketState {
     state.contacts.push({
       id: text(contact.id), name: text(contact.name).trim().slice(0, 30), avatar: safePocketAvatar(contact.avatar),
       personality: text(contact.personality), greeting: text(contact.greeting), sourceLabel: text(contact.sourceLabel),
+      ...(text(contact.sourceCharacterCardId) ? { sourceCharacterCardId: text(contact.sourceCharacterCardId) } : {}),
       messages, createdAt: text(contact.createdAt),
     });
   }
@@ -85,7 +87,7 @@ export function normalizePocketState(value: unknown): PocketState {
 
 export function pocketStorageKey(sessionId: string) { return `renge_pocket_phone_v1:${sessionId || "default"}`; }
 
-export function makePocketContact(input: Pick<PocketContact, "name" | "avatar" | "personality" | "greeting" | "sourceLabel">): PocketContact {
+export function makePocketContact(input: Pick<PocketContact, "name" | "avatar" | "personality" | "greeting" | "sourceLabel" | "sourceCharacterCardId">): PocketContact {
   if (!input.name.trim()) throw new Error("给这位朋友起个名字吧。");
   if (!input.personality.trim()) throw new Error("写一点角色设定，让 TA 更了解自己吧。");
   const createdAt = new Date().toISOString();

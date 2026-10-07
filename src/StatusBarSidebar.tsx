@@ -20,6 +20,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import type { PocketContextSync, PocketConversationBuilder } from "./pocketPhoneContext";
 import {
   Suspense,
   type CSSProperties,
@@ -145,6 +146,8 @@ export type StatusBarSidebarProps = {
   characterCards: CharacterCard[];
   phoneProviders: PocketProvider[];
   phoneActiveProviderId: string;
+  onPhoneSyncContext: PocketContextSync;
+  onPhoneBuildConversation: PocketConversationBuilder;
   userProfile: {
     nickname: string;
     bio: string;
@@ -852,6 +855,8 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   characterCards,
   phoneProviders,
   phoneActiveProviderId,
+  onPhoneSyncContext,
+  onPhoneBuildConversation,
   userProfile,
   chatSessionId,
   heartbeat,
@@ -2341,6 +2346,8 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
               characterCards={characterCards}
               providers={phoneProviders}
               activeProviderId={phoneActiveProviderId}
+              onSyncContext={onPhoneSyncContext}
+              onBuildConversation={onPhoneBuildConversation}
               sessionId={chatSessionId}
               userProfile={userProfile}
             />
@@ -2815,6 +2822,8 @@ export function StatusBarSidebar(props: StatusBarSidebarProps) {
   const onClearValues = useLatestCallback((characterId: string) =>
     props.onClearValues(characterId));
   const onManualUpdate = useLatestCallback(() => props.onManualUpdate());
+  const onPhoneSyncContext = useLatestCallback<PocketContextSync>((...args) => props.onPhoneSyncContext(...args));
+  const onPhoneBuildConversation = useLatestCallback<PocketConversationBuilder>((...args) => props.onPhoneBuildConversation(...args));
   const onPresetsChange = useLatestCallback((presets: StatusBarPreset[]) =>
     props.onPresetsChange(presets));
   const onChooseWorkspace = useLatestCallback(() => props.onChooseWorkspace?.());
@@ -2866,6 +2875,8 @@ export function StatusBarSidebar(props: StatusBarSidebarProps) {
       onStateChange={onStateChange}
       onClearValues={onClearValues}
       onManualUpdate={onManualUpdate}
+      onPhoneSyncContext={onPhoneSyncContext}
+      onPhoneBuildConversation={onPhoneBuildConversation}
       onPresetsChange={onPresetsChange}
       onChooseWorkspace={props.onChooseWorkspace ? onChooseWorkspace : undefined}
       onBrowserComment={props.onBrowserComment ? onBrowserComment : undefined}

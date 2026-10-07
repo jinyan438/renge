@@ -9,6 +9,7 @@ import { startRengeServer } from "../server.mjs";
 // Run after npm run build. Uses isolated app data and local fixture models only.
 const root = await mkdtemp(join(tmpdir(), "renge-pocket-browser-"));
 const requests = [];
+const mainRequests = [];
 let mode = "success";
 let releaseSlowReply;
 let browser;
@@ -44,13 +45,29 @@ try {
     providers: [provider, { ...provider, id: "fixture-responses", name: "Responses Fixture", apiType: "responses", modelId: "phone-responses", models: ["phone-responses", "phone-other"] }],
     userProfile: { nickname: "小月", bio: "喜欢画画和草莓", avatarImage: "" },
     personas: [{ id: "fixture-persona", name: "薄荷", description: "薄荷是一个喜欢种花的温柔朋友。", entryTypes: [{ id: "type", name: "喜好", influence: "HIGH", entries: [{ id: "enabled", key: "喜欢", value: "向日葵", enabled: true }, { id: "disabled", key: "不应导入", value: "disabled-persona-entry", enabled: false }] }], modelProfile: { provider: "", model: "", temperature: 1, responseStyle: "" }, createdAt: now, updatedAt: now }],
-    characterCards: [{ id: "fixture-card", name: "月岛", nickname: "", description: "{{char}}是{{user}}的青梅竹马。", personality: "耐心、可爱，记得对方的喜好。", scenario: "放学后一起买甜点。", firstMessage: "{{user}}，今天也想和你一起回家。", messageExample: "", systemPrompt: "", createdAt: now, updatedAt: now }],
+    characterCards: [{ id: "fixture-card", name: "月岛", nickname: "", description: "{{char}}是{{user}}的青梅竹马。", personality: "耐心、可爱，记得对方的喜好。", scenario: "放学后一起买甜点。", firstMessage: "{{user}}，今天也想和你一起回家。", messageExample: "", systemPrompt: "", characterBook: { id: "card-phone-world", name: "月岛的世界", entries: [{ content: "月岛角色卡世界书", constant: true }] }, createdAt: now, updatedAt: now }],
+    worldBooks: [{ id: "phone-world", name: "草莓花园", entries: [
+      { id: "first", content: "手机世界书第一条", constant: true, position: "before_char", order: 1 },
+      { id: "second", content: "手机世界书第二条", constant: true, position: "before_char", order: 2 },
+      { id: "depth", keys: ["草莓"], content: "{{char}}和{{user}}的花园在北街", position: "at_depth", depth: 1 },
+      { id: "off", content: "DISABLED_PHONE_LORE", constant: true, enabled: false },
+    ] }, { id: "inactive-phone-world", name: "未启用世界书", entries: [{ content: "INACTIVE_PHONE_LORE", constant: true }] }],
+    activeWorldBookIds: ["phone-world"],
     chatSessions: ["One", "Two"].map(title => ({ id: `phone-${title.toLowerCase()}`, title: `Phone ${title}`, mode: "ai", workspaceKey: "default", workspaceName: "默认工作区", messages: [{ id: `main-${title}`, role: "user", content: `Phone ${title}`, createdAt: now }], createdAt: now, updatedAt: now })),
   };
   assert.equal((await fetch(`${server.url}/api/app-data`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data: seed }) })).ok, true);
   browser = await chromium.launch({ headless: true });
   page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
   page.setDefaultTimeout(15000);
+  const mainReply = "主会话回复：记住了明天一起画画。";
+  await page.route("**/api/pi/chat", async route => {
+    mainRequests.push(route.request().postDataJSON());
+    await route.fulfill({ status: 200, contentType: "text/event-stream", body: [
+      `data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant", content: mainReply }, finish_reason: null }] })}`,
+      `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}`,
+      "data: [DONE]", "",
+    ].join("\n\n") });
+  });
   const pageErrors = [];
   page.on("pageerror", error => pageErrors.push(error.message));
   const phone = page.locator(".pocket-panel");
@@ -71,9 +88,18 @@ try {
     await phone.locator(".pocket-composer textarea").fill(content);
     await phone.getByRole("button", { name: "发送消息", exact: true }).click();
   }
+  async function sendMain(content) {
+    const count = mainRequests.length;
+    await page.getByPlaceholder("输入消息，可粘贴图片", { exact: true }).fill(content);
+    await page.getByRole("button", { name: "发送", exact: true }).click();
+    await page.getByRole("button", { name: "发送", exact: true }).waitFor();
+    assert.equal(mainRequests.length, count + 1);
+    await page.locator(".chat-message.assistant").filter({ hasText: mainReply }).nth(count).waitFor();
+  }
   await page.goto(server.url);
   await openPhone();
   await page.locator(".chat-session-item").filter({ hasText: "Phone One" }).click();
+  await sendMain("先记住明天一起画画");
   await phone.screenshot({ path: ".runtime/pocket-home.png", animations: "disabled" });
   await phone.getByRole("button", { name: "打开微信", exact: true }).click();
   await phone.getByRole("button", { name: "添加第一位朋友", exact: true }).click();
@@ -88,6 +114,22 @@ try {
   assert.equal(requests.length, 1);
   assert.match(requests[0].body.request?.messages?.[0]?.content ?? requests[0].body.messages[0].content, /奶糖/);
   assert.match(JSON.stringify(requests[0].body), /喜欢画画和草莓/);
+  const firstHistory = requests[0].body.messages;
+  const texts = firstHistory.map(message => message.content);
+  assert.ok(texts.findIndex(text => text.includes("先记住明天一起画画")) < texts.findIndex(text => text.includes("小月，一起去买草莓吧！")));
+  assert.match(JSON.stringify(firstHistory), /主会话回复：记住了明天一起画画/);
+  assert.ok(texts[0].indexOf("手机世界书第一条") < texts[0].indexOf("手机世界书第二条"));
+  assert.match(firstHistory.at(-2).content, /奶糖和小月的花园在北街/);
+  assert.match(firstHistory.at(-1).content, /今天想吃草莓/);
+  assert.doesNotMatch(JSON.stringify(firstHistory), /DISABLED_PHONE_LORE|INACTIVE_PHONE_LORE|Phone Two/);
+  await sendMain("知道奶糖刚才发了什么吗？");
+  const secondMain = mainRequests.at(-1).request.messages.map(message => typeof message.content === "string" ? message.content : JSON.stringify(message.content));
+  assert.ok(secondMain.findIndex(text => text.includes("先记住明天一起画画")) < secondMain.findIndex(text => text.includes("今天想吃草莓")));
+  assert.ok(secondMain.findIndex(text => text.includes(reply)) < secondMain.findIndex(text => text.includes("知道奶糖刚才发了什么吗？")));
+  assert.match(secondMain.find(text => text.includes(reply)), /微信 · 奶糖 → 小月/);
+  assert.notEqual(mainRequests[0].piSessionScope, mainRequests[1].piSessionScope);
+  assert.equal(await page.locator(".chat-message.assistant").filter({ hasText: reply }).count(), 1);
+  console.log("PASS: bidirectional ordered main/WeChat context, worldbook matching/depth and refreshed Pi history");
   console.log("PASS: custom contact, greeting macros and model-backed role reply");
 
   mode = "fail";
@@ -96,16 +138,22 @@ try {
   await phone.getByRole("button", { name: "重试回复", exact: true }).click();
   await phone.locator(".pocket-message.assistant").filter({ hasText: reply }).nth(1).waitFor();
   assert.deepEqual(requests[1].body, requests[2].body);
+  const retryHistory = requests[2].body.messages.map(message => message.content);
+  assert.ok(retryHistory.findIndex(text => text.includes("知道奶糖刚才发了什么吗？")) < retryHistory.findIndex(text => text.includes("你会陪我去吗？")));
   assert.equal(await phone.locator(".pocket-message.user").count(), 2);
   mode = "slow";
   await send("这条消息先等等");
   await phone.getByRole("button", { name: "停止回复", exact: true }).waitFor();
   await page.waitForFunction(() => document.querySelector(".pocket-typing"));
   while (!releaseSlowReply) await new Promise(resolve => setTimeout(resolve, 10));
+  await sendMain("微信还在等待时记下这条主会话内容");
   await phone.getByRole("button", { name: "停止回复", exact: true }).click();
   releaseSlowReply();
   await phone.getByRole("button", { name: "重试回复", exact: true }).click();
   await phone.locator(".pocket-message.assistant").filter({ hasText: reply }).nth(2).waitFor();
+  const concurrentHistory = requests.at(-1).body.messages.map(message => message.content);
+  assert.ok(concurrentHistory.findIndex(text => text.includes("这条消息先等等")) < concurrentHistory.findIndex(text => text.includes("微信还在等待时记下这条主会话内容")));
+  assert.equal(await page.locator(".chat-message.user").filter({ hasText: "这条消息先等等" }).count(), 1);
   assert.equal(await phone.locator(".pocket-message.user").count(), 3);
   assert.equal(await phone.locator(".pocket-message.assistant").count(), 4);
   await phone.screenshot({ path: ".runtime/pocket-chat.png", animations: "disabled" });
@@ -146,6 +194,7 @@ try {
   assert.equal(requests.at(-1).path, "/v1/responses");
   assert.equal(requests.at(-1).body.model, "phone-other");
   assert.match(JSON.stringify(requests.at(-1).body), /月岛是小月的青梅竹马/);
+  assert.match(JSON.stringify(requests.at(-1).body), /月岛角色卡世界书/);
   console.log("PASS: character-card import, selectable model, Responses API, themes and large text");
 
   await phone.getByRole("button", { name: "编辑联系人", exact: true }).click();
@@ -157,6 +206,8 @@ try {
   await phone.getByRole("button", { name: "清空聊天", exact: true }).click();
   await phone.getByRole("alertdialog").getByRole("button", { name: "确认", exact: true }).click();
   assert.equal(await phone.locator(".pocket-message").count(), 0);
+  assert.equal(await page.locator(".chat-message").filter({ hasText: "小月，今天也想和你一起回家。" }).count(), 0);
+  assert.equal(await page.locator(".chat-message").filter({ hasText: "一起走吧" }).count(), 0);
   await phone.getByRole("button", { name: "编辑联系人", exact: true }).click();
   await phone.getByRole("button", { name: "删除联系人", exact: true }).click();
   await phone.getByRole("alertdialog").getByRole("button", { name: "确认", exact: true }).click();
@@ -180,6 +231,8 @@ try {
   await phone.locator(".pocket-contact-row").filter({ hasText: "奶糖" }).click();
   assert.equal(await phone.locator(".pocket-message.user").count(), 3);
   assert.equal(await phone.locator(".pocket-message.assistant").count(), 4);
+  assert.equal(await page.locator(".chat-message.user").filter({ hasText: "今天想吃草莓" }).count(), 1);
+  assert.equal(await page.locator(".chat-message.assistant").filter({ hasText: reply }).count(), 3);
   console.log("PASS: session isolation and saved contacts, history, model and appearance after reload");
 
   const handle = page.locator(".right-sidebar-resize-handle");

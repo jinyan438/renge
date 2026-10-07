@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 
 import { ArrowLeft, BatteryFull, Check, ChevronRight, Heart, MessageCircle, MoreHorizontal, Plus, Search, Send, Settings, Signal, Sparkles, Square, Users, Wifi, X } from "lucide-react";
 import type { CharacterCard } from "./characterCardUtils";
 import type { AgentPersona } from "./types";
-import { buildPocketConversation, emptyPocketState, makePocketContact, normalizePocketState, pocketId, pocketStorageKey, POCKET_AVATARS, POCKET_THEMES, safePocketAvatar, type PocketContact, type PocketSettings, type PocketState } from "./pocketPhoneState";
+import { emptyPocketState, makePocketContact, normalizePocketState, pocketId, pocketStorageKey, POCKET_AVATARS, POCKET_THEMES, safePocketAvatar, type PocketContact, type PocketSettings, type PocketState } from "./pocketPhoneState";
+import type { PocketContextSync, PocketConversationBuilder } from "./pocketPhoneContext";
 import { requestPocketReply, resolvePocketModel, type PocketProvider } from "./pocketPhoneChat";
 import "./pocket-phone.css";
 
@@ -10,11 +11,12 @@ type PocketPhoneProps = {
   sessionId: string; personas: AgentPersona[]; characterCards: CharacterCard[];
   providers: PocketProvider[]; activeProviderId: string;
   userProfile: { nickname: string; bio: string; avatarImage: string };
+  onSyncContext: PocketContextSync; onBuildConversation: PocketConversationBuilder;
   onBack: () => void; onClose: () => void;
 };
 type PhoneApp = "home" | "wechat" | "settings";
 type WechatTab = "chats" | "contacts" | "me";
-type ContactDraft = Pick<PocketContact, "name" | "avatar" | "personality" | "greeting" | "sourceLabel">;
+type ContactDraft = Pick<PocketContact, "name" | "avatar" | "personality" | "greeting" | "sourceLabel" | "sourceCharacterCardId">;
 type Confirmation = { title: string; description: string; action: () => void };
 
 function Rabbit() {
@@ -75,9 +77,11 @@ export function PocketPhone(props: PocketPhoneProps) {
   const canChat = !!selection.provider?.apiBaseUrl.trim() && !!selection.modelId.trim();
 
   function updateState(change: (previous: PocketState) => PocketState) {
-    const next = change(stateRef.current);
+    const previous = stateRef.current;
+    const next = change(previous);
     stateRef.current = next;
     setState(next);
+    props.onSyncContext(props.sessionId, previous.contacts, next.contacts, next.settings.nickname.trim() || props.userProfile.nickname.trim() || "小小的我");
     try { localStorage.setItem(storageKey, JSON.stringify(next)); setStorageWarning(""); }
     catch { setStorageWarning("手机存储空间不足或不可用，这次改动暂未保存。请保留当前页面。"); }
   }
@@ -88,11 +92,12 @@ export function PocketPhone(props: PocketPhoneProps) {
   function openWechat(nextTab: WechatTab = "chats") { setApp("wechat"); setTab(nextTab); setContactId(""); setQuery(""); }
   function openContact(contact: PocketContact) { setContactId(contact.id); setApp("wechat"); setQuery(""); }
   function addContact() { setEditorError(""); setEditor({ draft: { name: "", avatar: "🐰", personality: "", greeting: "", sourceLabel: "自定义角色" } }); }
-  function editContact(contact: PocketContact) { setEditorError(""); setEditor({ id: contact.id, draft: { name: contact.name, avatar: contact.avatar, personality: contact.personality, greeting: contact.greeting, sourceLabel: contact.sourceLabel } }); }
+  function editContact(contact: PocketContact) { setEditorError(""); setEditor({ id: contact.id, draft: { name: contact.name, avatar: contact.avatar, personality: contact.personality, greeting: contact.greeting, sourceLabel: contact.sourceLabel, sourceCharacterCardId: contact.sourceCharacterCardId } }); }
 
   useEffect(() => { const timer = setInterval(() => setNow(new Date()), 15000); return () => clearInterval(timer); }, []);
   useEffect(() => {
     mountedRef.current = true;
+    props.onSyncContext(props.sessionId, null, stateRef.current.contacts, nickname);
     return () => { mountedRef.current = false; controllerRef.current?.abort(); };
   }, []);
   useEffect(() => { const node = conversationRef.current; if (node) node.scrollTop = node.scrollHeight; }, [contactId, activeContact?.messages.length, pendingContactId, errors[contactId]]);
@@ -120,11 +125,11 @@ export function PocketPhone(props: PocketPhoneProps) {
     const card = props.characterCards.find(item => `card:${item.id}` === value);
     const persona = props.personas.find(item => `persona:${item.id}` === value);
     const draft = card ? {
-      name: card.nickname || card.name, avatar: safePocketAvatar(card.avatarDataUrl), sourceLabel: "来自角色卡",
+      name: card.nickname || card.name, avatar: safePocketAvatar(card.avatarDataUrl), sourceLabel: "来自角色卡", sourceCharacterCardId: card.id,
       personality: [card.description, card.personality, card.scenario && `场景：${card.scenario}`, card.systemPrompt, card.messageExample && `对话示例：${card.messageExample}`, card.postHistoryInstructions].filter(Boolean).join("\n\n"),
       greeting: card.firstMessage,
     } : persona ? {
-      name: persona.name, avatar: safePocketAvatar(persona.avatarImage), sourceLabel: "来自人格",
+      name: persona.name, avatar: safePocketAvatar(persona.avatarImage), sourceLabel: "来自人格", sourceCharacterCardId: undefined,
       personality: [persona.description, ...persona.entryTypes.flatMap(type => type.entries.filter(entry => entry.enabled).map(entry => `${type.name} · ${entry.key}：${entry.value}`))].filter(Boolean).join("\n"), greeting: "",
     } : null;
     if (draft) setEditor({ ...editor, draft });
@@ -160,7 +165,7 @@ export function PocketPhone(props: PocketPhoneProps) {
     setErrors(previous => ({ ...previous, [contact.id]: "" }));
     const timeout = setTimeout(() => controller.abort(new Error("等待有点久，点重试再发送一次吧。")), 120000);
     try {
-      const reply = await requestPocketReply(selection.provider, selection.modelId, buildPocketConversation(outgoing, { nickname, bio: props.userProfile.bio }), controller.signal);
+      const reply = await requestPocketReply(selection.provider, selection.modelId, props.onBuildConversation(props.sessionId, outgoing, { nickname, bio: props.userProfile.bio }), controller.signal);
       if (controller.signal.aborted) return;
       updateContact(contact.id, previous => ({ ...previous, messages: [...previous.messages, { id: pocketId(), role: "assistant", content: reply, createdAt: new Date().toISOString() }] }));
     } catch (error) {
@@ -240,7 +245,7 @@ export function PocketPhone(props: PocketPhoneProps) {
             <label className="pocket-field">角色设定 <span>性格、身份，以及你们的关系</span><textarea required rows={4} placeholder="TA 是谁？说话是什么语气？和你有什么关系？越具体，聊天就越有角色的感觉。" value={editor.draft.personality} onChange={event => patchDraft({ personality: event.target.value })} /></label>
             <label className="pocket-field">第一句招呼 <span>可选</span><textarea rows={2} placeholder="嗨，今天有没有想我呀？" value={editor.draft.greeting} onChange={event => patchDraft({ greeting: event.target.value })} /></label>{editorError && <p className="pocket-editor-error" role="alert">{editorError}</p>}
             <button type="submit" className="pocket-primary"><Heart size={16} />{editor.id ? "保存小档案" : "添加到通讯录"}</button>
-            {editor.id && <div className="pocket-contact-actions"><button type="button" disabled={pendingContactId === editor.id} onClick={() => { const id = editor.id!; setConfirmation({ title: "清空这段聊天？", description: "联系人会保留，聊天记录清空后无法恢复。", action: () => { updateContact(id, contact => ({ ...contact, messages: [] })); setErrors(previous => ({ ...previous, [id]: "" })); setEditor(null); } }); }}>清空聊天</button><button type="button" disabled={pendingContactId === editor.id} onClick={() => { const id = editor.id!; setConfirmation({ title: "删除这位联系人？", description: "这位朋友和你们的聊天记录都会从手机中删除。", action: () => { updateState(previous => ({ ...previous, contacts: previous.contacts.filter(contact => contact.id !== id) })); setContactId(""); setEditor(null); } }); }}>删除联系人</button></div>}
+            {editor.id && <div className="pocket-contact-actions"><button type="button" disabled={pendingContactId === editor.id} onClick={() => { const id = editor.id!; setConfirmation({ title: "清空这段聊天？", description: "联系人会保留，微信及当前会话中的对应记录将清空，无法恢复。", action: () => { updateContact(id, contact => ({ ...contact, messages: [] })); setErrors(previous => ({ ...previous, [id]: "" })); setEditor(null); } }); }}>清空聊天</button><button type="button" disabled={pendingContactId === editor.id} onClick={() => { const id = editor.id!; setConfirmation({ title: "删除这位联系人？", description: "这位朋友和你们的聊天记录将从手机及当前会话中删除。", action: () => { updateState(previous => ({ ...previous, contacts: previous.contacts.filter(contact => contact.id !== id) })); setContactId(""); setEditor(null); } }); }}>删除联系人</button></div>}
           </form></div>}
           {confirmation && <div className="pocket-confirm-backdrop"><div ref={confirmationRef} className="pocket-confirm" role="alertdialog" aria-modal="true" aria-labelledby="pocket-confirm-title"><Heart size={25} /><h3 id="pocket-confirm-title">{confirmation.title}</h3><p>{confirmation.description}</p><div><button type="button" onClick={() => setConfirmation(null)}>再想想</button><button type="button" onClick={() => { confirmation.action(); setConfirmation(null); }}>确认</button></div></div></div>}
         </div>

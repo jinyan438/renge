@@ -125,6 +125,7 @@ import {
   type ChatPreset,
   type ChatPresetPrompt,
 } from "./presetUtils";
+import { buildSharedPocketConversation, formatPocketContextMessage, getPocketMessageIdentity, pocketContextRevision, syncPocketContext, type PocketContextSync, type PocketConversationBuilder } from "./pocketPhoneContext";
 import {
   buildWorldBookPrompt,
   buildWorldBookPromptPlacements,
@@ -8430,6 +8431,7 @@ function formatChatMessageForApi(
     hasImageRecognitionMcp?: boolean;
   } = {},
 ) {
+  if (getPocketMessageIdentity(message)) return formatPocketContextMessage(message);
   if (message.role !== "user") {
     return message.content;
   }
@@ -13248,7 +13250,7 @@ export function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sessionId,
-          piSessionScope: getPiSessionScope("main", chatProvider, selectedModelValue),
+          piSessionScope: getMainPiSessionScope(sessionId, chatProvider, selectedModelValue),
           enabled,
           workspace: getPiWorkspacePayload(sessionId),
         }),
@@ -13280,7 +13282,7 @@ export function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sessionId,
-          piSessionScope: getPiSessionScope("main", chatProvider, selectedModelValue),
+          piSessionScope: getMainPiSessionScope(sessionId, chatProvider, selectedModelValue),
           piCompaction: {
             enabled: contextCompressionSettings.enabled,
             reserveTokens: 16_384,
@@ -13567,6 +13569,59 @@ export function App() {
       },
     );
     setChatStatus({ status: "success", message: "已清空当前角色卡的状态栏变量。" });
+  };
+
+  const getMainPiSessionScope = (sessionId: string, provider: ModelProviderChannel | null | undefined, modelId: string, history = getMessagesForSession(sessionId)) => {
+    const session = chatSessionsRef.current.find(candidate => candidate.id === sessionId);
+    const revision = pocketContextRevision(history) || session?.tavernMetadata.pocketContextRevision;
+    return `${getPiSessionScope("main", provider, modelId)}${typeof revision === "string" && revision ? `-pocket-${revision}` : ""}`;
+  };
+
+  const syncPhoneContext: PocketContextSync = (sessionId, previous, contacts, nickname) => {
+    const session = chatSessionsRef.current.find(candidate => candidate.id === sessionId);
+    if (!session) return;
+    const history = getMessagesForSession(sessionId);
+    const messages = syncPocketContext(history, previous, contacts, nickname);
+    if (messages === history) return;
+    const timestamp = new Date().toISOString();
+    const sessions = chatSessionsRef.current.map(candidate => candidate.id === sessionId ? {
+      ...candidate, messages, updatedAt: timestamp,
+      tavernMetadata: { ...candidate.tavernMetadata, pocketContextRevision: crypto.randomUUID() },
+    } : candidate);
+    chatSessionsRef.current = sessions;
+    setChatSessions(sessions);
+    if (activeChatSessionIdRef.current === sessionId) {
+      chatMessagesRef.current = messages;
+      setChatMessages(messages);
+    }
+  };
+
+  const buildPhoneConversation: PocketConversationBuilder = (sessionId, contact, user) => {
+    const session = chatSessionsRef.current.find(candidate => candidate.id === sessionId);
+    const roleplayCard = session?.mode === "roleplay"
+      ? characterCards.find(card => card.id === session.roleplayCharacterCardId)
+      : undefined;
+    const history = getMessagesForSession(sessionId).filter(message =>
+      !isTavernHiddenMessage(message) && (message.content.trim() || message.attachments?.length),
+    ).map(message => {
+      const identity = getPocketMessageIdentity(message);
+      const role = isTavernSystemMessage(message) ? "system" as const : message.role;
+      if (identity) return { role, content: formatPocketContextMessage(message) };
+      const content = getChatApiMessageText(buildChatMessageForApi(message, personas, userProfile, undefined));
+      const name = getTavernMessageName(message) || (message.role === "user"
+        ? getChatSenderName(message.sender, personas, userProfile)
+        : getChatSenderPersona(message.sender, personas)?.name || roleplayCard?.name || getAiChatMessageName(message, "助手"));
+      return { role, content: `【主会话 · ${name}】\n${content}` };
+    });
+    const books = new Map(worldBooks.map(book => [book.id, book]));
+    const activeIds = new Set(activeWorldBookIds);
+    const cardIds = [session?.mode === "roleplay" ? session.roleplayCharacterCardId : undefined, contact.sourceCharacterCardId];
+    for (const id of cardIds) {
+      const card = characterCards.find(candidate => candidate.id === id);
+      const book = card ? resolveSessionCharacterWorldBook(session, card, worldBooks) : null;
+      if (book) { books.set(book.id, book); activeIds.add(book.id); }
+    }
+    return buildSharedPocketConversation(contact, user, history, filterPromptTemplateSpecialEntries([...books.values()], promptTemplateEnabled), [...activeIds]);
   };
 
   useEffect(() => {
@@ -25840,7 +25895,7 @@ export function App() {
                     requestModelId,
                   ) ?? activeChatPreset?.maxContext ?? 128_000,
                   piCompaction: piCompactionSettings,
-                  piSessionScope: getPiSessionScope("main", requestProvider, requestModelId),
+                  piSessionScope: getMainPiSessionScope(requestSessionId, requestProvider, requestModelId, messagesForApi),
                   piLastUserPromptFallback:
                     !isContinuation && !isDialogueRewrite && !isLocalRewrite,
                   piSkillPaths: requestPiSkillPaths,
@@ -29116,7 +29171,7 @@ export function App() {
                     requestModelId,
                   ) ?? activeChatPreset?.maxContext ?? 128_000,
                   piCompaction: piCompactionSettings,
-                  piSessionScope: getPiSessionScope("main", chatProvider, requestModelId),
+                  piSessionScope: getMainPiSessionScope(requestSessionId, chatProvider, requestModelId, messagesForApi),
                   piLastUserPromptFallback: true,
                   piSkillPaths: requestPiSkillPaths,
                   mcpConfig: {
@@ -37803,6 +37858,8 @@ export function App() {
                 const tavernSystemMessage = isTavernSystemMessage(message);
                 const tavernHiddenMessage = isTavernHiddenMessage(message);
                 const tavernMessageName = getTavernMessageName(message);
+                const pocketIdentity = getPocketMessageIdentity(message);
+                const pocketAvatar = pocketIdentity && message.role === "assistant" ? pocketIdentity.contactAvatar : "";
                 const assistantPersona =
                   message.role === "assistant"
                     ? getAssistantMessagePersona(
@@ -37812,7 +37869,7 @@ export function App() {
                       )
                     : null;
                 const messageName =
-                  tavernMessageName || (message.role === "user"
+                  (pocketIdentity ? `微信 · ${message.role === "user" ? `${pocketIdentity.userName} → ${pocketIdentity.contactName}` : pocketIdentity.contactName}` : "") || tavernMessageName || (message.role === "user"
                     ? getChatSenderName(messageSender, personas, userProfile)
                     : chatMode === "roleplay" && activeSessionRoleplayCard
                       ? activeSessionRoleplayCard.name
@@ -37820,7 +37877,7 @@ export function App() {
                         ? getAiChatMessageName(message, effectiveChatModelId)
                         : assistantPersona?.name ?? "AI");
                 const messageAvatarImage =
-                  message.role === "user"
+                  pocketIdentity && message.role === "assistant" ? (pocketAvatar.startsWith("data:") || pocketAvatar.startsWith("/") ? pocketAvatar : "") : message.role === "user"
                     ? getChatSenderAvatarImage(messageSender, personas, userProfile)
                     : chatMode === "roleplay" && activeSessionRoleplayCard
                       ? activeSessionRoleplayCard.avatarDataUrl
@@ -37863,6 +37920,8 @@ export function App() {
                         <div className="chat-avatar">
                           {messageAvatarImage ? (
                             <img src={messageAvatarImage} alt={`${messageName} 头像`} />
+                          ) : pocketAvatar ? (
+                            <span aria-hidden="true">{pocketAvatar}</span>
                           ) : tavernSystemMessage || messageSender?.kind === "system" ? (
                             <Settings2 size={16} />
                           ) : messageSender?.kind === "persona" ? (
@@ -39133,6 +39192,8 @@ export function App() {
           characterCards={characterCards}
           phoneProviders={providers}
           phoneActiveProviderId={activeProviderId}
+          onPhoneSyncContext={syncPhoneContext}
+          onPhoneBuildConversation={buildPhoneConversation}
           userProfile={userProfile}
           chatSessionId={activeChatSessionId}
           heartbeat={activeHeartbeat}
