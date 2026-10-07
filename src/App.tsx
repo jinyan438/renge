@@ -381,33 +381,6 @@ import {
   type LlmContextSource,
 } from "./llmContextSettings";
 import { StatusBarSidebar } from "./StatusBarSidebar";
-import {
-  WECHAT_CHAT_SYSTEM_PROMPT,
-  buildWechatGroupRequestMessages,
-  buildWechatGroupSpeakerSelectionMessages,
-  buildWechatRequestMessages,
-  getWechatSessionStore,
-  loadWechatStoreFromStorage,
-  resolveWechatGroupSpeakerSelection,
-  saveWechatStoreToStorage,
-  splitWechatReply,
-  updateWechatSessionStore,
-  type WechatContact,
-  type WechatGroup,
-  type WechatGroupSendMessageResult,
-  type WechatRequestMessage,
-  type WechatSendMessageInput,
-  type WechatSendMessageResult,
-  type WechatSharedContextMessage,
-  type WechatStoredMessage,
-} from "./wechatSidebarUtils";
-import {
-  PHONE_TOOL_SYSTEM_PROMPT,
-  executePhoneToolOnSession,
-  isPhoneToolName,
-  phoneToolDefinitions,
-  type PhoneToolName,
-} from "./phoneToolUtils";
 import type { FileBrowserSource, FileBrowserSystemAction } from "./FilesSidebarPanel";
 import {
   normalizeTextFileWriteArguments,
@@ -942,7 +915,6 @@ type SystemPromptProfile = {
 };
 
 const BUILT_IN_SYSTEM_PROMPT_IDS = {
-  wechat: "builtin-system-prompt-wechat-chat",
   roleplay: "builtin-system-prompt-roleplay",
   actionOptions: "8c9d9112-9007-4ebd-a3a8-7fb4f23557da",
 } as const;
@@ -969,13 +941,6 @@ const MAX_CHAT_CONTINUATION_ROUNDS = 12;
 const MAX_CHAT_DIALOGUE_REWRITE_ROUNDS = 12;
 
 const BUILT_IN_SYSTEM_PROMPTS: SystemPromptProfile[] = [
-  {
-    id: BUILT_IN_SYSTEM_PROMPT_IDS.wechat,
-    name: "微信聊天模式",
-    content: WECHAT_CHAT_SYSTEM_PROMPT,
-    updatedAt: "2026-07-17T00:00:00.000Z",
-    builtIn: true,
-  },
   {
     id: BUILT_IN_SYSTEM_PROMPT_IDS.roleplay,
     name: "角色扮演模式",
@@ -1754,10 +1719,6 @@ const LLM_CONTEXT_SOURCE_META: Record<
   mcpTools: {
     label: "MCP 工具",
     description: "启用 Pi MCP Adapter 原生代理工具，并按需连接已启用的服务器。",
-  },
-  phoneTools: {
-    label: "手机工具",
-    description: "允许 AI 管理当前会话的联系人和群聊，并在合适时机发送微信消息。",
   },
 };
 const CHAT_MESSAGE_FONT_OPTIONS: Array<{
@@ -8119,29 +8080,6 @@ function getAiChatMessageAvatarImage(
   return message.aiIdentity.avatarImage ?? fallbackAvatarImage;
 }
 
-function getWechatMessageMetadata(message: ChatMessage) {
-  if (message.source !== "wechat" || !isObjectRecord(message.extra)) return null;
-  const contactId = typeof message.extra.contactId === "string" ? message.extra.contactId : "";
-  const contactName =
-    typeof message.extra.contactName === "string" ? message.extra.contactName.trim() : "";
-  const contactAvatar =
-    typeof message.extra.contactAvatar === "string" ? message.extra.contactAvatar : "";
-  const groupId = typeof message.extra.groupId === "string" ? message.extra.groupId : "";
-  const groupName =
-    typeof message.extra.groupName === "string" ? message.extra.groupName.trim() : "";
-  const groupAvatar =
-    typeof message.extra.groupAvatar === "string" ? message.extra.groupAvatar : "";
-  return contactId || contactName || groupId
-    ? {
-        contactId,
-        contactName: contactName || (groupId ? "" : "微信朋友"),
-        contactAvatar,
-        groupId,
-        groupName: groupName || "微信群聊",
-        groupAvatar,
-      }
-    : null;
-}
 
 function formatFileSize(size: number) {
   if (!Number.isFinite(size) || size <= 0) return "0 B";
@@ -8492,16 +8430,6 @@ function formatChatMessageForApi(
     hasImageRecognitionMcp?: boolean;
   } = {},
 ) {
-  const wechatMetadata = getWechatMessageMetadata(message);
-  if (wechatMetadata) {
-    const speaker =
-      message.role === "assistant"
-        ? wechatMetadata.contactName
-        : userProfile.nickname.trim() || "我";
-    return wechatMetadata.groupId
-      ? `【微信群 · ${wechatMetadata.groupName} · ${speaker}】：${message.content}`
-      : `【微信 · ${speaker}】：${message.content}`;
-  }
   if (message.role !== "user") {
     return message.content;
   }
@@ -9128,11 +9056,9 @@ function buildMultiAgentDelegationToolDefinitions(
 }
 
 function isSilentChatControlTool(toolName: string) {
-  return toolName === "multi_agent_end_rounds" || isPhoneToolName(toolName);
+  return toolName === "multi_agent_end_rounds";
 }
 
-// Phone action/result records stay hidden, while normal assistant text returned
-// alongside a phone call remains part of the conversation turn.
 function isHiddenAssistantContentTool(toolName: string) {
   return toolName === "multi_agent_end_rounds";
 }
@@ -10327,18 +10253,6 @@ function formatToolResultForApi(result: unknown, toolName?: string) {
         "这是静默内部控制。继续完成当前正常回复，不要向用户提及工具、权限、提前结束、停止轮次、原因或依据。",
     });
   }
-  if (toolName && isPhoneToolName(toolName)) {
-    const sanitized = sanitizeToolResultForApiValue(result);
-    const nextAction = isObjectRecord(sanitized) && typeof sanitized.next_action === "string"
-      ? sanitized.next_action
-      : "";
-    return JSON.stringify({
-      ...(isObjectRecord(sanitized) ? sanitized : { result: sanitized }),
-      instruction:
-        nextAction ||
-        "手机操作已在后台完成。可以继续使用手机工具，也可以正常完成主会话回复；不要向用户解释工具调用过程。",
-    });
-  }
   return JSON.stringify(sanitizeToolResultForApiValue(result));
 }
 
@@ -10407,14 +10321,6 @@ function toolVisualizationDiff(meta: ToolVisualization): string {
 
 function formatSilentChatToolErrorForApi(toolName: string, error: unknown) {
   const message = error instanceof Error ? error.message : "工具执行失败";
-  if (isPhoneToolName(toolName)) {
-    return JSON.stringify({
-      ok: false,
-      error: message,
-      instruction:
-        "手机操作失败。根据错误修正参数后可重试，也可以继续正常主会话；不要向用户暴露后台工具过程。",
-    });
-  }
   return JSON.stringify({
     ended: false,
     instruction:
@@ -20574,31 +20480,6 @@ export function App() {
     () => chatMessages.find((message) => message.id === chatMessageMenu?.messageId),
     [chatMessageMenu?.messageId, chatMessages],
   );
-  const syncedWechatMessages = useMemo<WechatStoredMessage[]>(
-    () =>
-      chatMessages.flatMap((message) => {
-        const metadata = getWechatMessageMetadata(message);
-        if (
-          (!metadata?.contactId && !metadata?.groupId) ||
-          (message.role !== "user" && message.role !== "assistant")
-        ) {
-          return [];
-        }
-        return [
-          {
-            id: message.id,
-            ...(metadata.contactId ? { contactId: metadata.contactId } : {}),
-            ...(metadata.groupId ? { groupId: metadata.groupId } : {}),
-            ...(metadata.contactName ? { senderName: metadata.contactName } : {}),
-            ...(metadata.contactAvatar ? { senderAvatar: metadata.contactAvatar } : {}),
-            role: message.role,
-            content: message.content,
-            createdAt: message.createdAt,
-          },
-        ];
-      }),
-    [chatMessages],
-  );
   const workspaceGroups = useMemo(() => {
     const groups = new Map<string, { key: string; name: string; sessions: ChatSession[] }>();
 
@@ -23020,165 +22901,6 @@ export function App() {
     };
   };
 
-  const executePhoneTool = (
-    toolName: PhoneToolName,
-    rawArguments: string,
-    sessionId: string,
-  ) => {
-    if (!sessionId) throw new Error("当前没有可绑定手机数据的主会话。");
-
-    const store = loadWechatStoreFromStorage(sessionId);
-    const currentSession = getWechatSessionStore(store, sessionId);
-    const availablePersonas = personasRef.current.map((persona) => ({
-      id: persona.id,
-      name: persona.name,
-      description: persona.description,
-      avatarImage: persona.avatarImage ?? "",
-    }));
-    const execution = executePhoneToolOnSession(
-      toolName,
-      parseToolArguments(rawArguments),
-      currentSession,
-      {
-        availablePersonas,
-        validPersonaIds: new Set(availablePersonas.map((persona) => persona.id)),
-      },
-    );
-
-    if (execution.session !== currentSession) {
-      const nextStore = updateWechatSessionStore(
-        store,
-        sessionId,
-        () => execution.session,
-      );
-      saveWechatStoreToStorage(nextStore);
-    }
-
-    if (
-      execution.sentMessages?.length ||
-      execution.updatedContact ||
-      execution.updatedGroup ||
-      execution.deletedContactId ||
-      execution.deletedGroupId
-    ) {
-      const currentMessages = getMessagesForSession(sessionId);
-      const nextMessages = ((current: ChatMessage[]) => {
-        let next = current;
-        if (execution.deletedContactId) {
-          next = next.filter((message) => {
-            const metadata = getWechatMessageMetadata(message);
-            return !(
-              metadata &&
-              !metadata.groupId &&
-              metadata.contactId === execution.deletedContactId
-            );
-          });
-        }
-        if (execution.deletedGroupId) {
-          next = next.filter(
-            (message) =>
-              getWechatMessageMetadata(message)?.groupId !== execution.deletedGroupId,
-          );
-        }
-        if (execution.updatedContact) {
-          const contact = execution.updatedContact;
-          next = next.map((message) => {
-            const metadata = getWechatMessageMetadata(message);
-            if (metadata?.contactId !== contact.id || !isObjectRecord(message.extra)) {
-              return message;
-            }
-            return {
-              ...message,
-              ...(message.role === "assistant"
-                ? {
-                    sender: contact.personaId
-                      ? { kind: "persona" as const, personaId: contact.personaId }
-                      : undefined,
-                  }
-                : {}),
-              extra: {
-                ...message.extra,
-                contactName: contact.name,
-                contactAvatar: contact.avatarImage,
-              },
-            };
-          });
-        }
-        if (execution.updatedGroup) {
-          const group = execution.updatedGroup;
-          next = next.map((message) => {
-            const metadata = getWechatMessageMetadata(message);
-            if (metadata?.groupId !== group.id || !isObjectRecord(message.extra)) {
-              return message;
-            }
-            return {
-              ...message,
-              extra: {
-                ...message.extra,
-                groupName: group.name,
-                groupAvatar: group.avatarImage,
-              },
-            };
-          });
-        }
-        if (execution.sentMessages?.length) {
-          const sentChatMessages = execution.sentMessages.map((message): ChatMessage => {
-            const contact = message.contactId
-              ? execution.session.contacts.find(
-                  (candidate) => candidate.id === message.contactId,
-                )
-              : undefined;
-            const group = message.groupId
-              ? execution.session.groups.find((candidate) => candidate.id === message.groupId)
-              : undefined;
-            if (!contact) throw new Error("手机消息缺少有效联系人身份。");
-            return {
-              id: message.id,
-              role: "assistant",
-              content: message.content,
-              createdAt: message.createdAt,
-              ...(contact.personaId
-                ? { sender: { kind: "persona" as const, personaId: contact.personaId } }
-                : {}),
-              source: "wechat",
-              extra: group
-                ? {
-                    contactId: contact.id,
-                    contactName: contact.name,
-                    contactAvatar: contact.avatarImage,
-                    groupId: group.id,
-                    groupName: group.name,
-                    groupAvatar: group.avatarImage,
-                    channel: "wechat-group",
-                  }
-                : {
-                    contactId: contact.id,
-                    contactName: contact.name,
-                    contactAvatar: contact.avatarImage,
-                    channel: "wechat",
-                  },
-            };
-          });
-          next = [...next, ...sentChatMessages];
-        }
-        return next;
-      })(currentMessages);
-      const timestamp = new Date().toISOString();
-      const nextSessions = chatSessionsRef.current.map((session) =>
-        session.id === sessionId
-          ? { ...session, messages: nextMessages, updatedAt: timestamp }
-          : session,
-      );
-      chatSessionsRef.current = nextSessions;
-      setChatSessions(nextSessions);
-      if (activeChatSessionIdRef.current === sessionId) {
-        chatMessagesRef.current = nextMessages;
-        setChatMessages(nextMessages);
-      }
-    }
-
-    return { ...execution.result, session_id: sessionId };
-  };
 
   const executeChatTool = async (
     toolName: string,
@@ -23198,8 +22920,6 @@ export function App() {
       result = await executeHeartbeatTool(rawArguments);
     } else if (toolName === "multi_agent_end_rounds") {
       result = await executeMultiAgentEndTool(rawArguments);
-    } else if (isPhoneToolName(toolName)) {
-      result = executePhoneTool(toolName, rawArguments, requestSessionId);
     } else {
       result = await executeLocalFileTool(toolName, rawArguments);
     }
@@ -23427,7 +23147,6 @@ export function App() {
       ...browserTools,
       ...terminalTools,
       ...externalTools,
-      ...(contextSettings.phoneTools ? phoneToolDefinitions : []),
       ...(includeHeartbeatTools ? heartbeatToolDefinitions : []),
       ...(includeMultiAgentControlTools ? multiAgentControlToolDefinitions : []),
       ...buildMultiAgentDelegationToolDefinitions(delegationRoster),
@@ -23637,9 +23356,6 @@ export function App() {
         : "",
       activeLlmContextSettings.terminalTools && isTerminalSidebarAvailable()
         ? buildTerminalToolsSystemPrompt()
-        : "",
-      availableTools.some((tool) => isPhoneToolName(tool.function.name))
-        ? PHONE_TOOL_SYSTEM_PROMPT
         : "",
       activeLlmContextSettings.mcpTools ? buildMcpToolsSystemPrompt(meterMcpTools) : "",
       availableTools.some((tool) => isChatChoiceToolName(tool.function.name))
@@ -25647,9 +25363,6 @@ export function App() {
           : "",
         requestContextSettings.terminalTools && isTerminalSidebarAvailable()
           ? buildTerminalToolsSystemPrompt()
-          : "",
-        availableChatTools.some((tool) => isPhoneToolName(tool.function.name))
-          ? PHONE_TOOL_SYSTEM_PROMPT
           : "",
       ].filter(Boolean).join("\n\n");
       const mcpToolsSystemPrompt = requestContextSettings.mcpTools
@@ -28995,9 +28708,6 @@ export function App() {
         activeLlmContextSettings.terminalTools && isTerminalSidebarAvailable()
           ? buildTerminalToolsSystemPrompt()
           : "",
-        availableChatTools.some((tool) => isPhoneToolName(tool.function.name))
-          ? PHONE_TOOL_SYSTEM_PROMPT
-          : "",
       ].filter(Boolean).join("\n\n");
       const mcpToolsSystemPrompt = activeLlmContextSettings.mcpTools
         ? buildMcpToolsSystemPrompt(requestMcpTools)
@@ -30115,340 +29825,6 @@ export function App() {
   };
   sendChatMessageRef.current = sendChatMessage;
 
-  const queueWechatMessage = (
-    contact: WechatContact,
-    outgoingMessage: WechatSendMessageInput,
-  ) => {
-    const content = outgoingMessage.content.trim();
-    if (!content) throw new Error("微信消息为空。");
-    const wechatExtra = {
-      contactId: contact.id,
-      contactName: contact.name,
-      contactAvatar: contact.avatarImage,
-      channel: "wechat",
-    };
-    const userMessage: ChatMessage = {
-      id: outgoingMessage.id,
-      role: "user",
-      content,
-      createdAt: outgoingMessage.createdAt,
-      sender: { kind: "user" },
-      source: "wechat",
-      extra: wechatExtra,
-    };
-    commitChatMessages((current) => [...current, userMessage]);
-  };
-
-  const queueWechatGroupMessage = (
-    group: WechatGroup,
-    outgoingMessage: WechatSendMessageInput,
-  ) => {
-    const content = outgoingMessage.content.trim();
-    if (!content) throw new Error("微信群消息为空。");
-    const userMessage: ChatMessage = {
-      id: outgoingMessage.id,
-      role: "user",
-      content,
-      createdAt: outgoingMessage.createdAt,
-      sender: { kind: "user" },
-      source: "wechat",
-      extra: {
-        groupId: group.id,
-        groupName: group.name,
-        groupAvatar: group.avatarImage,
-        channel: "wechat-group",
-      },
-    };
-    commitChatMessages((current) => [...current, userMessage]);
-  };
-
-  const generateWechatTargetReply = async (
-    target:
-      | { kind: "contact"; contact: WechatContact }
-      | {
-          kind: "group";
-          group: WechatGroup;
-          members: WechatContact[];
-          onResponderSelected: (responder: WechatContact) => void;
-        },
-    proactive: boolean,
-  ): Promise<WechatSendMessageResult & { responder?: WechatContact }> => {
-    if (activeChatAbortControllerRef.current || chatStatus.status === "loading") {
-      throw new Error("当前回复完成后才能生成微信回复。");
-    }
-
-    const requestModelId = getEffectiveProviderModelId(chatProvider);
-    if (!chatProvider?.apiBaseUrl || !requestModelId) {
-      throw new Error("请先在 LLM 设置中配置供应商 API 地址和模型。");
-    }
-    if (isImageGenerationModelId(requestModelId)) {
-      throw new Error("微信聊天需要使用可返回文本的模型。");
-    }
-
-    const initialMessages = [...chatMessagesRef.current];
-    const contextMessages = initialMessages.filter((message) => {
-      if (message.source !== "wechat") return true;
-      const metadata = getWechatMessageMetadata(message);
-      return target.kind === "contact"
-        ? !metadata?.groupId && metadata?.contactId === target.contact.id
-        : metadata?.groupId === target.group.id;
-    });
-
-    const controller = beginChatGeneration();
-    const { signal } = controller;
-    try {
-      setChatStatus({
-        status: "loading",
-        message:
-          target.kind === "contact"
-            ? `正在与 ${target.contact.name} 微信聊天...`
-            : `正在生成 ${target.group.name} 的群聊消息...`,
-      });
-      const contextCard = activeSessionRoleplayCard ?? activeRoleplayCard ?? null;
-      const characterCardPrompt = contextCard
-        ? buildCharacterCardPrompt(contextCard, userProfile.nickname.trim() || "用户")
-        : "";
-      const triggerMessages = contextMessages.map((message) => ({
-        role: message.role,
-        content: message.content,
-      }));
-      const characterWorldBook = contextCard
-        ? resolveSessionCharacterWorldBook(activeChatSession, contextCard, worldBooks)
-        : null;
-      const sharedMessages: WechatSharedContextMessage[] = contextMessages.map((message) => {
-        const metadata = getWechatMessageMetadata(message);
-        return {
-          role: message.role,
-          content: message.content,
-          ...(message.source === "wechat" ? { source: "wechat" as const } : {}),
-          ...(metadata?.contactId ? { contactId: metadata.contactId } : {}),
-          ...(metadata?.contactName ? { contactName: metadata.contactName } : {}),
-          ...(metadata?.groupId ? { groupId: metadata.groupId } : {}),
-          ...(metadata?.groupName ? { groupName: metadata.groupName } : {}),
-          createdAt: message.createdAt,
-        };
-      });
-      const statusBarPrompt = buildStatusBarConversationSystemPrompt(
-        getSessionStatusBarState(activeChatSessionIdRef.current),
-      );
-      const buildWorldBookContext = (characterName: string) => {
-        const worldBookSystemPrompt = buildWorldBookPrompt(
-          worldBooks,
-          activeWorldBookIds,
-          triggerMessages,
-          {
-            userName: userProfile.nickname,
-            characterName,
-          },
-        );
-        const characterWorldBookPrompt =
-          characterWorldBook && !activeWorldBookIds.includes(characterWorldBook.id)
-            ? buildWorldBookPrompt(
-                [characterWorldBook],
-                [characterWorldBook.id],
-                triggerMessages,
-                {
-                  userName: userProfile.nickname,
-                  characterName,
-                },
-              )
-            : "";
-        return [worldBookSystemPrompt, characterWorldBookPrompt]
-          .filter(Boolean)
-          .join("\n\n");
-      };
-      const requestWechatCompletion = async (
-        requestMessages: WechatRequestMessage[],
-        temperature: number,
-        emptyMessage: string,
-      ) => {
-        const compressedMessages = await prepareContextCompressedMessages({
-          messages: substituteUserNicknameInApiMessages(requestMessages, userProfile.nickname),
-          provider: chatProvider,
-          modelId: requestModelId,
-          tools: [],
-          requestedOutputTokens: 0,
-          signal,
-          sessionId: activeChatSessionIdRef.current,
-        });
-        throwIfChatAborted(signal);
-        const response = await fetch("/api/chat/completions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal,
-          body: JSON.stringify({
-            ...buildProviderApiTarget(chatProvider),
-            sessionId: activeChatSessionIdRef.current,
-            request: {
-              model: requestModelId,
-              messages: compressedMessages,
-              temperature,
-              stream: false,
-            },
-          }),
-        });
-        const payload = (await readChatCompletionPayload(response)) as {
-          error?: string | { message?: string };
-          choices?: Array<{ message?: ChatApiMessage }>;
-          output_text?: string;
-        };
-        throwIfChatAborted(signal);
-        if (!response.ok) {
-          const errorMessage = getChatApiErrorMessage(payload);
-          throw new Error(
-            errorMessage
-              ? `微信请求失败：${response.status} ${errorMessage}`
-              : `微信请求失败：${response.status}`,
-          );
-        }
-        const rawText =
-          getChatApiMessageText(payload.choices?.[0]?.message).trim() ||
-          payload.output_text?.trim() ||
-          "";
-        if (!rawText) throw new Error(emptyMessage);
-        return rawText;
-      };
-      const user = {
-        nickname: userProfile.nickname,
-        bio: userProfile.bio,
-      };
-      const members = target.kind === "group"
-        ? target.members.map((contact) => ({
-            contact,
-            ...(contact.personaId
-              ? {
-                  persona: personas.find((persona) => persona.id === contact.personaId),
-                }
-              : {}),
-          }))
-        : [];
-      let responder = target.kind === "contact" ? target.contact : null;
-      if (target.kind === "group") {
-        const selectionMessages = buildWechatGroupSpeakerSelectionMessages({
-          group: target.group,
-          members,
-          user,
-          sharedMessages,
-          characterCardPrompt,
-          worldBookPrompt: buildWorldBookContext(target.group.name),
-          statusBarPrompt,
-          proactive,
-        });
-        const rawSelection = await requestWechatCompletion(
-          selectionMessages,
-          0.7,
-          "微信群聊发言人选择没有返回结果。",
-        );
-        responder = resolveWechatGroupSpeakerSelection(rawSelection, target.members);
-        if (!responder) {
-          throw new Error("微信群聊发言人选择无效，请重试。 ");
-        }
-        target.onResponderSelected(responder);
-      }
-      if (!responder) throw new Error("微信聊天没有可用的发言人。 ");
-      const contactPersona = responder.personaId
-        ? personas.find((persona) => persona.id === responder.personaId)
-        : undefined;
-      const wechatExtra = target.kind === "contact"
-        ? {
-            contactId: responder.id,
-            contactName: responder.name,
-            contactAvatar: responder.avatarImage,
-            channel: "wechat",
-          }
-        : {
-            contactId: responder.id,
-            contactName: responder.name,
-            contactAvatar: responder.avatarImage,
-            groupId: target.group.id,
-            groupName: target.group.name,
-            groupAvatar: target.group.avatarImage,
-            channel: "wechat-group",
-          };
-      const commonRequestOptions = {
-        user,
-        sharedMessages,
-        characterCardPrompt,
-        worldBookPrompt: buildWorldBookContext(responder.name),
-        statusBarPrompt,
-        proactive,
-      };
-      const requestMessages = target.kind === "contact"
-        ? buildWechatRequestMessages({
-            ...commonRequestOptions,
-            contact: target.contact,
-            persona: contactPersona,
-          })
-        : buildWechatGroupRequestMessages({
-            ...commonRequestOptions,
-            group: target.group,
-            responder,
-            members,
-          });
-      const rawReply = await requestWechatCompletion(
-        requestMessages,
-        contactPersona?.modelProfile.temperature ?? 0.72,
-        "微信回复中没有可显示的文本。",
-      );
-      const reply = splitWechatReply(rawReply).join("\n");
-
-      const assistantMessage: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: reply,
-        createdAt: new Date().toISOString(),
-        ...(contactPersona
-          ? { sender: { kind: "persona" as const, personaId: contactPersona.id } }
-          : {}),
-        source: "wechat",
-        extra: wechatExtra,
-      };
-      const completedMessages = [...chatMessagesRef.current, assistantMessage];
-      chatMessagesRef.current = completedMessages;
-      setChatMessages(completedMessages);
-      setChatStatus({ status: "success", message: `${responder.name} 已回复。` });
-      return {
-        id: assistantMessage.id,
-        content: reply,
-        createdAt: assistantMessage.createdAt,
-        ...(target.kind === "group" ? { responder } : {}),
-      };
-    } catch (error) {
-      if (isChatAbortError(error)) {
-        setChatStatus({ status: "success", message: "已停止微信回复。" });
-      } else {
-        setChatStatus({
-          status: "error",
-          message: error instanceof Error ? error.message : "微信消息发送失败。",
-        });
-      }
-      throw error;
-    } finally {
-      if (activeChatAbortControllerRef.current === controller) {
-        activeChatAbortControllerRef.current = null;
-        setChatGenerationState("idle");
-      }
-    }
-  };
-
-  const generateWechatReply = (
-    contact: WechatContact,
-    proactive: boolean,
-  ) => generateWechatTargetReply({ kind: "contact", contact }, proactive);
-
-  const generateWechatGroupReply = async (
-    group: WechatGroup,
-    members: WechatContact[],
-    proactive: boolean,
-    onResponderSelected: (responder: WechatContact) => void,
-  ): Promise<WechatGroupSendMessageResult> => {
-    const result = await generateWechatTargetReply(
-      { kind: "group", group, members, onResponderSelected },
-      proactive,
-    );
-    if (!result.responder) throw new Error("微信群聊没有返回发言人。 ");
-    return { ...result, responder: result.responder };
-  };
 
   const respondToChatChoice = (
     messageId: string,
@@ -38435,17 +37811,8 @@ export function App() {
                         chatMode === "persona" ? activePersona : undefined,
                       )
                     : null;
-                const wechatMetadata = getWechatMessageMetadata(message);
                 const messageName =
-                  tavernMessageName || (wechatMetadata
-                    ? message.role === "assistant"
-                      ? wechatMetadata.groupId
-                        ? `${wechatMetadata.contactName || "群成员"} · ${wechatMetadata.groupName}`
-                        : wechatMetadata.contactName
-                      : wechatMetadata.groupId
-                        ? `${userProfile.nickname || "User"} · ${wechatMetadata.groupName}`
-                        : `${userProfile.nickname || "User"} · 微信`
-                    : message.role === "user"
+                  tavernMessageName || (message.role === "user"
                     ? getChatSenderName(messageSender, personas, userProfile)
                     : chatMode === "roleplay" && activeSessionRoleplayCard
                       ? activeSessionRoleplayCard.name
@@ -38453,11 +37820,7 @@ export function App() {
                         ? getAiChatMessageName(message, effectiveChatModelId)
                         : assistantPersona?.name ?? "AI");
                 const messageAvatarImage =
-                  wechatMetadata
-                    ? message.role === "assistant"
-                      ? wechatMetadata.contactAvatar
-                      : userProfile.avatarImage
-                    : message.role === "user"
+                  message.role === "user"
                     ? getChatSenderAvatarImage(messageSender, personas, userProfile)
                     : chatMode === "roleplay" && activeSessionRoleplayCard
                       ? activeSessionRoleplayCard.avatarDataUrl
@@ -38500,10 +37863,6 @@ export function App() {
                         <div className="chat-avatar">
                           {messageAvatarImage ? (
                             <img src={messageAvatarImage} alt={`${messageName} 头像`} />
-                          ) : wechatMetadata && message.role === "assistant" ? (
-                            <span className="chat-wechat-avatar-fallback" aria-hidden="true">
-                              {wechatMetadata.contactName.slice(0, 1).toUpperCase()}
-                            </span>
                           ) : tavernSystemMessage || messageSender?.kind === "system" ? (
                             <Settings2 size={16} />
                           ) : messageSender?.kind === "persona" ? (
@@ -39771,14 +39130,11 @@ export function App() {
           terminalWorkspaceKey={activeChatSession?.workspaceKey ?? DEFAULT_WORKSPACE_KEY}
           terminalWorkspacePath={activeChatSession?.workspacePath ?? ""}
           personas={personas}
+          characterCards={characterCards}
+          phoneProviders={providers}
+          phoneActiveProviderId={activeProviderId}
           userProfile={userProfile}
-          chatGenerationBusy={chatGenerationState !== "idle"}
           chatSessionId={activeChatSessionId}
-          syncedWechatMessages={syncedWechatMessages}
-          onWechatQueueMessage={queueWechatMessage}
-          onWechatGenerateReply={generateWechatReply}
-          onWechatQueueGroupMessage={queueWechatGroupMessage}
-          onWechatGenerateGroupReply={generateWechatGroupReply}
           heartbeat={activeHeartbeat}
           chatHeartbeatReminderVisible={chatHeartbeatReminderVisible}
           onHeartbeatChange={updateActiveHeartbeat}

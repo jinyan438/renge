@@ -16,7 +16,6 @@ test("uses tool-rich defaults outside roleplay and lean defaults for roleplay", 
     browserTools: true,
     terminalTools: true,
     mcpTools: true,
-    phoneTools: false,
   });
   assert.deepEqual(settings.roleplay, {
     skills: false,
@@ -24,7 +23,6 @@ test("uses tool-rich defaults outside roleplay and lean defaults for roleplay", 
     browserTools: false,
     terminalTools: false,
     mcpTools: false,
-    phoneTools: false,
   });
 });
 
@@ -36,7 +34,6 @@ test("normalizes partial saved settings without losing new context sources", () 
 
   assert.equal(settings.ai.terminalTools, false);
   assert.equal(settings.ai.browserTools, true);
-  assert.equal(settings.ai.phoneTools, false);
   assert.equal(settings.roleplay.workspaceTools, true);
   assert.equal(settings.roleplay.browserTools, false);
   assert.deepEqual(settings.persona, DEFAULT_LLM_CONTEXT_SETTINGS.persona);

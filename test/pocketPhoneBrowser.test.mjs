@@ -1,0 +1,220 @@
+import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { chromium } from "playwright";
+import { startRengeServer } from "../server.mjs";
+
+// Run after npm run build. Uses isolated app data and local fixture models only.
+const root = await mkdtemp(join(tmpdir(), "renge-pocket-browser-"));
+const requests = [];
+let mode = "success";
+let releaseSlowReply;
+let browser;
+let page;
+let server;
+const reply = "给你留了最甜的草莓，我们一起吃吧 🍓";
+const upstream = createServer(async (request, response) => {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
+  const body = JSON.parse(Buffer.concat(chunks).toString());
+  requests.push({ path: request.url, body });
+  if (mode === "fail") {
+    mode = "success";
+    response.writeHead(503, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ error: { message: "fixture temporary unavailable" } }));
+    return;
+  }
+  if (mode === "slow") { mode = "success"; await new Promise(resolve => { releaseSlowReply = resolve; }); }
+  response.writeHead(200, { "Content-Type": "application/json" });
+  response.end(JSON.stringify(request.url.endsWith("responses")
+    ? { output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: reply }] }] }
+    : { choices: [{ message: { role: "assistant", content: reply } }] }));
+});
+
+try {
+  await mkdir(".runtime", { recursive: true });
+  await new Promise(resolve => upstream.listen(0, "127.0.0.1", resolve));
+  server = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir: join(root, "data") });
+  const now = new Date().toISOString();
+  const provider = { id: "fixture-chat", name: "Phone Fixture", apiBaseUrl: `http://127.0.0.1:${upstream.address().port}/v1`, apiKey: "fixture-key", apiType: "chat-completions", modelId: "phone-chat", models: ["phone-chat"], updatedAt: now };
+  const seed = {
+    version: 1, chatMode: "ai", activeProviderId: provider.id, activePersonaId: "fixture-persona",
+    providers: [provider, { ...provider, id: "fixture-responses", name: "Responses Fixture", apiType: "responses", modelId: "phone-responses", models: ["phone-responses", "phone-other"] }],
+    userProfile: { nickname: "小月", bio: "喜欢画画和草莓", avatarImage: "" },
+    personas: [{ id: "fixture-persona", name: "薄荷", description: "薄荷是一个喜欢种花的温柔朋友。", entryTypes: [{ id: "type", name: "喜好", influence: "HIGH", entries: [{ id: "enabled", key: "喜欢", value: "向日葵", enabled: true }, { id: "disabled", key: "不应导入", value: "disabled-persona-entry", enabled: false }] }], modelProfile: { provider: "", model: "", temperature: 1, responseStyle: "" }, createdAt: now, updatedAt: now }],
+    characterCards: [{ id: "fixture-card", name: "月岛", nickname: "", description: "{{char}}是{{user}}的青梅竹马。", personality: "耐心、可爱，记得对方的喜好。", scenario: "放学后一起买甜点。", firstMessage: "{{user}}，今天也想和你一起回家。", messageExample: "", systemPrompt: "", createdAt: now, updatedAt: now }],
+    chatSessions: ["One", "Two"].map(title => ({ id: `phone-${title.toLowerCase()}`, title: `Phone ${title}`, mode: "ai", workspaceKey: "default", workspaceName: "默认工作区", messages: [{ id: `main-${title}`, role: "user", content: `Phone ${title}`, createdAt: now }], createdAt: now, updatedAt: now })),
+  };
+  assert.equal((await fetch(`${server.url}/api/app-data`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data: seed }) })).ok, true);
+  browser = await chromium.launch({ headless: true });
+  page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+  page.setDefaultTimeout(15000);
+  const pageErrors = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  const phone = page.locator(".pocket-panel");
+  async function openPhone() {
+    await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
+    await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
+    const maximize = page.getByRole("button", { name: "最大化窗口", exact: true });
+    if (await maximize.isVisible()) await maximize.click();
+    await page.getByRole("button", { name: "展开右侧栏", exact: true }).click();
+    await page.getByRole("button", { name: /手机.*可爱手机/ }).click();
+    await phone.getByRole("button", { name: "打开微信", exact: true }).waitFor();
+  }
+  async function waitForReply() {
+    await phone.locator(".pocket-message.assistant").filter({ hasText: reply }).last().waitFor();
+    await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  }
+  async function send(content) {
+    await phone.locator(".pocket-composer textarea").fill(content);
+    await phone.getByRole("button", { name: "发送消息", exact: true }).click();
+  }
+  await page.goto(server.url);
+  await openPhone();
+  await page.locator(".chat-session-item").filter({ hasText: "Phone One" }).click();
+  await phone.screenshot({ path: ".runtime/pocket-home.png", animations: "disabled" });
+  await phone.getByRole("button", { name: "打开微信", exact: true }).click();
+  await phone.getByRole("button", { name: "添加第一位朋友", exact: true }).click();
+  let editor = phone.getByRole("dialog");
+  await editor.getByLabel("朋友的名字", { exact: true }).fill("奶糖");
+  await editor.getByLabel(/角色设定/).fill("奶糖是小月的好朋友，活泼可爱，喜欢草莓甜点。");
+  await editor.getByLabel(/第一句招呼/).fill("{{user}}，一起去买草莓吧！");
+  await editor.getByRole("button", { name: "添加到通讯录", exact: true }).click();
+  await phone.getByText("小月，一起去买草莓吧！", { exact: true }).waitFor();
+  await send("今天想吃草莓");
+  await waitForReply();
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].body.request?.messages?.[0]?.content ?? requests[0].body.messages[0].content, /奶糖/);
+  assert.match(JSON.stringify(requests[0].body), /喜欢画画和草莓/);
+  console.log("PASS: custom contact, greeting macros and model-backed role reply");
+
+  mode = "fail";
+  await send("你会陪我去吗？");
+  await phone.getByText("fixture temporary unavailable", { exact: true }).waitFor();
+  await phone.getByRole("button", { name: "重试回复", exact: true }).click();
+  await phone.locator(".pocket-message.assistant").filter({ hasText: reply }).nth(1).waitFor();
+  assert.deepEqual(requests[1].body, requests[2].body);
+  assert.equal(await phone.locator(".pocket-message.user").count(), 2);
+  mode = "slow";
+  await send("这条消息先等等");
+  await phone.getByRole("button", { name: "停止回复", exact: true }).waitFor();
+  await page.waitForFunction(() => document.querySelector(".pocket-typing"));
+  while (!releaseSlowReply) await new Promise(resolve => setTimeout(resolve, 10));
+  await phone.getByRole("button", { name: "停止回复", exact: true }).click();
+  releaseSlowReply();
+  await phone.getByRole("button", { name: "重试回复", exact: true }).click();
+  await phone.locator(".pocket-message.assistant").filter({ hasText: reply }).nth(2).waitFor();
+  assert.equal(await phone.locator(".pocket-message.user").count(), 3);
+  assert.equal(await phone.locator(".pocket-message.assistant").count(), 4);
+  await phone.screenshot({ path: ".runtime/pocket-chat.png", animations: "disabled" });
+  console.log("PASS: failure retry and canceled reply do not duplicate outgoing messages");
+
+  await phone.getByRole("button", { name: "返回微信列表", exact: true }).click();
+  await phone.getByRole("button", { name: "添加联系人", exact: true }).click();
+  editor = phone.getByRole("dialog");
+  await editor.getByLabel("从已有角色导入").selectOption("persona:fixture-persona");
+  assert.match(await editor.getByLabel(/角色设定/).inputValue(), /向日葵/);
+  assert.doesNotMatch(await editor.getByLabel(/角色设定/).inputValue(), /disabled-persona-entry/);
+  await editor.getByRole("button", { name: "添加到通讯录", exact: true }).click();
+  await phone.getByRole("button", { name: "编辑联系人", exact: true }).click();
+  editor = phone.getByRole("dialog");
+  await editor.getByLabel("朋友的名字", { exact: true }).fill("薄荷同学");
+  await editor.getByRole("button", { name: "保存小档案", exact: true }).click();
+  await phone.getByText("薄荷同学", { exact: true }).first().waitFor();
+  console.log("PASS: persona import uses enabled traits, and contact editing preserves the conversation");
+
+  await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click();
+  await phone.getByRole("button", { name: "打开手机设置", exact: true }).click();
+  await phone.getByLabel("模型渠道").selectOption("fixture-responses");
+  await phone.getByLabel("聊天模型").selectOption("phone-other");
+  await phone.getByRole("button", { name: "薄荷布丁", exact: true }).click();
+  await phone.getByRole("switch").click();
+  assert.equal(await phone.getByRole("switch").getAttribute("aria-checked"), "true");
+  await phone.locator(".pocket-settings").evaluate(node => { node.scrollTop = 0; });
+  await phone.screenshot({ path: ".runtime/pocket-settings.png", animations: "disabled" });
+  await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click();
+  await phone.getByRole("button", { name: "打开微信", exact: true }).click();
+  await phone.getByRole("button", { name: "添加联系人", exact: true }).click();
+  editor = phone.getByRole("dialog");
+  await editor.getByLabel("从已有角色导入").selectOption("card:fixture-card");
+  await editor.getByRole("button", { name: "添加到通讯录", exact: true }).click();
+  await phone.getByText("小月，今天也想和你一起回家。", { exact: true }).waitFor();
+  await send("一起走吧");
+  await waitForReply();
+  assert.equal(requests.at(-1).path, "/v1/responses");
+  assert.equal(requests.at(-1).body.model, "phone-other");
+  assert.match(JSON.stringify(requests.at(-1).body), /月岛是小月的青梅竹马/);
+  console.log("PASS: character-card import, selectable model, Responses API, themes and large text");
+
+  await phone.getByRole("button", { name: "编辑联系人", exact: true }).click();
+  await phone.getByRole("button", { name: "清空聊天", exact: true }).click();
+  await phone.getByRole("alertdialog").getByRole("button", { name: "再想想", exact: true }).click();
+  await phone.getByRole("button", { name: "关闭联系人编辑", exact: true }).click();
+  assert.equal(await phone.locator(".pocket-message").count(), 3);
+  await phone.getByRole("button", { name: "编辑联系人", exact: true }).click();
+  await phone.getByRole("button", { name: "清空聊天", exact: true }).click();
+  await phone.getByRole("alertdialog").getByRole("button", { name: "确认", exact: true }).click();
+  assert.equal(await phone.locator(".pocket-message").count(), 0);
+  await phone.getByRole("button", { name: "编辑联系人", exact: true }).click();
+  await phone.getByRole("button", { name: "删除联系人", exact: true }).click();
+  await phone.getByRole("alertdialog").getByRole("button", { name: "确认", exact: true }).click();
+  assert.equal(await phone.locator(".pocket-contact-row").count(), 2);
+  await phone.getByLabel("搜索联系人").fill("奶糖");
+  assert.equal(await phone.locator(".pocket-contact-row").count(), 1);
+  await phone.getByLabel("搜索联系人").fill("找不到的朋友");
+  await phone.getByText("还没有找到这位朋友", { exact: true }).waitFor();
+  console.log("PASS: search and destructive actions require confirmation");
+
+  await page.locator(".chat-session-item").filter({ hasText: "Phone Two" }).click();
+  await phone.getByRole("button", { name: "打开微信", exact: true }).click();
+  assert.equal(await phone.locator(".pocket-contact-row").count(), 0);
+  await page.locator(".chat-session-item").filter({ hasText: "Phone One" }).click();
+  assert.equal(await phone.locator(".pocket-device.theme-mint.large-text").count(), 1);
+  await page.reload();
+  await openPhone();
+  assert.equal(await phone.locator(".pocket-device.theme-mint.large-text").count(), 1);
+  await phone.getByRole("button", { name: "打开微信", exact: true }).click();
+  assert.equal(await phone.locator(".pocket-contact-row").count(), 2);
+  await phone.locator(".pocket-contact-row").filter({ hasText: "奶糖" }).click();
+  assert.equal(await phone.locator(".pocket-message.user").count(), 3);
+  assert.equal(await phone.locator(".pocket-message.assistant").count(), 4);
+  console.log("PASS: session isolation and saved contacts, history, model and appearance after reload");
+
+  const handle = page.locator(".right-sidebar-resize-handle");
+  const bounds = await handle.boundingBox();
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + 160, bounds.y + bounds.height / 2, { steps: 12 });
+  await page.mouse.up();
+  const width = await page.locator(".status-bar-sidebar").evaluate(node => node.clientWidth);
+  assert.ok(width <= 270, `Expected a narrow phone sidebar, got ${width}`);
+  assert.equal(await phone.locator(".pocket-screen").evaluate(node => node.scrollWidth <= node.clientWidth + 1), true);
+  await phone.screenshot({ path: ".runtime/pocket-narrow.png", animations: "disabled" });
+  await page.setViewportSize({ width: 1600, height: 500 });
+  await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click();
+  await phone.getByRole("button", { name: "打开微信", exact: true }).waitFor();
+  assert.equal(await phone.locator(".pocket-stage").evaluate(node => {
+    node.scrollTop = 0;
+    return node.querySelector(".pocket-device").getBoundingClientRect().top >= node.getBoundingClientRect().top;
+  }), true);
+  await phone.screenshot({ path: ".runtime/pocket-short.png", animations: "disabled" });
+  assert.deepEqual(pageErrors, []);
+  console.log("PASS: 260px sidebar, short window, and no browser runtime errors");
+} catch (error) {
+  if (page && !page.isClosed()) {
+    await page.screenshot({ path: ".runtime/pocket-test-failure.png" });
+    console.error((await page.locator("body").innerText()).slice(-3500));
+  }
+  throw error;
+} finally {
+  releaseSlowReply?.();
+  await browser?.close();
+  server?.server.closeAllConnections();
+  if (server) await new Promise(resolve => server.server.close(resolve));
+  upstream.closeAllConnections();
+  await new Promise(resolve => upstream.close(resolve));
+  assert.ok(root.startsWith(join(tmpdir(), "renge-pocket-browser-")));
+  await rm(root, { recursive: true, force: true });
+}

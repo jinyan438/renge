@@ -74,17 +74,13 @@ import {
   validateStatusBarItems,
 } from "./statusBarUtils";
 import type { AgentPersona } from "./types";
-import {
-  areWechatMessagesEqual,
-  type WechatContact,
-  type WechatGroup,
-  type WechatGroupSendMessageResult,
-  type WechatSendMessageInput,
-  type WechatSendMessageResult,
-  type WechatStoredMessage,
-} from "./wechatSidebarUtils";
+import type { CharacterCard } from "./characterCardUtils";
+import type { PocketProvider } from "./pocketPhoneChat";
 import "./status-bar.css";
 
+const PocketPhone = memo(lazy(() =>
+  import("./PocketPhone").then((module) => ({ default: module.PocketPhone })),
+));
 const BrowserSidebarPanel = memo(lazy(() =>
   import("./BrowserSidebarPanel").then((module) => ({
     default: module.BrowserSidebarPanel,
@@ -103,11 +99,6 @@ const PcConnectionSidebarPanel = memo(lazy(() =>
 const TerminalSidebarPanel = memo(lazy(() =>
   import("./TerminalSidebarPanel").then((module) => ({
     default: module.TerminalSidebarPanel,
-  })),
-));
-const WechatSidebar = memo(lazy(() =>
-  import("./WechatSidebar").then((module) => ({
-    default: module.WechatSidebar,
   })),
 ));
 
@@ -151,32 +142,15 @@ export type StatusBarSidebarProps = {
   terminalWorkspaceKey?: string;
   terminalWorkspacePath?: string;
   personas: AgentPersona[];
+  characterCards: CharacterCard[];
+  phoneProviders: PocketProvider[];
+  phoneActiveProviderId: string;
   userProfile: {
     nickname: string;
     bio: string;
     avatarImage: string;
   };
-  chatGenerationBusy?: boolean;
   chatSessionId: string;
-  syncedWechatMessages: WechatStoredMessage[];
-  onWechatQueueMessage: (
-    contact: WechatContact,
-    message: WechatSendMessageInput,
-  ) => void;
-  onWechatGenerateReply: (
-    contact: WechatContact,
-    proactive: boolean,
-  ) => Promise<WechatSendMessageResult>;
-  onWechatQueueGroupMessage: (
-    group: WechatGroup,
-    message: WechatSendMessageInput,
-  ) => void;
-  onWechatGenerateGroupReply: (
-    group: WechatGroup,
-    members: WechatContact[],
-    proactive: boolean,
-    onResponderSelected: (responder: WechatContact) => void,
-  ) => Promise<WechatGroupSendMessageResult>;
   heartbeat: {
     enabled: boolean;
     intervalMinutes: number;
@@ -235,7 +209,7 @@ const RIGHT_SIDEBAR_TOOLS = [
   {
     id: "phone",
     label: "手机",
-    description: "微信联系人与共享上下文聊天",
+    description: "可爱手机桌面、微信角色聊天与设置",
     icon: Smartphone,
     available: true,
   },
@@ -875,14 +849,11 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   terminalWorkspaceKey = "default",
   terminalWorkspacePath = "",
   personas,
+  characterCards,
+  phoneProviders,
+  phoneActiveProviderId,
   userProfile,
-  chatGenerationBusy = false,
   chatSessionId,
-  syncedWechatMessages,
-  onWechatQueueMessage,
-  onWechatGenerateReply,
-  onWechatQueueGroupMessage,
-  onWechatGenerateGroupReply,
   heartbeat,
   chatHeartbeatReminderVisible,
   onHeartbeatChange,
@@ -2362,17 +2333,15 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
           </Suspense>
         ) : activeToolId === "phone" ? (
           <Suspense fallback={<SidebarToolLoading label="手机" />}>
-            <WechatSidebar
-              busy={chatGenerationBusy}
+            <PocketPhone
+              key={chatSessionId}
               onBack={handleToolBack}
               onClose={handleToolClose}
-              onQueueMessage={onWechatQueueMessage}
-              onGenerateReply={onWechatGenerateReply}
-              onQueueGroupMessage={onWechatQueueGroupMessage}
-              onGenerateGroupReply={onWechatGenerateGroupReply}
               personas={personas}
+              characterCards={characterCards}
+              providers={phoneProviders}
+              activeProviderId={phoneActiveProviderId}
               sessionId={chatSessionId}
-              syncedMessages={syncedWechatMessages}
               userProfile={userProfile}
             />
           </Suspense>
@@ -2818,10 +2787,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
 }, (previous, next) => {
   const keys = Object.keys(previous) as (keyof StatusBarSidebarProps)[];
   return keys.length === Object.keys(next).length && keys.every((key) =>
-    key === "syncedWechatMessages"
-      // Main-chat fragments recreate this projection even when no phone message changed.
-      ? areWechatMessagesEqual(previous.syncedWechatMessages, next.syncedWechatMessages)
-      : Object.is(previous[key], next[key]),
+    Object.is(previous[key], next[key]),
   );
 });
 
@@ -2854,31 +2820,6 @@ export function StatusBarSidebar(props: StatusBarSidebarProps) {
   const onChooseWorkspace = useLatestCallback(() => props.onChooseWorkspace?.());
   const onBrowserComment = useLatestCallback((comment: BrowserPageComment) =>
     props.onBrowserComment?.(comment));
-  const onWechatQueueMessage = useLatestCallback(
-    (contact: WechatContact, message: WechatSendMessageInput) =>
-      props.onWechatQueueMessage(contact, message),
-  );
-  const onWechatGenerateReply = useLatestCallback(
-    (contact: WechatContact, proactive: boolean) =>
-      props.onWechatGenerateReply(contact, proactive),
-  );
-  const onWechatQueueGroupMessage = useLatestCallback(
-    (group: WechatGroup, message: WechatSendMessageInput) =>
-      props.onWechatQueueGroupMessage(group, message),
-  );
-  const onWechatGenerateGroupReply = useLatestCallback(
-    (
-      group: WechatGroup,
-      members: WechatContact[],
-      proactive: boolean,
-      onResponderSelected: (responder: WechatContact) => void,
-    ) => props.onWechatGenerateGroupReply(
-      group,
-      members,
-      proactive,
-      onResponderSelected,
-    ),
-  );
   const onHeartbeatChange = useLatestCallback(
     (patch: Parameters<StatusBarSidebarProps["onHeartbeatChange"]>[0]) =>
       props.onHeartbeatChange(patch),
@@ -2929,10 +2870,6 @@ export function StatusBarSidebar(props: StatusBarSidebarProps) {
       onChooseWorkspace={props.onChooseWorkspace ? onChooseWorkspace : undefined}
       onBrowserComment={props.onBrowserComment ? onBrowserComment : undefined}
       pcConnection={pcConnection}
-      onWechatQueueMessage={onWechatQueueMessage}
-      onWechatGenerateReply={onWechatGenerateReply}
-      onWechatQueueGroupMessage={onWechatQueueGroupMessage}
-      onWechatGenerateGroupReply={onWechatGenerateGroupReply}
       onHeartbeatChange={onHeartbeatChange}
       onHeartbeatReminderVisibleChange={onHeartbeatReminderVisibleChange}
     />

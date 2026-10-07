@@ -1,0 +1,256 @@
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { ArrowLeft, BatteryFull, Check, ChevronRight, Heart, MessageCircle, MoreHorizontal, Plus, Search, Send, Settings, Signal, Sparkles, Square, Users, Wifi, X } from "lucide-react";
+import type { CharacterCard } from "./characterCardUtils";
+import type { AgentPersona } from "./types";
+import { buildPocketConversation, emptyPocketState, makePocketContact, normalizePocketState, pocketId, pocketStorageKey, POCKET_AVATARS, POCKET_THEMES, safePocketAvatar, type PocketContact, type PocketSettings, type PocketState } from "./pocketPhoneState";
+import { requestPocketReply, resolvePocketModel, type PocketProvider } from "./pocketPhoneChat";
+import "./pocket-phone.css";
+
+type PocketPhoneProps = {
+  sessionId: string; personas: AgentPersona[]; characterCards: CharacterCard[];
+  providers: PocketProvider[]; activeProviderId: string;
+  userProfile: { nickname: string; bio: string; avatarImage: string };
+  onBack: () => void; onClose: () => void;
+};
+type PhoneApp = "home" | "wechat" | "settings";
+type WechatTab = "chats" | "contacts" | "me";
+type ContactDraft = Pick<PocketContact, "name" | "avatar" | "personality" | "greeting" | "sourceLabel">;
+type Confirmation = { title: string; description: string; action: () => void };
+
+function Rabbit({ small = false }: { small?: boolean }) {
+  return <svg className={`pocket-rabbit${small ? " is-small" : ""}`} viewBox="0 0 240 240" fill="none" aria-hidden="true">
+    <ellipse cx="123" cy="214" rx="69" ry="11" fill="currentColor" opacity=".12" />
+    <path d="M83 102C62 82 64 27 82 27C98 27 106 69 102 96M135 95C130 64 144 22 160 29C177 37 163 80 154 105" fill="#fffaf5" stroke="#d7b9ac" strokeWidth="3" />
+    <path d="M82 44C76 61 83 83 89 88M151 45C151 61 144 77 144 83" stroke="#edbac2" strokeWidth="9" strokeLinecap="round" />
+    <path d="M71 145C46 168 65 211 93 211H156C184 211 198 169 172 147" fill="#fffaf5" stroke="#d7b9ac" strokeWidth="3" />
+    <path d="M56 122C54 86 86 81 122 81C160 81 188 96 185 126C184 153 158 165 122 165C86 165 59 153 56 122Z" fill="#fffaf5" stroke="#d7b9ac" strokeWidth="3" />
+    <ellipse cx="86" cy="132" rx="12" ry="7" fill="#f3b6c0" opacity=".8" /><ellipse cx="158" cy="132" rx="12" ry="7" fill="#f3b6c0" opacity=".8" />
+    <path d="M97 115V121M146 115V121" stroke="#70554d" strokeWidth="4.5" strokeLinecap="round" /><path d="M115 130L121 134L128 130M121 134V139" stroke="#70554d" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+    <path d="M122 202C117 198 82 176 82 159C82 140 106 139 122 156C138 139 163 140 163 159C163 176 127 198 122 202Z" fill="currentColor" />
+    <path d="M69 176C83 184 90 179 90 172M172 176C157 184 151 179 151 172" stroke="#d7b9ac" strokeWidth="3" strokeLinecap="round" />
+    <path d="M24 100L27 108L35 111L27 114L24 122L21 114L13 111L21 108Z" fill="#f5cc83" /><path d="M213 143L216 151L224 154L216 157L213 165L210 157L202 154L210 151Z" fill="#f5cc83" />
+  </svg>;
+}
+
+function Avatar({ avatar, name, self = false }: { avatar: string; name: string; self?: boolean }) {
+  const safeAvatar = safePocketAvatar(avatar);
+  return <span className={`pocket-avatar${self ? " is-self" : ""}`}>
+    {safeAvatar.startsWith("data:") || safeAvatar.startsWith("/") ? <img src={safeAvatar} alt={name} onError={event => { event.currentTarget.style.display = "none"; }} /> : <span aria-hidden="true">{safeAvatar}</span>}
+  </span>;
+}
+
+function formatTime(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+}
+
+export function PocketPhone(props: PocketPhoneProps) {
+  const storageKey = pocketStorageKey(props.sessionId);
+  const [storageWarning, setStorageWarning] = useState("");
+  const [state, setState] = useState<PocketState>(() => {
+    try { const saved = localStorage.getItem(storageKey); return saved ? normalizePocketState(JSON.parse(saved)) : emptyPocketState(); }
+    catch { return emptyPocketState(); }
+  });
+  const stateRef = useRef(state);
+  const [app, setApp] = useState<PhoneApp>("home");
+  const [tab, setTab] = useState<WechatTab>("chats");
+  const [contactId, setContactId] = useState("");
+  const [query, setQuery] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [editor, setEditor] = useState<{ id?: string; draft: ContactDraft } | null>(null);
+  const [editorError, setEditorError] = useState("");
+  const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const [pendingContactId, setPendingContactId] = useState("");
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const controllerRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  const editorRef = useRef<HTMLFormElement>(null);
+  const confirmationRef = useRef<HTMLDivElement>(null);
+  const conversationRef = useRef<HTMLDivElement>(null);
+  const [now, setNow] = useState(new Date());
+  const activeContact = state.contacts.find(contact => contact.id === contactId);
+  const nickname = state.settings.nickname.trim() || props.userProfile.nickname.trim() || "小小的我";
+  const selection = resolvePocketModel(props.providers, props.activeProviderId, state.settings.providerId, state.settings.modelId);
+  const currentTheme = POCKET_THEMES.find(theme => theme.id === state.settings.theme)!;
+  const canChat = !!selection.provider?.apiBaseUrl.trim() && !!selection.modelId.trim();
+
+  function updateState(change: (previous: PocketState) => PocketState) {
+    const next = change(stateRef.current);
+    stateRef.current = next;
+    setState(next);
+    try { localStorage.setItem(storageKey, JSON.stringify(next)); setStorageWarning(""); }
+    catch { setStorageWarning("手机存储空间不足或不可用，这次改动暂未保存。请保留当前页面。"); }
+  }
+  function updateSettings(patch: Partial<PocketSettings>) { updateState(previous => ({ ...previous, settings: { ...previous.settings, ...patch } })); }
+  function updateContact(id: string, change: (contact: PocketContact) => PocketContact) {
+    updateState(previous => ({ ...previous, contacts: previous.contacts.map(contact => contact.id === id ? change(contact) : contact) }));
+  }
+  function openWechat(nextTab: WechatTab = "chats") { setApp("wechat"); setTab(nextTab); setContactId(""); setQuery(""); }
+  function openContact(contact: PocketContact) { setContactId(contact.id); setApp("wechat"); setQuery(""); }
+  function addContact() { setEditorError(""); setEditor({ draft: { name: "", avatar: "🐰", personality: "", greeting: "", sourceLabel: "自定义角色" } }); }
+  function editContact(contact: PocketContact) { setEditorError(""); setEditor({ id: contact.id, draft: { name: contact.name, avatar: contact.avatar, personality: contact.personality, greeting: contact.greeting, sourceLabel: contact.sourceLabel } }); }
+
+  useEffect(() => { const timer = setInterval(() => setNow(new Date()), 15000); return () => clearInterval(timer); }, []);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; controllerRef.current?.abort(); };
+  }, []);
+  useEffect(() => { const node = conversationRef.current; if (node) node.scrollTop = node.scrollHeight; }, [contactId, activeContact?.messages.length, pendingContactId, errors[contactId]]);
+  useEffect(() => {
+    const dialog = confirmation ? confirmationRef.current : editor ? editorRef.current : null;
+    if (!dialog) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusables = () => Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input, textarea, select, [tabindex="0"]'));
+    if (confirmation) focusables()[0]?.focus();
+    const trapFocus = (event: Event) => {
+      if (!(event instanceof KeyboardEvent)) return;
+      if (event.key === "Escape") { event.preventDefault(); if (confirmation) setConfirmation(null); else setEditor(null); }
+      if (event.key !== "Tab") return;
+      const elements = focusables();
+      const first = elements[0]; const last = elements.at(-1);
+      if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) { event.preventDefault(); first?.focus(); }
+    };
+    dialog.addEventListener("keydown", trapFocus);
+    return () => { dialog.removeEventListener("keydown", trapFocus); if (previousFocus?.isConnected) previousFocus.focus(); };
+  }, [!!editor, !!confirmation]);
+
+  function importCharacter(value: string) {
+    if (!editor || !value) return;
+    const card = props.characterCards.find(item => `card:${item.id}` === value);
+    const persona = props.personas.find(item => `persona:${item.id}` === value);
+    const draft = card ? {
+      name: card.nickname || card.name, avatar: safePocketAvatar(card.avatarDataUrl), sourceLabel: "来自角色卡",
+      personality: [card.description, card.personality, card.scenario && `场景：${card.scenario}`, card.systemPrompt, card.messageExample && `对话示例：${card.messageExample}`, card.postHistoryInstructions].filter(Boolean).join("\n\n"),
+      greeting: card.firstMessage,
+    } : persona ? {
+      name: persona.name, avatar: safePocketAvatar(persona.avatarImage), sourceLabel: "来自人格",
+      personality: [persona.description, ...persona.entryTypes.flatMap(type => type.entries.filter(entry => entry.enabled).map(entry => `${type.name} · ${entry.key}：${entry.value}`))].filter(Boolean).join("\n"), greeting: "",
+    } : null;
+    if (draft) setEditor({ ...editor, draft });
+  }
+
+  function saveContact(event: FormEvent) {
+    event.preventDefault();
+    if (!editor) return;
+    try {
+      const validated = makePocketContact(editor.draft);
+      if (editor.id) updateContact(editor.id, contact => ({ ...contact, ...editor.draft, name: validated.name, personality: validated.personality, avatar: validated.avatar, greeting: validated.greeting }));
+      else {
+        const greeting = validated.greeting.replace(/\{\{char\}\}/gi, validated.name).replace(/\{\{user\}\}/gi, nickname);
+        const contact = { ...validated, messages: validated.messages.map(message => ({ ...message, content: greeting })) };
+        updateState(previous => ({ ...previous, contacts: [...previous.contacts, contact] }));
+        openContact(contact);
+      }
+      setEditor(null);
+    } catch (error) { setEditorError(error instanceof Error ? error.message : "联系人没有保存成功。"); }
+  }
+
+  async function sendMessage(retry = false) {
+    const contact = stateRef.current.contacts.find(item => item.id === contactId);
+    if (!contact || controllerRef.current) return;
+    const content = (drafts[contact.id] || "").trim();
+    if (!retry && !content) return;
+    if (!canChat) { setErrors(previous => ({ ...previous, [contact.id]: "先到手机设置选择聊天模型，就可以收到 TA 的回复啦。" })); return; }
+    const outgoing = retry ? contact : { ...contact, messages: [...contact.messages, { id: pocketId(), role: "user" as const, content, createdAt: new Date().toISOString() }] };
+    if (!retry) { updateContact(contact.id, () => outgoing); setDrafts(previous => ({ ...previous, [contact.id]: "" })); }
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    setPendingContactId(contact.id);
+    setErrors(previous => ({ ...previous, [contact.id]: "" }));
+    const timeout = setTimeout(() => controller.abort(new Error("等待有点久，点重试再发送一次吧。")), 120000);
+    try {
+      const reply = await requestPocketReply(selection.provider, selection.modelId, buildPocketConversation(outgoing, { nickname, bio: props.userProfile.bio }), controller.signal);
+      if (controller.signal.aborted) return;
+      updateContact(contact.id, previous => ({ ...previous, messages: [...previous.messages, { id: pocketId(), role: "assistant", content: reply, createdAt: new Date().toISOString() }] }));
+    } catch (error) {
+      if (mountedRef.current && (!controller.signal.aborted || controller.signal.reason instanceof Error && controller.signal.reason.name !== "AbortError")) setErrors(previous => ({ ...previous, [contact.id]: error instanceof Error ? error.message : "暂时没有连接上，请重试。" }));
+    } finally {
+      clearTimeout(timeout);
+      if (controllerRef.current === controller) { controllerRef.current = null; if (mountedRef.current) setPendingContactId(""); }
+    }
+  }
+
+  const searchedContacts = state.contacts.filter(contact => contact.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+  const listedContacts = [...searchedContacts].sort((a, b) => tab === "contacts" ? a.name.localeCompare(b.name, "zh-CN") : (b.messages.at(-1)?.createdAt || b.createdAt).localeCompare(a.messages.at(-1)?.createdAt || a.createdAt));
+  const totalMessages = state.contacts.reduce((sum, contact) => sum + contact.messages.length, 0);
+  const draft = activeContact ? drafts[activeContact.id] || "" : "";
+  const patchDraft = (patch: Partial<ContactDraft>) => setEditor(previous => previous ? { ...previous, draft: { ...previous.draft, ...patch } } : null);
+
+  return <section className="pocket-panel" aria-label="口袋手机">
+    <header className="pocket-panel-header">
+      <button type="button" onClick={props.onBack} aria-label="返回右侧工具"><ArrowLeft size={17} /></button>
+      <span><strong>口袋手机</strong><small>把可爱和想念，随身收藏</small></span>
+      <button type="button" onClick={props.onClose} aria-label="关闭手机模块"><X size={17} /></button>
+    </header>
+    <div className="pocket-stage">
+      <div className={`pocket-device theme-${state.settings.theme}${state.settings.largeText ? " large-text" : ""}`} style={{ "--pocket-swatch": currentTheme.color } as CSSProperties}>
+        <div className="pocket-side-button" aria-hidden="true" />
+        <div className={`pocket-screen app-${app}`}>
+          <div className="pocket-status"><span>{formatTime(now.toISOString())}</span><div className="pocket-island" aria-hidden="true"><i /></div><span aria-label="信号良好，电量充足"><Signal size={12} /><Wifi size={12} /><BatteryFull size={17} /></span></div>
+          {storageWarning && <div className="pocket-storage-warning" role="alert">{storageWarning}</div>}
+          <div className="pocket-content" key={app} inert={editor || confirmation ? true : undefined}>
+            {app === "home" ? <div className="pocket-home">
+              <div className="pocket-home-date"><span>{now.toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "long" })}</span><strong>{formatTime(now.toISOString())}</strong><small><Heart size={11} fill="currentColor" /> 今天也要好好爱自己</small></div>
+              <div className="pocket-wallpaper"><span className="pocket-cloud cloud-one" /><span className="pocket-cloud cloud-two" /><span className="pocket-wallpaper-star star-one">✦</span><span className="pocket-wallpaper-star star-two">✧</span><Rabbit /><span className="pocket-wallpaper-note">a little love, every day</span></div>
+              <button className="pocket-memory-widget" type="button" onClick={() => openWechat("contacts")}><span className="pocket-widget-sticker">💌</span><span><strong>{state.contacts.length ? `${state.contacts.length} 位朋友，住在口袋里` : "让喜欢的人，住进口袋里"}</strong><small>{state.contacts.length ? "点开微信，聊聊今天的小事" : "添加第一位联系人，开始故事吧"}</small></span><ChevronRight size={15} /></button>
+              <div className="pocket-app-grid">
+                <button className="pocket-app-icon" type="button" onClick={() => openWechat()} aria-label="打开微信"><span className="pocket-icon-wechat"><MessageCircle size={33} strokeWidth={2.3} fill="white" /><MessageCircle className="pocket-chat-icon-small" size={23} fill="#d8f4dc" /></span><strong>微信</strong></button>
+                <button className="pocket-app-icon" type="button" onClick={() => setApp("settings")} aria-label="打开手机设置"><span className="pocket-icon-settings"><Settings size={34} strokeWidth={1.7} /></span><strong>设置</strong></button>
+              </div>
+              <div className="pocket-home-bottom"><span className="pocket-page-dot" /><span /><div className="pocket-dock"><button type="button" onClick={() => openWechat()} aria-label="打开微信聊天"><MessageCircle size={22} /><span>聊聊天</span></button><i /><button type="button" onClick={addContact} aria-label="添加新朋友"><Heart size={22} /><span>新朋友</span></button></div></div>
+            </div> : app === "settings" ? <div className="pocket-settings pocket-scroll">
+              <div className="pocket-app-heading"><button type="button" onClick={() => setApp("home")} aria-label="返回手机桌面"><ArrowLeft size={19} /></button><h2>设置</h2><span>让手机更像你</span></div>
+              <div className="pocket-profile-card"><Avatar avatar={props.userProfile.avatarImage || "🍓"} name={nickname} self /><span><strong>{nickname}</strong><small>今天也是可爱的你 ♡</small></span><Sparkles size={19} /></div>
+              <label className="pocket-settings-label" htmlFor="pocket-nickname">我的昵称</label><input id="pocket-nickname" className="pocket-input" maxLength={24} placeholder={props.userProfile.nickname || "小小的我"} value={state.settings.nickname} onChange={event => updateSettings({ nickname: event.target.value })} />
+              <div className="pocket-settings-label">手机主题</div><div className="pocket-theme-options">{POCKET_THEMES.map(theme => <button type="button" key={theme.id} className={state.settings.theme === theme.id ? "is-selected" : ""} onClick={() => updateSettings({ theme: theme.id })} aria-pressed={state.settings.theme === theme.id}><span style={{ background: theme.color }}>{state.settings.theme === theme.id && <Check size={16} />}</span><small>{theme.name}</small></button>)}</div><p className="pocket-theme-note">{currentTheme.note} ♡</p>
+              <div className="pocket-settings-label">角色聊天</div><div className="pocket-settings-group">
+                <label htmlFor="pocket-provider">模型渠道</label><select id="pocket-provider" value={state.settings.providerId} onChange={event => updateSettings({ providerId: event.target.value, modelId: "" })}><option value="">跟随应用当前渠道</option>{props.providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}{state.settings.providerId && !selection.provider && <option value={state.settings.providerId}>渠道已移除，请重新选择</option>}</select>
+                <label htmlFor="pocket-model">聊天模型</label><select id="pocket-model" disabled={!state.settings.providerId || !selection.provider} value={selection.modelId} onChange={event => updateSettings({ modelId: event.target.value })}>{Array.from(new Set([selection.modelId, selection.provider?.modelId, ...selection.provider?.models || []].filter((value): value is string => !!value))).map(model => <option key={model} value={model}>{model}</option>)}{!selection.modelId && <option value="">暂无可用模型</option>}</select>
+                <p>{canChat ? "微信角色会使用这个模型与你聊天。" : "请先在应用的模型渠道中配置接口和模型。"}</p>
+              </div>
+              <button className="pocket-setting-toggle" type="button" role="switch" aria-checked={state.settings.largeText} onClick={() => updateSettings({ largeText: !state.settings.largeText })}><span><strong>大一点的聊天文字</strong><small>让每一句话都看得清楚</small></span><i className={state.settings.largeText ? "is-on" : ""} /></button>
+              <div className="pocket-about"><Rabbit small /><strong>小小手机 · 大大想念</strong><span>{state.contacts.length} 位联系人 · {totalMessages} 条消息</span><small>联系人和聊天记录自动保存在此设备，按会话分开收藏</small></div>
+            </div> : <div className="pocket-wechat">
+              <header className="pocket-wechat-header"><button type="button" onClick={() => activeContact ? setContactId("") : setApp("home")} aria-label={activeContact ? "返回微信列表" : "返回手机桌面"}><ArrowLeft size={19} /></button><span><strong>{activeContact?.name || (tab === "contacts" ? "通讯录" : tab === "me" ? "我" : "微信")}</strong><small>{activeContact ? pendingContactId === activeContact.id ? "对方正在输入…" : "留一点时间，给在意的人" : "每一句小事，都值得被听见"}</small></span><button type="button" onClick={() => activeContact ? editContact(activeContact) : addContact()} aria-label={activeContact ? "编辑联系人" : "添加联系人"}>{activeContact ? <MoreHorizontal size={22} /> : <Plus size={22} />}</button></header>
+              {activeContact ? <>
+                <div className="pocket-conversation pocket-scroll" ref={conversationRef} role="log" aria-label={`${activeContact.name}的聊天记录`} aria-live="polite">
+                  <div className="pocket-conversation-start"><Avatar avatar={activeContact.avatar} name={activeContact.name} /><strong>{activeContact.name}</strong><small>你们的小小故事，从这里开始</small></div>
+                  {activeContact.messages.map((message, index) => <div key={message.id}>
+                    {(index === 0 || new Date(message.createdAt).getTime() - new Date(activeContact.messages[index - 1].createdAt).getTime() > 300000) && <time className="pocket-message-time">{new Date(message.createdAt).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })} {formatTime(message.createdAt)}</time>}
+                    <div className={`pocket-message ${message.role}`}><Avatar avatar={message.role === "user" ? props.userProfile.avatarImage || "🍓" : activeContact.avatar} name={message.role === "user" ? nickname : activeContact.name} self={message.role === "user"} /><div className="pocket-message-bubble">{message.content}</div></div>
+                  </div>)}
+                  {pendingContactId === activeContact.id && <div className="pocket-message assistant"><Avatar avatar={activeContact.avatar} name={activeContact.name} /><div className="pocket-typing" aria-label="对方正在输入"><i /><i /><i /></div></div>}
+                  {errors[activeContact.id] && <div className="pocket-chat-error" role="alert"><span>{errors[activeContact.id]}</span><div>{canChat && activeContact.messages.at(-1)?.role === "user" && <button type="button" disabled={!!pendingContactId} onClick={() => void sendMessage(true)}>重试回复</button>}<button type="button" onClick={() => setApp("settings")}>手机设置</button></div></div>}
+                  {!canChat && !errors[activeContact.id] && <button className="pocket-model-hint" type="button" onClick={() => setApp("settings")}>选一个聊天模型，收到 TA 的回复 <ChevronRight size={14} /></button>}
+                </div>
+                <form className="pocket-composer" onSubmit={event => { event.preventDefault(); void sendMessage(); }}><textarea rows={1} aria-label={`给${activeContact.name}发消息`} placeholder="分享一点今天的小事…" value={draft} onChange={event => setDrafts(previous => ({ ...previous, [activeContact.id]: event.target.value }))} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} />{pendingContactId === activeContact.id ? <button type="button" aria-label="停止回复" onClick={() => { controllerRef.current?.abort(); setErrors(previous => ({ ...previous, [activeContact.id]: "已停止等待，可以重试回复。" })); }}><Square size={15} fill="currentColor" /></button> : <button className="pocket-send" type="submit" aria-label="发送消息" disabled={!draft.trim() || !!pendingContactId}><Send size={17} /></button>}</form>
+              </> : <>
+                {tab === "me" ? <div className="pocket-me pocket-scroll"><div className="pocket-profile-card"><Avatar avatar={props.userProfile.avatarImage || "🍓"} name={nickname} self /><span><strong>{nickname}</strong><small>把每一次相遇，温柔收藏</small></span></div><div className="pocket-me-stats"><span><strong>{state.contacts.length}</strong>位朋友</span><span><strong>{totalMessages}</strong>条回忆</span></div><button className="pocket-menu-row" type="button" onClick={() => setApp("settings")}><Settings size={20} /><span>手机设置<small>主题、昵称与聊天模型</small></span><ChevronRight size={17} /></button><Rabbit /><p>想说的话，总有人愿意听 ♡</p></div> : <div className="pocket-list-body pocket-scroll">
+                  <label className="pocket-search"><Search size={15} /><input aria-label="搜索联系人" placeholder="找找想念的那个人" value={query} onChange={event => setQuery(event.target.value)} /></label>
+                  {tab === "contacts" && <button className="pocket-new-friend" type="button" onClick={addContact}><span><Plus size={21} /></span><strong>新的朋友</strong><small>添加</small><ChevronRight size={15} /></button>}
+                  {!!listedContacts.length && <div className="pocket-list-label">{tab === "contacts" ? `我的朋友 · ${listedContacts.length}` : "最近的聊天"}</div>}
+                  {listedContacts.map(contact => <button className="pocket-contact-row" type="button" key={contact.id} onClick={() => openContact(contact)}><Avatar avatar={contact.avatar} name={contact.name} /><span><strong>{contact.name}</strong><small>{pendingContactId === contact.id ? "对方正在输入…" : tab === "contacts" ? contact.sourceLabel || "自定义角色" : contact.messages.at(-1)?.content || "轻轻打个招呼吧 ♡"}</small></span><time>{tab === "contacts" ? <ChevronRight size={14} /> : formatTime(contact.messages.at(-1)?.createdAt || "")}</time></button>)}
+                  {!listedContacts.length && <div className="pocket-empty"><Rabbit /><strong>{query ? "还没有找到这位朋友" : "想念的人，近在口袋"}</strong><p>{query ? "换个名字再找找吧" : "为喜欢的角色添加一个联系人，\n聊日常，也聊属于你们的故事。"}</p>{!query && <button className="pocket-primary" type="button" onClick={addContact}><Plus size={16} /> 添加第一位朋友</button>}</div>}
+                </div>}
+                <nav className="pocket-wechat-tabs" aria-label="微信导航">{([{ id: "chats", label: "微信", icon: MessageCircle }, { id: "contacts", label: "通讯录", icon: Users }, { id: "me", label: "我", icon: Heart }] as const).map(item => <button type="button" key={item.id} className={tab === item.id ? "is-active" : ""} aria-current={tab === item.id ? "page" : undefined} onClick={() => { setTab(item.id); setQuery(""); }}><item.icon size={21} /><span>{item.label}</span></button>)}</nav>
+              </>}
+            </div>}
+          </div>
+          <button type="button" className="pocket-home-indicator" inert={editor || confirmation ? true : undefined} onClick={() => setApp("home")} aria-label="回到手机桌面"><span /></button>
+          {editor && <div className="pocket-sheet-backdrop"><form ref={editorRef} className="pocket-sheet pocket-scroll" inert={confirmation ? true : undefined} role="dialog" aria-modal="true" aria-labelledby="pocket-editor-title" onSubmit={saveContact}><header><div><small>A NEW LITTLE STORY</small><h3 id="pocket-editor-title">{editor.id ? "朋友的小档案" : "认识一位新朋友"}</h3></div><button type="button" aria-label="关闭联系人编辑" onClick={() => setEditor(null)}><X size={18} /></button></header>
+            {!editor.id && <label className="pocket-field">从已有角色导入<select defaultValue="" onChange={event => importCharacter(event.target.value)}><option value="">自己创建一个角色</option><optgroup label="角色卡">{props.characterCards.map(card => <option key={card.id} value={`card:${card.id}`}>{card.name}</option>)}</optgroup><optgroup label="人格">{props.personas.map(persona => <option key={persona.id} value={`persona:${persona.id}`}>{persona.name}</option>)}</optgroup></select></label>}
+            <div className="pocket-editor-avatar"><Avatar avatar={editor.draft.avatar} name={editor.draft.name} /><span>选一枚可爱的头像<small>也可以保留导入角色的头像</small></span></div><div className="pocket-avatar-picker">{POCKET_AVATARS.map(avatar => <button type="button" key={avatar} aria-label={`选择头像${avatar}`} aria-pressed={editor.draft.avatar === avatar} className={editor.draft.avatar === avatar ? "is-selected" : ""} onClick={() => patchDraft({ avatar })}>{avatar}</button>)}</div>
+            <label className="pocket-field">朋友的名字<input autoFocus required maxLength={30} placeholder="比如：奶糖、月岛、你的专属角色" value={editor.draft.name} onChange={event => patchDraft({ name: event.target.value })} /></label>
+            <label className="pocket-field">角色设定 <span>性格、身份，以及你们的关系</span><textarea required rows={4} placeholder="TA 是谁？说话是什么语气？和你有什么关系？越具体，聊天就越有角色的感觉。" value={editor.draft.personality} onChange={event => patchDraft({ personality: event.target.value })} /></label>
+            <label className="pocket-field">第一句招呼 <span>可选</span><textarea rows={2} placeholder="嗨，今天有没有想我呀？" value={editor.draft.greeting} onChange={event => patchDraft({ greeting: event.target.value })} /></label>{editorError && <p className="pocket-editor-error" role="alert">{editorError}</p>}
+            <button type="submit" className="pocket-primary"><Heart size={16} />{editor.id ? "保存小档案" : "添加到通讯录"}</button>
+            {editor.id && <div className="pocket-contact-actions"><button type="button" disabled={pendingContactId === editor.id} onClick={() => { const id = editor.id!; setConfirmation({ title: "清空这段聊天？", description: "联系人会保留，聊天记录清空后无法恢复。", action: () => { updateContact(id, contact => ({ ...contact, messages: [] })); setErrors(previous => ({ ...previous, [id]: "" })); setEditor(null); } }); }}>清空聊天</button><button type="button" disabled={pendingContactId === editor.id} onClick={() => { const id = editor.id!; setConfirmation({ title: "删除这位联系人？", description: "这位朋友和你们的聊天记录都会从手机中删除。", action: () => { updateState(previous => ({ ...previous, contacts: previous.contacts.filter(contact => contact.id !== id) })); setContactId(""); setEditor(null); } }); }}>删除联系人</button></div>}
+          </form></div>}
+          {confirmation && <div className="pocket-confirm-backdrop"><div ref={confirmationRef} className="pocket-confirm" role="alertdialog" aria-modal="true" aria-labelledby="pocket-confirm-title"><Heart size={25} /><h3 id="pocket-confirm-title">{confirmation.title}</h3><p>{confirmation.description}</p><div><button type="button" onClick={() => setConfirmation(null)}>再想想</button><button type="button" onClick={() => { confirmation.action(); setConfirmation(null); }}>确认</button></div></div></div>}
+        </div>
+      </div>
+    </div>
+    <footer className="pocket-panel-footer"><Heart size={10} /><span>小小的屏幕，装下大大的喜欢</span><Heart size={10} /></footer>
+  </section>;
+}
