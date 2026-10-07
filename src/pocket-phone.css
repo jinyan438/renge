@@ -76,7 +76,6 @@
 .pocket-app-heading { display: flex; align-items: center; gap: 7px; margin-bottom: 17px; }
 .pocket-app-heading > button { background: transparent; padding: 4px; display: grid; place-items: center; }
 .pocket-app-heading h2 { margin: 0; font-size: 20px; font-weight: 700; }
-.pocket-app-heading > span { margin-left: auto; font-size: 10px; opacity: .6; }
 .pocket-profile-card { display: flex; align-items: center; gap: 10px; padding: 15px 12px; border-radius: 20px; background: linear-gradient(125deg, var(--pocket-pale), #fff7ed); }
 .pocket-profile-card > span:nth-child(2) { display: grid; flex: 1; min-width: 0; gap: 6px; }
 .pocket-profile-card strong { overflow-wrap: anywhere; font-size: 15px; }
@@ -94,24 +93,18 @@
 .pocket-theme-options button.is-selected { border-color: var(--pocket-accent); background: #ffffffb0; }
 .pocket-theme-options button > span { display: grid; place-items: center; width: 32px; height: 32px; border: 3px solid #ffffff90; border-radius: 50%; color: white; box-shadow: 0 2px 4px #77656510; }
 .pocket-theme-options small { font-size: 10px; }
-.pocket-theme-note { text-align: center; font-size: 10px; opacity: .65; margin: 10px 0 0; }
 .pocket-settings-group { padding: 14px 12px; border-radius: 16px; background: #f5f0ee80; }
 .pocket-settings-group label { display: block; font-size: 11px; margin-bottom: 6px; }
 .pocket-settings-group select { width: 100%; border: 1px solid var(--pocket-pale); padding: 8px 6px; border-radius: 9px; color: var(--pocket-text); background: #fffaf7; font-size: 11px; margin-bottom: 12px; text-overflow: ellipsis; }
+.pocket-settings-group select:last-child { margin-bottom: 0; }
 .pocket-settings-group p { font-size: 10px; opacity: .65; line-height: 1.7; margin: 0; }
 .pocket-setting-toggle { display: flex; width: 100%; padding: 19px 2px; text-align: left; align-items: center; gap: 10px; background: transparent; }
 .pocket-setting-toggle > span { display: grid; gap: 6px; flex: 1; }
 .pocket-setting-toggle strong { font-size: 11px; }
-.pocket-setting-toggle small { font-size: 10px; opacity: .6; }
 .pocket-setting-toggle i { position: relative; width: 34px; height: 21px; border-radius: 15px; background: #d4c7c5; transition: background .2s; }
 .pocket-setting-toggle i::after { content: ""; position: absolute; left: 3px; top: 3px; height: 15px; width: 15px; border-radius: 50%; background: white; box-shadow: 0 1px 3px #0001; transition: transform .2s; }
 .pocket-setting-toggle i.is-on { background: var(--pocket-accent); }
 .pocket-setting-toggle i.is-on::after { transform: translateX(13px); }
-.pocket-about { display: grid; justify-items: center; gap: 6px; padding: 8px 0; text-align: center; }
-.pocket-rabbit.is-small { width: 70px; }
-.pocket-about strong { font-size: 11px; }
-.pocket-about span, .pocket-about small { font-size: 9px; opacity: .6; line-height: 1.6; }
-.pocket-about small { max-width: 190px; }
 .pocket-wechat { display: flex; min-height: 0; width: 100%; flex-direction: column; }
 .pocket-wechat-header { display: flex; gap: 8px; align-items: center; flex-shrink: 0; padding: 5px 12px 13px; background: #fffaf7; border-bottom: 1px solid #efdfd640; }
 .pocket-wechat-header > button { background: transparent; padding: 5px 3px; display: grid; place-items: center; flex-shrink: 0; }
@@ -182,7 +175,6 @@
 .pocket-field > input, .pocket-field > textarea, .pocket-field > select { margin-top: 7px; font-weight: 400; }
 .pocket-editor-avatar { display: flex; align-items: center; gap: 10px; margin-top: 19px; }
 .pocket-editor-avatar > span:nth-child(2) { display: grid; gap: 5px; font-size: 11px; }
-.pocket-editor-avatar small { font-size: 9px; opacity: .6; }
 .pocket-avatar-picker { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; margin: 12px 0 19px; }
 .pocket-avatar-picker button { border-radius: 10px; background: #f6efec; font-family: "Segoe UI Emoji", sans-serif; font-size: 21px; height: 34px; padding: 2px; border: 1px solid transparent; }
 .pocket-avatar-picker button.is-selected { background: var(--pocket-pale); border-color: var(--pocket-accent); }
@@ -208,7 +200,6 @@
   .pocket-screen { border-radius: 27px; }
   .pocket-status { padding-left: 14px; padding-right: 12px; }
   .pocket-home { padding-left: 14px; padding-right: 14px; }
-  .pocket-app-heading > span { display: none; }
   .pocket-profile-card { padding: 13px 10px; }
   .pocket-profile-card small { font-size: 9px; }
   .pocket-panel-header { padding: 12px 10px 7px; }
