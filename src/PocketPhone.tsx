@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 
 import { ArrowLeft, BatteryFull, Check, ChevronRight, Heart, MessageCircle, MoreHorizontal, Plus, Search, Send, Settings, Signal, Sparkles, Square, Users, Wifi, X } from "lucide-react";
 import type { CharacterCard } from "./characterCardUtils";
 import type { AgentPersona } from "./types";
-import { emptyPocketState, getPocketMessageBubbles, makePocketContact, normalizePocketState, pocketId, pocketStorageKey, POCKET_AVATARS, POCKET_THEMES, safePocketAvatar, type PocketContact, type PocketSettings, type PocketState } from "./pocketPhoneState";
+import { emptyPocketState, getPocketGenerationMode, getPocketMessageBubbles, makePocketContact, normalizePocketState, pocketId, pocketStorageKey, POCKET_AVATARS, POCKET_THEMES, safePocketAvatar, type PocketContact, type PocketSettings, type PocketState } from "./pocketPhoneState";
 import type { PocketContextSync, PocketConversationBuilder } from "./pocketPhoneContext";
 import { requestPocketReply, resolvePocketModel, type PocketProvider } from "./pocketPhoneChat";
 import "./pocket-phone.css";
@@ -151,23 +151,31 @@ export function PocketPhone(props: PocketPhoneProps) {
     } catch (error) { setEditorError(error instanceof Error ? error.message : "联系人没有保存成功。"); }
   }
 
-  async function sendMessage(retry = false) {
+  function sendMessage() {
+    const contact = stateRef.current.contacts.find(item => item.id === contactId);
+    if (!contact) return;
+    const content = (drafts[contact.id] || "").trim();
+    if (!content) { void generateReply(); return; }
+    updateContact(contact.id, previous => ({ ...previous, messages: [...previous.messages, { id: pocketId(), role: "user", content, createdAt: new Date().toISOString() }] }));
+    setDrafts(previous => ({ ...previous, [contact.id]: "" }));
+    setErrors(previous => ({ ...previous, [contact.id]: "" }));
+  }
+
+  async function generateReply() {
     const contact = stateRef.current.contacts.find(item => item.id === contactId);
     if (!contact || controllerRef.current) return;
-    const content = (drafts[contact.id] || "").trim();
-    if (!retry && !content) return;
     if (!canChat) { setErrors(previous => ({ ...previous, [contact.id]: "先到手机设置选择聊天模型，就可以收到 TA 的回复啦。" })); return; }
-    const outgoing = retry ? contact : { ...contact, messages: [...contact.messages, { id: pocketId(), role: "user" as const, content, createdAt: new Date().toISOString() }] };
-    if (!retry) { updateContact(contact.id, () => outgoing); setDrafts(previous => ({ ...previous, [contact.id]: "" })); }
+    const mode = getPocketGenerationMode(contact);
+    const replyContextMessageId = contact.messages.at(-1)?.id || "";
     const controller = new AbortController();
     controllerRef.current = controller;
     setPendingContactId(contact.id);
     setErrors(previous => ({ ...previous, [contact.id]: "" }));
     const timeout = setTimeout(() => controller.abort(new Error("等待有点久，点重试再发送一次吧。")), 120000);
     try {
-      const reply = await requestPocketReply(selection.provider, selection.modelId, props.onBuildConversation(props.sessionId, outgoing, { nickname, bio: props.userProfile.bio }), controller.signal);
+      const reply = await requestPocketReply(selection.provider, selection.modelId, props.onBuildConversation(props.sessionId, contact, { nickname, bio: props.userProfile.bio }, mode), controller.signal);
       if (controller.signal.aborted) return;
-      updateContact(contact.id, previous => ({ ...previous, messages: [...previous.messages, { id: pocketId(), role: "assistant", content: reply, createdAt: new Date().toISOString() }] }));
+      updateContact(contact.id, previous => ({ ...previous, messages: [...previous.messages, { id: pocketId(), role: "assistant", content: reply, createdAt: new Date().toISOString(), replyContextMessageId }] }));
     } catch (error) {
       if (mountedRef.current && (!controller.signal.aborted || controller.signal.reason instanceof Error && controller.signal.reason.name !== "AbortError")) setErrors(previous => ({ ...previous, [contact.id]: error instanceof Error ? error.message : "暂时没有连接上，请重试。" }));
     } finally {
@@ -221,10 +229,10 @@ export function PocketPhone(props: PocketPhoneProps) {
                     {getPocketMessageBubbles(message).map((content, segmentIndex) => <div key={segmentIndex} className={`pocket-message ${message.role}`}><Avatar avatar={message.role === "user" ? props.userProfile.avatarImage || "🍓" : activeContact.avatar} name={message.role === "user" ? nickname : activeContact.name} self={message.role === "user"} /><div className="pocket-message-bubble">{content}</div></div>)}
                   </div>)}
                   {pendingContactId === activeContact.id && <div className="pocket-message assistant"><Avatar avatar={activeContact.avatar} name={activeContact.name} /><div className="pocket-typing" aria-label="对方正在输入"><i /><i /><i /></div></div>}
-                  {errors[activeContact.id] && <div className="pocket-chat-error" role="alert"><span>{errors[activeContact.id]}</span><div>{canChat && activeContact.messages.at(-1)?.role === "user" && <button type="button" disabled={!!pendingContactId} onClick={() => void sendMessage(true)}>重试回复</button>}<button type="button" onClick={() => setApp("settings")}>手机设置</button></div></div>}
+                  {errors[activeContact.id] && <div className="pocket-chat-error" role="alert"><span>{errors[activeContact.id]}</span><div>{canChat && <button type="button" disabled={!!pendingContactId} onClick={() => void generateReply()}>重试回复</button>}<button type="button" onClick={() => setApp("settings")}>手机设置</button></div></div>}
                   {!canChat && !errors[activeContact.id] && <button className="pocket-model-hint" type="button" onClick={() => setApp("settings")}>选一个聊天模型，收到 TA 的回复 <ChevronRight size={14} /></button>}
                 </div>
-                <form className="pocket-composer" onSubmit={event => { event.preventDefault(); void sendMessage(); }}><textarea rows={1} aria-label={`给${activeContact.name}发消息`} placeholder="分享一点今天的小事…" value={draft} onChange={event => setDrafts(previous => ({ ...previous, [activeContact.id]: event.target.value }))} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} />{pendingContactId === activeContact.id ? <button type="button" aria-label="停止回复" onClick={() => { controllerRef.current?.abort(); setErrors(previous => ({ ...previous, [activeContact.id]: "已停止等待，可以重试回复。" })); }}><Square size={15} fill="currentColor" /></button> : <button className="pocket-send" type="submit" aria-label="发送消息" disabled={!draft.trim() || !!pendingContactId}><Send size={17} /></button>}</form>
+                <form className="pocket-composer" onSubmit={event => { event.preventDefault(); void sendMessage(); }}><textarea rows={1} aria-label={`给${activeContact.name}发消息`} placeholder="分享一点今天的小事…" value={draft} onChange={event => setDrafts(previous => ({ ...previous, [activeContact.id]: event.target.value }))} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} />{pendingContactId === activeContact.id && !draft.trim() ? <button type="button" aria-label="停止回复" onClick={event => { event.preventDefault(); controllerRef.current?.abort(); setErrors(previous => ({ ...previous, [activeContact.id]: "已停止等待，可以重试回复。" })); }}><Square size={15} fill="currentColor" /></button> : <button className="pocket-send" type="submit" aria-label="发送消息" title={draft.trim() ? "发送消息" : getPocketGenerationMode(activeContact) === "reply" ? "生成回复" : "让对方主动发消息"} disabled={!draft.trim() && !!pendingContactId}><Send size={17} /></button>}</form>
               </> : <>
                 {tab === "me" ? <div className="pocket-me pocket-scroll"><div className="pocket-profile-card"><Avatar avatar={props.userProfile.avatarImage || "🍓"} name={nickname} self /><span><strong>{nickname}</strong><small>把每一次相遇，温柔收藏</small></span></div><div className="pocket-me-stats"><span><strong>{state.contacts.length}</strong>位朋友</span><span><strong>{totalMessages}</strong>条回忆</span></div><button className="pocket-menu-row" type="button" onClick={() => setApp("settings")}><Settings size={20} /><span>手机设置<small>主题、昵称与聊天模型</small></span><ChevronRight size={17} /></button><Rabbit /><p>想说的话，总有人愿意听 ♡</p></div> : <div className="pocket-list-body pocket-scroll">
                   <label className="pocket-search"><Search size={15} /><input aria-label="搜索联系人" placeholder="搜索" value={query} onChange={event => setQuery(event.target.value)} /></label>

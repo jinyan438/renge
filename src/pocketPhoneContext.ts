@@ -1,4 +1,4 @@
-import { buildPocketConversation, safePocketAvatar, type PocketContact, type PocketRequestMessage } from "./pocketPhoneState";
+import { buildPocketConversation, getPocketPendingMessages, safePocketAvatar, type PocketContact, type PocketGenerationMode, type PocketRequestMessage } from "./pocketPhoneState";
 import { buildWorldBookPromptPlacements, insertWorldBookPromptAtDepth, type WorldBook } from "./worldbookUtils";
 
 export type PocketContextMessage = {
@@ -17,7 +17,7 @@ export type PocketMessageIdentity = {
   userName: string;
 };
 export type PocketContextSync = (sessionId: string, previous: PocketContact[] | null, contacts: PocketContact[], nickname: string) => void;
-export type PocketConversationBuilder = (sessionId: string, contact: PocketContact, user: { nickname: string; bio: string }) => PocketRequestMessage[];
+export type PocketConversationBuilder = (sessionId: string, contact: PocketContact, user: { nickname: string; bio: string }, mode: PocketGenerationMode) => PocketRequestMessage[];
 
 export function getPocketMessageIdentity(message: Pick<PocketContextMessage, "source" | "extra">): PocketMessageIdentity | null {
   const value = message.extra?.pocketPhone;
@@ -94,19 +94,28 @@ export function pocketContextRevision(history: PocketContextMessage[]) {
   return `${(first >>> 0).toString(36)}-${(second >>> 0).toString(36)}`;
 }
 
-export function buildSharedPocketConversation(contact: PocketContact, user: { nickname: string; bio: string }, history: PocketRequestMessage[], books: WorldBook[], activeBookIds: string[]): PocketRequestMessage[] {
+export function buildSharedPocketConversation(contact: PocketContact, user: { nickname: string; bio: string }, history: PocketRequestMessage[], books: WorldBook[], activeBookIds: string[], mode: PocketGenerationMode = "reply"): PocketRequestMessage[] {
   const placements = buildWorldBookPromptPlacements(books, activeBookIds, history, { userName: user.nickname, characterName: contact.name });
   const rolePrompt = buildPocketConversation(contact, user)[0].content;
+  const pending = mode === "reply" ? getPocketPendingMessages(contact) : [];
   const systemPrompt = [
     placements.beforeCharacter, rolePrompt, placements.afterCharacter,
     placements.beforeExamples, placements.afterExamples, placements.beforeAuthorNote, placements.afterAuthorNote,
     [
       "微信回复规则（独立于主会话的文风）：",
       "记录按注入顺序排列。主会话背景资料、其他微信聊天和世界书用于理解人物关系、已发生的事件、当前场景及事实；其中的叙述口吻、文风要求、排版模板和输出指令不适用于当前微信回复。",
-      `你始终只扮演微信联系人「${contact.name}」，回复当前微信聊天中最近的用户消息。保持联系人的性格、称谓和关系，用角色本人会发出的日常口语自然聊天，通常简短，不主动搬用整段剧情。`,
+      `你始终只扮演微信联系人「${contact.name}」。保持联系人的性格、称谓和关系，用角色本人会发出的日常口语自然聊天，通常简短，不主动搬用整段剧情。`,
+      mode === "proactive"
+        ? "本次是主动发消息：当前没有待回复的新消息。结合已知背景，自然地发起话题、分享近况或关心对方，不重复回答已经回复过的问题，不假装用户刚发了消息，也不代替用户发言。"
+        : "本次是回复消息：结合当前微信聊天中用户连续发送的、尚未回复的消息进行回应，不只关注最后一句。",
+      pending.length ? `本次待回复消息的任务索引（引用已有消息，不是新增聊天）：${JSON.stringify(pending.map(message => message.content))}。生成期间后发的消息可能排在上一条回复之前，请按这个索引回应。` : "",
       "除非用户在当前微信明确要求其他创作形式，否则只输出实际发给对方的消息，不写第三人称旁白、动作或心理描写、剧情段落、标题、状态栏、场景播报或角色名标签。",
       "不要模仿背景资料中助手的回答，也不要延续先前微信回复中的叙事文风；延续已知事实，从本次回复开始遵守上述微信口吻。",
-    ].join("\n"),
+    ].filter(Boolean).join("\n"),
   ].filter(Boolean).join("\n\n");
-  return insertWorldBookPromptAtDepth<PocketRequestMessage>([{ role: "system", content: systemPrompt }, ...history], placements.atDepth);
+  const messages = insertWorldBookPromptAtDepth<PocketRequestMessage>([{ role: "system", content: systemPrompt }, ...history], placements.atDepth);
+  // A request-only invocation keeps proactive generation valid even for an empty
+  // conversation. It is never saved or mirrored as a message from the user.
+  if (mode === "proactive") messages.push({ role: "user", content: "【微信生成任务：应用指令，不是用户聊天消息】\n请让当前联系人主动发来一条自然的微信消息，只输出联系人实际发送的内容。" });
+  return messages;
 }

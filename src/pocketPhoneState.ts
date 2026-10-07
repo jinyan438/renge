@@ -3,6 +3,7 @@ export type PocketMessage = {
   role: "user" | "assistant";
   content: string;
   createdAt: string;
+  replyContextMessageId?: string;
 };
 
 export type PocketContact = {
@@ -26,6 +27,7 @@ export type PocketSettings = {
   largeText: boolean;
 };
 export type PocketState = { version: 1; contacts: PocketContact[]; settings: PocketSettings };
+export type PocketGenerationMode = "reply" | "proactive";
 export type PocketRequestMessage = Pick<PocketMessage, "role" | "content"> | { role: "system"; content: string };
 
 export const POCKET_AVATARS = ["🐰", "🐱", "🐻", "🦊", "🐼", "🐶", "🌷", "🍓", "🌙", "🧸", "🦋", "🍑"];
@@ -73,7 +75,7 @@ export function normalizePocketState(value: unknown): PocketState {
     for (const message of Array.isArray(contact.messages) ? contact.messages : []) {
       if (!record(message) || !text(message.id) || messageIds.has(text(message.id)) || !text(message.content).trim() || (message.role !== "user" && message.role !== "assistant")) continue;
       messageIds.add(text(message.id));
-      messages.push({ id: text(message.id), role: message.role, content: text(message.content), createdAt: text(message.createdAt) });
+      messages.push({ id: text(message.id), role: message.role, content: text(message.content), createdAt: text(message.createdAt), ...(message.role === "assistant" && typeof message.replyContextMessageId === "string" ? { replyContextMessageId: message.replyContextMessageId } : {}) });
     }
     state.contacts.push({
       id: text(contact.id), name: text(contact.name).trim().slice(0, 30), avatar: safePocketAvatar(contact.avatar),
@@ -86,6 +88,22 @@ export function normalizePocketState(value: unknown): PocketState {
 }
 
 export function pocketStorageKey(sessionId: string) { return `renge_pocket_phone_v1:${sessionId || "default"}`; }
+
+export function getPocketPendingMessages(contact: Pick<PocketContact, "messages">): PocketMessage[] {
+  let latestAssistant = -1;
+  contact.messages.forEach((message, index) => { if (message.role === "assistant") latestAssistant = index; });
+  const assistant = contact.messages[latestAssistant];
+  // A message sent while generation is running was not in that reply's context.
+  // Older replies without this marker covered all messages preceding them.
+  const covered = typeof assistant?.replyContextMessageId === "string"
+    ? contact.messages.findIndex(message => message.id === assistant.replyContextMessageId)
+    : latestAssistant;
+  return contact.messages.filter((message, index) => message.role === "user" && index > covered);
+}
+
+export function getPocketGenerationMode(contact: Pick<PocketContact, "messages">): PocketGenerationMode {
+  return getPocketPendingMessages(contact).length ? "reply" : "proactive";
+}
 
 export function getPocketMessageBubbles(message: Pick<PocketMessage, "role" | "content">): string[] {
   if (message.role === "user" || /```|~~~/.test(message.content)) return [message.content];

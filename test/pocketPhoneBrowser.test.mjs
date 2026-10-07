@@ -85,10 +85,12 @@ try {
     await phone.locator(".pocket-message.assistant").filter({ hasText: reply }).last().waitFor();
     await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
   }
-  async function send(content) {
+  async function queueMessage(content) {
     await phone.locator(".pocket-composer textarea").fill(content);
     await phone.getByRole("button", { name: "发送消息", exact: true }).click();
   }
+  async function generate() { await phone.getByRole("button", { name: "发送消息", exact: true }).click(); }
+  async function send(content) { await queueMessage(content); await generate(); }
   async function sendMain(content) {
     const count = mainRequests.length;
     await page.getByPlaceholder("输入消息，可粘贴图片", { exact: true }).fill(content);
@@ -144,7 +146,7 @@ try {
   await phone.getByRole("button", { name: "重试回复", exact: true }).click();
   await phone.locator(".pocket-message.assistant").filter({ hasText: reply }).nth(1).waitFor();
   assert.deepEqual(requests[1].body, requests[2].body);
-  const retryHistory = requests[2].body.messages.map(message => message.content);
+  const retryHistory = requests[2].body.messages.filter(message => message.role !== "system").map(message => message.content);
   assert.ok(retryHistory.findIndex(text => text.includes("知道奶糖刚才发了什么吗？")) < retryHistory.findIndex(text => text.includes("你会陪我去吗？")));
   assert.equal(await phone.locator(".pocket-message.user").count(), 2);
   mode = "slow";
@@ -153,11 +155,14 @@ try {
   await page.waitForFunction(() => document.querySelector(".pocket-typing"));
   while (!releaseSlowReply) await new Promise(resolve => setTimeout(resolve, 10));
   await sendMain("微信还在等待时记下这条主会话内容");
+  const stoppedRequests = requests.length;
   await phone.getByRole("button", { name: "停止回复", exact: true }).click();
   releaseSlowReply();
+  await phone.getByText("已停止等待，可以重试回复。", { exact: true }).waitFor();
+  assert.equal(requests.length, stoppedRequests);
   await phone.getByRole("button", { name: "重试回复", exact: true }).click();
   await phone.locator(".pocket-message.assistant").filter({ hasText: reply }).nth(2).waitFor();
-  const concurrentHistory = requests.at(-1).body.messages.map(message => message.content);
+  const concurrentHistory = requests.at(-1).body.messages.filter(message => message.role !== "system").map(message => message.content);
   assert.ok(concurrentHistory.findIndex(text => text.includes("这条消息先等等")) < concurrentHistory.findIndex(text => text.includes("微信还在等待时记下这条主会话内容")));
   assert.equal(await page.locator(".chat-message.user").filter({ hasText: "这条消息先等等" }).count(), 1);
   assert.equal(await phone.locator(".pocket-message.user").count(), 3);
@@ -178,6 +183,26 @@ try {
   await editor.getByRole("button", { name: "保存小档案", exact: true }).click();
   await phone.getByText("薄荷同学", { exact: true }).first().waitFor();
   console.log("PASS: persona import uses enabled traits, and contact editing preserves the conversation");
+
+  const proactiveReply = "今天路过花店，看见一盆向日葵，突然想和你分享。";
+  fixtureReply = proactiveReply;
+  await generate();
+  await phone.locator(".pocket-message.assistant").filter({ hasText: proactiveReply }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  assert.equal(await phone.locator(".pocket-message.user").count(), 0);
+  assert.match(requests.at(-1).body.messages[0].content, /本次是主动发消息/);
+  assert.match(requests.at(-1).body.messages.at(-1).content, /应用指令，不是用户聊天消息/);
+  mode = "fail";
+  await generate();
+  await phone.getByText("fixture temporary unavailable", { exact: true }).waitFor();
+  const failedProactive = requests.at(-1).body;
+  await phone.getByRole("button", { name: "重试回复", exact: true }).click();
+  await phone.locator(".pocket-message.assistant").filter({ hasText: proactiveReply }).nth(1).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  assert.deepEqual(requests.at(-1).body, failedProactive);
+  assert.equal(await phone.locator(".pocket-message.user").count(), 0);
+  fixtureReply = reply;
+  console.log("PASS: an empty chat can initiate a proactive message, continue proactively and retry without creating user messages");
 
   await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click();
   await phone.getByRole("button", { name: "打开手机设置", exact: true }).click();
@@ -261,6 +286,44 @@ try {
   await phone.locator(".pocket-contact-row").filter({ hasText: "奶糖" }).click();
   assert.deepEqual(await phone.locator(".pocket-message-group").filter({ hasText: splitParts[0] }).locator(".pocket-message-bubble").allTextContents(), splitParts);
   console.log("PASS: reply paragraphs render as separate bubbles after reload, while storage and shared context retain one original message");
+
+  const beforeBatch = requests.length;
+  await queueMessage("放学一起去画画");
+  assert.equal(requests.length, beforeBatch);
+  await queueMessage("记得带上水彩和画本");
+  assert.equal(requests.length, beforeBatch);
+  const batchReply = "好呀，水彩和画本都带上，我们放学见。";
+  fixtureReply = batchReply;
+  await generate();
+  await phone.locator(".pocket-message.assistant").filter({ hasText: batchReply }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  assert.equal(requests.length, beforeBatch + 1);
+  const batchInput = requests.at(-1).body.input;
+  const batchTexts = ["放学一起去画画", "记得带上水彩和画本"];
+  const inputText = message => typeof message.content === "string" ? message.content : message.content.map(part => part.text || "").join("");
+  assert.deepEqual(batchInput.filter(message => message.role === "user" && batchTexts.includes(inputText(message))).map(inputText), batchTexts);
+
+  const inFlightReply = "我先看看你发的第一件事。";
+  fixtureReply = inFlightReply;
+  mode = "slow";
+  releaseSlowReply = undefined;
+  await send("你先看下这件事");
+  await phone.getByRole("button", { name: "停止回复", exact: true }).waitFor();
+  while (!releaseSlowReply) await new Promise(resolve => setTimeout(resolve, 10));
+  const inFlightCount = requests.length;
+  await queueMessage("还有一件事，也帮我看看");
+  assert.equal(requests.length, inFlightCount);
+  releaseSlowReply();
+  await phone.locator(".pocket-message.assistant").filter({ hasText: inFlightReply }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  const queuedReply = "刚才后发的那件事我也看到了。";
+  fixtureReply = queuedReply;
+  await generate();
+  await phone.locator(".pocket-message.assistant").filter({ hasText: queuedReply }).waitFor();
+  assert.doesNotMatch(JSON.stringify(requests.at(-1).body), /本次是主动发消息/);
+  assert.match(JSON.stringify(requests.at(-1).body), /本次是回复消息/);
+  fixtureReply = reply;
+  console.log("PASS: sending is local-only, multiple messages generate together, and messages sent during generation remain pending");
 
   const handle = page.locator(".right-sidebar-resize-handle");
   const bounds = await handle.boundingBox();

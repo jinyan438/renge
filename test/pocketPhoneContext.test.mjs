@@ -76,6 +76,20 @@ test("main narration and other contacts are quoted background, while only this c
   assert.match(result[0].content, /不要延续先前微信回复中的叙事文风/);
 });
 
+test("proactive generation adds a request-only task, without inventing or mutating user history", () => {
+  const friend = contact("林晓夏", []);
+  const history = [{ role: "assistant", content: "今天的事情忙完啦" }];
+  const result = buildSharedPocketConversation(friend, { nickname: "林风", bio: "" }, history, [], [], "proactive");
+  assert.match(result[0].content, /本次是主动发消息/);
+  assert.doesNotMatch(result[0].content, /本次是回复消息/);
+  assert.deepEqual(result.slice(1, -1), history);
+  assert.match(result.at(-1).content, /应用指令，不是用户聊天消息/);
+  assert.deepEqual(friend.messages, []);
+  const replying = buildSharedPocketConversation(friend, { nickname: "林风", bio: "" }, history, [], [], "reply");
+  assert.equal(replying.length, history.length + 1);
+  assert.match(replying[0].content, /用户连续发送的、尚未回复的消息/);
+});
+
 test("WeChat receives complete shared history and enabled matching worldbooks in entry and depth order", () => {
   const friend = contact("奶糖", []);
   const shared = Array.from({ length: 65 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: `会话-${index}` }));
