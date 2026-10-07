@@ -4,6 +4,7 @@ export type PocketMessage = {
   content: string;
   createdAt: string;
   replyContextMessageId?: string;
+  speaker?: Pick<PocketContact, "id" | "name" | "avatar">;
 };
 
 export type PocketContact = {
@@ -18,6 +19,19 @@ export type PocketContact = {
   createdAt: string;
 };
 
+export type PocketGroupMember = Pick<PocketContact, "id" | "name" | "avatar" | "personality" | "sourceCharacterCardId">;
+export type PocketGroup = {
+  id: string;
+  name: string;
+  members: PocketGroupMember[];
+  messages: PocketMessage[];
+  createdAt: string;
+  replyContextMessageId?: string;
+};
+export type PocketConversation = PocketContact | PocketGroup;
+export function isPocketGroup(conversation: PocketConversation): conversation is PocketGroup { return "members" in conversation; }
+export function getPocketConversations(state: PocketState): PocketConversation[] { return [...state.contacts, ...state.groups]; }
+
 export type PocketTheme = "rose" | "mint" | "lavender";
 export type PocketSettings = {
   theme: PocketTheme;
@@ -26,7 +40,7 @@ export type PocketSettings = {
   modelId: string;
   largeText: boolean;
 };
-export type PocketState = { version: 1; contacts: PocketContact[]; settings: PocketSettings };
+export type PocketState = { version: 1; contacts: PocketContact[]; groups: PocketGroup[]; settings: PocketSettings };
 export type PocketGenerationMode = "reply" | "proactive";
 export type PocketRequestMessage = Pick<PocketMessage, "role" | "content"> | { role: "system"; content: string };
 
@@ -42,13 +56,28 @@ export function pocketId() {
 }
 
 export function emptyPocketState(): PocketState {
-  return { version: 1, contacts: [], settings: { theme: "rose", nickname: "", providerId: "", modelId: "", largeText: false } };
+  return { version: 1, contacts: [], groups: [], settings: { theme: "rose", nickname: "", providerId: "", modelId: "", largeText: false } };
 }
 
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 function text(value: unknown) { return typeof value === "string" ? value : ""; }
+
+function normalizeMessages(value: unknown, group = false): PocketMessage[] {
+  const ids = new Set<string>();
+  return (Array.isArray(value) ? value : []).flatMap(message => {
+    if (!record(message) || !text(message.id) || ids.has(text(message.id)) || !text(message.content).trim() || (message.role !== "user" && message.role !== "assistant")) return [];
+    const speaker = group && message.role === "assistant" && record(message.speaker) && text(message.speaker.id) && text(message.speaker.name).trim()
+      ? { id: text(message.speaker.id), name: text(message.speaker.name).trim().slice(0, 30), avatar: safePocketAvatar(message.speaker.avatar) } : undefined;
+    if (group && message.role === "assistant" && !speaker) return [];
+    ids.add(text(message.id));
+    return [{ id: text(message.id), role: message.role, content: text(message.content), createdAt: text(message.createdAt),
+      ...(message.role === "assistant" && typeof message.replyContextMessageId === "string" ? { replyContextMessageId: message.replyContextMessageId } : {}),
+      ...(speaker ? { speaker } : {}),
+    }];
+  });
+}
 
 export function safePocketAvatar(value: unknown) {
   const avatar = text(value);
@@ -70,13 +99,7 @@ export function normalizePocketState(value: unknown): PocketState {
   for (const contact of Array.isArray(value.contacts) ? value.contacts : []) {
     if (!record(contact) || !text(contact.id) || !text(contact.name).trim() || contactIds.has(text(contact.id))) continue;
     contactIds.add(text(contact.id));
-    const messageIds = new Set<string>();
-    const messages: PocketMessage[] = [];
-    for (const message of Array.isArray(contact.messages) ? contact.messages : []) {
-      if (!record(message) || !text(message.id) || messageIds.has(text(message.id)) || !text(message.content).trim() || (message.role !== "user" && message.role !== "assistant")) continue;
-      messageIds.add(text(message.id));
-      messages.push({ id: text(message.id), role: message.role, content: text(message.content), createdAt: text(message.createdAt), ...(message.role === "assistant" && typeof message.replyContextMessageId === "string" ? { replyContextMessageId: message.replyContextMessageId } : {}) });
-    }
+    const messages = normalizeMessages(contact.messages);
     state.contacts.push({
       id: text(contact.id), name: text(contact.name).trim().slice(0, 30), avatar: safePocketAvatar(contact.avatar),
       personality: text(contact.personality), greeting: text(contact.greeting), sourceLabel: text(contact.sourceLabel),
@@ -84,19 +107,36 @@ export function normalizePocketState(value: unknown): PocketState {
       messages, createdAt: text(contact.createdAt),
     });
   }
+  for (const group of Array.isArray(value.groups) ? value.groups : []) {
+    if (!record(group) || !text(group.id) || !text(group.name).trim() || contactIds.has(text(group.id))) continue;
+    const memberIds = new Set<string>();
+    const members: PocketGroupMember[] = (Array.isArray(group.members) ? group.members : []).flatMap(member => {
+      if (!record(member) || !text(member.id) || !text(member.name).trim() || memberIds.has(text(member.id))) return [];
+      memberIds.add(text(member.id));
+      return [{ id: text(member.id), name: text(member.name).trim().slice(0, 30), avatar: safePocketAvatar(member.avatar), personality: text(member.personality),
+        ...(text(member.sourceCharacterCardId) ? { sourceCharacterCardId: text(member.sourceCharacterCardId) } : {}),
+      }];
+    });
+    if (!members.length) continue;
+    contactIds.add(text(group.id));
+    state.groups.push({ id: text(group.id), name: text(group.name).trim().slice(0, 30), members, messages: normalizeMessages(group.messages, true), createdAt: text(group.createdAt),
+      ...(typeof group.replyContextMessageId === "string" ? { replyContextMessageId: group.replyContextMessageId } : {}),
+    });
+  }
   return state;
 }
 
 export function pocketStorageKey(sessionId: string) { return `renge_pocket_phone_v1:${sessionId || "default"}`; }
 
-export function getPocketPendingMessages(contact: Pick<PocketContact, "messages">): PocketMessage[] {
+export function getPocketPendingMessages(contact: { messages: PocketMessage[]; replyContextMessageId?: string }): PocketMessage[] {
   let latestAssistant = -1;
   contact.messages.forEach((message, index) => { if (message.role === "assistant") latestAssistant = index; });
   const assistant = contact.messages[latestAssistant];
   // A message sent while generation is running was not in that reply's context.
   // Older replies without this marker covered all messages preceding them.
-  const covered = typeof assistant?.replyContextMessageId === "string"
-    ? contact.messages.findIndex(message => message.id === assistant.replyContextMessageId)
+  const marker = "members" in contact ? contact.replyContextMessageId ?? "" : assistant?.replyContextMessageId;
+  const covered = typeof marker === "string"
+    ? contact.messages.findIndex(message => message.id === marker)
     : latestAssistant;
   return contact.messages.filter((message, index) => message.role === "user" && index > covered);
 }

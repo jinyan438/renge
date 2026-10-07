@@ -17,6 +17,7 @@ let page;
 let server;
 const reply = "给你留了最甜的草莓，我们一起吃吧 🍓";
 let fixtureReply = reply;
+let groupResponder;
 const upstream = createServer(async (request, response) => {
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
@@ -29,10 +30,11 @@ const upstream = createServer(async (request, response) => {
     return;
   }
   if (mode === "slow") { mode = "success"; await new Promise(resolve => { releaseSlowReply = resolve; }); }
+  const output = groupResponder ? groupResponder(body) : fixtureReply;
   response.writeHead(200, { "Content-Type": "application/json" });
   response.end(JSON.stringify(request.url.endsWith("responses")
-    ? { output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: fixtureReply }] }] }
-    : { choices: [{ message: { role: "assistant", content: fixtureReply } }] }));
+    ? { output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: output }] }] }
+    : { choices: [{ message: { role: "assistant", content: output } }] }));
 });
 
 try {
@@ -324,6 +326,140 @@ try {
   assert.match(JSON.stringify(requests.at(-1).body), /本次是回复消息/);
   fixtureReply = reply;
   console.log("PASS: sending is local-only, multiple messages generate together, and messages sent during generation remain pending");
+
+  await phone.getByRole("button", { name: "返回微信列表", exact: true }).click();
+  await phone.getByRole("button", { name: "添加联系人", exact: true }).click();
+  editor = phone.getByRole("dialog");
+  await editor.getByLabel("从已有角色导入").selectOption("card:fixture-card");
+  await editor.getByRole("button", { name: "添加到通讯录", exact: true }).click();
+  await phone.getByRole("button", { name: "返回微信列表", exact: true }).click();
+  await phone.getByRole("button", { name: "发起群聊", exact: true }).click();
+  editor = phone.getByRole("dialog");
+  await editor.getByRole("button", { name: "创建群聊", exact: true }).click();
+  await editor.getByText("至少选择一位朋友。", { exact: true }).waitFor();
+  await editor.getByLabel("群名称", { exact: true }).fill("草莓小分队");
+  for (const name of ["奶糖", "月岛", "薄荷同学"]) await editor.getByRole("checkbox", { name: new RegExp(name) }).check();
+  await editor.getByRole("button", { name: "创建群聊", exact: true }).click();
+  await phone.locator(".pocket-wechat-header").getByText("草莓小分队 (4)", { exact: true }).waitFor();
+  let groupPhase = "initial";
+  groupResponder = body => {
+    const content = (body.input || body.messages).map(inputText).join("\n");
+    const speaker = content.match(/微信群「[^」]+」扮演「([^」]+)」本人/)?.[1];
+    assert.ok(speaker, "A group request must identify its current speaker");
+    if (groupPhase === "silent" || speaker === "薄荷同学") return JSON.stringify({ speak: false, texts: [] });
+    if (groupPhase === "invalid" && speaker === "月岛") return "这条错误回复不能进入聊天记录";
+    const texts = groupPhase === "initial" ? speaker === "奶糖" ? ["群里奶糖先说", "奶糖再补充"] : ["月岛接住了奶糖的话"]
+      : [`${groupPhase}：${speaker}的群消息`];
+    return JSON.stringify({ speak: true, texts });
+  };
+  const initialGroupRequests = requests.length;
+  await queueMessage("@奶糖 放学去画画吗？"); await queueMessage("我们在草莓花园见");
+  assert.equal(requests.length, initialGroupRequests);
+  await generate();
+  await phone.getByText("月岛接住了奶糖的话", { exact: true }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  assert.equal(requests.length, initialGroupRequests + 3);
+  assert.deepEqual(await phone.locator(".pocket-message.assistant .pocket-speaker-name").allTextContents(), ["奶糖", "奶糖", "月岛"]);
+  assert.equal(await phone.locator(".pocket-message.assistant .pocket-avatar").count(), 3);
+  const secondMemberRequest = requests[initialGroupRequests + 1].body.input.map(inputText).join("\n");
+  assert.match(secondMemberRequest, /群里奶糖先说/); assert.match(secondMemberRequest, /奶糖再补充/);
+  assert.match(secondMemberRequest, /月岛角色卡世界书/); assert.match(secondMemberRequest, /主会话背景资料/);
+  assert.match(secondMemberRequest, /独立于主会话的文风/);
+  assert.match(secondMemberRequest, /本次待回复消息的任务索引/);
+  assert.doesNotMatch(await phone.locator(".pocket-conversation").innerText(), /"speak"|"texts"/);
+  await sendMain("记住刚才群里各位的发言");
+  const groupMain = mainRequests.at(-1).request.messages.map(inputText);
+  const lastGroupMessage = groupMain.findIndex(text => text.includes("月岛接住了奶糖的话"));
+  assert.match(groupMain[lastGroupMessage], /微信群 · 草莓小分队 · 月岛/);
+  assert.ok(lastGroupMessage < groupMain.findIndex(text => text.includes("记住刚才群里各位的发言")));
+  await phone.locator(".pocket-speaker-name").filter({ hasText: "月岛" }).click();
+  assert.equal(await phone.locator(".pocket-composer textarea").inputValue(), "@月岛 ");
+  await phone.locator(".pocket-composer textarea").fill("");
+  await phone.screenshot({ path: ".runtime/pocket-group.png", animations: "disabled" });
+  console.log("PASS: group creation, attributed split messages, per-member turns/silence, @, card worldbook and bidirectional context");
+
+  groupPhase = "invalid";
+  await send("下一轮群聊");
+  await phone.getByText("月岛的群聊回复格式有误，请重试。", { exact: true }).waitFor();
+  assert.equal(await phone.locator(".pocket-message.assistant").count(), 3);
+  assert.equal(await page.locator(".chat-message").filter({ hasText: "invalid：奶糖的群消息" }).count(), 0);
+  groupPhase = "retry";
+  await phone.getByRole("button", { name: "重试回复", exact: true }).click();
+  await phone.getByText("retry：月岛的群消息", { exact: true }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  assert.equal(await phone.locator(".pocket-message.user").count(), 3);
+  assert.equal(await phone.getByText("retry：奶糖的群消息", { exact: true }).count(), 1);
+  groupPhase = "proactive";
+  await generate();
+  await phone.getByText("proactive：月岛的群消息", { exact: true }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  assert.equal(await phone.locator(".pocket-message.user").count(), 3);
+  assert.match(JSON.stringify(requests.at(-1).body), /本次是主动发消息/);
+  groupPhase = "silent";
+  await generate();
+  await phone.getByText("本轮暂无新消息。", { exact: true }).waitFor();
+  assert.equal(await phone.getByRole("button", { name: "发送消息", exact: true }).getAttribute("title"), "让对方主动发消息");
+  console.log("PASS: malformed group replies are atomic, retries do not duplicate messages, and proactive/quiet rounds add no fake user records");
+
+  groupPhase = "inflight"; mode = "slow"; releaseSlowReply = undefined;
+  await send("先回复这一条群消息");
+  while (!releaseSlowReply) await new Promise(resolve => setTimeout(resolve, 10));
+  const groupInFlightRequests = requests.length;
+  await queueMessage("生成中另发的群消息");
+  assert.equal(requests.length, groupInFlightRequests);
+  releaseSlowReply();
+  await phone.getByText("inflight：月岛的群消息", { exact: true }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  assert.doesNotMatch(JSON.stringify(requests.at(-1).body), /生成中另发的群消息/);
+  assert.equal(await phone.getByRole("button", { name: "发送消息", exact: true }).getAttribute("title"), "生成回复");
+  groupPhase = "queued";
+  await generate();
+  await phone.getByText("queued：月岛的群消息", { exact: true }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  assert.match(JSON.stringify(requests.at(-1).body), /生成中另发的群消息/);
+  assert.match(JSON.stringify(requests.at(-1).body), /本次是回复消息/);
+  await phone.getByRole("button", { name: "群聊设置", exact: true }).click();
+  editor = phone.getByRole("dialog");
+  await editor.getByLabel("群名称", { exact: true }).fill("草莓茶话会");
+  await editor.getByRole("checkbox", { name: /薄荷同学/ }).uncheck();
+  await editor.getByRole("button", { name: "保存群聊", exact: true }).click();
+  await phone.locator(".pocket-wechat-header").getByText("草莓茶话会 (3)", { exact: true }).waitFor();
+  const groupState = await page.evaluate(() => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:phone-one")).groups);
+  await page.locator(".chat-session-item").filter({ hasText: "Phone Two" }).click();
+  await phone.getByRole("button", { name: "打开微信", exact: true }).click();
+  assert.equal(await phone.locator(".pocket-contact-row").count(), 0);
+  await page.locator(".chat-session-item").filter({ hasText: "Phone One" }).click();
+  await page.reload(); await openPhone();
+  await phone.getByRole("button", { name: "打开微信", exact: true }).click();
+  await phone.locator(".pocket-contact-row").filter({ hasText: "草莓茶话会" }).click();
+  assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:phone-one")).groups), groupState);
+  await phone.getByText("queued：月岛的群消息", { exact: true }).waitFor();
+  console.log("PASS: group snapshot excludes late sends until the next round, member editing, session isolation and reload persistence");
+
+  await phone.getByRole("button", { name: "群聊设置", exact: true }).click();
+  await phone.getByRole("button", { name: "清空聊天", exact: true }).click();
+  await phone.getByRole("alertdialog").getByRole("button", { name: "确认", exact: true }).click();
+  assert.equal(await phone.locator(".pocket-message").count(), 0);
+  assert.equal(await page.locator(".chat-message").filter({ hasText: "queued：月岛的群消息" }).count(), 0);
+  assert.ok(await page.locator(".chat-message").filter({ hasText: "今天想吃草莓" }).count());
+  groupPhase = "fresh";
+  await generate();
+  await phone.getByText("fresh：月岛的群消息", { exact: true }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  assert.equal(await phone.locator(".pocket-message.user").count(), 0);
+  await phone.getByRole("button", { name: "群聊设置", exact: true }).click();
+  await phone.getByRole("button", { name: "解散群聊", exact: true }).click();
+  await phone.getByRole("alertdialog").getByRole("button", { name: "再想想", exact: true }).click();
+  await phone.getByRole("button", { name: "关闭群聊设置", exact: true }).click();
+  assert.equal(await phone.locator(".pocket-message.assistant").count(), 2);
+  await phone.getByRole("button", { name: "群聊设置", exact: true }).click();
+  await phone.getByRole("button", { name: "解散群聊", exact: true }).click();
+  await phone.getByRole("alertdialog").getByRole("button", { name: "确认", exact: true }).click();
+  assert.equal(await phone.locator(".pocket-contact-row").filter({ hasText: "草莓茶话会" }).count(), 0);
+  assert.equal(await page.locator(".chat-message").filter({ hasText: "fresh：月岛的群消息" }).count(), 0);
+  assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:phone-one")).groups), []);
+  groupResponder = undefined;
+  console.log("PASS: confirmed clear and dissolve remove only that group's mirrored records, while empty groups can initiate chats");
 
   const handle = page.locator(".right-sidebar-resize-handle");
   const bounds = await handle.boundingBox();

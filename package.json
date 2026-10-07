@@ -18,7 +18,7 @@
     "electron:install-local": "node scripts/install-electron-local.mjs",
     "electron": "npm run build && electron electron/main.mjs",
     "desktop": "npm run electron",
-    "test:pocket-phone": "tsx --test test/pocketPhoneChat.test.mjs test/pocketPhoneContext.test.mjs && node test/pocketPhoneBrowser.test.mjs"
+    "test:pocket-phone": "tsx --test test/pocketPhoneChat.test.mjs test/pocketPhoneContext.test.mjs test/pocketPhoneGroup.test.mjs && node test/pocketPhoneBrowser.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.87.1",

@@ -126,6 +126,7 @@ import {
   type ChatPresetPrompt,
 } from "./presetUtils";
 import { buildPocketHistoryMessage, buildSharedPocketConversation, formatPocketContextMessage, getPocketMessageIdentity, pocketContextRevision, syncPocketContext, type PocketContextSync, type PocketConversationBuilder } from "./pocketPhoneContext";
+import { isPocketGroup } from "./pocketPhoneState";
 import {
   buildWorldBookPrompt,
   buildWorldBookPromptPlacements,
@@ -13596,15 +13597,22 @@ export function App() {
     }
   };
 
-  const buildPhoneConversation: PocketConversationBuilder = (sessionId, contact, user, mode) => {
+  const buildPhoneConversation: PocketConversationBuilder = (sessionId, contact, user, mode, speaker, excludedMessageIds = []) => {
     const session = chatSessionsRef.current.find(candidate => candidate.id === sessionId);
     const roleplayCard = session?.mode === "roleplay"
       ? characterCards.find(card => card.id === session.roleplayCharacterCardId)
       : undefined;
-    const history = getMessagesForSession(sessionId).filter(message =>
+    // Earlier members' replies are staged until the whole round succeeds. They
+    // enter later members' requests in order, without persisting partial rounds.
+    const staged: ChatMessage[] = syncPocketContext(getMessagesForSession(sessionId), null, [contact], user.nickname);
+    const excludedIds = new Set(excludedMessageIds);
+    const history = staged.filter(message => {
+      const identity = getPocketMessageIdentity(message);
+      return !identity || identity.contactId !== contact.id || !excludedIds.has(identity.messageId);
+    }).filter(message =>
       !isTavernHiddenMessage(message) && (message.content.trim() || message.attachments?.length),
     ).map(message => {
-      if (getPocketMessageIdentity(message)) return buildPocketHistoryMessage(message, contact.id);
+      if (getPocketMessageIdentity(message)) return buildPocketHistoryMessage(message, contact.id, "助手", speaker?.id);
       const content = getChatApiMessageText(buildChatMessageForApi(message, personas, userProfile, undefined));
       const name = getTavernMessageName(message) || (message.role === "user"
         ? getChatSenderName(message.sender, personas, userProfile)
@@ -13613,13 +13621,13 @@ export function App() {
     });
     const books = new Map(worldBooks.map(book => [book.id, book]));
     const activeIds = new Set(activeWorldBookIds);
-    const cardIds = [session?.mode === "roleplay" ? session.roleplayCharacterCardId : undefined, contact.sourceCharacterCardId];
+    const cardIds = [session?.mode === "roleplay" ? session.roleplayCharacterCardId : undefined, isPocketGroup(contact) ? speaker?.sourceCharacterCardId : contact.sourceCharacterCardId];
     for (const id of cardIds) {
       const card = characterCards.find(candidate => candidate.id === id);
       const book = card ? resolveSessionCharacterWorldBook(session, card, worldBooks) : null;
       if (book) { books.set(book.id, book); activeIds.add(book.id); }
     }
-    return buildSharedPocketConversation(contact, user, history, filterPromptTemplateSpecialEntries([...books.values()], promptTemplateEnabled), [...activeIds], mode);
+    return buildSharedPocketConversation(contact, user, history, filterPromptTemplateSpecialEntries([...books.values()], promptTemplateEnabled), [...activeIds], mode, speaker);
   };
 
   useEffect(() => {
@@ -37867,7 +37875,7 @@ export function App() {
                       )
                     : null;
                 const messageName =
-                  (pocketIdentity ? `微信 · ${message.role === "user" ? `${pocketIdentity.userName} → ${pocketIdentity.contactName}` : pocketIdentity.contactName}` : "") || tavernMessageName || (message.role === "user"
+                  (pocketIdentity ? `微信 · ${pocketIdentity.groupName ? `${pocketIdentity.groupName} · ` : ""}${message.role === "user" ? `${pocketIdentity.userName} → ${pocketIdentity.contactName}` : pocketIdentity.contactName}` : "") || tavernMessageName || (message.role === "user"
                     ? getChatSenderName(messageSender, personas, userProfile)
                     : chatMode === "roleplay" && activeSessionRoleplayCard
                       ? activeSessionRoleplayCard.name
