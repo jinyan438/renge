@@ -201,7 +201,7 @@
 .pocket-group-label { font-size: 11px; font-weight: 700; margin: 18px 0 9px; }
 .pocket-member-self, .pocket-member-choice { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid #bba09d16; font-size: 12px; }
 .pocket-member-self > span:last-child { margin-left: auto; opacity: .5; font-size: 10px; }
-.pocket-member-choice > input { width: 17px; height: 17px; flex: 0 0 17px; accent-color: var(--pocket-accent); }
+.pocket-member-self > input, .pocket-member-choice > input { width: 17px; height: 17px; flex: 0 0 17px; margin: 0; accent-color: var(--pocket-accent); }
 .pocket-member-choice > strong, .pocket-member-self > strong { min-width: 0; overflow-wrap: anywhere; }
 .pocket-group-picker { margin-bottom: 18px; }
 .pocket-primary:disabled { opacity: .5; cursor: default; }
