@@ -34,3 +34,15 @@ test("actors, generated records, pending replies and interaction counts survive 
   assert.deepEqual(restored.pendingReplies, ["comment"]);
   assert.equal(normalizeRedState({ ...state, comments: [...state.comments, { ...comment, id: "reply", generated: true, responseToId: "comment" }] }).pendingReplies.length, 0);
 });
+
+test("role checkboxes and custom actor avatars survive reload without opting in historical authors", () => {
+  const avatar = "data:image/png;base64,aGVsbG8=";
+  const actor = { id: "card:friend", name: "奶糖", avatar, personality: "绘画搭档" };
+  const state = { ...emptyRedState(), actors: [actor], selectedRoleIds: [actor.id, actor.id, null, "", 123], notes: [{ id: "note", title: "画画", authorId: actor.id, generated: true, tags: [], images: [] }], comments: [{ id: "comment", noteId: "note", actorId: actor.id, content: "自评", generated: true }] };
+  const restored = normalizeRedState(state);
+  assert.deepEqual(restored.selectedRoleIds, [actor.id]);
+  assert.equal(restored.actors[0].avatar, avatar); assert.equal(restored.notes[0].avatar, avatar); assert.equal(restored.comments[0].avatar, avatar);
+  assert.deepEqual(normalizeRedState(JSON.parse(JSON.stringify(restored))), restored);
+  const { selectedRoleIds, ...legacy } = state;
+  assert.deepEqual(normalizeRedState(legacy).selectedRoleIds, []);
+});

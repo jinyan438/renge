@@ -29,6 +29,19 @@
 .xhs-app p, .xhs-app h2, .xhs-app h3 { margin: 0; letter-spacing: 0; }
 .xhs-main { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .xhs-avatar { display: block; width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
+.xhs-role-picker { padding: 14px 16px; background: #fff; border-top: 7px solid #fafafa; border-bottom: 7px solid #fafafa; }
+.xhs-role-picker > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.xhs-role-picker h3 { font-size: 13px; font-weight: 600; }
+.xhs-role-picker > header span, .xhs-role-picker > p, .xhs-role-picker > small { color: #999; font-size: 10px; }
+.xhs-role-picker > p { margin-top: 3px; }
+.xhs-role-picker > div { display: grid; gap: 2px; max-height: 210px; overflow-y: auto; scrollbar-width: thin; margin-top: 8px; }
+.xhs-role-choice { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 8px 0; cursor: pointer; }
+.xhs-app .xhs-role-choice input[type="checkbox"] { width: 15px; height: 15px; flex-shrink: 0; margin: 0; accent-color: var(--xhs-red); cursor: pointer; }
+.xhs-role-choice > span { display: grid; gap: 2px; min-width: 0; }
+.xhs-role-choice strong { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.xhs-role-choice small { color: #aaa; font-size: 9px; }
+.xhs-role-shortcut { display: flex; align-items: center; gap: 2px; min-width: 0; color: #888 !important; font-size: 10px !important; text-align: left; }
+.xhs-role-shortcut svg { width: 12px; height: 12px; }
 .xhs-feed-header { display: flex; align-items: center; gap: 11px; height: 45px; flex-shrink: 0; padding: 0 12px; border-bottom: 1px solid #efefef; background: #fff; }
 .xhs-feed-header > button { display: grid; place-items: center; width: 24px; height: 32px; flex-shrink: 0; }
 .xhs-feed-header > button svg { width: 22px; height: 22px; }

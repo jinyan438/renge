@@ -20,11 +20,11 @@ export type RedState = {
   version: 2; liked: string[]; saved: string[]; followed: string[]; likedComments: string[];
   hidden: string[]; history: string[]; notes: RedNote[]; comments: RedComment[];
   actors: RedActor[]; deletedContextMessages: PocketContextDeletion[];
-  pendingReplies: string[];
+  pendingReplies: string[]; selectedRoleIds: string[];
 };
 
 export function emptyRedState(): RedState {
-  return { version: 2, liked: [], saved: [], followed: [], likedComments: [], hidden: [], history: [], notes: [], comments: [], actors: [], deletedContextMessages: [], pendingReplies: [] };
+  return { version: 2, liked: [], saved: [], followed: [], likedComments: [], hidden: [], history: [], notes: [], comments: [], actors: [], deletedContextMessages: [], pendingReplies: [], selectedRoleIds: [] };
 }
 // Keep the storage key so existing user-published notes migrate in place.
 export function redStorageKey(sessionId: string) { return `renge_pocket_red_v1:${sessionId || "default"}`; }
@@ -41,6 +41,7 @@ export function normalizeRedState(value: unknown): RedState {
   const state = emptyRedState();
   if (!record(value) || ![1, 2].includes(Number(value.version))) return state;
   const legacy = value.version === 1;
+  state.selectedRoleIds = [...new Set((Array.isArray(value.selectedRoleIds) ? value.selectedRoleIds : []).map(id => redText(id, 100)).filter(Boolean))];
   const retired = new Set(["game", "mall", "work", "gemini"]);
   const seenActors = new Set<string>();
   for (const actor of Array.isArray(value.actors) ? value.actors : []) {
@@ -48,7 +49,7 @@ export function normalizeRedState(value: unknown): RedState {
     const id = redText(actor.id, 100); const name = redText(actor.name, 30);
     if (!id || !name || seenActors.has(id)) continue;
     seenActors.add(id);
-    state.actors.push({ id, name, avatar: POCKET_AVATARS.includes(String(actor.avatar)) ? String(actor.avatar) : randomRedAvatar(), personality: redText(actor.personality, 6000), ...(redText(actor.sourceCharacterCardId, 100) ? { sourceCharacterCardId: redText(actor.sourceCharacterCardId, 100) } : {}) });
+    state.actors.push({ id, name, avatar: safeRedImage(actor.avatar) ? actor.avatar : randomRedAvatar(), personality: redText(actor.personality, 6000), ...(redText(actor.sourceCharacterCardId, 100) ? { sourceCharacterCardId: redText(actor.sourceCharacterCardId, 100) } : {}) });
   }
   const seenNotes = new Set<string>();
   for (const note of Array.isArray(value.notes) ? value.notes : []) {

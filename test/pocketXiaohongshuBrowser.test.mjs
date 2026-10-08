@@ -19,14 +19,17 @@ const upstream = createServer(async (request, response) => {
   if (mode === "fail") { mode = "success"; response.writeHead(503, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error: { message: "fixture temporarily unavailable" } })); return; }
   if (mode === "slow") { mode = "success"; await new Promise(resolve => { releaseSlow = resolve; }); }
   const prompt = (body.messages || body.input).map(text).join("\n");
+  const allowed = JSON.parse(prompt.match(/已勾选的生成角色及最新设定：(\[[^\n]*\])/)[1]);
+  const author = name => { const role = allowed.find(role => role.name === name) || allowed[0]; return { authorId: role.id, author: role.name }; };
   let output;
   if (mode === "bad") { mode = "success"; output = '{"notes":[{"author":"奶糖","title":"不应部分保存","content":"有效"},{"title":"无效"}]}'; }
+  else if (mode === "unselected") { mode = "success"; output = JSON.stringify({ notes: [{ authorId: "contact:friend", author: "奶糖", title: "未勾选角色的帖子", content: "不能保存" }] }); }
   else if (prompt.includes("本次任务：增量生成")) {
     round++;
     output = JSON.stringify({ notes: [
-      { authorId: "contact:friend", author: "奶糖", title: `北街画画日常 ${round}`, content: `第${round}次去北街的草莓花园画画，记得带上水彩和画本。`, tags: ["草莓", "画画"], category: "生活", coverText: `今天\n也想和你\n一起画画`, coverTone: "mint", likes: 24, saves: 5, comments: [{ author: "同桌", content: `第${round}篇：这个画本真好看！`, likes: 2 }] },
-      { authorId: "persona:mint", author: "薄荷", title: `花园里的小事 ${round}`, content: `第${round}篇：浇完花，坐下来看看今天的云。`, tags: ["生活"], category: "情感", coverText: "慢慢来\n日子会开花", coverTone: "rose", comments: [] },
-      { author: "街角咖啡", title: `周末灵感 ${round}`, content: `第${round}篇：散步时发现了新的灵感，分享给喜欢日常的朋友。`, tags: ["周末"], category: "生活", coverText: "留一点时间\n给自己", coverTone: "cream", comments: [] },
+      { ...author("奶糖"), title: `北街画画日常 ${round}`, content: `第${round}次去北街的草莓花园画画，记得带上水彩和画本。`, tags: ["草莓", "画画"], category: "生活", coverText: `今天\n也想和你\n一起画画`, coverTone: "mint", likes: 24, saves: 5, comments: [{ ...author("同桌"), content: `第${round}篇：这个画本真好看！`, likes: 2 }] },
+      { ...author("薄荷"), title: `花园里的小事 ${round}`, content: `第${round}篇：浇完花，坐下来看看今天的云。`, tags: ["生活"], category: "情感", coverText: "慢慢来\n日子会开花", coverTone: "rose", comments: [] },
+      { ...author("街角咖啡"), title: `周末灵感 ${round}`, content: `第${round}篇：散步时发现了新的灵感，分享给喜欢日常的朋友。`, tags: ["周末"], category: "生活", coverText: "留一点时间\n给自己", coverTone: "cream", comments: [] },
     ] });
   } else {
     replies++; const author = prompt.match(/本次优先发言角色：([^。]+)/)?.[1] || "奶糖";
@@ -46,17 +49,19 @@ try {
     version: 1, chatMode: "ai", activeProviderId: provider.id,
     providers: [provider, { ...provider, id: "responses", name: "Red Responses", apiType: "responses", modelId: "fixture-responses", models: ["fixture-responses"] }],
     userProfile: { nickname: "小月", bio: "喜欢草莓和画画", avatarImage: "" },
-    personas: [{ id: "mint", name: "薄荷", description: "喜欢种花的温柔朋友", entryTypes: [], modelProfile: { provider: "", model: "", temperature: 1, responseStyle: "" }, createdAt: now, updatedAt: now }],
+    personas: [{ id: "mint", name: "薄荷", avatarImage: "/api/app-data/assets/fixture-mint.png", description: "喜欢种花的温柔朋友" }, { id: "desk", name: "同桌", description: "喜欢画画" }, { id: "shadow", name: "影子", description: "UNCHECKED_ROLE_SETTING" }].map(persona => ({ ...persona, entryTypes: [], modelProfile: { provider: "", model: "", temperature: 1, responseStyle: "" }, createdAt: now, updatedAt: now })),
     characterCards: [{ id: "friend-card", name: "奶糖", description: "{{char}}是{{user}}的绘画搭档", personality: "活泼，喜欢草莓", firstMessage: "", characterBook: { id: "friend-book", entries: [{ content: "奶糖角色卡世界书", constant: true }] }, createdAt: now, updatedAt: now }],
     worldBooks: [{ id: "active", entries: [{ content: "草莓花园世界书", constant: true, position: "before_char" }, { content: "{{char}}记得{{user}}喜欢草莓", keys: ["草莓"], position: "at_depth", depth: 1 }, { content: "DISABLED_RED_LORE", constant: true, enabled: false }] }, { id: "inactive", entries: [{ content: "INACTIVE_RED_LORE", constant: true }] }], activeWorldBookIds: ["active"],
     chatSessions: ["one", "two"].map(id => ({ id: `red-${id}`, title: `Red ${id}`, mode: "ai", workspaceKey: "default", workspaceName: "默认工作区", messages: [{ id: `message-${id}`, role: "user", content: id === "one" ? "小月和奶糖约好周末去北街画画" : "这是另一个会话，不应泄露", createdAt: now }], createdAt: now, updatedAt: now })),
   };
+  seed.characterCards.push({ id: "coffee", name: "街角咖啡", avatarDataUrl: "/api/app-data/assets/fixture-coffee.png", description: "分享周末的日常", createdAt: now, updatedAt: now });
   assert.equal((await fetch(`${server.url}/api/app-data`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data: seed }) })).ok, true);
   browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, reducedMotion: "reduce" });
   const phoneSeed = { ...emptyPocketState(), contacts: [{ id: "friend", name: "奶糖", avatar: "/touxiang/1.png", personality: "奶糖是小月的绘画搭档", greeting: "", sourceLabel: "角色卡", sourceCharacterCardId: "friend-card", createdAt: now, messages: [{ id: "greeting", role: "assistant", content: "微信里约好了带草莓去画画", createdAt: now }] }] };
   await context.addInitScript(value => { if (!localStorage.getItem("renge_pocket_phone_v1:red-one")) localStorage.setItem("renge_pocket_phone_v1:red-one", JSON.stringify(value)); }, phoneSeed);
   page = await context.newPage(); page.setDefaultTimeout(15000);
+  await page.route("**/api/app-data/assets/fixture-*.png", route => route.fulfill({ contentType: "image/png", body: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1N0AAAAASUVORK5CYII=", "base64") }));
   const pageErrors = []; page.on("pageerror", error => pageErrors.push(error.message));
   const mainReply = "主会话已经参考小红书里的内容。";
   await page.route("**/api/pi/chat", async route => {
@@ -75,6 +80,8 @@ try {
   const readState = () => page.evaluate(() => JSON.parse(localStorage.getItem("renge_pocket_red_v1:red-one")));
   const home = () => red.getByRole("button", { name: "首页", exact: true }).click();
   const back = () => red.getByRole("button", { name: "返回小红书列表", exact: true }).click();
+  const profile = () => red.getByRole("button", { name: "我", exact: true }).click();
+  const checkbox = name => red.getByRole("checkbox", { name: `参与生成：${name}`, exact: true });
   async function generate(expected) { await red.getByRole("button", { name: "生成小红书笔记", exact: true }).click(); await page.waitForFunction(count => document.querySelectorAll(".xhs-card").length === count, expected); await red.getByRole("button", { name: "生成小红书笔记", exact: true }).waitFor({ state: "visible" }); }
   async function comment(content) { await red.getByRole("button", { name: "说点什么...", exact: true }).click(); await red.getByRole("textbox", { name: "评论内容", exact: true }).fill(content); await red.getByRole("dialog").getByRole("button", { name: "发送", exact: true }).click(); }
   const waitReplies = count => page.waitForFunction(count => { const state = JSON.parse(localStorage.getItem("renge_pocket_red_v1:red-one")); return state.comments.filter(comment => comment.responseToId).length === count && state.pendingReplies.length === 0; }, count);
@@ -84,11 +91,23 @@ try {
   await page.goto(server.url); await openPhone();
   assert.equal(await red.locator(".xhs-card").count(), 0);
   assert.equal(await red.getByText("为什么领导很少请假？", { exact: true }).count(), 0);
+  assert.equal(await red.getByRole("button", { name: "生成小红书笔记", exact: true }).isDisabled(), true);
+  await red.getByRole("button", { name: "选择生成角色", exact: true }).click();
+  assert.ok(await red.getByRole("checkbox").count() >= 5); assert.equal(await red.locator('.xhs-role-choice input:checked').count(), 0);
+  for (const name of ["奶糖", "薄荷", "同桌", "街角咖啡"]) await checkbox(name).check();
+  assert.equal(await checkbox("影子").isChecked(), false);
+  assert.equal(await checkbox("奶糖").evaluate(node => getComputedStyle(node).accentColor), "rgb(255, 36, 66)");
+  await phone.screenshot({ path: ".runtime/xiaohongshu-role-picker.png", animations: "disabled" });
+  await home();
   await generate(3); const firstState = await readState(); const firstIds = firstState.notes.map(note => note.id);
-  assert.equal(firstState.actors.length, 4); firstState.actors.forEach(actor => assert.ok(POCKET_AVATARS.includes(actor.avatar)));
+  assert.equal(firstState.actors.length, 4);
+  assert.equal(firstState.actors.find(actor => actor.name === "奶糖").avatar, "/touxiang/1.png");
+  assert.equal(firstState.actors.find(actor => actor.name === "薄荷").avatar, "/api/app-data/assets/fixture-mint.png");
+  assert.equal(firstState.actors.find(actor => actor.name === "街角咖啡").avatar, "/api/app-data/assets/fixture-coffee.png");
+  assert.ok(POCKET_AVATARS.includes(firstState.actors.find(actor => actor.name === "同桌").avatar));
   const firstRequest = JSON.stringify(requests[0].body);
   assert.match(firstRequest, /小月和奶糖约好周末去北街画画/); assert.match(firstRequest, /微信里约好了带草莓去画画/); assert.match(firstRequest, /草莓花园世界书/);
-  assert.doesNotMatch(firstRequest, /DISABLED_RED_LORE|INACTIVE_RED_LORE|这是另一个会话|微信回复规则/);
+  assert.doesNotMatch(firstRequest, /DISABLED_RED_LORE|INACTIVE_RED_LORE|这是另一个会话|微信回复规则|UNCHECKED_ROLE_SETTING/);
   assert.equal(requests[0].body.model, "fixture-chat");
   await phone.screenshot({ path: ".runtime/xiaohongshu-generated-home.png", animations: "disabled" });
   await sendMain("记住小红书刚生成的笔记"); const firstScope = mainRequests.at(-1).piSessionScope;
@@ -148,8 +167,45 @@ try {
   assert.equal(await red.evaluate(node => node.scrollWidth <= node.clientWidth + 1), true);
   assert.equal(await red.locator(".xhs-interactions").evaluate(node => node.scrollWidth <= node.clientWidth + 1), true);
   await phone.screenshot({ path: ".runtime/xiaohongshu-generated-narrow.png", animations: "disabled" });
+  await back(); await profile();
+  assert.equal(await red.locator(".xhs-role-picker").evaluate(node => node.scrollWidth <= node.clientWidth + 1), true);
+  for (const name of ["奶糖", "薄荷", "同桌", "街角咖啡"]) assert.equal(await checkbox(name).isChecked(), true);
+  for (const name of ["奶糖", "薄荷", "街角咖啡"]) await checkbox(name).uncheck();
+  await home(); mode = "unselected";
+  await red.getByRole("button", { name: "生成小红书笔记", exact: true }).click(); await red.getByText("模型使用了未勾选的角色，请重试生成。", { exact: true }).waitFor();
+  assert.equal((await readState()).notes.length, 13);
+  await red.getByRole("button", { name: "重试生成", exact: true }).click(); await page.waitForFunction(() => document.querySelectorAll(".xhs-card").length === 16);
+  const deskState = await readState();
+  assert.deepEqual(deskState.notes.slice(0, 3).map(note => note.author), ["同桌", "同桌", "同桌"]);
+  const pool = body => JSON.parse((body.messages || body.input).map(text).join("\n").match(/已勾选的生成角色及最新设定：(\[[^\n]*\])/)[1]);
+  assert.deepEqual(pool(requests.at(-1).body).map(role => role.name), ["同桌"]);
+  const replyCount = deskState.comments.filter(comment => comment.responseToId).length;
+  await red.getByRole("button", { name: "打开笔记：北街画画日常 1", exact: true }).click();
+  await comment("原作者取消勾选后只由已选角色回复"); await waitReplies(replyCount + 1);
+  assert.equal((await readState()).comments.at(-1).author, "同桌");
+  await back(); await profile(); await checkbox("同桌").uncheck(); await home();
+  assert.equal(await red.getByRole("button", { name: "生成小红书笔记", exact: true }).isDisabled(), true);
+  await red.getByRole("button", { name: "打开笔记：北街画画日常 1", exact: true }).click();
+  const beforePending = requests.length;
+  await comment("全部取消勾选时保留评论等待角色回复");
+  await red.getByText("请先到「我」勾选参与生成的角色。", { exact: true }).waitFor(); assert.equal(requests.length, beforePending);
+  await back(); await profile(); await checkbox("影子").check(); await waitReplies(replyCount + 2);
+  assert.equal((await readState()).comments.at(-1).author, "影子");
+  await home(); mode = "slow";
+  await red.getByRole("button", { name: "生成小红书笔记", exact: true }).click();
+  while (!releaseSlow) await new Promise(resolve => setTimeout(resolve, 10));
+  await profile(); await checkbox("影子").uncheck(); await checkbox("同桌").check();
+  releaseSlow(); releaseSlow = undefined;
+  await red.locator(".xhs-generation-status").waitFor({ state: "hidden" });
+  assert.equal((await readState()).notes.length, 16);
+  await home(); await generate(19);
+  assert.deepEqual(pool(requests.at(-1).body).map(role => role.name), ["同桌"]);
+  await page.reload(); await openPhone(); await profile();
+  assert.equal(await checkbox("同桌").isChecked(), true); assert.equal(await checkbox("奶糖").isChecked(), false); assert.equal(await checkbox("影子").isChecked(), false);
+  assert.deepEqual((await readState()).actors.filter(actor => actor.name !== "影子").map(actor => actor.avatar), actorAvatars);
+  await phone.screenshot({ path: ".runtime/xiaohongshu-role-picker-narrow.png", animations: "disabled" });
   assert.deepEqual(pageErrors, []);
-  console.log("PASS: empty feed, shared random avatars, incremental model generation, main/WeChat/worldbook context, automatic and queued replies, atomic failures/retries, main edits/deletes, Responses model settings, local posting, session isolation, reload and narrow layout");
+  console.log("PASS: role opt-in and persistence, strict author/comment/reply pools, cancellation on selection changes, own avatars and stable random fallback, incremental model generation, main/WeChat/worldbook context, queued replies/retries, main edits/deletes, Responses, posting, isolation, reload and narrow layout");
 } catch (error) {
   if (page && !page.isClosed()) { await page.screenshot({ path: ".runtime/xiaohongshu-test-failure.png" }); console.error((await page.locator("body").innerText()).slice(-3500)); }
   throw error;

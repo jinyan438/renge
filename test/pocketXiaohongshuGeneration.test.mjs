@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { POCKET_AVATARS } from "../src/pocketPhoneState.ts";
 import { emptyRedState } from "../src/pocketXiaohongshuState.ts";
-import { appendGeneratedRedFeed, appendGeneratedRedReplies, buildRedTaskContact, getRedRoles } from "../src/pocketXiaohongshuGeneration.ts";
+import { appendGeneratedRedFeed, appendGeneratedRedReplies, buildRedTaskContact, getRedRoleChoices, getRedRoles, selectedRedRoles, syncRedRoleAvatars } from "../src/pocketXiaohongshuGeneration.ts";
 
-const roles = [{ id: "card:friend", name: "奶糖", personality: "{{char}}是{{user}}的绘画搭档", sourceCharacterCardId: "friend" }];
+const roles = [{ id: "card:friend", name: "奶糖", personality: "{{char}}是{{user}}的绘画搭档", sourceCharacterCardId: "friend" }, { id: "persona:stranger", name: "路人", personality: "喜欢画画" }];
 const post = title => ({ authorId: "card:friend", author: "奶糖", title, content: `${title}正文`, tags: ["画画"], coverText: title, coverTone: "mint", avatar: "https://example.com/tracker.jpg", likes: 3, comments: [{ author: "路人", content: "好好看", likes: 2 }] });
 const generate = (state, title, random = () => .8) => appendGeneratedRedFeed(state, JSON.stringify({ notes: [post(title)] }), roles, "小月", random);
 test("generation appends new posts and comments, assigning stable random pool avatars", () => {
@@ -43,4 +43,45 @@ test("comment replies target the submitted snapshot and retry without duplicate 
 test("role candidates use enabled persona traits and latest saved phone roles", () => {
   const result = getRedRoles([{ id: "friend", name: "奶糖", personality: "最新手机设定" }], [{ id: "persona", name: "小林", description: "温柔", entryTypes: [{ name: "喜好", entries: [{ key: "喜欢", value: "蓝莓", enabled: true }, { key: "禁用", value: "不能导入", enabled: false }] }] }], []);
   assert.equal(result[0].personality, "最新手机设定"); assert.match(result[1].personality, /蓝莓/); assert.doesNotMatch(result[1].personality, /不能导入/);
+});
+
+test("only checked roles enter the pool; saved authors cannot rejoin through feed or reply history", () => {
+  const old = generate(emptyRedState(), "历史帖子");
+  assert.equal(getRedRoleChoices(roles, old.actors).length, 2);
+  assert.deepEqual(selectedRedRoles(old, roles), []);
+  assert.throws(() => buildRedTaskContact(old, "小月", [], { kind: "feed" }), /勾选/);
+  const state = { ...old, selectedRoleIds: [roles[1].id] };
+  const selected = selectedRedRoles(state, roles);
+  assert.deepEqual(selected.map(role => role.name), ["路人"]);
+  const task = buildRedTaskContact(state, "小月", selected, { kind: "feed" });
+  assert.doesNotMatch(task.personality, /绘画搭档/);
+  assert.match(task.personality, /未勾选角色/);
+  assert.deepEqual(task.contextCharacterCardIds, []);
+  assert.throws(() => appendGeneratedRedFeed(state, JSON.stringify({ notes: [post("未勾选作者")] }), selected, "小月"), /未勾选/);
+});
+
+test("unselected authors, commenters and replies are rejected atomically", () => {
+  const state = generate(emptyRedState(), "历史帖子"); const snapshot = structuredClone(state);
+  const selected = [roles[0]];
+  assert.throws(() => appendGeneratedRedFeed(state, JSON.stringify({ notes: [post("新帖")] }), selected, "小月"), /未勾选/);
+  assert.throws(() => appendGeneratedRedFeed(state, JSON.stringify({ notes: [{ ...post("旧作者"), authorId: state.actors[1].id, author: "路人", comments: [] }] }), selected, "小月"), /未勾选/);
+  const target = { id: "user", noteId: state.notes[0].id, actorId: "self", author: "小月", content: "你好", generated: false };
+  const pending = { ...state, comments: [...state.comments, target], pendingReplies: [target.id] };
+  const task = { kind: "reply", noteId: target.noteId, commentId: target.id };
+  assert.throws(() => appendGeneratedRedReplies(pending, JSON.stringify({ replies: [{ authorId: roles[1].id, content: "未勾选回复" }] }), selected, "小月", task), /未勾选/);
+  const other = buildRedTaskContact(pending, "小月", [roles[1]], task);
+  assert.equal(other.name, "路人"); assert.match(other.personality, /本次优先发言角色：路人/);
+  assert.deepEqual(state, snapshot); assert.deepEqual(pending.pendingReplies, [target.id]);
+});
+
+test("existing contact, persona and card avatars override random avatars, including saved posts", () => {
+  const image = "data:image/png;base64,aGVsbG8=";
+  const candidates = getRedRoles([{ id: "friend", name: "奶糖", avatar: "/touxiang/7.png", personality: "朋友" }], [{ id: "stranger", name: "路人", avatarImage: image, description: "朋友", entryTypes: [] }], [{ id: "card", name: "卡片角色", avatarDataUrl: "/api/app-data/assets/portrait.png" }]);
+  assert.deepEqual(candidates.map(role => role.avatar), ["/touxiang/7.png", image, "/api/app-data/assets/portrait.png"]);
+  const result = appendGeneratedRedFeed(emptyRedState(), JSON.stringify({ notes: [{ ...post("已有头像"), authorId: "contact:friend" }] }), candidates, "小月", () => { throw new Error("有头像时不应随机分配"); });
+  assert.equal(result.notes[0].avatar, "/touxiang/7.png"); assert.equal(result.comments[0].avatar, image);
+  const restored = syncRedRoleAvatars(result, candidates.map(role => ({ ...role, avatar: image })));
+  assert.equal(restored.notes[0].avatar, image);
+  assert.equal(syncRedRoleAvatars(restored, candidates.map(role => ({ ...role, avatar: image }))), restored);
+  assert.equal(result.notes[0].avatar, "/touxiang/7.png");
 });

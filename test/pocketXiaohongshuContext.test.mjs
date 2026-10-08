@@ -6,7 +6,8 @@ import { appendGeneratedRedFeed, buildRedTaskContact } from "../src/pocketXiaoho
 import { emptyRedState, RED_CONTEXT_ID } from "../src/pocketXiaohongshuState.ts";
 import { normalizeWorldBook } from "../src/worldbookUtils.ts";
 
-function fixture() { return appendGeneratedRedFeed(emptyRedState(), JSON.stringify({ notes: [{ author: "奶糖", title: "草莓花园", content: "和朋友在北街画画。", tags: ["草莓"], comments: [] }] }), [], "小月"); }
+const roles = [{ id: "friend", name: "奶糖", personality: "朋友" }];
+function fixture() { return appendGeneratedRedFeed(emptyRedState(), JSON.stringify({ notes: [{ author: "奶糖", title: "草莓花园", content: "和朋友在北街画画。", tags: ["草莓"], comments: [] }] }), roles, "小月"); }
 const main = id => ({ id, role: "user", content: id, createdAt: "2026-10-08T01:00:00Z" });
 test("red notes share the ordered main timeline, label correctly and change the Pi context revision", () => {
   const state = fixture(); const contact = redContextConversation(state);
@@ -14,7 +15,7 @@ test("red notes share the ordered main timeline, label correctly and change the 
   assert.equal(history[1].source, "xiaohongshu"); assert.equal(getPocketMessageIdentity(history[1]).app, "xiaohongshu");
   assert.match(formatPocketContextMessage(history[1]), /小红书 · 奶糖/);
   const revision = pocketContextRevision(history);
-  const next = appendGeneratedRedFeed(state, JSON.stringify({ notes: [{ author: "奶糖", title: "第二篇", content: "新的日常" }] }), [], "小月");
+  const next = appendGeneratedRedFeed(state, JSON.stringify({ notes: [{ author: "奶糖", title: "第二篇", content: "新的日常" }] }), roles, "小月");
   history = syncPocketContext([...history, main("主会话B")], [contact], [redContextConversation(next)], "小月");
   assert.deepEqual(history.map(message => message.id), ["主会话A", history[1].id, "主会话B", history[3].id]);
   assert.match(history[3].content, /第二篇/); assert.notEqual(pocketContextRevision(history), revision);
@@ -22,7 +23,7 @@ test("red notes share the ordered main timeline, label correctly and change the 
   assert.equal(buildPocketHistoryMessage(history[1], "wechat-friend").role, "user");
 });
 test("red generation includes complete quoted history and enabled worldbook placement without WeChat output rules", () => {
-  const state = fixture(); const contact = buildRedTaskContact(state, "小月", [], { kind: "feed" });
+  const state = fixture(); const contact = buildRedTaskContact(state, "小月", roles, { kind: "feed" });
   const history = Array.from({ length: 65 }, (_, index) => buildPocketHistoryMessage(main(`主会话-${index}`), RED_CONTEXT_ID));
   history.push(...syncPocketContext([], null, [contact], "小月").map(message => buildPocketHistoryMessage(message, RED_CONTEXT_ID)));
   const book = normalizeWorldBook({ id: "active", entries: [{ content: "角色前世界书", constant: true, position: "before_char" }, { content: "{{user}}的草莓世界书", keys: ["草莓"], position: "at_depth", depth: 1 }, { content: "DISABLED_LORE", constant: true, enabled: false }] });
