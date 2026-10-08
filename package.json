@@ -19,7 +19,8 @@
     "electron": "npm run build && electron electron/main.mjs",
     "desktop": "npm run electron",
     "test:pocket-phone": "tsx --test test/pocketPhoneChat.test.mjs test/pocketPhoneContext.test.mjs test/pocketPhoneGroup.test.mjs test/pocketPhoneSync.test.mjs test/pocketPhoneInner.test.mjs && node test/pocketPhoneBrowser.test.mjs",
-    "test:pocket-red": "tsx --test test/pocketXiaohongshuState.test.mjs test/pocketXiaohongshuGeneration.test.mjs test/pocketXiaohongshuContext.test.mjs test/pocketXiaohongshuCommunity.test.mjs && node test/pocketXiaohongshuBrowser.test.mjs"
+    "test:pocket-red": "tsx --test test/pocketXiaohongshuState.test.mjs test/pocketXiaohongshuGeneration.test.mjs test/pocketXiaohongshuContext.test.mjs test/pocketXiaohongshuCommunity.test.mjs && node test/pocketXiaohongshuBrowser.test.mjs",
+    "test:pocket-wechat": "tsx --test test/pocketWechatMedia.test.mjs && node test/pocketWechatBrowser.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.87.1",

@@ -2,6 +2,7 @@ import { DEFAULT_POCKET_AVATAR, buildPocketConversation, getPocketPendingMessage
 import { buildWorldBookPromptPlacements, insertWorldBookPromptAtDepth, type WorldBook } from "./worldbookUtils";
 import { buildSharedRedConversation } from "./pocketXiaohongshuContext";
 import { getPocketContextRecords, normalizePocketHormones, pocketInnerGenerationPrompt, type PocketInnerState, type PocketContextRecord } from "./pocketPhoneInner";
+import { pocketMediaPrompt } from "./pocketWechatMedia";
 
 export type PocketContextMessage = {
   id: string;
@@ -180,6 +181,7 @@ export function buildSharedPocketConversation(contact: PocketConversation, user:
       "除非用户在当前微信明确要求其他创作形式，否则 texts 字段只输出实际发给对方的消息，不写第三人称旁白、动作或心理描写、剧情段落、标题、状态栏、场景播报或角色名标签。",
       "不要模仿背景资料中助手的回答，也不要延续先前微信回复中的叙事文风；延续已知事实，从本次回复开始遵守上述微信口吻。",
       group ? "群聊规则：根据自己的性格和刚才的群消息决定是否发言。话少的角色可以保持安静；被 @ 或直接点名时优先回应。可以接话、讨论、调侃其他群友，但不能替其他成员或用户发言，不能编造用户没做过的动作、决定和大事。后面的成员能看到本轮前面成员的新消息，避免重复同一句话。" : "",
+      pocketMediaPrompt(contact, speaker?.id),
       pocketInnerGenerationPrompt(group ? speaker!.innerState : contact.innerState, group),
     ].filter(Boolean).join("\n"),
   ].filter(Boolean).join("\n\n");

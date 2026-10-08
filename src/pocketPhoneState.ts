@@ -1,4 +1,5 @@
 import { normalizePocketInnerHistory, normalizePocketInnerState, type PocketInnerEntry, type PocketInnerState } from "./pocketPhoneInner.ts";
+import { normalizePocketAttachment, normalizePocketWallet, type PocketAttachment, type PocketWallet } from "./pocketWechatMedia.ts";
 
 export type PocketMessage = {
   id: string;
@@ -7,6 +8,7 @@ export type PocketMessage = {
   createdAt: string;
   replyContextMessageId?: string;
   speaker?: Pick<PocketContact, "id" | "name" | "avatar">;
+  attachment?: PocketAttachment;
 };
 
 export type PocketContact = {
@@ -55,7 +57,7 @@ export type PocketSettings = {
   largeText: boolean;
 };
 export type PocketContextDeletion = { contactId: string; messageId: string };
-export type PocketState = { version: 1; contacts: PocketContact[]; groups: PocketGroup[]; settings: PocketSettings; deletedContextMessages: PocketContextDeletion[] };
+export type PocketState = { version: 1; contacts: PocketContact[]; groups: PocketGroup[]; settings: PocketSettings; wallet: PocketWallet; deletedContextMessages: PocketContextDeletion[] };
 export type PocketGenerationMode = "reply" | "proactive";
 export type PocketRequestMessage = Pick<PocketMessage, "role" | "content"> | { role: "system"; content: string };
 
@@ -75,7 +77,7 @@ export function pocketId() {
 }
 
 export function emptyPocketState(): PocketState {
-  return { version: 1, contacts: [], groups: [], settings: { theme: "rose", nickname: "", providerId: "", modelId: "", largeText: false }, deletedContextMessages: [] };
+  return { version: 1, contacts: [], groups: [], settings: { theme: "rose", nickname: "", providerId: "", modelId: "", largeText: false }, wallet: { balance: 0, bills: [] }, deletedContextMessages: [] };
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -91,9 +93,11 @@ function normalizeMessages(value: unknown, group = false): PocketMessage[] {
       ? { id: text(message.speaker.id), name: text(message.speaker.name).trim().slice(0, 30), avatar: safePocketAvatar(message.speaker.avatar) } : undefined;
     if (group && message.role === "assistant" && !speaker) return [];
     ids.add(text(message.id));
+    const attachment = normalizePocketAttachment(message.attachment);
     return [{ id: text(message.id), role: message.role, content: text(message.content), createdAt: text(message.createdAt),
       ...(message.role === "assistant" && typeof message.replyContextMessageId === "string" ? { replyContextMessageId: message.replyContextMessageId } : {}),
       ...(speaker ? { speaker } : {}),
+      ...(attachment ? { attachment } : {}),
     }];
   });
 }
@@ -110,6 +114,7 @@ export function safePocketAvatar(value: unknown) {
 export function normalizePocketState(value: unknown): PocketState {
   const state = emptyPocketState();
   if (!record(value) || value.version !== 1) return state;
+  state.wallet = normalizePocketWallet(value.wallet);
   const deletedKeys = new Set<string>();
   state.deletedContextMessages = (Array.isArray(value.deletedContextMessages) ? value.deletedContextMessages : []).flatMap(item => {
     if (!record(item) || !text(item.contactId) || !text(item.messageId)) return [];
@@ -186,7 +191,8 @@ export function getPocketGenerationMode(contact: Pick<PocketContact, "messages">
   return getPocketPendingMessages(contact).length ? "reply" : "proactive";
 }
 
-export function getPocketMessageBubbles(message: Pick<PocketMessage, "role" | "content">): string[] {
+export function getPocketMessageBubbles(message: Pick<PocketMessage, "role" | "content" | "attachment">): string[] {
+  if (message.attachment) return [message.content];
   if (message.role === "user" || /```|~~~/.test(message.content)) return [message.content];
   const lines = message.content.replace(/\r\n?/g, "\n").split("\n").map(line => line.trim()).filter(Boolean);
   // Keep lists, tables and other structured replies together.

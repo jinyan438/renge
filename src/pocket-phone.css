@@ -132,6 +132,103 @@
 .pocket-wechat-tabs button { display: flex; flex: 1; flex-direction: column; align-items: center; gap: 4px; padding: 3px; color: #b5a5a1; background: transparent; }
 .pocket-wechat-tabs button.is-active { color: #629d7c; }
 .pocket-wechat-tabs span { font-size: 9px; }
+.pocket-wx-account { display: flex; flex: 1; min-height: 0; position: relative; flex-direction: column; background: #ededed; color: #191919; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+.pocket-wx-account-content { flex: 1; min-height: 0; }
+.pocket-wx-profile { display: flex; align-items: center; gap: 15px; background: white; padding: 34px 19px 30px; }
+.pocket-wx-profile > img { width: 55px; height: 55px; border-radius: 7px; object-fit: cover; }
+.pocket-wx-profile > span { display: grid; flex: 1; min-width: 0; gap: 9px; }
+.pocket-wx-profile strong { font-size: 20px; overflow-wrap: anywhere; }
+.pocket-wx-profile small { font-size: 10px; color: #777; overflow-wrap: anywhere; }
+.pocket-wx-profile > svg { flex-shrink: 0; color: #aaa; }
+.pocket-wx-profile > svg:last-child { margin-left: -10px; }
+.pocket-wx-status { border: 1px solid #dedede; border-radius: 12px; padding: 2px 8px; display: flex; align-items: center; gap: 4px; width: fit-content; font-size: 9px; color: #777; }
+.pocket-wx-row { width: 100%; display: flex; align-items: center; gap: 14px; padding: 17px 19px; background: white; text-align: left; }
+.pocket-wx-row > span { flex: 1; font-size: 13px; }
+.pocket-wx-row > small { color: #888; font-size: 12px; font-variant-numeric: tabular-nums; }
+.pocket-wx-row > svg { flex-shrink: 0; }
+.pocket-wx-row > svg:last-child { color: #b6b6b6; }
+.pocket-wx-service-entry, .pocket-wx-row-group { margin: 8px 0; }
+.pocket-wx-row-group .pocket-wx-row + .pocket-wx-row { position: relative; }
+.pocket-wx-row-group .pocket-wx-row + .pocket-wx-row::before { content: ""; position: absolute; left: 55px; right: 0; top: 0; height: 1px; background: #f1f1f1; }
+.pocket-wx-page-header { display: flex; align-items: center; justify-content: space-between; height: 43px; padding: 0 12px; background: #ededed; }
+.pocket-wx-page-header > button { display: grid; place-items: center; padding: 5px; background: transparent; }
+.pocket-wx-page-header strong { font-size: 15px; }
+.pocket-wx-pay-card { display: flex; margin: 8px 10px 12px; padding: 19px 10px 17px; min-height: 120px; border-radius: 9px; background: #2aae67; color: white; }
+.pocket-wx-pay-card button { display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 9px; flex: 1; background: transparent; color: white; }
+.pocket-wx-pay-card strong { font-size: 14px; font-weight: 500; }
+.pocket-wx-pay-card small { font-size: 11px; color: #ffffffa6; }
+.pocket-wx-services { margin: 9px 10px; background: white; border-radius: 9px; padding: 15px 12px 8px; }
+.pocket-wx-services h4 { margin: 0 0 17px; font-size: 11px; color: #777; font-weight: 400; }
+.pocket-wx-services > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 21px 5px; padding-bottom: 14px; }
+.pocket-wx-services button { display: flex; align-items: center; flex-direction: column; gap: 10px; background: transparent; font-size: 10px; white-space: nowrap; }
+.pocket-wx-services button svg { color: #df9b39; }
+.pocket-wx-services button:nth-child(even) svg { color: #4097d8; }
+.pocket-wx-wallet-list { margin-top: 9px; }
+.pocket-wx-wallet-footer { display: flex; justify-content: center; gap: 4px; align-items: center; font-size: 11px; color: #b1b1b1; padding: 33px 0; }
+.wx-page-balance, .wx-page-bills { background: white; }
+.wx-page-balance .pocket-wx-page-header, .wx-page-bills .pocket-wx-page-header { background: white; }
+.pocket-wx-balance { display: flex; align-items: center; flex-direction: column; padding: 39px 15px 15px; }
+.pocket-wx-coin { display: grid; place-items: center; width: 51px; height: 51px; border-radius: 50%; color: white; background: #ffbd35; font: 38px/1 "Segoe UI", sans-serif; box-shadow: inset 0 0 0 4px #ffd267; }
+.pocket-wx-balance h3 { margin: 21px 0 10px; font-size: 15px; font-weight: 400; }
+.pocket-wx-balance > strong { font-size: clamp(23px, 10cqi, 38px); font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; max-width: 100%; text-align: center; }
+.pocket-wx-edit-balance { margin: 40px 0 15px; width: 150px; padding: 10px; border-radius: 5px; background: #07c160; color: white !important; font-size: 13px !important; }
+.pocket-wx-bills-link { padding: 10px; background: transparent; color: #576b95 !important; font-size: 12px !important; }
+.pocket-wx-balance > p { display: flex; align-items: center; gap: 4px; color: #aaa; font-size: 10px; margin-top: 45px; }
+.pocket-wx-bills { padding: 4px 15px; }
+.pocket-wx-bill { display: flex; align-items: center; gap: 9px; padding: 17px 0; border-bottom: 1px solid #f0f0f0; }
+.pocket-wx-bill-icon { padding: 7px; border-radius: 7px; background: #f5b646; color: white; }
+.pocket-wx-bill-icon.kind-receive { background: #07c160; }
+.pocket-wx-bill > span:nth-child(2) { flex: 1; min-width: 0; }
+.pocket-wx-bill > span:not(:first-child) { display: grid; gap: 7px; }
+.pocket-wx-bill > span:last-child { text-align: right; flex-shrink: 0; }
+.pocket-wx-bill strong { font-size: 11px; font-weight: 500; overflow-wrap: anywhere; }
+.pocket-wx-bill small { font-size: 9px; color: #aaa; }
+.pocket-wx-no-bills { text-align: center; color: #aaa; padding: 75px 0; font-size: 12px; }
+.pocket-wx-modal-backdrop { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; padding: 18px; background: #0006; }
+.pocket-wx-modal { width: 100%; padding: 20px; border-radius: 13px; background: white; box-shadow: 0 10px 30px #0002; }
+.pocket-wx-modal header { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 14px; margin-bottom: 23px; }
+.pocket-wx-modal header button { background: transparent; display: grid; place-items: center; }
+.pocket-wx-modal label { display: grid; gap: 10px; font-size: 11px; }
+.pocket-wx-modal input { width: 100%; box-sizing: border-box; padding: 11px 9px; border: 1px solid #ddd; border-radius: 5px; background: #fafafa; font-size: 21px; }
+.pocket-wx-modal p { font-size: 12px; line-height: 1.7; margin-bottom: 22px; }
+.pocket-wx-modal p[role="alert"] { color: #c44747; }
+.pocket-wx-green-button { display: flex; gap: 8px; align-items: center; justify-content: center; width: 100%; padding: 11px; margin-top: 20px; border-radius: 5px; background: #07c160; color: white !important; font-size: 13px !important; }
+.pocket-wx-attach-panel { display: flex; flex-shrink: 0; gap: 19px; padding: 18px 15px 16px; border-top: 1px solid #e5e5e5; background: #f7f7f9; font-family: "Microsoft YaHei", sans-serif; }
+.pocket-wx-attach-panel button { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 0; background: transparent; color: #737985; }
+.pocket-wx-attach-panel button > span { display: grid; place-items: center; width: 56px; height: 56px; border: 1px solid #e0e3eb; border-radius: 17px; background: #fafbfc; }
+.pocket-wx-attach-panel small { color: #666; font-size: 12px; }
+.pocket-composer .pocket-attach-toggle { background: transparent; color: #90909a; padding: 0; width: 27px; min-width: 27px; }
+.pocket-wx-attach-sheet { font-family: "Microsoft YaHei", sans-serif; }
+.pocket-wx-attach-sheet > small { font-size: 11px; opacity: .65; }
+.pocket-wx-recipient { margin: 6px 0 24px; text-align: center; font-size: 15px; }
+.pocket-wx-photo-preview { max-height: 150px; max-width: 100%; display: block; margin: 10px auto; object-fit: contain; border-radius: 8px; }
+.pocket-wx-transfer { width: min(208px, 100%); min-width: 0; border-radius: 7px; overflow: hidden; background: #f5a43e; color: white; font-family: "Microsoft YaHei", sans-serif; }
+.pocket-wx-transfer > div:first-child { display: flex; align-items: center; gap: 10px; padding: 13px 11px; }
+.pocket-wx-transfer-icon { border: 1.5px solid white; border-radius: 50%; display: grid; place-items: center; width: 31px; height: 31px; flex-shrink: 0; }
+.pocket-wx-transfer > div:first-child > span:last-child { display: grid; min-width: 0; gap: 5px; }
+.pocket-wx-transfer strong { font-size: 16px; font-weight: 500; overflow-wrap: anywhere; }
+.pocket-wx-transfer small { font-size: 10px; opacity: .85; overflow-wrap: anywhere; }
+.pocket-wx-transfer footer { font-size: 10px; padding: 5px 11px; background: #e7932d; }
+.pocket-wx-transfer.status-received { background: #f3d7af; }
+.pocket-wx-transfer.status-received footer { background: #edc995; }
+.pocket-wx-transfer.status-returned { background: #bcb9ae; }
+.pocket-wx-transfer.status-returned footer { background: #aaa798; }
+.pocket-wx-transfer-actions { display: flex; background: #fff5e7; }
+.pocket-wx-transfer-actions button { padding: 8px 10px; font-size: 10px; background: transparent; color: #9c6424; display: flex; align-items: center; justify-content: center; gap: 3px; flex: 1; }
+.pocket-wx-transfer-actions button + button { border-left: 1px solid #f3dfbe; }
+.pocket-wx-voice { max-width: 100%; }
+.pocket-wx-voice > button { background: #fffdfb; color: #222; border-radius: 5px; padding: 12px; display: flex; justify-content: space-between; align-items: center; gap: 24px; font: 13px "Microsoft YaHei", sans-serif; max-width: 100%; }
+.pocket-message.user .pocket-wx-voice > button { background: #a9e87c; flex-direction: row-reverse; }
+.pocket-wx-voice > p { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; margin: 6px 0 0; border-radius: 5px; background: #fff9; font-size: 11px; line-height: 1.6; }
+.pocket-wx-image { display: flex; align-items: flex-start; flex-direction: column; gap: 9px; padding: 15px; width: 163px; min-height: 150px; max-width: 100%; border-radius: 8px; background: linear-gradient(150deg, #dae8ee, #f0e5e5); text-align: left; color: #657586; }
+.pocket-wx-image > small { font-size: 10px; }
+.pocket-wx-image > span { font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.pocket-wx-image.has-photo { padding: 0; min-height: 0; }
+.pocket-wx-image img { display: block; width: 100%; max-height: 230px; object-fit: cover; border-radius: 8px; }
+.pocket-wx-image-viewer { position: absolute; inset: 0; z-index: 25; background: #151515f5; color: white; display: flex; align-items: center; justify-content: center; flex-direction: column; padding: 45px 15px 15px; }
+.pocket-wx-image-viewer > button { position: absolute; right: 12px; top: 12px; background: transparent; color: white; padding: 5px; }
+.pocket-wx-image-viewer > img { max-width: 100%; max-height: 70%; object-fit: contain; }
+.pocket-wx-image-viewer > p { white-space: pre-wrap; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; overflow-y: auto; }
 .pocket-conversation { flex: 1; min-height: 0; padding: 14px 10px; background: linear-gradient(145deg, #f8f3ee, var(--pocket-wallpaper)); }
 .pocket-message-time { display: block; margin: 16px 0 13px; font-size: 9px; text-align: center; color: #a5908c; }
 .pocket-message { display: flex; align-items: flex-start; gap: 7px; margin-bottom: 15px; }
