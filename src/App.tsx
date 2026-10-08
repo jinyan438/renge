@@ -706,7 +706,7 @@ type ChatMessage = {
   createdAt: string;
   sender?: ChatSenderIdentity;
   attachments?: ChatAttachment[];
-  source?: "heartbeat" | "roleplay-greeting" | "wechat";
+  source?: "heartbeat" | "roleplay-greeting" | "wechat" | "xiaohongshu";
   choiceRequest?: ChatChoiceRequest;
   toolVisualization?: ToolVisualization;
   dialogueRewritePending?: boolean;
@@ -2792,7 +2792,7 @@ function normalizeChatMessage(
     ...(attachments.length > 0 ? { attachments } : {}),
     ...(rawMessage.source === "heartbeat" ||
     rawMessage.source === "roleplay-greeting" ||
-    rawMessage.source === "wechat"
+    rawMessage.source === "wechat" || rawMessage.source === "xiaohongshu"
       ? { source: rawMessage.source }
       : {}),
     ...(role === "assistant" && choiceRequest ? { choiceRequest } : {}),
@@ -13624,7 +13624,7 @@ export function App() {
     });
     const books = new Map(worldBooks.map(book => [book.id, book]));
     const activeIds = new Set(activeWorldBookIds);
-    const cardIds = [session?.mode === "roleplay" ? session.roleplayCharacterCardId : undefined, isPocketGroup(contact) ? speaker?.sourceCharacterCardId : contact.sourceCharacterCardId];
+    const cardIds = [session?.mode === "roleplay" ? session.roleplayCharacterCardId : undefined, isPocketGroup(contact) ? speaker?.sourceCharacterCardId : contact.sourceCharacterCardId, ...(!isPocketGroup(contact) ? contact.contextCharacterCardIds || [] : [])];
     for (const id of cardIds) {
       const card = characterCards.find(candidate => candidate.id === id);
       const book = card ? resolveSessionCharacterWorldBook(session, card, worldBooks) : null;
@@ -37878,7 +37878,7 @@ export function App() {
                       )
                     : null;
                 const messageName =
-                  (pocketIdentity ? `微信 · ${pocketIdentity.groupName ? `${pocketIdentity.groupName} · ` : ""}${message.role === "user" ? `${pocketIdentity.userName} → ${pocketIdentity.contactName}` : pocketIdentity.contactName}` : "") || tavernMessageName || (message.role === "user"
+                  (pocketIdentity ? `${pocketIdentity.app === "xiaohongshu" ? "小红书" : "微信"} · ${pocketIdentity.groupName ? `${pocketIdentity.groupName} · ` : ""}${message.role === "user" ? pocketIdentity.app === "xiaohongshu" ? pocketIdentity.userName : `${pocketIdentity.userName} → ${pocketIdentity.contactName}` : pocketIdentity.contactName}` : "") || tavernMessageName || (message.role === "user"
                     ? getChatSenderName(messageSender, personas, userProfile)
                     : chatMode === "roleplay" && activeSessionRoleplayCard
                       ? activeSessionRoleplayCard.name

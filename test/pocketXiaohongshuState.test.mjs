@@ -1,34 +1,36 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { emptyRedState, normalizeRedState, RED_NOTES, redStorageKey, safeRedImage, toggleRedItem } from "../src/pocketXiaohongshuState.ts";
+import { POCKET_AVATARS, POCKET_EXTRACTED_AVATARS, safePocketAvatar } from "../src/pocketPhoneState.ts";
+import { emptyRedState, normalizeRedState, randomRedAvatar, redStorageKey, safeRedImage, toggleRedItem } from "../src/pocketXiaohongshuState.ts";
 
-test("Xiaohongshu interactions start empty and storage is isolated by conversation", () => {
+test("new red phones contain no seeded notes, comments or actors", () => {
   assert.deepEqual(normalizeRedState(null), emptyRedState());
-  assert.deepEqual(normalizeRedState({ version: 2, liked: ["work"] }), emptyRedState());
+  assert.deepEqual(emptyRedState().notes, []); assert.deepEqual(emptyRedState().comments, []);
   assert.notEqual(redStorageKey("one"), redStorageKey("two"));
-  assert.notEqual(redStorageKey("one"), "renge_pocket_phone_v1:one");
-  assert.deepEqual(toggleRedItem(toggleRedItem([], "work"), "work"), []);
+  assert.deepEqual(toggleRedItem(toggleRedItem([], "note"), "note"), []);
 });
-
-test("restoring preserves published notes, comments, replies and interaction state", () => {
-  const note = { ...RED_NOTES[0], id: "published", title: "我的第一篇笔记", images: ["data:image/png;base64,aGVsbG8="], author: "小月", avatar: "/touxiang/20.png", likes: 0, saves: 0, comments: 0, category: "生活", location: "" };
-  const comments = [{ id: "mine", noteId: "published", author: "小月", avatar: "/touxiang/20.png", content: "第一条评论", time: "刚刚", location: "", likes: 0 }, { id: "reply", noteId: "work", parentId: "work-watermelon", author: "小月", avatar: "/touxiang/20.png", content: "回复", time: "刚刚", location: "", likes: 0 }];
-  const state = { ...emptyRedState(), notes: [note], comments, liked: ["work"], saved: ["game"], followed: ["小职人先先贝"], likedComments: ["work-ssr"], hidden: ["mall"], history: ["work", "game"] };
-  const restored = normalizeRedState(JSON.parse(JSON.stringify(state)));
-  assert.equal(restored.notes[0].title, note.title);
-  assert.deepEqual(restored.notes[0].images, note.images);
-  assert.deepEqual(restored.comments, comments);
-  for (const key of ["liked", "saved", "followed", "likedComments", "hidden", "history"]) assert.deepEqual(restored[key], state[key]);
-});
-
-test("restoring rejects malformed, duplicate and remote image records", () => {
-  const valid = { ...RED_NOTES[0], id: "published" };
-  const state = normalizeRedState({ ...emptyRedState(), liked: ["work", "work", 42, null], notes: [null, valid, valid, RED_NOTES[0], { ...valid, id: "blank", title: " " }, { ...valid, id: "remote", images: ["javascript:alert(1)", "https://example.com/photo.jpg", "data:image/svg+xml;base64,PHN2Zz4="] }], comments: [null, { id: "orphan", noteId: "missing", content: "lost" }, { id: "empty", noteId: "game", content: " " }] });
-  assert.deepEqual(state.liked, ["work"]);
-  assert.deepEqual(state.notes.map(note => note.id), ["published", "remote"]);
-  assert.deepEqual(state.notes[1].images, []);
-  assert.deepEqual(state.comments, []);
-  assert.equal(safeRedImage("/xiaohongshu/game-note.jpg"), true);
-  assert.equal(safeRedImage("/xiaohongshu/../../secret.jpg"), false);
+test("all extracted avatars join the phone picker and random character avatar pool", () => {
+  assert.equal(POCKET_AVATARS.length, 31); assert.equal(POCKET_EXTRACTED_AVATARS.length, 11);
+  POCKET_EXTRACTED_AVATARS.forEach(avatar => { assert.equal(safePocketAvatar(avatar), avatar); assert.equal(safeRedImage(avatar), true); });
+  for (let index = 0; index < POCKET_AVATARS.length; index++) assert.equal(randomRedAvatar(() => (index + .1) / POCKET_AVATARS.length), POCKET_AVATARS[index]);
+  assert.equal(safeRedImage("https://example.com/avatar.jpg"), false);
   assert.equal(safeRedImage("data:image/svg+xml;base64,PHN2Zz4="), false);
+});
+test("legacy user posts survive migration while retired defaults and their references disappear", () => {
+  const post = { id: "mine", title: "我自己的笔记", content: "正文", tags: ["日常"], images: ["data:image/png;base64,aGVsbG8="], author: "小月", avatar: "/touxiang/20.png", time: "刚刚" };
+  const old = { version: 1, notes: [post, { ...post, id: "game" }], comments: [{ id: "my-comment", noteId: "mine", author: "小月", avatar: "/touxiang/20.png", content: "自己的评论" }, { id: "old-comment", noteId: "game", content: "默认帖子评论" }], liked: ["game", "mine"], saved: ["work"], history: ["game", "mine"] };
+  const restored = normalizeRedState(old);
+  assert.equal(restored.version, 2); assert.equal(restored.notes.length, 1);
+  assert.equal(restored.notes[0].title, post.title); assert.deepEqual(restored.notes[0].images, post.images);
+  assert.equal(restored.comments.length, 1); assert.deepEqual(restored.liked, ["mine"]); assert.deepEqual(restored.saved, []); assert.deepEqual(restored.history, ["mine"]);
+});
+test("actors, generated records, pending replies and interaction counts survive restoration", () => {
+  const actor = { id: "actor", name: "奶糖", avatar: POCKET_EXTRACTED_AVATARS[0], personality: "喜欢画画" };
+  const note = { id: "note", authorId: actor.id, title: "今天画画了", content: "正文", generated: true, likes: 24, saves: 8, images: [], tags: ["画画"], category: "生活", time: "刚刚" };
+  const comment = { id: "comment", noteId: "note", actorId: "self", author: "小月", content: "可以一起吗？", avatar: "/touxiang/20.png" };
+  const state = normalizeRedState({ ...emptyRedState(), actors: [actor], notes: [note], comments: [comment], pendingReplies: ["comment"], liked: ["note"], likedComments: ["comment"] });
+  const restored = normalizeRedState(JSON.parse(JSON.stringify(state)));
+  assert.deepEqual(restored, state); assert.equal(restored.notes[0].avatar, actor.avatar); assert.equal(restored.notes[0].likes, 24);
+  assert.deepEqual(restored.pendingReplies, ["comment"]);
+  assert.equal(normalizeRedState({ ...state, comments: [...state.comments, { ...comment, id: "reply", generated: true, responseToId: "comment" }] }).pendingReplies.length, 0);
 });

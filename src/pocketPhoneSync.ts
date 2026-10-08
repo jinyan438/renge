@@ -1,5 +1,7 @@
 import { getPocketMessageIdentity, type PocketContextMessage } from "./pocketPhoneContext";
 import { emptyPocketState, getPocketConversations, normalizePocketState, pocketStorageKey, type PocketContextDeletion, type PocketConversation, type PocketState } from "./pocketPhoneState";
+import { applyRedContextChanges } from "./pocketXiaohongshuContext";
+import { normalizeRedState, RED_CONTEXT_ID, redStorageKey } from "./pocketXiaohongshuState";
 
 export type PocketContextChange = { contactId: string; messageId: string; content: string | null };
 const messageKey = (contactId: string, messageId: string) => JSON.stringify([contactId, messageId]);
@@ -40,6 +42,7 @@ export function getPocketContextChanges(previous: PocketContextMessage[], next: 
 }
 
 export function applyPocketContextChanges(state: PocketState, changes: PocketContextChange[]): PocketState {
+  changes = changes.filter(change => change.contactId !== RED_CONTEXT_ID);
   if (!changes.length) return state;
   const byKey = new Map(changes.map(change => [messageKey(change.contactId, change.messageId), change.content]));
   const update = <T extends PocketConversation>(conversation: T): T => {
@@ -86,6 +89,10 @@ export function syncPocketPhoneFromContext(sessionId: string, previous: PocketCo
     const state = saved ? normalizePocketState(JSON.parse(saved)) : emptyPocketState();
     const updated = applyPocketContextChanges(state, changes);
     if (updated !== state) localStorage.setItem(key, JSON.stringify(updated));
+    const redKey = redStorageKey(sessionId);
+    const redState = normalizeRedState(JSON.parse(localStorage.getItem(redKey) || "null"));
+    const redUpdated = applyRedContextChanges(redState, changes);
+    if (redUpdated !== redState) localStorage.setItem(redKey, JSON.stringify(redUpdated));
   } catch {
     storageWarning = "手机存储空间不足或不可用，这次改动暂未保存。请保留当前页面。";
   }

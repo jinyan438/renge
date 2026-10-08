@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright";
 import { startRengeServer } from "../server.mjs";
+import { POCKET_AVATARS } from "../src/pocketPhoneState.ts";
 
 // Run after npm run build. Uses isolated app data and local fixture models only.
 const root = await mkdtemp(join(tmpdir(), "renge-pocket-browser-"));
@@ -142,8 +143,8 @@ try {
   await editor.getByLabel("朋友的名字", { exact: true }).fill("奶糖");
   await editor.getByLabel(/角色设定/).fill("奶糖是小月的好朋友，活泼可爱，喜欢草莓甜点。");
   await editor.getByLabel(/第一句招呼/).fill("{{user}}，一起去买草莓吧！");
-  assert.equal(await editor.locator(".pocket-avatar-picker button").count(), 20);
-  assert.equal(await editor.locator(".pocket-avatar-picker img").count(), 20);
+  assert.equal(await editor.locator(".pocket-avatar-picker button").count(), POCKET_AVATARS.length);
+  assert.equal(await editor.locator(".pocket-avatar-picker img").count(), POCKET_AVATARS.length);
   await editor.getByRole("button", { name: "选择头像9", exact: true }).click();
   assert.equal(await editor.locator(".pocket-editor-avatar img").getAttribute("src"), "/touxiang/9.png");
   await editor.locator(".pocket-avatar-picker").scrollIntoViewIfNeeded();

@@ -9,6 +9,9 @@ import { requestPocketReply, resolvePocketModel, type PocketProvider } from "./p
 import { applyPocketContextChanges, recordPocketContextDeletions, subscribePocketContextChanges } from "./pocketPhoneSync";
 import "./pocket-phone.css";
 import { PocketXiaohongshu } from "./PocketXiaohongshu";
+import { getRedRoles } from "./pocketXiaohongshuGeneration";
+import { normalizeRedState, redStorageKey } from "./pocketXiaohongshuState";
+import { redContextConversation } from "./pocketXiaohongshuContext";
 
 type PocketPhoneProps = {
   sessionId: string; personas: AgentPersona[]; characterCards: CharacterCard[];
@@ -119,6 +122,10 @@ export function PocketPhone(props: PocketPhoneProps) {
   useEffect(() => {
     mountedRef.current = true;
     props.onSyncContext(props.sessionId, null, getPocketConversations(stateRef.current), nickname, stateRef.current.deletedContextMessages);
+    try {
+      const redState = normalizeRedState(JSON.parse(localStorage.getItem(redStorageKey(props.sessionId)) || "null"));
+      props.onSyncContext(props.sessionId, null, [redContextConversation(redState)], nickname, redState.deletedContextMessages);
+    } catch { /* Keep existing main context when local phone storage is unavailable. */ }
     return () => { mountedRef.current = false; controllerRef.current?.abort(); };
   }, []);
   useEffect(() => { const node = conversationRef.current; if (node) node.scrollTop = node.scrollHeight; }, [contactId, activeContact?.messages.length, pendingContactId, errors[contactId]]);
@@ -267,7 +274,7 @@ export function PocketPhone(props: PocketPhoneProps) {
                 <button className="pocket-app-icon" type="button" onClick={() => setApp("xiaohongshu")} aria-label="打开小红书"><span className="pocket-icon-xiaohongshu"><b>小红书</b></span><strong>小红书</strong></button>
                 <button className="pocket-app-icon" type="button" onClick={() => setApp("settings")} aria-label="打开手机设置"><span className="pocket-icon-settings"><Settings size={34} strokeWidth={1.7} /></span><strong>设置</strong></button>
               </div>
-            </div> : app === "xiaohongshu" ? <PocketXiaohongshu sessionId={props.sessionId} nickname={nickname} avatar={props.userProfile.avatarImage} onExit={() => setApp("home")} /> : app === "settings" ? <div className="pocket-settings pocket-scroll">
+            </div> : app === "xiaohongshu" ? <PocketXiaohongshu sessionId={props.sessionId} nickname={nickname} bio={props.userProfile.bio} avatar={props.userProfile.avatarImage} roles={getRedRoles(state.contacts, props.personas, props.characterCards)} provider={selection.provider} modelId={selection.modelId} onBuildConversation={props.onBuildConversation} onSyncContext={props.onSyncContext} onSettings={() => setApp("settings")} onExit={() => setApp("home")} /> : app === "settings" ? <div className="pocket-settings pocket-scroll">
               <div className="pocket-app-heading"><button type="button" onClick={() => setApp("home")} aria-label="返回手机桌面"><ArrowLeft size={19} /></button><h2>设置</h2></div>
               <div className="pocket-profile-card"><Avatar avatar={props.userProfile.avatarImage || DEFAULT_POCKET_USER_AVATAR} name={nickname} self /><span><strong>{nickname}</strong></span><Sparkles size={19} /></div>
               <label className="pocket-settings-label" htmlFor="pocket-nickname">我的昵称</label><input id="pocket-nickname" className="pocket-input" maxLength={24} placeholder={props.userProfile.nickname || "小小的我"} value={state.settings.nickname} onChange={event => updateSettings({ nickname: event.target.value })} />

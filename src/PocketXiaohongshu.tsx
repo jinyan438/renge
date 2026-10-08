@@ -1,12 +1,22 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Flag, Heart, History, ImagePlus, ListFilter, MessageCircle, MoreHorizontal, Music2, PencilLine, Plus, Search, Smile, Star, Users, VolumeX, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Flag, Heart, History, ImagePlus, ListFilter, MessageCircle, MoreHorizontal, Music2, PencilLine, Plus, Search, Smile, Sparkles, Square, Star, Users, VolumeX, X } from "lucide-react";
 import { DEFAULT_POCKET_USER_AVATAR } from "./pocketPhoneState";
-import { emptyRedState, normalizeRedState, RED_COMMENTS, RED_NOTES, redStorageKey, safeRedImage, toggleRedItem, type RedComment, type RedNote, type RedState } from "./pocketXiaohongshuState";
+import { emptyRedState, normalizeRedState, redStorageKey, safeRedImage, toggleRedItem, type RedComment, type RedNote, type RedState } from "./pocketXiaohongshuState";
+import { appendGeneratedRedFeed, appendGeneratedRedReplies, buildRedTaskContact, type RedRole, type RedTask } from "./pocketXiaohongshuGeneration";
+import { applyRedContextChanges, redContextConversation } from "./pocketXiaohongshuContext";
+import { subscribePocketContextChanges } from "./pocketPhoneSync";
+import { requestPocketReply, type PocketProvider } from "./pocketPhoneChat";
+import type { PocketContextSync, PocketConversationBuilder } from "./pocketPhoneContext";
 import "./pocket-xiaohongshu.css";
 
 type View = "feed" | "search" | "profile" | "messages" | "history" | "market";
 type Sheet = "menu" | "share" | "publish" | "comment" | null;
-type Props = { sessionId: string; nickname: string; avatar: string; onExit: () => void };
+type Props = {
+  sessionId: string; nickname: string; bio: string; avatar: string; roles: RedRole[];
+  provider: PocketProvider | undefined; modelId: string;
+  onBuildConversation: PocketConversationBuilder; onSyncContext: PocketContextSync;
+  onSettings: () => void; onExit: () => void;
+};
 const channels = ["推荐", "RED", "热点", "直播", "短剧", "穿搭"];
 const categories = ["推荐", "游戏", "生活", "职场", "情感", "穿搭"];
 
@@ -32,12 +42,17 @@ async function readPhoto(file: File): Promise<string> {
   return canvas.toDataURL("image/jpeg", .78);
 }
 
-export function PocketXiaohongshu({ sessionId, nickname, avatar, onExit }: Props) {
+export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, provider, modelId, onBuildConversation, onSyncContext, onSettings, onExit }: Props) {
   const storageKey = redStorageKey(sessionId);
   const [state, setState] = useState<RedState>(() => {
     try { return normalizeRedState(JSON.parse(localStorage.getItem(storageKey) || "null")); } catch { return emptyRedState(); }
   });
   const stateRef = useRef(state);
+  const controllerRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  const [generation, setGeneration] = useState<RedTask | null>(null);
+  const [failure, setFailure] = useState<{ task: RedTask; message: string } | null>(null);
+  const [failedReplyIds, setFailedReplyIds] = useState<string[]>([]);
   const [view, setView] = useState<View>("feed");
   const [topTab, setTopTab] = useState("发现");
   const [category, setCategory] = useState("推荐");
@@ -67,14 +82,16 @@ export function PocketXiaohongshu({ sessionId, nickname, avatar, onExit }: Props
   const sheetRef = useRef<HTMLDivElement>(null);
   const touchX = useRef<number | null>(null);
   const selfAvatar = safeRedImage(avatar) ? avatar : DEFAULT_POCKET_USER_AVATAR;
-  const notes = [...state.notes, ...RED_NOTES];
+  const notes = state.notes;
   const note = notes.find(item => item.id === noteId);
-  const allComments = [...RED_COMMENTS, ...state.comments];
+  const allComments = state.comments;
   const noteComments = allComments.filter(comment => comment.noteId === noteId);
-  const countComments = (item: RedNote) => item.comments + state.comments.filter(comment => comment.noteId === item.id).length;
+  const countComments = (item: RedNote) => state.comments.filter(comment => comment.noteId === item.id).length;
 
   function update(change: (previous: RedState) => RedState) {
-    const next = change(stateRef.current); stateRef.current = next; setState(next);
+    const previous = stateRef.current;
+    const next = change(previous); stateRef.current = next; setState(next);
+    onSyncContext(sessionId, [redContextConversation(previous)], [redContextConversation(next)], nickname, next.deletedContextMessages);
     try { localStorage.setItem(storageKey, JSON.stringify(next)); setStorageWarning(""); }
     catch { setStorageWarning("手机存储空间不足，这次改动暂未保存，请保留当前页面。"); }
   }
@@ -83,6 +100,26 @@ export function PocketXiaohongshu({ sessionId, nickname, avatar, onExit }: Props
     setToast(message); toastTimer.current = setTimeout(() => setToast(""), 2400);
   }
   useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
+  useEffect(() => {
+    mountedRef.current = true;
+    onSyncContext(sessionId, null, [redContextConversation(stateRef.current)], nickname, stateRef.current.deletedContextMessages);
+    return () => { mountedRef.current = false; controllerRef.current?.abort(); };
+  }, [sessionId]);
+  useEffect(() => subscribePocketContextChanges(sessionId, (changes, warning) => {
+    const next = applyRedContextChanges(stateRef.current, changes);
+    if (next === stateRef.current) return;
+    controllerRef.current?.abort(new Error("相关笔记或评论已修改，请重试生成。"));
+    stateRef.current = next; setState(next); setStorageWarning(warning);
+    if (!next.notes.some(note => note.id === noteId)) setNoteId("");
+  }), [sessionId, noteId]);
+  const generationContextKey = JSON.stringify([provider?.id, modelId, roles]);
+  useEffect(() => { controllerRef.current?.abort(new Error("模型或角色设定已变化，请重试生成。")); }, [generationContextKey]);
+  useEffect(() => {
+    if (controllerRef.current) return;
+    const id = state.pendingReplies.find(id => !failedReplyIds.includes(id));
+    const comment = state.comments.find(comment => comment.id === id);
+    if (comment) void generate({ kind: "reply", noteId: comment.noteId, commentId: comment.id });
+  }, [state.pendingReplies, generation, failedReplyIds]);
   useEffect(() => { if (!noteId && feedRef.current) feedRef.current.scrollTop = feedScroll.current; }, [noteId]);
   useEffect(() => {
     if (!sheet) return;
@@ -102,6 +139,36 @@ export function PocketXiaohongshu({ sessionId, nickname, avatar, onExit }: Props
     return () => { element.removeEventListener("keydown", handleKey); if (previousFocus?.isConnected) previousFocus.focus(); };
   }, [sheet]);
 
+  async function generate(task: RedTask) {
+    if (controllerRef.current) return;
+    const controller = new AbortController(); controllerRef.current = controller;
+    setGeneration(task); setFailure(null);
+    if (task.kind === "reply") setFailedReplyIds(previous => previous.filter(id => id !== task.commentId));
+    const timeout = setTimeout(() => controller.abort(new Error("等待有点久，请重试生成。")), 120000);
+    try {
+      const snapshot = stateRef.current;
+      const contact = buildRedTaskContact(snapshot, nickname, roles, task);
+      const request = onBuildConversation(sessionId, contact, { nickname, bio }, "proactive");
+      const reply = await requestPocketReply(provider, modelId, request, controller.signal, task.kind === "feed" ? 6144 : 2048);
+      controller.signal.throwIfAborted();
+      if (!mountedRef.current) return;
+      update(previous => task.kind === "feed" ? appendGeneratedRedFeed(previous, reply, roles, nickname) : appendGeneratedRedReplies(previous, reply, roles, nickname, task));
+      if (task.kind === "feed") { setTopTab("发现"); setCategory("推荐"); navigate("feed"); feedRef.current?.scrollTo(0, 0); notify("新笔记已生成"); }
+      else {
+        const target = stateRef.current.comments.find(comment => comment.id === task.commentId);
+        if (target) setExpanded(previous => [...new Set([...previous, target.parentId || target.id])]);
+      }
+    } catch (error) {
+      if (mountedRef.current && (task.kind === "feed" || stateRef.current.comments.some(comment => comment.id === task.commentId))) {
+        setFailure({ task, message: error instanceof Error ? error.message : "生成失败，请重试。" });
+        if (task.kind === "reply") setFailedReplyIds(previous => [...new Set([...previous, task.commentId])]);
+      }
+    } finally {
+      clearTimeout(timeout);
+      if (controllerRef.current === controller) { controllerRef.current = null; if (mountedRef.current) setGeneration(null); }
+    }
+  }
+
   function navigate(next: View) { setNoteId(""); setView(next); setCategoryPicker(false); feedScroll.current = 0; }
   function openNote(item: RedNote) {
     feedScroll.current = feedRef.current?.scrollTop || 0;
@@ -117,12 +184,13 @@ export function PocketXiaohongshu({ sessionId, nickname, avatar, onExit }: Props
   }
   function submitComment(event: FormEvent) {
     event.preventDefault(); if (!note || !commentText.trim()) return;
-    const comment: RedComment = { id: crypto.randomUUID(), noteId: note.id, author: nickname, avatar: selfAvatar, content: `${replyTarget && replyTarget.parentId ? `回复 ${replyTarget.author}：` : ""}${commentText.trim()}`, time: "刚刚", location: "", likes: 0, ...(replyTarget ? { parentId: replyTarget.parentId || replyTarget.id } : {}) };
-    update(previous => ({ ...previous, comments: [...previous.comments, comment] }));
+    const comment: RedComment = { id: crypto.randomUUID(), noteId: note.id, actorId: "self", author: nickname, avatar: selfAvatar, content: `${replyTarget && replyTarget.parentId ? `回复 ${replyTarget.author}：` : ""}${commentText.trim()}`, time: "刚刚", createdAt: new Date().toISOString(), location: "", likes: 0, ...(replyTarget ? { parentId: replyTarget.parentId || replyTarget.id, replyToId: replyTarget.id } : {}) };
+    update(previous => ({ ...previous, comments: [...previous.comments, comment], pendingReplies: [...previous.pendingReplies, comment.id] }));
     if (comment.parentId) setExpanded(previous => [...new Set([...previous, comment.parentId!])]);
     else setCommentSort("latest");
     setSheet(null); setCommentText(""); setReplyTarget(null); notify("评论成功");
     requestAnimationFrame(jumpToComments);
+    void generate({ kind: "reply", noteId: note.id, commentId: comment.id });
   }
   function submitSearch(event?: FormEvent, term = query) { event?.preventDefault(); setQuery(term); setSearchTerm(term.trim()); navigate("search"); }
   async function copyNote() {
@@ -143,8 +211,8 @@ export function PocketXiaohongshu({ sessionId, nickname, avatar, onExit }: Props
   }
   function publish(event: FormEvent) {
     event.preventDefault(); if (!draftTitle.trim() || loadingPhotos) return;
-    const tags = [...draftContent.matchAll(/#([^\s#]+)/g)].map(match => match[1]).slice(0, 10);
-    const published: RedNote = { id: crypto.randomUUID(), title: draftTitle.trim(), content: draftContent.trim(), tags, images: draftImages, author: nickname, avatar: selfAvatar, likes: 0, saves: 0, comments: 0, category: "生活", location: "", time: "刚刚" };
+    const tags = [...new Set([...draftContent.matchAll(/#([^\s#]+)/g)].map(match => match[1]))].slice(0, 10);
+    const published: RedNote = { id: crypto.randomUUID(), title: draftTitle.trim(), content: draftContent.trim(), tags, images: draftImages, author: nickname, authorId: "self", avatar: selfAvatar, generated: false, createdAt: new Date().toISOString(), likes: 0, saves: 0, comments: 0, category: "生活", location: "", time: "刚刚" };
     update(previous => ({ ...previous, notes: [published, ...previous.notes] }));
     setSheet(null); setDraftTitle(""); setDraftContent(""); setDraftImages([]); setPublishError("");
     navigate("profile"); setProfileTab("笔记"); openNote(published); notify("笔记已发布到手机");
@@ -159,11 +227,11 @@ export function PocketXiaohongshu({ sessionId, nickname, avatar, onExit }: Props
     const columns = [items.filter((_, index) => index % 2 === 0), items.filter((_, index) => index % 2 === 1)];
     return items.length ? <div className="xhs-waterfall">{columns.map((column, index) => <div className="xhs-column" key={index}>{column.map(item => <article className="xhs-card" key={item.id}>
       <button type="button" className="xhs-card-open" aria-label={`打开笔记：${item.title}`} onClick={() => openNote(item)}>
-        {item.images.length ? <img className="xhs-card-cover" src={item.cover || item.images[0]} alt={item.title} loading="lazy" decoding="async" /> : <div className="xhs-text-cover">{item.title}</div>}
+        {item.images.length ? <img className="xhs-card-cover" src={item.images[0]} alt={item.title} loading="lazy" decoding="async" /> : <div className={`xhs-text-cover tone-${item.coverTone || "cream"}`}><span>“</span><strong>{item.coverText || item.title}</strong><i /></div>}
         <h3>{item.title}</h3>
       </button>
       <div className="xhs-card-meta"><button type="button" className="xhs-card-author" onClick={() => openNote(item)}><RedAvatar src={item.avatar} name={item.author} /><span>{item.author}</span></button><button className={`xhs-card-like${state.liked.includes(item.id) ? " is-liked" : ""}`} type="button" aria-label={`${state.liked.includes(item.id) ? "取消点赞" : "点赞"}：${item.title}`} aria-pressed={state.liked.includes(item.id)} onClick={() => like(item)}><Heart /><span>{item.likes + Number(state.liked.includes(item.id))}</span></button></div>
-    </article>)}</div>)}</div> : <div className="xhs-empty"><Search size={34} /><p>{topTab === "关注" && view === "feed" ? "关注喜欢的人，发现更多日常" : "这里还没有笔记"}</p><button type="button" onClick={() => { setTopTab("发现"); setCategory("推荐"); setSearchTerm(""); setQuery(""); navigate("feed"); }}>看看推荐</button></div>;
+    </article>)}</div>)}</div> : <div className="xhs-empty"><Search size={34} /><p>{topTab === "关注" && view === "feed" ? "关注喜欢的人，发现更多日常" : (state.notes.length ? "这里还没有笔记" : "还没有笔记，点击生成发现新动态")}</p><button type="button" onClick={() => { setTopTab("发现"); setCategory("推荐"); setSearchTerm(""); setQuery(""); navigate("feed"); }}>看看推荐</button></div>;
   }
   function renderComment(comment: RedComment, nested = false) {
     const liked = state.likedComments.includes(comment.id);
@@ -179,7 +247,7 @@ export function PocketXiaohongshu({ sessionId, nickname, avatar, onExit }: Props
   const visible = notes.filter(item => !state.hidden.includes(item.id));
   let feedNotes = visible;
   if (view === "search") feedNotes = visible.filter(item => `${item.title} ${item.content} ${item.tags.join(" ")} ${item.author}`.toLocaleLowerCase().includes(searchTerm.toLocaleLowerCase()));
-  else if (view === "profile") feedNotes = profileTab === "笔记" ? state.notes : visible.filter(item => (profileTab === "收藏" ? state.saved : state.liked).includes(item.id));
+  else if (view === "profile") feedNotes = profileTab === "笔记" ? state.notes.filter(item => !item.generated) : visible.filter(item => (profileTab === "收藏" ? state.saved : state.liked).includes(item.id));
   else if (view === "history") feedNotes = [...state.history].reverse().flatMap(id => visible.find(item => item.id === id) || []);
   else {
     if (topTab === "关注" && view === "feed") feedNotes = feedNotes.filter(item => state.followed.includes(item.author));
@@ -194,30 +262,35 @@ export function PocketXiaohongshu({ sessionId, nickname, avatar, onExit }: Props
   return <div className="xhs-app" aria-label="小红书">
     <div className="xhs-main" inert={sheet ? true : undefined}>
       {storageWarning && <p className="xhs-storage-warning" role="alert">{storageWarning}</p>}
+      {generation && <div className="xhs-generation-status" role="status"><Sparkles /><span>{generation.kind === "feed" ? "正在生成新笔记…" : "正在生成评论回复…"}</span><button type="button" aria-label="停止小红书生成" onClick={() => controllerRef.current?.abort(new Error("已停止生成，点击重试继续。"))}><Square /></button></div>}
+      {failure && <div className="xhs-generation-error" role="alert"><p>{failure.message}</p><button type="button" disabled={!!generation} onClick={() => void generate(failure.task)}>重试生成</button><button type="button" onClick={onSettings}>手机设置</button></div>}
+      {!failure && failedReplyIds.some(id => state.pendingReplies.includes(id)) && <div className="xhs-generation-error"><p>有评论暂未收到回复</p><button type="button" disabled={!!generation} onClick={() => { const pending = state.comments.find(comment => failedReplyIds.includes(comment.id) && state.pendingReplies.includes(comment.id)); if (pending) void generate({ kind: "reply", noteId: pending.noteId, commentId: pending.id }); }}>重试回复</button></div>}
       {note ? <>
         <header className="xhs-note-header"><button type="button" aria-label="返回小红书列表" onClick={() => setNoteId("")}><ChevronLeft /></button><RedAvatar src={note.avatar} name={note.author} /><span className="xhs-note-author"><span>{note.author}</span>{note.music && <small><Music2 />{note.music}</small>}</span><button type="button" className={`xhs-follow${state.followed.includes(note.author) ? " is-followed" : ""}`} aria-pressed={state.followed.includes(note.author)} onClick={() => follow(note.author)}>{state.followed.includes(note.author) ? "已关注" : "关注"}</button><button type="button" aria-label="分享笔记" onClick={() => setSheet("share")}><RedShareIcon /></button></header>
         <div className="xhs-note-scroll" ref={detailRef}>
+          {!note.images.length && <div className={`xhs-text-cover xhs-note-cover tone-${note.coverTone || "cream"}`}><span>“</span><strong>{note.coverText || note.title}</strong><i /></div>}
           {note.images.length > 0 && <div className="xhs-carousel" tabIndex={note.images.length > 1 ? 0 : undefined} aria-label={`笔记图片 ${slide + 1}/${note.images.length}`} onKeyDown={carouselKey} onTouchStart={event => { touchX.current = event.touches[0]?.clientX ?? null; }} onTouchEnd={event => { const end = event.changedTouches[0]?.clientX; if (touchX.current !== null && end !== undefined && Math.abs(end - touchX.current) > 35) setSlide(previous => Math.max(0, Math.min(note.images.length - 1, previous + (end < touchX.current! ? 1 : -1)))); touchX.current = null; }}>
             <img src={note.images[slide]} alt={`${note.title}，第${slide + 1}张图片`} decoding="async" />
             {note.images.length > 1 && <><span className="xhs-image-count">{slide + 1}/{note.images.length}</span><button className="xhs-slide-prev" type="button" disabled={!slide} aria-label="上一张图片" onClick={() => setSlide(previous => previous - 1)}><ChevronLeft /></button><button className="xhs-slide-next" type="button" disabled={slide === note.images.length - 1} aria-label="下一张图片" onClick={() => setSlide(previous => previous + 1)}><ChevronRight /></button></>}
             {note.music && <span className="xhs-mute" aria-label="静态图文笔记"><VolumeX /></span>}
           </div>}
           {note.images.length > 1 && <div className="xhs-image-dots" aria-label="选择图片">{note.images.map((_, index) => <button type="button" key={index} aria-label={`第${index + 1}张图片`} aria-pressed={slide === index} className={slide === index ? "is-active" : ""} onClick={() => setSlide(index)} />)}</div>}
-          <article className="xhs-note-copy"><h2>{note.id === "game" ? "别动我大河好吗😫" : note.title}</h2>{note.content !== note.title && <p>{note.id === "game" ? note.content.split("\n").slice(1).join("\n") : note.content}</p>}<div className="xhs-tags">{note.tags.map(tag => <button type="button" key={tag} onClick={() => { setNoteId(""); submitSearch(undefined, tag); }}>#{tag}</button>)}</div>
-            {note.activity && <button type="button" className="xhs-activity" onClick={() => { setNoteId(""); submitSearch(undefined, "王者万象棋"); }}><Flag />活动 <i />{note.activity}</button>}
+          <article className="xhs-note-copy"><h2>{note.title}</h2>{note.content !== note.title && <p>{note.content}</p>}<div className="xhs-tags">{note.tags.map(tag => <button type="button" key={tag} onClick={() => { setNoteId(""); submitSearch(undefined, tag); }}>#{tag}</button>)}</div>
+            {note.activity && <button type="button" className="xhs-activity" onClick={() => { setNoteId(""); submitSearch(undefined, note.activity); }}><Flag />活动 <i />{note.activity}</button>}
             <div className="xhs-note-info"><span>编辑于 {note.time} {note.location}</span><button type="button" onClick={() => { update(previous => ({ ...previous, hidden: [...previous.hidden, note.id] })); setNoteId(""); notify("将减少这篇笔记的推荐"); }}><Smile />不喜欢</button></div>
           </article>
           <section className="xhs-comments" ref={commentsRef} aria-label="笔记评论"><header><span>共 {countComments(note)} 条评论</span><button type="button" aria-label={commentSort === "default" ? "按最新排序评论" : "按默认排序评论"} onClick={() => setCommentSort(previous => previous === "default" ? "latest" : "default")}><ListFilter />{commentSort === "latest" && <small>最新</small>}</button></header><div className="xhs-comment-prompt"><RedAvatar src={selfAvatar} name={nickname} /><button type="button" onClick={() => openComment()}><span>留下你的想法吧</span><Smile /><ImagePlus /></button></div>
-            {rootComments.map(comment => { const replies = noteComments.filter(reply => reply.parentId === comment.id); const isExpanded = expanded.includes(comment.id); return <div className="xhs-thread" key={comment.id}>{renderComment(comment)}{(isExpanded ? replies : replies.slice(0, 1)).map(reply => renderComment(reply, true))}{replies.length > 1 && <button type="button" className="xhs-expand-replies" aria-expanded={isExpanded} onClick={() => setExpanded(previous => toggleRedItem(previous, comment.id))}><i />{isExpanded ? "收起回复" : `展开 ${comment.replyCount || replies.length} 条回复`}</button>}</div>; })}
+            {rootComments.map(comment => { const replies = noteComments.filter(reply => reply.parentId === comment.id); const isExpanded = expanded.includes(comment.id); return <div className="xhs-thread" key={comment.id}>{renderComment(comment)}{(isExpanded ? replies : replies.slice(0, 1)).map(reply => renderComment(reply, true))}{replies.length > 1 && <button type="button" className="xhs-expand-replies" aria-expanded={isExpanded} onClick={() => setExpanded(previous => toggleRedItem(previous, comment.id))}><i />{isExpanded ? "收起回复" : `展开 ${replies.length} 条回复`}</button>}</div>; })}
             {!rootComments.length && <p className="xhs-no-comments">还没有评论，快来留下你的想法吧</p>}
           </section>
         </div>
         <footer className="xhs-interactions"><button className="xhs-say-something" type="button" onClick={() => openComment()}><PencilLine /><span>说点什么...</span></button><button type="button" className={state.liked.includes(note.id) ? "is-liked" : ""} aria-label={state.liked.includes(note.id) ? "取消点赞笔记" : "点赞笔记"} aria-pressed={state.liked.includes(note.id)} onClick={() => like(note)}><Heart /><span>{note.likes + Number(state.liked.includes(note.id))}</span></button><button type="button" className={state.saved.includes(note.id) ? "is-saved" : ""} aria-label={state.saved.includes(note.id) ? "取消收藏笔记" : "收藏笔记"} aria-pressed={state.saved.includes(note.id)} onClick={() => update(previous => ({ ...previous, saved: toggleRedItem(previous.saved, note.id) }))}><Star /><span>{note.saves + Number(state.saved.includes(note.id))}</span></button><button type="button" aria-label="查看评论" onClick={jumpToComments}><MessageCircle /><span>{countComments(note)}</span></button></footer>
       </> : <>
         {view === "feed" ? <><header className="xhs-feed-header"><button type="button" aria-label="小红书菜单" onClick={() => setSheet("menu")}><MessageCircle /></button><nav aria-label="首页频道">{["关注", "发现", "合肥"].map(label => <button type="button" key={label} className={topTab === label ? "is-active" : ""} aria-current={topTab === label ? "page" : undefined} onClick={() => { setTopTab(label); feedRef.current?.scrollTo(0, 0); }}>{label}</button>)}</nav><button type="button" aria-label="搜索小红书" onClick={() => navigate("search")}><Search /></button></header><div className="xhs-channels"><nav aria-label="发现分类">{[...new Set([...channels, ...(!channels.includes(category) ? [category] : [])])].map(label => <button type="button" key={label} className={category === label ? "is-active" : ""} aria-pressed={category === label} onClick={() => { setCategory(label); feedRef.current?.scrollTo(0, 0); }}>{label}</button>)}</nav><button type="button" aria-label="展开频道分类" aria-expanded={categoryPicker} onClick={() => setCategoryPicker(previous => !previous)}><ChevronDown /></button></div>{categoryPicker && <div className="xhs-category-picker">{categories.map(label => <button key={label} type="button" className={category === label ? "is-active" : ""} onClick={() => { setCategory(label); setCategoryPicker(false); }}>{label}</button>)}</div>}</> : view === "search" ? <form className="xhs-search-header" onSubmit={event => submitSearch(event)}><button type="button" aria-label="返回小红书首页" onClick={() => navigate("feed")}><ChevronLeft /></button><label><Search /><input autoFocus aria-label="搜索笔记" placeholder="搜索感兴趣的内容" maxLength={100} value={query} onChange={event => setQuery(event.target.value)} />{query && <button type="button" aria-label="清空搜索" onClick={() => { setQuery(""); setSearchTerm(""); }}><X /></button>}</label><button type="submit">搜索</button></form> : <header className="xhs-page-header"><button type="button" aria-label="返回小红书首页" onClick={() => navigate("feed")}><ChevronLeft /></button><h2>{view === "profile" ? "我" : view === "history" ? "浏览记录" : view === "market" ? "市集" : "消息"}</h2><button type="button" aria-label="小红书菜单" onClick={() => setSheet("menu")}><MoreHorizontal /></button></header>}
+        {view === "feed" && <div className="xhs-generation-toolbar"><span>发现新的生活碎片</span><button type="button" className="xhs-red-button" disabled={!!generation} onClick={() => void generate({ kind: "feed" })} aria-label="生成小红书笔记"><Sparkles />{generation?.kind === "feed" ? "生成中…" : "生成"}</button></div>}
         <div className="xhs-feed-scroll" ref={feedRef}>
           {view === "profile" && <><div className="xhs-profile"><RedAvatar src={selfAvatar} name={nickname} /><div><h2>{nickname}</h2><span>小红书号：renge</span></div><p>记录生活里的点点滴滴 ✨</p><div className="xhs-profile-stats"><span><b>{state.followed.length}</b>关注</span><span><b>{state.notes.length}</b>笔记</span><span><b>{state.liked.length + state.saved.length}</b>赞过与收藏</span></div></div><nav className="xhs-profile-tabs" aria-label="我的笔记">{["笔记", "收藏", "赞过"].map(label => <button type="button" key={label} className={profileTab === label ? "is-active" : ""} aria-pressed={profileTab === label} onClick={() => setProfileTab(label)}>{label}</button>)}</nav></>}
-          {view === "search" && !searchTerm && <div className="xhs-search-suggestions"><h3>猜你想搜</h3>{["王者万象棋", "合肥", "打工人的状态", "双子座"].map(term => <button type="button" key={term} onClick={() => submitSearch(undefined, term)}><Search />{term}</button>)}</div>}
+          {view === "search" && !searchTerm && <div className="xhs-search-suggestions"><h3>猜你想搜</h3>{[...new Set(notes.flatMap(item => item.tags))].slice(0, 8).map(term => <button type="button" key={term} onClick={() => submitSearch(undefined, term)}><Search />{term}</button>)}</div>}
           {view === "search" && searchTerm && <p className="xhs-results-label">全部 · {feedNotes.length} 篇笔记</p>}
           {view === "market" && <div className="xhs-market-banner"><span>逛逛生活</span><strong>发现身边的好去处</strong><small>灵感与日常，都在这里</small></div>}
           {view === "messages" ? <div className="xhs-messages"><div className="xhs-message-shortcuts">{[{ icon: Heart, label: "赞和收藏", color: "red", count: state.liked.length + state.saved.length }, { icon: Users, label: "新增关注", color: "blue", count: state.followed.length }, { icon: MessageCircle, label: "评论和@", color: "green", count: state.comments.length }].map(item => <button type="button" key={item.label} onClick={() => { if (item.label === "赞和收藏") { setProfileTab("赞过"); navigate("profile"); } else if (item.label === "新增关注") { setTopTab("关注"); navigate("feed"); } else document.querySelector(".xhs-message-list")?.scrollIntoView({ block: "nearest" }); }}><span className={`xhs-shortcut-${item.color}`}><item.icon /></span><small>{item.label}</small><b>{item.count}</b></button>)}</div><div className="xhs-message-list"><h3>我的评论</h3>{state.comments.length ? [...state.comments].reverse().map(comment => { const target = notes.find(item => item.id === comment.noteId); return target && <button type="button" className="xhs-message-row" key={comment.id} onClick={() => openNote(target)}><RedAvatar src={comment.avatar} name={comment.author} /><span><strong>{comment.content}</strong><small>{target.title} · {comment.time}</small></span><ChevronRight /></button>; }) : <div className="xhs-empty"><MessageCircle size={34} /><p>评论笔记后，会在这里留下记录</p></div>}</div></div> : renderCards(feedNotes)}

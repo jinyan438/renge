@@ -17,6 +17,8 @@ export type PocketContact = {
   sourceCharacterCardId?: string;
   messages: PocketMessage[];
   createdAt: string;
+  app?: "xiaohongshu";
+  contextCharacterCardIds?: string[];
 };
 
 export type PocketGroupMember = Pick<PocketContact, "id" | "name" | "avatar" | "personality" | "sourceCharacterCardId">;
@@ -45,7 +47,8 @@ export type PocketState = { version: 1; contacts: PocketContact[]; groups: Pocke
 export type PocketGenerationMode = "reply" | "proactive";
 export type PocketRequestMessage = Pick<PocketMessage, "role" | "content"> | { role: "system"; content: string };
 
-export const POCKET_AVATARS = Array.from({ length: 20 }, (_, index) => `/touxiang/${index + 1}.png`);
+export const POCKET_EXTRACTED_AVATARS = ["game", "work", "mall", "gemini", "momo", "wind", "watermelon", "ssr", "croissant", "wxfeng", "fish"].map(name => `/xiaohongshu/avatar-${name}.jpg`);
+export const POCKET_AVATARS = [...Array.from({ length: 20 }, (_, index) => `/touxiang/${index + 1}.png`), ...POCKET_EXTRACTED_AVATARS];
 export const DEFAULT_POCKET_AVATAR = POCKET_AVATARS[0];
 export const DEFAULT_POCKET_USER_AVATAR = POCKET_AVATARS[19];
 const LEGACY_POCKET_AVATARS = ["🐰", "🐱", "🐻", "🦊", "🐼", "🐶", "🌷", "🍓", "🌙", "🧸", "🦋", "🍑"];

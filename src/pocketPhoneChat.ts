@@ -12,7 +12,7 @@ export function resolvePocketModel(providers: PocketProvider[], activeProviderId
   return { provider, modelId: providerId ? modelId || provider?.modelId || provider?.models[0] || "" : provider?.modelId || provider?.models[0] || "" };
 }
 
-export async function requestPocketReply(provider: PocketProvider | undefined, modelId: string, messages: PocketRequestMessage[], signal: AbortSignal): Promise<string> {
+export async function requestPocketReply(provider: PocketProvider | undefined, modelId: string, messages: PocketRequestMessage[], signal: AbortSignal, maxTokens = 2048): Promise<string> {
   if (!provider?.apiBaseUrl.trim() || !modelId.trim()) throw new Error("先去手机设置里选择已配置的模型，再来聊天吧。");
   const requestProvider = { ...provider, modelId };
   const response = await fetch("/api/chat/completions", {
@@ -20,7 +20,7 @@ export async function requestPocketReply(provider: PocketProvider | undefined, m
     body: JSON.stringify({
       apiBaseUrl: provider.apiBaseUrl.trim().replace(/\/+$/, ""), apiKey: provider.apiKey,
       apiType: shouldUseResponsesApiForLocalQwen(requestProvider) ? "responses" : provider.apiType,
-      request: { model: modelId, messages, stream: false, max_tokens: 2048, ...buildProviderReasoningDisableRequest(requestProvider) },
+      request: { model: modelId, messages, stream: false, max_tokens: maxTokens, ...buildProviderReasoningDisableRequest(requestProvider) },
     }),
   });
   let payload;
