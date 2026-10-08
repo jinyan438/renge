@@ -64,6 +64,12 @@ test("WeChat repeats its required output format after plain chat history and acc
   assert.deepEqual(requests[0].messages.slice(0, -1), history);
   assert.match(requests[0].messages.at(-1).content, /应用指令，不是用户聊天消息/);
   assert.match(requests[0].messages.at(-1).content, /innerMonologue.*hormones/);
+  for (const item of POCKET_HORMONES) {
+    assert.ok(requests[0].messages.at(-1).content.includes(`${item.key}（${item.name}）`));
+    assert.ok(requests[0].messages.at(-1).content.includes(item.effect));
+    assert.ok(requests[0].messages.at(-1).content.includes(item.update));
+  }
+  assert.match(requests[0].messages.at(-1).content, /本人尚无激素状态/);
   assert.equal(requests[0].max_tokens, 4096);
   assert.equal(history.length, 4);
   assert.deepEqual(turn.texts, ["一起去画画吧"]);
@@ -103,6 +109,41 @@ test("format repair is bounded and never substitutes defaults or hides configura
   globalThis.fetch.mock.mockImplementation(async () => { calls++; return Response.json({ error: { message: "bad credentials" } }, { status: 401 }); });
   await assert.rejects(requestPocketWechatTurn(provider, "default", messages, new AbortController().signal), /bad credentials/);
   assert.equal(calls, 1);
+});
+
+test("single and quiet group updates resend all hormone effects/directions with only the latest saved baseline, including format completion", async t => {
+  const previous = { monologue: "已经很安心", hormones: { ...hormones, dopamine: 61 }, previousHormones: { ...hormones, dopamine: 12 }, updatedAt: "" };
+  const requests = [];
+  const modelLevels = { ...hormones, dopamine: 59, oxytocin: 68, cortisol: 30 };
+  let group = false;
+  t.mock.method(globalThis, "fetch", async (_, options) => {
+    requests.push(JSON.parse(options.body).request);
+    return replyResponse(requests.length % 2 ? "抱抱就好" : JSON.stringify({ ...(group ? { speak: false } : {}), texts: group ? [] : ["抱抱就好"], innerMonologue: "有他陪着已经很安心，不必再期待什么", hormones: modelLevels }));
+  });
+  for (const quiet of [false, true]) {
+    group = quiet;
+    const history = [...messages, { role: "assistant", content: "刚才已收到过表白" }];
+    const turn = await requestPocketWechatTurn(provider, "default", history, new AbortController().signal, previous, group);
+    for (const request of requests.slice(-2)) {
+      const task = request.messages.at(-1).content;
+      for (const item of POCKET_HORMONES) {
+        assert.ok(task.includes(`${item.key}（${item.name}）`), `${item.key} must have its own description in the update task`);
+        assert.ok(task.includes(item.effect));
+        assert.ok(task.includes(item.update));
+      }
+      assert.match(task, /没有新的触发依据就保持不变/);
+      assert.match(task, /同一情绪、重复话题.*不能每次都继续累加/);
+      assert.match(task, /不要把增量当作新值/);
+      assert.match(task, /"dopamine":61/);
+      assert.doesNotMatch(task, /"dopamine":12|previousHormones/);
+      assert.deepEqual(request.messages.slice(0, history.length), history);
+    }
+    assert.match(requests.at(-1).messages.at(-1).content, /同一轮格式补全.*只从最新已保存基线更新一次/);
+    assert.deepEqual(turn.innerState.hormones, modelLevels);
+    assert.deepEqual(turn.innerState.previousHormones, previous.hormones);
+    assert.equal(turn.speak, !group);
+  }
+  assert.equal(requests.length, 4);
 });
 
 test("format completion retains a silent group decision and cancellation discards a late completion", async t => {

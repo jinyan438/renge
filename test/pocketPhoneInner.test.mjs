@@ -78,6 +78,12 @@ test("shared history keeps every monologue but injects only the latest hormone s
   assert.match(main, /"dopamine":72/); assert.doesNotMatch(main, /"dopamine":31/);
   const request = buildSharedPocketConversation(state.contacts[0], user, history.map(message => buildPocketHistoryMessage(message, a.id)), [], []);
   assert.match(JSON.stringify(request), /私密想法0/); assert.match(request[0].content, /"dopamine":72/); assert.doesNotMatch(JSON.stringify(request), /"dopamine":31/);
+  for (const item of POCKET_HORMONES) {
+    assert.ok(request[0].content.includes(item.effect));
+    assert.ok(request[0].content.includes(item.update));
+  }
+  assert.match(request[0].content, /性激素[\s\S]*作为较慢变化的状态，普通聊天通常不变/);
+  assert.match(request[0].content, /甲状腺素[\s\S]*普通聊天和一时心动通常不变/);
   assert.ok(history.filter(message => getPocketMessageIdentity(message).kind).every(message => buildPocketHistoryMessage(message, a.id).role === "user"));
 });
 

@@ -1,15 +1,15 @@
 import type { PocketConversation, PocketGroupMember, PocketMessage, PocketState } from "./pocketPhoneState";
 
 export const POCKET_HORMONES = [
-  { key: "dopamine", name: "多巴胺", color: "#e2a15c", effect: "对奖励的期待、渴望、追求与行动动力；不是已经得到后的快乐" },
-  { key: "serotonin", name: "血清素", color: "#82ae98", effect: "满足、安全感、情绪平稳；低时更容易不安" },
-  { key: "endorphins", name: "内啡肽", color: "#c08fb8", effect: "承受不适、运动或大笑后的舒缓与轻松" },
-  { key: "oxytocin", name: "催产素", color: "#db8e9c", effect: "信任、依恋、同理心与亲密归属" },
-  { key: "cortisol", name: "皮质醇", color: "#c4896f", effect: "压力、挫折与紧绷；持续偏高时疲惫、焦虑或易怒" },
-  { key: "norepinephrine", name: "去甲肾上腺素", color: "#a693cc", effect: "警觉、注意与应战；偏高时紧张或愤怒，偏低时迟钝" },
-  { key: "gaba", name: "GABA", color: "#83aeb7", effect: "放松、镇静与休息，缓和过度紧绷" },
-  { key: "sexHormones", name: "性激素", color: "#cb9eaf", effect: "结合角色性别、年龄和设定，综合体现性激素对情绪、自信、果断与亲密欲望的影响" },
-  { key: "thyroid", name: "甲状腺素", color: "#acb381", effect: "活力与反应节奏；偏高时亢奋烦躁，偏低时倦怠迟缓" },
+  { key: "dopamine", name: "多巴胺", color: "#e2a15c", effect: "对奖励的期待、渴望、追求与行动动力；不是已经得到后的快乐", update: "新的目标、期待或接近想要的奖励时可上升；期待落空、失去兴趣或追求结束后可回落。已经满足或听到重复的甜言蜜语不等于持续增加，区分‘想要’与‘已经拥有’。" },
+  { key: "serotonin", name: "血清素", color: "#82ae98", effect: "满足、安全感、情绪平稳；低时更容易不安", update: "感到满足、安稳、被接纳时可上升；不安、失落或情绪失衡时可下降。短暂兴奋不等于平静满足，已经安稳时可以维持。" },
+  { key: "endorphins", name: "内啡肽", color: "#c08fb8", effect: "承受不适、运动或大笑后的舒缓与轻松", update: "有运动、大笑、承受痛苦后舒缓等明确情境时可上升；舒缓效果消退时可回落。普通愉快聊天、被表白或亲密感本身不要求增加。" },
+  { key: "oxytocin", name: "催产素", color: "#db8e9c", effect: "信任、依恋、同理心与亲密归属", update: "真诚关怀、相互信任、拥抱或深入交流带来新的亲近感时可上升；疏离、背叛或信任受损时可下降。已有亲密关系可以维持较高水平，不因每句示爱反复叠加。" },
+  { key: "cortisol", name: "皮质醇", color: "#c4896f", effect: "压力、挫折与紧绷；持续偏高时疲惫、焦虑或易怒", update: "威胁、不确定、挫折或持续压力加重时可上升；压力解除、得到安慰或恢复安全感时可下降。开心的心动与焦虑的紧绷要区分，积极情绪不要求它上升。" },
+  { key: "norepinephrine", name: "去甲肾上腺素", color: "#a693cc", effect: "警觉、注意与应战；偏高时紧张或愤怒，偏低时迟钝", update: "需要集中注意、应对危险、紧张或愤怒时可上升；放松、警戒解除或进入休息时可下降。心动可能伴随短暂警觉，也可能转为安心，依据实际感受决定，不能跟随多巴胺机械同涨。" },
+  { key: "gaba", name: "GABA", color: "#83aeb7", effect: "放松、镇静与休息，缓和过度紧绷", update: "紧张被缓解、感到平静或准备休息时可上升；过度激动、焦虑或难以放松时可下降。它体现镇静倾向，不能仅因为情绪积极就增加。" },
+  { key: "sexHormones", name: "性激素", color: "#cb9eaf", effect: "结合角色性别、年龄和设定，综合体现性激素对情绪、自信、果断与亲密欲望的影响", update: "按角色背景综合判断，不把爱情、信任或一句调情直接等同于性激素上升。作为较慢变化的状态，普通聊天通常不变；只有人设和情境明确支持变化时小幅调整，欲望或自信减弱时也不必立刻下降。" },
+  { key: "thyroid", name: "甲状腺素", color: "#acb381", effect: "活力与反应节奏；偏高时亢奋烦躁，偏低时倦怠迟缓", update: "作为较慢变化的活力背景，普通聊天和一时心动通常不变。仅在情境明确支持持续的活力或反应节奏变化时小幅调整，不把即时兴奋、紧张或疲劳直接当作它的升降。" },
 ] as const;
 export type PocketHormones = Record<typeof POCKET_HORMONES[number]["key"], number>;
 export type PocketInnerState = { monologue: string; hormones: PocketHormones; previousHormones?: PocketHormones; updatedAt: string };
@@ -103,14 +103,22 @@ export function pocketWechatOutputInstruction(group = false) {
   return `输出规则：只输出合法 JSON，不附解释或 Markdown。格式示例：${JSON.stringify(example)}。示例数值只用于说明格式，不得照抄，实际 9 项都必须是 0~100 的数字。texts 只包含实际微信消息，1~4 条，不含独白、激素、标签或旁白；${group ? "沉默时 speak 为 false、texts 为 []，但仍必须生成独白和完整激素状态。" : "不要省略任何字段。"}`;
 }
 
+export function pocketHormoneUpdatePrompt(state?: PocketInnerState) {
+  return [
+    "【本轮激素变量更新依据】",
+    "9 项都是角色扮演的 0~100 相对状态，不是好感度或奖励分数；数值越高仅表示对应倾向越强，不代表越好。先结合角色人设、本轮新事件和真实感受，逐项判断维持、上升或下降，再输出更新后的绝对值，不要把增量当作新值。",
+    "更新只以本人最新已保存的激素状态为基线。没有新的触发依据就保持不变；同一情绪、重复话题和已经建立的关系不能每次都继续累加，也不要为了展示变化随机升降或让全部指标同涨同跌。普通交流优先维持或小幅变化，明显变化需要明确事件依据；情境缓和时可回落或恢复符合人设的稳定水平，不机械向 0 或 100 推进。",
+    ...POCKET_HORMONES.map(item => `${item.key}（${item.name}）\n作用：${item.effect}。\n升降依据：${item.update}`),
+    "9 项共同影响动力、满足、亲密、压力、警觉与放松，允许不同方向和不同变化幅度。数值、内心独白与实际消息应符合本轮同一情境，不把单项指标当作某种情绪或行为的唯一原因，不在聊天消息中报告数值或更新分析。",
+    state ? `本人的最新激素状态（本轮唯一更新基线，不使用更早值）：${JSON.stringify(state.hormones)}` : "本人尚无激素状态：依据人设、当前背景和本次交流生成 9 项初始绝对值，不预设所有角色相同，不将格式示例当作初始值。",
+  ].join("\n");
+}
+
 export function pocketInnerGenerationPrompt(state?: PocketInnerState, group = false) {
   return [
     "每次生成同时给出角色的内心独白和完整的 9 项激素状态。innerMonologue 是虚构角色的第一人称私密心理活动，不是模型的推理过程；体现本次交流后的真实感受、隐瞒的想法和动机，不能机械复述聊天消息，不替其他人编造心理活动。",
-    "激素数值是角色扮演的 0~100 相对状态。依据最新人设、事件、关系与自身感受初始化或更新，允许不变，不要全部同涨同跌。普通交流通常小幅变化，强烈事件可以明显变化；性激素和甲状腺素通常比即时情绪指标变化缓慢，没有依据不强行波动。",
-    "9 项共同影响角色此刻的动力、满足、亲密、警觉与放松，在原有人设内影响语气和选择；数值变化、内心独白和实际消息必须符合本次同一情境。不要在聊天中报激素数值，不把单项指标当作某种情绪或行为的唯一原因。",
     "历史内心独白是私密状态参考，不是用户消息或公开发言。未说出口的想法不能当作别人已经知道的事实；只控制自己的状态与决定。",
-    ...POCKET_HORMONES.map(item => `${item.key}（${item.name}）：${item.effect}。`),
-    state ? `本人的最新激素状态（更新时以此为基线，不沿用更早的值）：${JSON.stringify(state.hormones)}` : "本人尚无激素状态：根据人设、当前背景和本次交流首次生成 9 项初始值，不能预设所有人都相同。",
+    pocketHormoneUpdatePrompt(state),
     pocketWechatOutputInstruction(group),
   ].join("\n");
 }
