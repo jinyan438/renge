@@ -241,11 +241,16 @@ function samplePaths(samples: VoiceSample[], outgoing: boolean) {
   return samples.map(([gray, path]) => <path key={gray} d={path} fill={outgoing && gray >= 29 ? "#1d1d1d" : `rgb(${gray},${gray},${gray})`} fillOpacity={outgoing && gray >= 29 ? (255 - gray) / 226 : 1} />);
 }
 
-export function PocketWechatVoiceGlyph({ seconds, outgoing, width }: { seconds: number; outgoing: boolean; width: number }) {
+export function PocketWechatVoiceGlyph({ seconds, outgoing }: { seconds: number; outgoing: boolean }) {
+  const width = 235;
   const digits = String(seconds).split("");
   const durationWidth = digits.length * 26 + 10;
   const durationX = outgoing ? width - 74 - durationWidth : 74;
-  return <svg className="pocket-wx-voice-art" viewBox={`0 0 ${width} 100`} width={width} height={100} aria-hidden="true" focusable="false" fill="#1d1d1d" fillRule="evenodd">
+  // Crop the reference's empty margins, then scale all ink together to an
+  // 18 px content row inside the original compact bubble.
+  const contentWidth = 104 + (digits.length - 1) * 26;
+  const contentX = outgoing ? width - contentWidth - 10 : 10;
+  return <svg className="pocket-wx-voice-art" viewBox={`${contentX} 20 ${contentWidth} 60`} width={contentWidth} height={60} aria-hidden="true" focusable="false" fill="#1d1d1d" fillRule="evenodd">
     <g className="pocket-wx-voice-waves" transform={outgoing ? `translate(${width} 0) scale(-1 1)` : undefined}>{samplePaths(VOICE_WAVES, outgoing)}</g>
     <g className="pocket-wx-voice-duration" transform={`translate(${durationX} 31)`}>
       {digits.map((digit, index) => <g key={index} transform={`translate(${index * 26} 0)`}>{digit === "4" ? samplePaths(REFERENCE_FOUR, outgoing) : <path d={VOICE_DIGITS[digit]} />}</g>)}

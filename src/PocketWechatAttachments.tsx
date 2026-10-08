@@ -16,8 +16,8 @@ export function PocketWechatMessage({ message, onVoice, onTransfer }: { message:
   }, [zoomed]);
   if (!attachment) return <div className="pocket-message-bubble">{message.content}</div>;
   if (attachment.kind === "voice") {
-    const width = 235 + Math.min(60, Math.max(0, attachment.seconds - 4) * 2);
-    return <div className="pocket-wx-voice"><button type="button" onClick={onVoice} aria-label={`${attachment.shown ? "收起" : "展开"}语音文字`} aria-expanded={!!attachment.shown} style={{ width }} title={`${attachment.seconds}秒语音`}><PocketWechatVoiceGlyph seconds={attachment.seconds} outgoing={message.role === "user"} width={width} /></button>{attachment.shown && <p>{attachment.text}</p>}</div>;
+    const width = Math.min(165, 76 + attachment.seconds * 2);
+    return <div className="pocket-wx-voice"><button type="button" onClick={onVoice} aria-label={`${attachment.shown ? "收起" : "展开"}语音文字`} aria-expanded={!!attachment.shown} style={{ width }} title={`${attachment.seconds}秒语音`}><PocketWechatVoiceGlyph seconds={attachment.seconds} outgoing={message.role === "user"} /></button>{attachment.shown && <p>{attachment.text}</p>}</div>;
   }
   if (attachment.kind === "image") return <><button type="button" className={`pocket-wx-image${attachment.url ? " has-photo" : ""}`} aria-label="查看聊天图片" onClick={() => setZoomed(true)}>{attachment.url ? <img src={attachment.url} alt={attachment.description} /> : <><ImageIcon size={28} /><small>图片</small><span>{attachment.description}</span></>}</button>{zoomed && <div className="pocket-wx-image-viewer" role="dialog" aria-modal="true" aria-label="聊天图片" onKeyDown={event => { if (event.key === "Escape") setZoomed(false); if (event.key === "Tab") { event.preventDefault(); closeRef.current?.focus(); } }}><button ref={closeRef} type="button" aria-label="关闭图片预览" onClick={() => setZoomed(false)}><X size={23} /></button>{attachment.url ? <img src={attachment.url} alt={attachment.description} /> : <ImageIcon size={64} />}<p>{attachment.description}</p></div>}</>;
   const pendingIncoming = message.role === "assistant" && attachment.status === "pending";

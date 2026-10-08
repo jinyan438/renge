@@ -217,9 +217,9 @@
 .pocket-wx-transfer-actions button { padding: 8px 10px; font-size: 10px; background: transparent; color: #9c6424; display: flex; align-items: center; justify-content: center; gap: 3px; flex: 1; }
 .pocket-wx-transfer-actions button + button { border-left: 1px solid #f3dfbe; }
 .pocket-wx-voice { max-width: 100%; }
-.pocket-wx-voice > button { background: #fff; border-radius: 0; padding: 0; display: block; max-width: 100%; overflow: hidden; }
-.pocket-wx-voice-art { display: block; width: 100%; height: auto; }
-.pocket-message.user .pocket-wx-voice > button { background: #a9e87c; border-radius: 5px; }
+.pocket-wx-voice > button { box-sizing: border-box; height: 42px; background: #fffdfb; color: #222; border-radius: 5px; padding: 12px; display: flex; justify-content: flex-start; align-items: center; max-width: 100%; overflow: hidden; }
+.pocket-wx-voice-art { display: block; flex-shrink: 0; width: auto; height: 18px; }
+.pocket-message.user .pocket-wx-voice > button { background: #a9e87c; justify-content: flex-end; }
 .pocket-wx-voice > p { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; margin: 6px 0 0; border-radius: 5px; background: #fff9; font-size: 11px; line-height: 1.6; }
 .pocket-wx-image { display: flex; align-items: flex-start; flex-direction: column; gap: 9px; padding: 15px; width: 163px; min-height: 150px; max-width: 100%; border-radius: 8px; background: linear-gradient(150deg, #dae8ee, #f0e5e5); text-align: left; color: #657586; }
 .pocket-wx-image > small { font-size: 10px; }
