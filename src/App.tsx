@@ -129,6 +129,7 @@ import { buildPocketHistoryMessage, buildSharedPocketConversation, formatPocketC
 import { isPocketGroup } from "./pocketPhoneState";
 import { reversePocketMessage } from "./pocketCharacterPhone";
 import { syncPocketPhoneFromContext } from "./pocketPhoneSync";
+import { syncPocketWechatClock } from "./pocketWechatClockSync";
 import {
   buildWorldBookPrompt,
   buildWorldBookPromptPlacements,
@@ -13587,6 +13588,7 @@ export function App() {
     if (!session) return;
     const history = getMessagesForSession(sessionId);
     const messages = syncPocketContext(history, previous, contacts, nickname, deletedMessages);
+    syncPocketWechatClock(sessionId, messages);
     if (messages === history) return;
     const timestamp = new Date().toISOString();
     const sessions = chatSessionsRef.current.map(candidate => candidate.id === sessionId ? {
@@ -13696,6 +13698,11 @@ export function App() {
   useEffect(() => {
     chatMessagesRef.current = chatMessages;
   }, [chatMessages]);
+
+  useEffect(() => {
+    if (!appDataLoaded || !activeChatSessionId || chatStatus.status === "loading") return;
+    syncPocketWechatClock(activeChatSessionId, chatMessages);
+  }, [appDataLoaded, activeChatSessionId, chatMessages, chatStatus.status]);
 
   useEffect(() => {
     chatSessionsRef.current = chatSessions;

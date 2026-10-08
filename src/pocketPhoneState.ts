@@ -1,11 +1,13 @@
 import { normalizePocketInnerHistory, normalizePocketInnerState, type PocketInnerEntry, type PocketInnerState } from "./pocketPhoneInner.ts";
 import { normalizePocketAttachment, normalizePocketWallet, type PocketAttachment, type PocketWallet } from "./pocketWechatMedia.ts";
+import { normalizePocketWechatClock, type PocketWechatClock } from "./pocketWechatClock.ts";
 
 export type PocketMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
   createdAt: string;
+  wechatTime?: string;
   replyContextMessageId?: string;
   generated?: true;
   speaker?: Pick<PocketContact, "id" | "name" | "avatar">;
@@ -69,7 +71,7 @@ export type PocketSettings = {
   largeText: boolean;
 };
 export type PocketContextDeletion = { contactId: string; messageId: string };
-export type PocketState = { version: 1; contacts: PocketContact[]; groups: PocketGroup[]; settings: PocketSettings; wallet: PocketWallet; deletedContextMessages: PocketContextDeletion[]; characterPhones?: Record<string, PocketCharacterPhone> };
+export type PocketState = { version: 1; contacts: PocketContact[]; groups: PocketGroup[]; settings: PocketSettings; wallet: PocketWallet; deletedContextMessages: PocketContextDeletion[]; characterPhones?: Record<string, PocketCharacterPhone>; wechatClock?: PocketWechatClock };
 export type PocketGenerationMode = "reply" | "proactive";
 export type PocketRequestMessage = Pick<PocketMessage, "role" | "content"> | { role: "system"; content: string };
 
@@ -107,6 +109,7 @@ function normalizeMessages(value: unknown, group = false): PocketMessage[] {
     ids.add(text(message.id));
     const attachment = normalizePocketAttachment(message.attachment);
     return [{ id: text(message.id), role: message.role, content: text(message.content), createdAt: text(message.createdAt),
+      ...(text(message.wechatTime) && Number.isFinite(Date.parse(text(message.wechatTime))) ? { wechatTime: text(message.wechatTime) } : {}),
       ...(typeof message.replyContextMessageId === "string" ? { replyContextMessageId: message.replyContextMessageId } : {}),
       // Older simulated user replies kept their generation marker when mirrored.
       ...(message.generated === true || message.role === "user" && typeof message.replyContextMessageId === "string" ? { generated: true as const } : {}),
@@ -129,6 +132,8 @@ export function normalizePocketState(value: unknown): PocketState {
   const state = emptyPocketState();
   if (!record(value) || value.version !== 1) return state;
   state.wallet = normalizePocketWallet(value.wallet);
+  const wechatClock = normalizePocketWechatClock(value.wechatClock);
+  if (wechatClock) state.wechatClock = wechatClock;
   const deletedKeys = new Set<string>();
   state.deletedContextMessages = (Array.isArray(value.deletedContextMessages) ? value.deletedContextMessages : []).flatMap(item => {
     if (!record(item) || !text(item.contactId) || !text(item.messageId)) return [];

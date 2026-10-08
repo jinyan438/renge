@@ -3,6 +3,7 @@ import { buildWorldBookPromptPlacements, insertWorldBookPromptAtDepth, type Worl
 import { buildSharedRedConversation } from "./pocketXiaohongshuContext";
 import { getPocketContextRecords, normalizePocketHormones, pocketInnerGenerationPrompt, type PocketInnerState, type PocketContextRecord } from "./pocketPhoneInner";
 import { pocketMediaPrompt } from "./pocketWechatMedia";
+import { formatPocketWechatTime } from "./pocketWechatClock";
 
 export type PocketContextMessage = {
   id: string;
@@ -49,10 +50,12 @@ export function formatPocketContextMessage(message: PocketContextMessage) {
     return `【微信 · ${identity.contactName} · 内心独白】\n${message.content}${hormones ? `\n【最新激素状态】\n${JSON.stringify(hormones)}` : ""}`;
   }
   const sender = message.role === "user" ? identity.userName : identity.contactName;
+  const time = typeof message.extra?.pocketWechatTime === "string" && Number.isFinite(Date.parse(message.extra.pocketWechatTime))
+    ? ` · ${formatPocketWechatTime(message.extra.pocketWechatTime)}` : "";
   if (identity.app === "xiaohongshu") return `【小红书 · ${sender}】\n${message.content}`;
-  if (identity.groupName) return `【微信群 · ${identity.groupName} · ${sender}】\n${message.content}`;
+  if (identity.groupName) return `【微信群 · ${identity.groupName} · ${sender}${time}】\n${message.content}`;
   const recipient = message.role === "user" ? identity.contactName : identity.userName;
-  return `【微信 · ${sender} → ${recipient}】\n${message.content}`;
+  return `【微信 · ${sender} → ${recipient}${time}】\n${message.content}`;
 }
 
 // Only this contact's own replies are assistant examples. Shared records are
@@ -107,7 +110,8 @@ export function syncPocketContext<T extends PocketContextMessage>(history: T[], 
     const last = identity.speakerId ? latest.get(identity.speakerId) : undefined;
     const state = identity.speakerId ? states.get(identity.speakerId) : undefined;
     const hormones = identity.kind === "inner-monologue" && last?.key === key(identity.contactId, identity.messageId) ? state?.hormones || normalizePocketHormones(oldHormones) : undefined;
-    return { ...extra, pocketPhone: identity, ...(hormones ? { pocketHormones: hormones } : {}) };
+    const time = nextByKey.get(key(identity.contactId, identity.messageId))?.message.wechatTime;
+    return { ...extra, pocketPhone: identity, ...(hormones ? { pocketHormones: hormones } : {}), ...(time ? { pocketWechatTime: time } : {}) };
   };
   const seen = new Set<string>();
   let changed = false;

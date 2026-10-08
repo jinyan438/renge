@@ -5,7 +5,7 @@ export type PocketAttachment =
   | { kind: "image"; description: string; url?: string }
   | { kind: "location"; name: string; address: string }
   | { kind: "voice"; text: string; seconds: number; shown?: boolean };
-export type PocketWalletEntry = { id: string; kind: "edit" | "send" | "receive" | "refund"; amount: number; balance: number; title: string; createdAt: string };
+export type PocketWalletEntry = { id: string; kind: "edit" | "send" | "receive" | "refund"; amount: number; balance: number; title: string; createdAt: string; wechatTime?: string };
 export type PocketWallet = { balance: number; bills: PocketWalletEntry[] };
 const MAX_MONEY = 999999999.99;
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
@@ -26,7 +26,9 @@ export function normalizePocketWallet(value: unknown): PocketWallet {
   const bills: PocketWalletEntry[] = (Array.isArray(value.bills) ? value.bills : []).flatMap(entry => {
     if (!object(entry) || typeof entry.id !== "string" || !entry.id || ids.has(entry.id) || !["edit", "send", "receive", "refund"].includes(String(entry.kind)) || typeof entry.amount !== "number" || !money(Math.abs(entry.amount)) || !money(entry.balance) || typeof entry.title !== "string" || typeof entry.createdAt !== "string") return [];
     ids.add(entry.id);
-    return [{ id: entry.id, kind: entry.kind as PocketWalletEntry["kind"], amount: roundPocketMoney(entry.amount), balance: roundPocketMoney(entry.balance), title: entry.title.slice(0, 100), createdAt: entry.createdAt }];
+    return [{ id: entry.id, kind: entry.kind as PocketWalletEntry["kind"], amount: roundPocketMoney(entry.amount), balance: roundPocketMoney(entry.balance), title: entry.title.slice(0, 100), createdAt: entry.createdAt,
+      ...(typeof entry.wechatTime === "string" && Number.isFinite(Date.parse(entry.wechatTime)) ? { wechatTime: entry.wechatTime } : {}),
+    }];
   });
   return { balance: money(value.balance) ? roundPocketMoney(value.balance) : 0, bills };
 }
