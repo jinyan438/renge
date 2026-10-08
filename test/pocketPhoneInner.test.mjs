@@ -21,6 +21,36 @@ test("each turn requires a private monologue and nine bounded numeric values, wi
   assert.deepEqual(turn.innerState.hormones, hormones());
 });
 
+test("model formatting variations keep actual content while ignoring prose and separate reasoning blocks", () => {
+  const raw = output('有点想问他："周末一起去？"，但先把 {小秘密} 藏好。');
+  for (const wrapped of [raw, `\uFEFF${raw}`, `\`\`\`json\n${raw}\n\`\`\``, `这是本次回复：\n\`\`\`JSON\n${raw}\n\`\`\`\n已完成。`, `<think>${output("这只是模型推理", 11)}</think>\n${raw}`, `普通说明 {不是 JSON}。\n${raw}\n完成`]) {
+    const turn = parsePocketWechatTurn(wrapped);
+    assert.equal(turn.innerState.monologue, '有点想问他："周末一起去？"，但先把 {小秘密} 藏好。');
+    assert.deepEqual(turn.texts, ["我们一起去画画吧"]);
+    assert.deepEqual(turn.innerState.hormones, hormones());
+  }
+  assert.throws(() => parsePocketWechatTurn(`<think>未结束的模型推理 ${raw}`), /格式/);
+  assert.throws(() => parsePocketWechatTurn(raw.slice(0, -3)), /格式/);
+});
+
+test("equivalent field names and explicit numeric levels normalize without inventing state", () => {
+  const levels = Object.fromEntries(POCKET_HORMONES.map((item, index) => [item.name, `${45 + index}%`]));
+  const turn = parsePocketWechatTurn(JSON.stringify({ messages: "第一句\n第二句", inner_monologue: "想再靠近一点", hormone_levels: levels }));
+  assert.deepEqual(turn.texts, ["第一句", "第二句"]);
+  assert.equal(turn.innerState.hormones.dopamine, 45);
+  assert.equal(turn.innerState.hormones.thyroid, 53);
+  const alternative = { ...hormones(), dopamine: { value: "60" }, sex_hormones: 65, noradrenaline: 55, thyroidHormones: 46 };
+  delete alternative.sexHormones; delete alternative.norepinephrine; delete alternative.thyroid;
+  const nested = parsePocketWechatTurn(JSON.stringify({ texts: ["好呀"], innerState: { monologue: "真的很期待", hormones: alternative } }));
+  assert.equal(nested.innerState.hormones.dopamine, 60);
+  assert.equal(nested.innerState.hormones.sexHormones, 65);
+  assert.equal(nested.innerState.hormones.norepinephrine, 55);
+  for (const value of [null, "高", "NaN", "101%", { change: 2 }]) {
+    assert.throws(() => parsePocketWechatTurn(JSON.stringify({ texts: ["好"], innerMonologue: "想法", hormones: { ...hormones(), gaba: value } })), /缺少/);
+  }
+  assert.throws(() => parsePocketWechatTurn(JSON.stringify({ speak: "false", texts: [], innerMonologue: "想法", hormones: hormones() }), undefined, true), /格式/);
+});
+
 test("independent people retain their latest state and monologue history across reload without leaking it into bubbles", () => {
   const a = person("奶糖"); const b = person("薄荷");
   const state = { ...emptyPocketState(), contacts: [a, b], groups: [makePocketGroup("画画群", [a, b], user.nickname)] };

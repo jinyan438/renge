@@ -5,7 +5,7 @@ import type { AgentPersona } from "./types";
 import { DEFAULT_POCKET_AVATAR, DEFAULT_POCKET_USER_AVATAR, emptyPocketState, getPocketConversations, getPocketGenerationMode, getPocketMessageBubbles, isPocketGroup, makePocketContact, normalizePocketState, pocketDisplayName, pocketId, pocketSpeakerName, pocketStorageKey, POCKET_AVATARS, POCKET_THEMES, resetPocketContactChat, safePocketAvatar, type PocketContact, type PocketConversation, type PocketGroup, type PocketGroupMember, type PocketMessage, type PocketSettings, type PocketState } from "./pocketPhoneState";
 import { makePocketGroup, parsePocketGroupReply, pocketGroupMember, resetPocketGroupChat, resolvePocketGroup } from "./pocketPhoneGroup";
 import type { PocketContextSync, PocketConversationBuilder } from "./pocketPhoneContext";
-import { requestPocketReply, resolvePocketModel, type PocketProvider } from "./pocketPhoneChat";
+import { requestPocketWechatTurn, resolvePocketModel, type PocketProvider } from "./pocketPhoneChat";
 import { applyPocketContextChanges, recordPocketContextDeletions, subscribePocketContextChanges } from "./pocketPhoneSync";
 import "./pocket-phone.css";
 import { PocketXiaohongshu } from "./PocketXiaohongshu";
@@ -13,7 +13,7 @@ import { getRedRoles } from "./pocketXiaohongshuGeneration";
 import { normalizeRedState, redStorageKey, type RedActor } from "./pocketXiaohongshuState";
 import { redContextConversation } from "./pocketXiaohongshuContext";
 import { addRedWechatFriend, syncRedWechatNicknames } from "./pocketXiaohongshuFriend";
-import { applyPocketInnerTurns, parsePocketWechatTurn, type PocketInnerEntry, type PocketInnerState } from "./pocketPhoneInner";
+import { applyPocketInnerTurns, PocketWechatFormatError, type PocketInnerEntry, type PocketInnerState } from "./pocketPhoneInner";
 import { PocketPhoneInner } from "./PocketInnerDialog";
 
 type PocketPhoneProps = {
@@ -233,7 +233,8 @@ export function PocketPhone(props: PocketPhoneProps) {
       // Exclude only messages sent locally during this round. Restored shared
       // records absent from local storage must still remain in the context.
       const excludedIds = isPocketGroup(contact) ? stateRef.current.groups.find(group => group.id === contact.id)?.messages.filter(message => !snapshotIds.has(message.id)).map(message => message.id) : undefined;
-      try { return await requestPocketReply(selection.provider, selection.modelId, props.onBuildConversation(props.sessionId, conversation, { nickname, bio: props.userProfile.bio }, mode, speaker, excludedIds), controller.signal); }
+      try { return await requestPocketWechatTurn(selection.provider, selection.modelId, props.onBuildConversation(props.sessionId, conversation, { nickname, bio: props.userProfile.bio }, mode, speaker, excludedIds), controller.signal, speaker?.innerState || (!isPocketGroup(conversation) ? conversation.innerState : undefined), isPocketGroup(conversation)); }
+      catch (error) { if (speaker && error instanceof PocketWechatFormatError) throw new Error(`${speaker.name}的群聊回复格式有误，请重试。`); throw error; }
       finally { clearTimeout(timeout); }
     };
     try {
@@ -243,11 +244,8 @@ export function PocketPhone(props: PocketPhoneProps) {
         const innerEntries: PocketInnerEntry[] = [];
         for (const member of contact.members) {
           setPendingSpeaker(member);
-          const reply = await request({ ...contact, messages: [...contact.messages, ...replies], innerHistory: [...(contact.innerHistory || []), ...innerEntries], members: contact.members.map(person => ({ ...person, innerState: turns.find(turn => turn.speaker.id === person.id)?.innerState || person.innerState })) }, member);
+          const turn = await request({ ...contact, messages: [...contact.messages, ...replies], innerHistory: [...(contact.innerHistory || []), ...innerEntries], members: contact.members.map(person => ({ ...person, innerState: turns.find(turn => turn.speaker.id === person.id)?.innerState || person.innerState })) }, member);
           if (controller.signal.aborted) return;
-          let turn;
-          try { turn = parsePocketWechatTurn(reply, member.innerState, true); }
-          catch { throw new Error(`${member.name}的群聊回复格式有误，请重试。`); }
           replies.push(...parsePocketGroupReply(JSON.stringify({ speak: turn.speak, texts: turn.texts }), member, replyContextMessageId));
           turns.push({ speaker: member, innerState: turn.innerState });
           innerEntries.push({ id: pocketId(), content: turn.innerState.monologue, createdAt: turn.innerState.updatedAt, speaker: { id: member.id, name: pocketDisplayName(member), avatar: member.avatar } });
@@ -255,9 +253,8 @@ export function PocketPhone(props: PocketPhoneProps) {
         updateState(previous => applyPocketInnerTurns(previous, contact.id, turns, replies, replyContextMessageId));
         if (!replies.length) setErrors(previous => ({ ...previous, [contact.id]: "本轮暂无新消息。" }));
       } else {
-        const reply = await request(contact);
+        const turn = await request(contact);
         if (controller.signal.aborted) return;
-        const turn = parsePocketWechatTurn(reply, contact.innerState);
         updateState(previous => applyPocketInnerTurns(previous, contact.id, [{ speaker: contact, innerState: turn.innerState }], [{ id: pocketId(), role: "assistant", content: turn.texts.join("\n"), createdAt: turn.innerState.updatedAt, replyContextMessageId }], replyContextMessageId));
       }
     } catch (error) {

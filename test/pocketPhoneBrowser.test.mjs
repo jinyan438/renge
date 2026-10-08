@@ -35,6 +35,9 @@ const upstream = createServer(async (request, response) => {
   if (mode === "slow") { mode = "success"; await new Promise(resolve => { releaseSlowReply = resolve; }); }
   let output = fixtureWechatTurn(groupResponder ? groupResponder(body) : fixtureReply, ++innerRound);
   if (mode === "inner-bad") { mode = "success"; const invalid = JSON.parse(output); delete invalid.hormones.gaba; output = JSON.stringify(invalid); }
+  if (mode === "inner-always-bad") { const invalid = JSON.parse(output); delete invalid.hormones.gaba; output = JSON.stringify(invalid); }
+  if (mode === "plain" || mode === "repair-slow") { const nextMode = mode === "repair-slow" ? "slow" : "success"; output = fixtureReply; mode = nextMode; }
+  if (mode === "wrapped") { mode = "success"; output = `<think>模型内部思考，不是角色的独白</think>\n以下是回复：\n\`\`\`json\n${output}\n\`\`\`\n完成。`; }
   response.writeHead(200, { "Content-Type": "application/json" });
   response.end(JSON.stringify(request.url.endsWith("responses")
     ? { output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: output }] }] }
@@ -169,8 +172,10 @@ try {
   assert.equal(firstHistory.find(message => message.content === "小月，一起去买草莓吧！").role, "assistant");
   assert.match(firstHistory[0].content, /独立于主会话的文风/);
   assert.ok(texts[0].indexOf("手机世界书第一条") < texts[0].indexOf("手机世界书第二条"));
-  assert.match(firstHistory.at(-2).content, /奶糖和小月的花园在北街/);
-  assert.match(firstHistory.at(-1).content, /今天想吃草莓/);
+  assert.match(firstHistory.at(-3).content, /奶糖和小月的花园在北街/);
+  assert.match(firstHistory.at(-2).content, /今天想吃草莓/);
+  assert.match(firstHistory.at(-1).content, /应用指令，不是用户聊天消息/);
+  assert.match(firstHistory.at(-1).content, /innerMonologue.*hormones/);
   assert.doesNotMatch(JSON.stringify(firstHistory), /DISABLED_PHONE_LORE|INACTIVE_PHONE_LORE|Phone Two/);
   const firstInner = await readContact("奶糖");
   assert.equal(Object.keys(firstInner.innerState.hormones).length, 9);
@@ -714,14 +719,65 @@ try {
   assert.doesNotMatch(inputText(requests.at(-1).body.input[0]), /活泼可爱，喜欢草莓甜点/);
   console.log("PASS: saving a changed role cancels the old in-flight reply and the next generation uses the latest role");
 
-  const beforeMalformedInner = await readContact("奶糖");
+  const beforeCompletion = await readContact("奶糖");
+  const completionRequests = requests.length;
   mode = "inner-bad";
   await generate();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  const afterCompletion = await readContact("奶糖");
+  assert.equal(requests.length, completionRequests + 2);
+  assert.equal(afterCompletion.messages.length, beforeCompletion.messages.length + 1);
+  assert.equal(afterCompletion.innerHistory.length, beforeCompletion.innerHistory.length + 1);
+  assert.equal(Object.keys(afterCompletion.innerState.hormones).length, 9);
+  assert.equal(await phone.locator(".pocket-chat-error").count(), 0);
+  assert.match(inputText(requests.at(-1).body.input.at(-1)), /微信格式补全任务/);
+  assert.deepEqual(requests.at(-1).body.input.slice(0, -1), requests.at(-2).body.input);
+
+  fixtureReply = "那我们一起慢慢背，不着急。";
+  const beforePlain = await readContact("奶糖"); const plainRequests = requests.length;
+  mode = "plain";
+  await send("我还没背");
+  await phone.getByText(fixtureReply, { exact: true }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  const afterPlain = await readContact("奶糖");
+  assert.equal(requests.length, plainRequests + 2);
+  assert.equal(afterPlain.messages.length, beforePlain.messages.length + 2);
+  assert.equal(afterPlain.innerHistory.length, beforePlain.innerHistory.length + 1);
+  assert.equal(Object.keys(afterPlain.innerState.hormones).length, 9);
+  assert.equal(await phone.locator(".pocket-chat-error").count(), 0);
+  assert.doesNotMatch(await phone.locator(".pocket-conversation").innerText(), /微信格式补全任务|innerMonologue|hormones/);
+
+  const beforeWrapped = await readContact("奶糖"); const wrappedRequests = requests.length;
+  fixtureReply = "先背第一句，我听着呢。"; mode = "wrapped";
+  await generate();
+  await phone.getByText(fixtureReply, { exact: true }).waitFor();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  assert.equal(requests.length, wrappedRequests + 1);
+  assert.equal((await readContact("奶糖")).innerHistory.length, beforeWrapped.innerHistory.length + 1);
+  assert.doesNotMatch(await phone.locator(".pocket-conversation").innerText(), /模型内部思考|以下是回复|完成。/);
+
+  const beforeCanceledRepair = await readContact("奶糖"); const cancelRepairRequests = requests.length;
+  fixtureReply = "停止后不能保存的补全回复。"; releaseSlowReply = undefined; mode = "repair-slow";
+  await generate();
+  while (!releaseSlowReply) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(requests.length, cancelRepairRequests + 2);
+  await phone.getByRole("button", { name: "停止回复", exact: true }).click();
+  releaseSlowReply();
+  await phone.getByText("已停止等待，可以重试回复。", { exact: true }).waitFor();
+  assert.deepEqual((await readContact("奶糖")).messages, beforeCanceledRepair.messages);
+  assert.deepEqual((await readContact("奶糖")).innerState, beforeCanceledRepair.innerState);
+  assert.deepEqual((await readContact("奶糖")).innerHistory, beforeCanceledRepair.innerHistory);
+
+  const beforeMalformedInner = await readContact("奶糖"); const badRequests = requests.length;
+  mode = "inner-always-bad";
+  await phone.getByRole("button", { name: "重试回复", exact: true }).click();
   await phone.getByText("这次缺少内心独白或完整的 9 项激素状态，请重试。", { exact: true }).waitFor();
+  assert.equal(requests.length, badRequests + 2);
   const malformedInner = await readContact("奶糖");
   assert.deepEqual(malformedInner.innerState, beforeMalformedInner.innerState);
   assert.deepEqual(malformedInner.innerHistory, beforeMalformedInner.innerHistory);
   assert.deepEqual(malformedInner.messages, beforeMalformedInner.messages);
+  mode = "success"; fixtureReply = "补全后终于可以安心继续聊了。";
   await phone.getByRole("button", { name: "重试回复", exact: true }).click();
   await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
   await phone.locator(".pocket-wechat-header").getByRole("button", { name: "查看奶糖的内心独白", exact: true }).click();
@@ -734,7 +790,7 @@ try {
   assert.equal(await phone.locator(".pocket-inner-monologue p").innerText(), finalMonologue);
   await phone.screenshot({ path: ".runtime/pocket-inner-preview.png", animations: "disabled" });
   await phone.getByRole("button", { name: "关闭内心独白", exact: true }).click();
-  console.log("PASS: inner monologue, nine hormone meters/deltas, latest-only model/main context, atomic malformed response and reload persistence");
+  console.log("PASS: plain/wrapped/incomplete WeChat output, automatic model completion, cancellation, bounded failure, atomic state and reload persistence");
 
   const handle = page.locator(".right-sidebar-resize-handle");
   const bounds = await handle.boundingBox();
