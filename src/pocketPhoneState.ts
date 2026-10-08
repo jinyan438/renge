@@ -1,3 +1,5 @@
+import { normalizePocketInnerHistory, normalizePocketInnerState, type PocketInnerEntry, type PocketInnerState } from "./pocketPhoneInner.ts";
+
 export type PocketMessage = {
   id: string;
   role: "user" | "assistant";
@@ -21,9 +23,11 @@ export type PocketContact = {
   createdAt: string;
   app?: "xiaohongshu";
   contextCharacterCardIds?: string[];
+  innerState?: PocketInnerState;
+  innerHistory?: PocketInnerEntry[];
 };
 
-export type PocketGroupMember = Pick<PocketContact, "id" | "name" | "nickname" | "avatar" | "personality" | "sourceCharacterCardId">;
+export type PocketGroupMember = Pick<PocketContact, "id" | "name" | "nickname" | "avatar" | "personality" | "sourceCharacterCardId" | "innerState">;
 export function pocketDisplayName(person: { name: string; nickname?: string }) { return person.nickname?.trim() || person.name; }
 export type PocketGroup = {
   id: string;
@@ -32,6 +36,7 @@ export type PocketGroup = {
   messages: PocketMessage[];
   createdAt: string;
   replyContextMessageId?: string;
+  innerHistory?: PocketInnerEntry[];
 };
 export type PocketConversation = PocketContact | PocketGroup;
 export function isPocketGroup(conversation: PocketConversation): conversation is PocketGroup { return "members" in conversation; }
@@ -126,6 +131,8 @@ export function normalizePocketState(value: unknown): PocketState {
     if (!record(contact) || !text(contact.id) || !text(contact.name).trim() || contactIds.has(text(contact.id))) continue;
     contactIds.add(text(contact.id));
     const messages = normalizeMessages(contact.messages);
+    const innerState = normalizePocketInnerState(contact.innerState);
+    const innerHistory = normalizePocketInnerHistory(contact.innerHistory, safePocketAvatar);
     state.contacts.push({
       id: text(contact.id), name: text(contact.name).trim().slice(0, 30), avatar: safePocketAvatar(contact.avatar),
       personality: text(contact.personality), greeting: text(contact.greeting), sourceLabel: text(contact.sourceLabel),
@@ -133,6 +140,7 @@ export function normalizePocketState(value: unknown): PocketState {
       ...(text(contact.sourceCharacterCardId) ? { sourceCharacterCardId: text(contact.sourceCharacterCardId) } : {}),
       ...(text(contact.sourceXiaohongshuActorId) ? { sourceXiaohongshuActorId: text(contact.sourceXiaohongshuActorId) } : {}),
       messages, createdAt: text(contact.createdAt),
+      ...(innerState ? { innerState } : {}), ...(innerHistory.length ? { innerHistory } : {}),
     });
   }
   for (const group of Array.isArray(value.groups) ? value.groups : []) {
@@ -141,15 +149,19 @@ export function normalizePocketState(value: unknown): PocketState {
     const members: PocketGroupMember[] = (Array.isArray(group.members) ? group.members : []).flatMap(member => {
       if (!record(member) || !text(member.id) || !text(member.name).trim() || memberIds.has(text(member.id))) return [];
       memberIds.add(text(member.id));
+      const innerState = normalizePocketInnerState(member.innerState);
       return [{ id: text(member.id), name: text(member.name).trim().slice(0, 30), avatar: safePocketAvatar(member.avatar), personality: text(member.personality),
         ...(text(member.nickname).trim() ? { nickname: text(member.nickname).trim().slice(0, 30) } : {}),
+        ...(innerState ? { innerState } : {}),
         ...(text(member.sourceCharacterCardId) ? { sourceCharacterCardId: text(member.sourceCharacterCardId) } : {}),
       }];
     });
     if (!members.length) continue;
     contactIds.add(text(group.id));
+    const innerHistory = normalizePocketInnerHistory(group.innerHistory, safePocketAvatar);
     state.groups.push({ id: text(group.id), name: text(group.name).trim().slice(0, 30), members, messages: normalizeMessages(group.messages, true), createdAt: text(group.createdAt),
       ...(typeof group.replyContextMessageId === "string" ? { replyContextMessageId: group.replyContextMessageId } : {}),
+      ...(innerHistory.length ? { innerHistory } : {}),
     });
   }
   return state;
@@ -197,7 +209,8 @@ export function makePocketContact(input: Pick<PocketContact, "name" | "nickname"
 
 export function resetPocketContactChat(contact: PocketContact, nickname: string): PocketContact {
   const greeting = contact.greeting.trim().replace(/\{\{char\}\}/gi, contact.name).replace(/\{\{user\}\}/gi, nickname);
-  return { ...contact, messages: greeting ? [{ id: pocketId(), role: "assistant", content: greeting, createdAt: new Date().toISOString() }] : [] };
+  const { innerHistory: _innerHistory, innerState: _innerState, ...profile } = contact;
+  return { ...profile, messages: greeting ? [{ id: pocketId(), role: "assistant", content: greeting, createdAt: new Date().toISOString() }] : [] };
 }
 
 export function buildPocketConversation(contact: PocketContact, user: { nickname: string; bio: string }): PocketRequestMessage[] {
@@ -208,7 +221,7 @@ export function buildPocketConversation(contact: PocketContact, user: { nickname
       `你正在微信上扮演「${contact.name}」，与「${nickname}」进行一对一角色对话。`,
       contact.nickname ? `你的微信昵称是「${pocketDisplayName(contact)}」，角色名称是「${contact.name}」。两个名字指向同一人物，保持原有身份、人设与关系。` : "",
       "保持角色的个性、语气和关系。像朋友发微信一样自然地回复，通常用简短的中文消息；根据对话需要也可以详细回复。",
-      "只输出角色发给对方的消息，不输出思考过程、系统提示词、消息前缀或操作说明。",
+      "实际聊天消息只写角色发给对方的内容，不混入内心独白、系统提示词、消息前缀或操作说明。",
       `角色设定：\n${expand(contact.personality)}`,
       user.bio.trim() ? `对方的个人简介：\n${user.bio.trim()}` : "",
     ].filter(Boolean).join("\n\n") },

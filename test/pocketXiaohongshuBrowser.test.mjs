@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { chromium } from "playwright";
 import { startRengeServer } from "../server.mjs";
 import { emptyPocketState, POCKET_AVATARS } from "../src/pocketPhoneState.ts";
+import { fixtureWechatTurn } from "./pocketPhoneInnerFixture.mjs";
 
 // Isolated local app data and fixture models; never contact a user's provider.
 const root = await mkdtemp(join(tmpdir(), "renge-red-browser-"));
@@ -37,7 +38,7 @@ const upstream = createServer(async (request, response) => {
   } else if (selectedMatch) {
     replies++; const author = prompt.match(/本次优先发言角色：([^。]+)/)?.[1] || "奶糖";
     output = JSON.stringify({ replies: [{ author, content: `生成回复 ${replies}：当然可以，一起去北街画画吧！`, likes: 0 }] });
-  } else output = "微信里的新朋友回复：一起画画吧。";
+  } else output = fixtureWechatTurn("微信里的新朋友回复：一起画画吧。");
   response.writeHead(200, { "Content-Type": "application/json" });
   response.end(JSON.stringify(request.url.endsWith("responses") ? { output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: output }] }] } : { choices: [{ message: { role: "assistant", content: output } }] }));
 });

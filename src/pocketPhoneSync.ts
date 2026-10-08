@@ -1,7 +1,8 @@
 import { getPocketMessageIdentity, type PocketContextMessage } from "./pocketPhoneContext";
-import { emptyPocketState, getPocketConversations, normalizePocketState, pocketStorageKey, type PocketContextDeletion, type PocketConversation, type PocketState } from "./pocketPhoneState";
+import { emptyPocketState, getPocketConversations, normalizePocketState, pocketStorageKey, type PocketContextDeletion, type PocketConversation, type PocketGroupMember, type PocketState } from "./pocketPhoneState";
 import { applyRedContextChanges } from "./pocketXiaohongshuContext";
 import { normalizeRedState, RED_CONTEXT_ID, redStorageKey } from "./pocketXiaohongshuState";
+import { getPocketContextRecords } from "./pocketPhoneInner";
 
 export type PocketContextChange = { contactId: string; messageId: string; content: string | null };
 const messageKey = (contactId: string, messageId: string) => JSON.stringify([contactId, messageId]);
@@ -18,8 +19,8 @@ function mergeDeletions(previous: PocketContextDeletion[], added: PocketContextD
 }
 
 export function recordPocketContextDeletions(previous: PocketState, next: PocketState): PocketState {
-  const remaining = new Set(getPocketConversations(next).flatMap(contact => contact.messages.map(message => messageKey(contact.id, message.id))));
-  const deleted = getPocketConversations(previous).flatMap(contact => contact.messages.filter(message => !remaining.has(messageKey(contact.id, message.id)))
+  const remaining = new Set(getPocketConversations(next).flatMap(contact => getPocketContextRecords(contact).map(message => messageKey(contact.id, message.id))));
+  const deleted = getPocketConversations(previous).flatMap(contact => getPocketContextRecords(contact).filter(message => !remaining.has(messageKey(contact.id, message.id)))
     .map(message => ({ contactId: contact.id, messageId: message.id })));
   const deletedContextMessages = mergeDeletions(next.deletedContextMessages, deleted);
   return deletedContextMessages === next.deletedContextMessages ? next : { ...next, deletedContextMessages };
@@ -54,6 +55,13 @@ export function applyPocketContextChanges(state: PocketState, changes: PocketCon
       const content = byKey.get(key)!;
       return content === null ? [] : [{ ...message, content }];
     });
+    const innerHistory = conversation.innerHistory?.flatMap(entry => {
+      const key = messageKey(conversation.id, `inner:${entry.id}`);
+      if (!byKey.has(key) || byKey.get(key) === entry.content) return [entry];
+      changed = true;
+      const content = byKey.get(key)!;
+      return content === null ? [] : [{ ...entry, content }];
+    });
     if (!changed) return conversation;
     const remainingIds = new Set(messages.map(message => message.id));
     const repairMarker = (marker: string | undefined) => {
@@ -65,11 +73,27 @@ export function applyPocketContextChanges(state: PocketState, changes: PocketCon
     messages = messages.map(message => message.replyContextMessageId === undefined ? message : {
       ...message, replyContextMessageId: repairMarker(message.replyContextMessageId),
     });
-    return { ...conversation, messages, ...("members" in conversation && conversation.replyContextMessageId !== undefined
+    return { ...conversation, messages, ...(innerHistory ? { innerHistory } : {}), ...("members" in conversation && conversation.replyContextMessageId !== undefined
       ? { replyContextMessageId: repairMarker(conversation.replyContextMessageId) } : {}) };
   };
-  const contacts = state.contacts.map(update);
-  const groups = state.groups.map(update);
+  const updatedContacts = state.contacts.map(update);
+  const updatedGroups = state.groups.map(update);
+  const oldInner = getPocketConversations(state).flatMap(conversation => (conversation.innerHistory || []).map(entry => ({ entry, key: messageKey(conversation.id, `inner:${entry.id}`) }))).filter(item => byKey.has(item.key));
+  const remainingInner = [...updatedContacts, ...updatedGroups].flatMap(conversation => conversation.innerHistory || []);
+  const refreshInner = <T extends PocketGroupMember>(person: T): T => {
+    const current = person.innerState;
+    const changed = current && oldInner.find(item => item.entry.speaker.id === person.id && item.entry.createdAt === current.updatedAt && item.entry.content === current.monologue);
+    if (!changed) return person;
+    const replacement = byKey.get(changed.key);
+    const content = replacement ?? remainingInner.filter(entry => entry.speaker.id === person.id).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).at(-1)?.content;
+    if (content === current.monologue) return person;
+    return { ...person, innerState: content ? { ...current, monologue: content } : undefined };
+  };
+  const contacts = updatedContacts.map(refreshInner);
+  const groups = updatedGroups.map(group => {
+    const members = group.members.map(refreshInner);
+    return members.every((member, index) => member === group.members[index]) ? group : { ...group, members };
+  });
   const deletedContextMessages = mergeDeletions(state.deletedContextMessages, changes.filter(change => change.content === null)
     .map(({ contactId, messageId }) => ({ contactId, messageId })));
   return deletedContextMessages !== state.deletedContextMessages || contacts.some((contact, index) => contact !== state.contacts[index]) || groups.some((group, index) => group !== state.groups[index])

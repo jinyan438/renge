@@ -1,6 +1,7 @@
 import { DEFAULT_POCKET_AVATAR, buildPocketConversation, getPocketPendingMessages, isPocketGroup, pocketDisplayName, pocketSpeakerName, safePocketAvatar, type PocketContextDeletion, type PocketConversation, type PocketGroupMember, type PocketGenerationMode, type PocketRequestMessage } from "./pocketPhoneState";
 import { buildWorldBookPromptPlacements, insertWorldBookPromptAtDepth, type WorldBook } from "./worldbookUtils";
 import { buildSharedRedConversation } from "./pocketXiaohongshuContext";
+import { getPocketContextRecords, normalizePocketHormones, pocketInnerGenerationPrompt, type PocketInnerState, type PocketContextRecord } from "./pocketPhoneInner";
 
 export type PocketContextMessage = {
   id: string;
@@ -19,6 +20,7 @@ export type PocketMessageIdentity = {
   groupName?: string;
   speakerId?: string;
   app?: "xiaohongshu";
+  kind?: "inner-monologue";
 };
 export type PocketContextSync = (sessionId: string, previous: PocketConversation[] | null, contacts: PocketConversation[], nickname: string, deletedMessages?: PocketContextDeletion[]) => void;
 export type PocketConversationBuilder = (sessionId: string, contact: PocketConversation, user: { nickname: string; bio: string }, mode: PocketGenerationMode, speaker?: PocketGroupMember, excludedMessageIds?: string[]) => PocketRequestMessage[];
@@ -32,12 +34,17 @@ export function getPocketMessageIdentity(message: Pick<PocketContextMessage, "so
     ...(typeof item.groupName === "string" && item.groupName ? { groupName: item.groupName } : {}),
     ...(typeof item.speakerId === "string" && item.speakerId ? { speakerId: item.speakerId } : {}),
     ...(message.source === "xiaohongshu" ? { app: "xiaohongshu" as const } : {}),
+    ...(item.kind === "inner-monologue" ? { kind: "inner-monologue" as const } : {}),
   };
 }
 
 export function formatPocketContextMessage(message: PocketContextMessage) {
   const identity = getPocketMessageIdentity(message);
   if (!identity) return message.content;
+  if (identity.kind === "inner-monologue") {
+    const hormones = normalizePocketHormones(message.extra?.pocketHormones);
+    return `【微信 · ${identity.contactName} · 内心独白】\n${message.content}${hormones ? `\n【最新激素状态】\n${JSON.stringify(hormones)}` : ""}`;
+  }
   const sender = message.role === "user" ? identity.userName : identity.contactName;
   if (identity.app === "xiaohongshu") return `【小红书 · ${sender}】\n${message.content}`;
   if (identity.groupName) return `【微信群 · ${identity.groupName} · ${sender}】\n${message.content}`;
@@ -50,6 +57,7 @@ export function formatPocketContextMessage(message: PocketContextMessage) {
 // phone's voice. Each record keeps its original position in the timeline.
 export function buildPocketHistoryMessage(message: PocketContextMessage, contactId: string, speakerName = "助手", groupSpeakerId?: string): PocketRequestMessage {
   const identity = getPocketMessageIdentity(message);
+  if (identity?.kind === "inner-monologue") return { role: "user", content: formatPocketContextMessage(message) };
   if (identity?.contactId === contactId && identity.app !== "xiaohongshu") return identity.groupName ? {
     role: message.role === "assistant" && identity.speakerId === groupSpeakerId ? "assistant" : "user",
     content: JSON.stringify({ 发言者: message.role === "user" ? identity.userName : identity.contactName, 内容: message.content }),
@@ -66,17 +74,37 @@ export function buildPocketHistoryMessage(message: PocketContextMessage, contact
 // records; only a first import sorts the missing local history across contacts.
 export function syncPocketContext<T extends PocketContextMessage>(history: T[], previous: PocketConversation[] | null, contacts: PocketConversation[], nickname: string, deletedMessages: PocketContextDeletion[] = []): Array<T | PocketContextMessage> {
   const key = (contactId: string, messageId: string) => JSON.stringify([contactId, messageId]);
-  const nextByKey = new Map(contacts.flatMap(contact => contact.messages.map(message => [key(contact.id, message.id), { contact, message }] as const)));
-  const previousKeys = new Set(previous?.flatMap(contact => contact.messages.map(message => key(contact.id, message.id))) ?? []);
+  const records = contacts.flatMap(contact => getPocketContextRecords(contact).map(message => ({ contact, message })));
+  const nextByKey = new Map(records.map(record => [key(record.contact.id, record.message.id), record]));
+  const previousKeys = new Set(previous?.flatMap(contact => getPocketContextRecords(contact).map(message => key(contact.id, message.id))) ?? []);
   deletedMessages.forEach(message => previousKeys.add(key(message.contactId, message.messageId)));
-  const identify = (contact: PocketConversation, message: PocketConversation["messages"][number]): PocketMessageIdentity => ({
+  const states = new Map<string, PocketInnerState>();
+  for (const contact of contacts) for (const person of isPocketGroup(contact) ? contact.members : [contact]) {
+    if (person.innerState && (!states.has(person.id) || person.innerState.updatedAt >= states.get(person.id)!.updatedAt)) states.set(person.id, person.innerState);
+  }
+  const latest = new Map<string, { key: string; time: string }>();
+  const trackLatest = (actorId: string, id: string, time: string) => { if (!latest.has(actorId) || time >= latest.get(actorId)!.time) latest.set(actorId, { key: id, time }); };
+  for (const message of history) {
+    const identity = getPocketMessageIdentity(message);
+    if (identity?.kind === "inner-monologue" && identity.speakerId && !(previousKeys.has(key(identity.contactId, identity.messageId)) && !nextByKey.has(key(identity.contactId, identity.messageId)))) trackLatest(identity.speakerId, key(identity.contactId, identity.messageId), message.createdAt);
+  }
+  for (const { contact, message } of records) if (message.innerMonologue && message.speaker) trackLatest(message.speaker.id, key(contact.id, message.id), message.createdAt);
+  const identify = (contact: PocketConversation, message: PocketContextRecord): PocketMessageIdentity => ({
     contactId: contact.id, messageId: message.id,
     contactName: isPocketGroup(contact) && message.role === "assistant" || !isPocketGroup(contact) && contact.app === "xiaohongshu" ? pocketSpeakerName(contact, message) : pocketDisplayName(contact),
     userName: nickname,
     contactAvatar: safePocketAvatar(isPocketGroup(contact) || !isPocketGroup(contact) && contact.app === "xiaohongshu" ? message.speaker?.avatar || DEFAULT_POCKET_AVATAR : contact.avatar),
     ...(!isPocketGroup(contact) && contact.app === "xiaohongshu" ? { app: "xiaohongshu" as const } : {}),
     ...(isPocketGroup(contact) ? { groupName: contact.name, ...(message.speaker ? { speakerId: message.speaker.id } : {}) } : {}),
+    ...(message.innerMonologue ? { kind: "inner-monologue" as const, speakerId: message.speaker!.id } : {}),
   });
+  const extraFor = (identity: PocketMessageIdentity, previous: Record<string, unknown> = {}) => {
+    const { pocketHormones: oldHormones, ...extra } = previous;
+    const last = identity.speakerId ? latest.get(identity.speakerId) : undefined;
+    const state = identity.speakerId ? states.get(identity.speakerId) : undefined;
+    const hormones = identity.kind === "inner-monologue" && last?.key === key(identity.contactId, identity.messageId) ? state?.hormones || normalizePocketHormones(oldHormones) : undefined;
+    return { ...extra, pocketPhone: identity, ...(hormones ? { pocketHormones: hormones } : {}) };
+  };
   const seen = new Set<string>();
   let changed = false;
   const next = history.flatMap(message => {
@@ -85,19 +113,25 @@ export function syncPocketContext<T extends PocketContextMessage>(history: T[], 
     const id = key(identity.contactId, identity.messageId);
     const match = nextByKey.get(id);
     if (!match && previousKeys.has(id)) { changed = true; return []; }
-    if (!match) return [message]; // An empty local phone must not erase a restored session.
+    if (!match) {
+      if (identity.kind !== "inner-monologue") return [message];
+      const extra = extraFor(identity, message.extra);
+      if (JSON.stringify(extra) === JSON.stringify(message.extra)) return [message];
+      changed = true; return [{ ...message, extra }];
+    } // An empty local phone must not erase a restored session.
     if (seen.has(id)) { changed = true; return []; }
     seen.add(id);
     const updatedIdentity = identify(match.contact, match.message);
-    if (message.content === match.message.content && message.role === match.message.role && JSON.stringify(identity) === JSON.stringify(updatedIdentity)) return [message];
+    const extra = extraFor(updatedIdentity, message.extra);
+    if (message.content === match.message.content && message.role === match.message.role && JSON.stringify(extra) === JSON.stringify(message.extra)) return [message];
     changed = true;
-    return [{ ...message, role: match.message.role, content: match.message.content, extra: { ...message.extra, pocketPhone: updatedIdentity } }];
+    return [{ ...message, role: match.message.role, content: match.message.content, extra }];
   });
   const missing = [...nextByKey].filter(([id]) => !seen.has(id)).map(([, match]) => match);
   if (previous === null) missing.sort((a, b) => a.message.createdAt.localeCompare(b.message.createdAt));
   const appended: PocketContextMessage[] = missing.map(({ contact, message }) => ({
     id: `pocket:${key(contact.id, message.id)}`, role: message.role, content: message.content, createdAt: message.createdAt,
-    source: !isPocketGroup(contact) && contact.app === "xiaohongshu" ? "xiaohongshu" : "wechat", extra: { pocketPhone: identify(contact, message) },
+    source: !isPocketGroup(contact) && contact.app === "xiaohongshu" ? "xiaohongshu" : "wechat", extra: extraFor(identify(contact, message)),
   }));
   return changed || appended.length ? [...next, ...appended] : history;
 }
@@ -107,7 +141,7 @@ export function syncPocketContext<T extends PocketContextMessage>(history: T[], 
 export function pocketContextRevision(history: PocketContextMessage[]) {
   const shared = history.filter(message => getPocketMessageIdentity(message));
   if (!shared.length) return "";
-  const value = JSON.stringify(shared.map(message => [message.id, message.role, message.content, message.extra?.pocketPhone]));
+  const value = JSON.stringify(shared.map(message => [message.id, message.role, message.content, message.extra?.pocketPhone, message.extra?.pocketHormones]));
   let first = 2166136261; let second = 5381;
   for (let index = 0; index < value.length; index++) {
     first = Math.imul(first ^ value.charCodeAt(index), 16777619);
@@ -143,15 +177,15 @@ export function buildSharedPocketConversation(contact: PocketConversation, user:
         ? "本次是主动发消息：当前没有待回复的新消息。结合已知背景，自然地发起话题、分享近况或关心对方，不重复回答已经回复过的问题，不假装用户刚发了消息，也不代替用户发言。"
         : "本次是回复消息：结合当前微信聊天中用户连续发送的、尚未回复的消息进行回应，不只关注最后一句。",
       pending.length ? `本次待回复消息的任务索引（引用已有消息，不是新增聊天）：${JSON.stringify(pending.map(message => message.content))}。生成期间后发的消息可能排在上一条回复之前，请按这个索引回应。` : "",
-      "除非用户在当前微信明确要求其他创作形式，否则只输出实际发给对方的消息，不写第三人称旁白、动作或心理描写、剧情段落、标题、状态栏、场景播报或角色名标签。",
+      "除非用户在当前微信明确要求其他创作形式，否则 texts 字段只输出实际发给对方的消息，不写第三人称旁白、动作或心理描写、剧情段落、标题、状态栏、场景播报或角色名标签。",
       "不要模仿背景资料中助手的回答，也不要延续先前微信回复中的叙事文风；延续已知事实，从本次回复开始遵守上述微信口吻。",
       group ? "群聊规则：根据自己的性格和刚才的群消息决定是否发言。话少的角色可以保持安静；被 @ 或直接点名时优先回应。可以接话、讨论、调侃其他群友，但不能替其他成员或用户发言，不能编造用户没做过的动作、决定和大事。后面的成员能看到本轮前面成员的新消息，避免重复同一句话。" : "",
-      group ? '输出规则：只输出合法 JSON，不附解释或 Markdown。发言时用 {"speak":true,"texts":["短消息1","短消息2"]}，1~4 条自然的微信消息，每一条独立发送；不发言时用 {"speak":false,"texts":[]}。不要输出成员名字或冒充其他人的 JSON；只输出你自己的决定与消息。' : "",
+      pocketInnerGenerationPrompt(group ? speaker!.innerState : contact.innerState, group),
     ].filter(Boolean).join("\n"),
   ].filter(Boolean).join("\n\n");
   const messages = insertWorldBookPromptAtDepth<PocketRequestMessage>([{ role: "system", content: systemPrompt }, ...history], placements.atDepth);
   // A request-only invocation keeps proactive generation valid even for an empty
   // conversation. It is never saved or mirrored as a message from the user.
-  if (mode === "proactive") messages.push({ role: "user", content: `【微信生成任务：应用指令，不是用户聊天消息】\n${group ? `请让「${characterName}」决定是否主动在群里发言，严格按 JSON 格式输出。` : "请让当前联系人主动发来一条自然的微信消息，只输出联系人实际发送的内容。"}` });
+  if (mode === "proactive") messages.push({ role: "user", content: `【微信生成任务：应用指令，不是用户聊天消息】\n${group ? `请让「${characterName}」决定是否主动在群里发言。` : "请让当前联系人主动发来一条自然的微信消息。"}同时生成内心独白与 9 项激素状态，严格按 JSON 格式输出。` });
   return messages;
 }

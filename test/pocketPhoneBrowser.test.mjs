@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { chromium } from "playwright";
 import { startRengeServer } from "../server.mjs";
 import { POCKET_AVATARS } from "../src/pocketPhoneState.ts";
+import { fixtureWechatTurn } from "./pocketPhoneInnerFixture.mjs";
 
 // Run after npm run build. Uses isolated app data and local fixture models only.
 const root = await mkdtemp(join(tmpdir(), "renge-pocket-browser-"));
@@ -19,6 +20,7 @@ let server;
 const reply = "给你留了最甜的草莓，我们一起吃吧 🍓";
 let fixtureReply = reply;
 let groupResponder;
+let innerRound = 0;
 const upstream = createServer(async (request, response) => {
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
@@ -31,7 +33,8 @@ const upstream = createServer(async (request, response) => {
     return;
   }
   if (mode === "slow") { mode = "success"; await new Promise(resolve => { releaseSlowReply = resolve; }); }
-  const output = groupResponder ? groupResponder(body) : fixtureReply;
+  let output = fixtureWechatTurn(groupResponder ? groupResponder(body) : fixtureReply, ++innerRound);
+  if (mode === "inner-bad") { mode = "success"; const invalid = JSON.parse(output); delete invalid.hormones.gaba; output = JSON.stringify(invalid); }
   response.writeHead(200, { "Content-Type": "application/json" });
   response.end(JSON.stringify(request.url.endsWith("responses")
     ? { output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: output }] }] }
@@ -169,11 +172,26 @@ try {
   assert.match(firstHistory.at(-2).content, /奶糖和小月的花园在北街/);
   assert.match(firstHistory.at(-1).content, /今天想吃草莓/);
   assert.doesNotMatch(JSON.stringify(firstHistory), /DISABLED_PHONE_LORE|INACTIVE_PHONE_LORE|Phone Two/);
+  const firstInner = await readContact("奶糖");
+  assert.equal(Object.keys(firstInner.innerState.hormones).length, 9);
+  assert.equal(firstInner.innerHistory.length, 1);
+  assert.equal(firstInner.innerState.previousHormones, undefined);
+  await phone.locator(".pocket-wechat-header").getByRole("button", { name: "查看奶糖的内心独白", exact: true }).click();
+  let innerDialog = phone.getByRole("dialog");
+  assert.equal(await innerDialog.getByRole("progressbar").count(), 9);
+  assert.equal(await innerDialog.getByRole("progressbar", { name: "多巴胺", exact: true }).getAttribute("aria-valuenow"), "41");
+  assert.equal(await innerDialog.locator(".pocket-inner-monologue p").innerText(), firstInner.innerState.monologue);
+  await phone.screenshot({ path: ".runtime/pocket-inner-initial.png", animations: "disabled" });
+  await page.keyboard.press("Escape");
+  assert.equal(await phone.getByRole("dialog").count(), 0);
+  assert.equal(await phone.locator(".pocket-conversation").getByText(firstInner.innerState.monologue, { exact: true }).count(), 0);
   await sendMain("知道奶糖刚才发了什么吗？");
   const secondMain = mainRequests.at(-1).request.messages.map(message => typeof message.content === "string" ? message.content : JSON.stringify(message.content));
   assert.ok(secondMain.findIndex(text => text.includes("先记住明天一起画画")) < secondMain.findIndex(text => text.includes("今天想吃草莓")));
   assert.ok(secondMain.findIndex(text => text.includes(reply)) < secondMain.findIndex(text => text.includes("知道奶糖刚才发了什么吗？")));
   assert.match(secondMain.find(text => text.includes(reply)), /微信 · 奶糖 → 小月/);
+  assert.ok(secondMain.some(text => text.includes(firstInner.innerState.monologue)));
+  assert.ok(secondMain.some(text => text.includes('"dopamine":41')));
   assert.notEqual(mainRequests[0].piSessionScope, mainRequests[1].piSessionScope);
   assert.equal(await page.locator(".chat-message.assistant").filter({ hasText: reply }).count(), 1);
   console.log("PASS: bidirectional ordered main/WeChat context, worldbook matching/depth and refreshed Pi history");
@@ -185,6 +203,15 @@ try {
   await phone.getByRole("button", { name: "重试回复", exact: true }).click();
   await phone.locator(".pocket-message.assistant").filter({ hasText: reply }).nth(1).waitFor();
   assert.deepEqual(requests[1].body, requests[2].body);
+  const secondInner = await readContact("奶糖");
+  assert.equal(secondInner.innerHistory.length, 2);
+  assert.equal(secondInner.innerState.previousHormones.dopamine, 41);
+  assert.equal(secondInner.innerState.hormones.dopamine, 42);
+  await phone.locator(".pocket-message.assistant").last().getByRole("button", { name: "查看奶糖的内心独白", exact: true }).click();
+  innerDialog = phone.getByRole("dialog");
+  assert.equal(await innerDialog.locator(".pocket-hormone .is-up").count(), 9);
+  await phone.screenshot({ path: ".runtime/pocket-inner-updated.png", animations: "disabled" });
+  await innerDialog.getByRole("button", { name: "关闭内心独白", exact: true }).click();
   const retryHistory = requests[2].body.messages.filter(message => message.role !== "system").map(message => message.content);
   assert.ok(retryHistory.findIndex(text => text.includes("知道奶糖刚才发了什么吗？")) < retryHistory.findIndex(text => text.includes("你会陪我去吗？")));
   assert.equal(await phone.locator(".pocket-message.user").count(), 2);
@@ -193,6 +220,9 @@ try {
   await phone.getByRole("button", { name: "停止回复", exact: true }).waitFor();
   await page.waitForFunction(() => document.querySelector(".pocket-typing"));
   while (!releaseSlowReply) await new Promise(resolve => setTimeout(resolve, 10));
+  const latestInnerContext = requests.at(-1).body.messages.map(inputText).join("\n");
+  assert.match(latestInnerContext, /"dopamine":42/);
+  assert.doesNotMatch(latestInnerContext, /"dopamine":41/);
   await sendMain("微信还在等待时记下这条主会话内容");
   const stoppedRequests = requests.length;
   await phone.getByRole("button", { name: "停止回复", exact: true }).click();
@@ -684,6 +714,28 @@ try {
   assert.doesNotMatch(inputText(requests.at(-1).body.input[0]), /活泼可爱，喜欢草莓甜点/);
   console.log("PASS: saving a changed role cancels the old in-flight reply and the next generation uses the latest role");
 
+  const beforeMalformedInner = await readContact("奶糖");
+  mode = "inner-bad";
+  await generate();
+  await phone.getByText("这次缺少内心独白或完整的 9 项激素状态，请重试。", { exact: true }).waitFor();
+  const malformedInner = await readContact("奶糖");
+  assert.deepEqual(malformedInner.innerState, beforeMalformedInner.innerState);
+  assert.deepEqual(malformedInner.innerHistory, beforeMalformedInner.innerHistory);
+  assert.deepEqual(malformedInner.messages, beforeMalformedInner.messages);
+  await phone.getByRole("button", { name: "重试回复", exact: true }).click();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  await phone.locator(".pocket-wechat-header").getByRole("button", { name: "查看奶糖的内心独白", exact: true }).click();
+  const finalMonologue = await phone.locator(".pocket-inner-monologue p").innerText();
+  await phone.getByRole("button", { name: "关闭内心独白", exact: true }).click();
+  await page.reload(); await openPhone();
+  await phone.getByRole("button", { name: "打开微信", exact: true }).click();
+  await phone.locator(".pocket-contact-row").filter({ hasText: "奶糖" }).click();
+  await phone.locator(".pocket-wechat-header").getByRole("button", { name: "查看奶糖的内心独白", exact: true }).click();
+  assert.equal(await phone.locator(".pocket-inner-monologue p").innerText(), finalMonologue);
+  await phone.screenshot({ path: ".runtime/pocket-inner-preview.png", animations: "disabled" });
+  await phone.getByRole("button", { name: "关闭内心独白", exact: true }).click();
+  console.log("PASS: inner monologue, nine hormone meters/deltas, latest-only model/main context, atomic malformed response and reload persistence");
+
   const handle = page.locator(".right-sidebar-resize-handle");
   const bounds = await handle.boundingBox();
   await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
@@ -694,6 +746,11 @@ try {
   assert.ok(width <= 270, `Expected a narrow phone sidebar, got ${width}`);
   assert.equal(await phone.locator(".pocket-screen").evaluate(node => node.scrollWidth <= node.clientWidth + 1), true);
   await phone.screenshot({ path: ".runtime/pocket-narrow.png", animations: "disabled" });
+  await phone.locator(".pocket-wechat-header").getByRole("button", { name: "查看奶糖的内心独白", exact: true }).click();
+  assert.equal(await phone.locator(".pocket-inner-dialog").evaluate(node => node.scrollWidth <= node.clientWidth + 1), true);
+  assert.equal(await phone.getByRole("progressbar").count(), 9);
+  await phone.screenshot({ path: ".runtime/pocket-inner-narrow.png", animations: "disabled" });
+  await phone.getByRole("button", { name: "关闭内心独白", exact: true }).click();
   await page.setViewportSize({ width: 1600, height: 500 });
   await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click();
   await phone.getByRole("button", { name: "打开微信", exact: true }).waitFor();

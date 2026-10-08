@@ -18,7 +18,7 @@
     "electron:install-local": "node scripts/install-electron-local.mjs",
     "electron": "npm run build && electron electron/main.mjs",
     "desktop": "npm run electron",
-    "test:pocket-phone": "tsx --test test/pocketPhoneChat.test.mjs test/pocketPhoneContext.test.mjs test/pocketPhoneGroup.test.mjs test/pocketPhoneSync.test.mjs && node test/pocketPhoneBrowser.test.mjs",
+    "test:pocket-phone": "tsx --test test/pocketPhoneChat.test.mjs test/pocketPhoneContext.test.mjs test/pocketPhoneGroup.test.mjs test/pocketPhoneSync.test.mjs test/pocketPhoneInner.test.mjs && node test/pocketPhoneBrowser.test.mjs",
     "test:pocket-red": "tsx --test test/pocketXiaohongshuState.test.mjs test/pocketXiaohongshuGeneration.test.mjs test/pocketXiaohongshuContext.test.mjs test/pocketXiaohongshuCommunity.test.mjs && node test/pocketXiaohongshuBrowser.test.mjs"
   },
   "dependencies": {

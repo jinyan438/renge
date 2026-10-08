@@ -193,6 +193,32 @@
 .pocket-member-choice > strong, .pocket-member-self > strong { min-width: 0; overflow-wrap: anywhere; }
 .pocket-group-picker { margin-bottom: 18px; }
 .pocket-primary:disabled { opacity: .5; cursor: default; }
+.pocket-panel .pocket-avatar-button { padding: 0; border: 0; background: transparent; border-radius: 10px; flex-shrink: 0; }
+.pocket-wechat-header .pocket-avatar { width: 29px; height: 29px; border-radius: 10px; }
+.pocket-group-people { display: flex; gap: 9px; flex-shrink: 0; padding: 9px 15px; overflow-x: auto; scrollbar-width: none; border-bottom: 1px solid #efdfd640; }
+.pocket-group-people .pocket-avatar { width: 26px; height: 26px; border-radius: 9px; }
+.pocket-inner-backdrop { position: absolute; inset: 0; z-index: 6; display: flex; align-items: center; justify-content: center; padding: 13px; background: #4b393e50; backdrop-filter: blur(5px); }
+.pocket-inner-dialog { display: flex; flex-direction: column; width: 100%; min-width: 0; max-height: 90%; border: 1px solid #ffffffb0; border-radius: 23px; background: #fffaf7; box-shadow: 0 14px 40px #50364025; overflow: hidden; animation: pocket-open .2s ease-out; }
+.pocket-inner-dialog > header { display: flex; align-items: center; gap: 10px; padding: 17px 16px 13px; border-bottom: 1px solid #eadbdc80; }
+.pocket-inner-dialog > header > img { width: 38px; height: 38px; flex-shrink: 0; border-radius: 13px; object-fit: cover; }
+.pocket-inner-dialog > header > div { flex: 1; min-width: 0; }
+.pocket-inner-dialog h3 { margin: 0 0 3px; font-size: 15px; overflow-wrap: anywhere; }
+.pocket-inner-dialog header span { font-size: 10px; color: #b39698; }
+.pocket-inner-dialog header button { display: grid; place-items: center; width: 26px; height: 26px; flex-shrink: 0; border-radius: 50%; background: #f3e7e5; }
+.pocket-inner-scroll { padding: 14px 16px 17px; overflow-y: auto; min-height: 0; scrollbar-width: thin; }
+.pocket-inner-dialog h4 { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; font-size: 11px; font-weight: 700; }
+.pocket-inner-monologue { padding: 13px; border: 1px solid #efdce1; border-radius: 15px; background: linear-gradient(135deg, #fff0f1, #fbf2e9); }
+.pocket-inner-monologue h4 { color: #ad7386; }
+.pocket-inner-monologue p { margin: 0; font-size: 12px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pocket-inner-hormones { padding-top: 17px; }
+.pocket-hormone { margin-top: 11px; }
+.pocket-hormone > div:first-child { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-bottom: 5px; font-size: 11px; }
+.pocket-hormone b { font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 600; }
+.pocket-hormone small { margin-right: 8px; font-size: 9px; }
+.pocket-hormone .is-up { color: #c4868f; }
+.pocket-hormone .is-down { color: #789f91; }
+.pocket-hormone-track { height: 6px; overflow: hidden; border-radius: 20px; background: #eee5e3; }
+.pocket-hormone-track i { display: block; height: 100%; border-radius: inherit; background: var(--hormone-color); transition: width .3s ease; }
 @keyframes pocket-open { from { opacity: .3; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes pocket-sheet { from { transform: translateY(30px); opacity: .5; } to { transform: translateY(0); opacity: 1; } }
 @keyframes pocket-typing { 50% { opacity: .25; transform: translateY(-3px); } }

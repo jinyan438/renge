@@ -3,6 +3,7 @@ import { getPocketMessageBubbles, pocketDisplayName, pocketId, type PocketContac
 export function pocketGroupMember(contact: PocketGroupMember): PocketGroupMember {
   return { id: contact.id, name: contact.name, avatar: contact.avatar, personality: contact.personality,
     ...(contact.nickname ? { nickname: contact.nickname } : {}),
+    ...(contact.innerState ? { innerState: contact.innerState } : {}),
     ...(contact.sourceCharacterCardId ? { sourceCharacterCardId: contact.sourceCharacterCardId } : {}),
   };
 }
@@ -19,6 +20,11 @@ export function makePocketGroup(name: string, members: PocketGroupMember[], nick
   return { id: pocketId(), name: (name.trim() || `${[nickname, ...unique.map(pocketDisplayName)].slice(0, 3).join("、")}${unique.length > 2 ? "等" : ""}的群聊`).slice(0, 30),
     members: unique, messages: [], createdAt: new Date().toISOString(),
   };
+}
+
+export function resetPocketGroupChat(group: PocketGroup): PocketGroup {
+  const { innerHistory: _innerHistory, ...profile } = group;
+  return { ...profile, messages: [], replyContextMessageId: undefined };
 }
 
 // Each member is asked in turn, as in yuyuan. The next member receives the
