@@ -130,6 +130,7 @@ import { isPocketGroup } from "./pocketPhoneState";
 import { reversePocketMessage } from "./pocketCharacterPhone";
 import { syncPocketPhoneFromContext } from "./pocketPhoneSync";
 import { syncPocketWechatClock } from "./pocketWechatClockSync";
+import { syncPocketCalendarContext } from "./pocketCalendarState";
 import {
   buildWorldBookPrompt,
   buildWorldBookPromptPlacements,
@@ -708,7 +709,7 @@ type ChatMessage = {
   createdAt: string;
   sender?: ChatSenderIdentity;
   attachments?: ChatAttachment[];
-  source?: "heartbeat" | "roleplay-greeting" | "wechat" | "xiaohongshu";
+  source?: "heartbeat" | "roleplay-greeting" | "wechat" | "xiaohongshu" | "calendar";
   choiceRequest?: ChatChoiceRequest;
   toolVisualization?: ToolVisualization;
   dialogueRewritePending?: boolean;
@@ -2794,7 +2795,7 @@ function normalizeChatMessage(
     ...(attachments.length > 0 ? { attachments } : {}),
     ...(rawMessage.source === "heartbeat" ||
     rawMessage.source === "roleplay-greeting" ||
-    rawMessage.source === "wechat" || rawMessage.source === "xiaohongshu"
+    rawMessage.source === "wechat" || rawMessage.source === "xiaohongshu" || rawMessage.source === "calendar"
       ? { source: rawMessage.source }
       : {}),
     ...(role === "assistant" && choiceRequest ? { choiceRequest } : {}),
@@ -13583,13 +13584,16 @@ export function App() {
     return `${getPiSessionScope("main", provider, modelId)}${typeof revision === "string" && revision ? `-pocket-${revision}` : ""}`;
   };
 
-  const syncPhoneContext: PocketContextSync = (sessionId, previous, contacts, nickname, deletedMessages) => {
+  const syncPhoneContext: PocketContextSync = (sessionId, previous, contacts, nickname, deletedMessages, calendarJump) => {
     const session = chatSessionsRef.current.find(candidate => candidate.id === sessionId);
     if (!session) return;
+    const saveCalendar = () => flushTavernPersistenceRef.current().catch(() => {
+      throw new Error("时间已更新，但会话上下文暂未保存，请保留当前页面后重试。");
+    });
     const history = getMessagesForSession(sessionId);
-    const messages = syncPocketContext(history, previous, contacts, nickname, deletedMessages);
+    const messages = syncPocketCalendarContext(syncPocketContext(history, previous, contacts, nickname, deletedMessages), calendarJump);
     syncPocketWechatClock(sessionId, messages);
-    if (messages === history) return;
+    if (messages === history) return calendarJump ? saveCalendar() : undefined;
     const timestamp = new Date().toISOString();
     const sessions = chatSessionsRef.current.map(candidate => candidate.id === sessionId ? {
       ...candidate, messages, updatedAt: timestamp,
@@ -13601,6 +13605,7 @@ export function App() {
       chatMessagesRef.current = messages;
       setChatMessages(messages);
     }
+    if (calendarJump) return saveCalendar();
   };
 
   const buildPhoneConversation: PocketConversationBuilder = (sessionId, contact, user, mode, speaker, excludedMessageIds = []) => {

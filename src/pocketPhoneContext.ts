@@ -4,13 +4,14 @@ import { buildSharedRedConversation } from "./pocketXiaohongshuContext";
 import { getPocketContextRecords, normalizePocketHormones, pocketInnerGenerationPrompt, type PocketInnerState, type PocketContextRecord } from "./pocketPhoneInner";
 import { pocketMediaPrompt } from "./pocketWechatMedia";
 import { formatPocketWechatTime } from "./pocketWechatClock";
+import type { PocketCalendarJump } from "./pocketCalendarState";
 
 export type PocketContextMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
   createdAt: string;
-  source?: "wechat" | "xiaohongshu" | "heartbeat" | "roleplay-greeting";
+  source?: "wechat" | "xiaohongshu" | "heartbeat" | "roleplay-greeting" | "calendar";
   extra?: Record<string, unknown>;
 };
 export type PocketMessageIdentity = {
@@ -25,7 +26,7 @@ export type PocketMessageIdentity = {
   kind?: "inner-monologue";
   phoneOwnerId?: string;
 };
-export type PocketContextSync = (sessionId: string, previous: PocketConversation[] | null, contacts: PocketConversation[], nickname: string, deletedMessages?: PocketContextDeletion[]) => void;
+export type PocketContextSync = (sessionId: string, previous: PocketConversation[] | null, contacts: PocketConversation[], nickname: string, deletedMessages?: PocketContextDeletion[], calendarJump?: PocketCalendarJump) => void | Promise<void>;
 export type PocketConversationBuilder = (sessionId: string, contact: PocketConversation, user: { nickname: string; bio: string }, mode: PocketGenerationMode, speaker?: PocketGroupMember, excludedMessageIds?: string[]) => PocketRequestMessage[];
 
 export function getPocketMessageIdentity(message: Pick<PocketContextMessage, "source" | "extra">): PocketMessageIdentity | null {
@@ -147,7 +148,7 @@ export function syncPocketContext<T extends PocketContextMessage>(history: T[], 
 // Pi persists its own history. A changed shared timeline needs a fresh scope so
 // the next request imports the ordered renderer history without interrupting a run.
 export function pocketContextRevision(history: PocketContextMessage[]) {
-  const shared = history.filter(message => getPocketMessageIdentity(message));
+  const shared = history.filter(message => getPocketMessageIdentity(message) || message.source === "calendar");
   if (!shared.length) return "";
   const value = JSON.stringify(shared.map(message => [message.id, message.role, message.content, message.extra?.pocketPhone, message.extra?.pocketHormones]));
   let first = 2166136261; let second = 5381;

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
-import { ArrowLeft, BatteryFull, Check, ChevronRight, Heart, Image as ImageIcon, MapPin, MessageCircle, Mic, MoreHorizontal, Plus, Search, Send, Settings, Signal, Sparkles, Square, UserRound, UserRoundPlus, Users, Wallet, Wifi, X } from "lucide-react";
+import { ArrowLeft, BatteryFull, CalendarDays, Check, ChevronRight, Heart, Image as ImageIcon, MapPin, MessageCircle, Mic, MoreHorizontal, Plus, Search, Send, Settings, Signal, Sparkles, Square, UserRound, UserRoundPlus, Users, Wallet, Wifi, X } from "lucide-react";
 import type { CharacterCard } from "./characterCardUtils";
 import type { AgentPersona } from "./types";
 import { DEFAULT_POCKET_AVATAR, DEFAULT_POCKET_USER_AVATAR, emptyPocketState, getPocketConversations, getPocketGenerationMode, getPocketConversationBubbles, isPocketGroup, makePocketContact, normalizePocketState, pocketDisplayName, pocketId, pocketSpeakerName, pocketStorageKey, POCKET_AVATARS, POCKET_THEMES, resetPocketContactChat, safePocketAvatar, type PocketContact, type PocketConversation, type PocketGroup, type PocketGroupMember, type PocketMessage, type PocketSettings, type PocketState } from "./pocketPhoneState";
@@ -22,6 +22,8 @@ import { PocketWechatAttachDialog, PocketWechatMessage } from "./PocketWechatAtt
 import { appendPocketAttachment, applyPocketTransferReplies, editPocketBalance, pocketMessagePreview, pocketReplyMessages, settlePocketTransfer, type PocketAttachment } from "./pocketWechatMedia";
 import { ensurePocketWechatClock, pocketWechatMessageTime, pocketWechatNow, pocketWechatTimePrompt, stampPocketWechatTimes } from "./pocketWechatClock";
 import { subscribePocketWechatClock } from "./pocketWechatClockSync";
+import { PocketCalendar } from "./PocketCalendar";
+import { jumpPocketCalendarClock, type PocketCalendarJump } from "./pocketCalendarState";
 
 type PocketPhoneProps = {
   sessionId: string; personas: AgentPersona[]; characterCards: CharacterCard[];
@@ -30,7 +32,7 @@ type PocketPhoneProps = {
   onSyncContext: PocketContextSync; onBuildConversation: PocketConversationBuilder;
   onBack: () => void; onClose: () => void;
 };
-type PhoneApp = "home" | "wechat" | "xiaohongshu" | "settings" | "character";
+type PhoneApp = "home" | "wechat" | "xiaohongshu" | "settings" | "character" | "calendar";
 type WechatTab = "chats" | "contacts" | "me";
 type ContactDraft = Pick<PocketContact, "name" | "nickname" | "avatar" | "personality" | "greeting" | "sourceLabel" | "sourceCharacterCardId">;
 type Confirmation = { title: string; description: string; action: () => void };
@@ -84,6 +86,7 @@ export function PocketPhone(props: PocketPhoneProps) {
   const [pendingSpeaker, setPendingSpeaker] = useState<PocketGroupMember | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const controllerRef = useRef<AbortController | null>(null);
+  const calendarJumpRef = useRef<PocketCalendarJump | null>(null);
   const mountedRef = useRef(true);
   const editorRef = useRef<HTMLFormElement>(null);
   const confirmationRef = useRef<HTMLDivElement>(null);
@@ -99,19 +102,28 @@ export function PocketPhone(props: PocketPhoneProps) {
   const currentTheme = POCKET_THEMES.find(theme => theme.id === state.settings.theme)!;
   const canChat = !!selection.provider?.apiBaseUrl.trim() && !!selection.modelId.trim();
 
-  function updateState(change: (previous: PocketState) => PocketState) {
+  function updateState(change: (previous: PocketState) => PocketState, calendarJump?: PocketCalendarJump) {
     const previous = rootRef.current;
     const changed = change(stateRef.current);
     const resolved = { ...changed, groups: changed.groups.map(group => resolvePocketGroup(group, changed.contacts)) };
     const merged = owner ? commitCharacterPhoneView(previous, owner.id, resolved) : { ...resolved, characterPhones: previous.characterPhones };
-    const next = stampPocketWechatTimes(recordPocketContextDeletions(previous, syncCharacterPhoneWallets(previous, merged)));
+    const timed = calendarJump ? { ...merged, wechatClock: jumpPocketCalendarClock(previous.wechatClock!, calendarJump) } : merged;
+    const next = stampPocketWechatTimes(recordPocketContextDeletions(previous, syncCharacterPhoneWallets(previous, timed)));
     rootRef.current = next;
     stateRef.current = owner ? characterPhoneView(next, owner.id, props.userProfile) : { ...next, characterPhones: undefined };
     setRootState(next);
     setNow(new Date());
     try { localStorage.setItem(storageKey, JSON.stringify(next)); setStorageWarning(""); }
     catch { setStorageWarning("手机存储空间不足或不可用，这次改动暂未保存。请保留当前页面。"); }
-    props.onSyncContext(props.sessionId, getPocketConversations(previous), getPocketConversations(next), next.settings.nickname.trim() || props.userProfile.nickname.trim() || "小小的我", next.deletedContextMessages);
+    return props.onSyncContext(props.sessionId, getPocketConversations(previous), getPocketConversations(next), next.settings.nickname.trim() || props.userProfile.nickname.trim() || "小小的我", next.deletedContextMessages, calendarJump);
+  }
+  function jumpCalendar(time: string) {
+    controllerRef.current?.abort();
+    const jump = calendarJumpRef.current?.time === time ? calendarJumpRef.current : { id: `calendar:${pocketId()}`, time, createdAt: new Date().toISOString() };
+    calendarJumpRef.current = jump;
+    return Promise.resolve(updateState(previous => previous, jump)).then(() => {
+      if (calendarJumpRef.current === jump) calendarJumpRef.current = null;
+    });
   }
   function updateSettings(patch: Partial<PocketSettings>) { updateState(previous => ({ ...previous, settings: { ...previous.settings, ...patch } })); }
   function updateContact(id: string, change: (contact: PocketContact) => PocketContact) {
@@ -374,9 +386,10 @@ export function PocketPhone(props: PocketPhoneProps) {
                 <button className="pocket-app-icon" type="button" onClick={() => openWechat()} aria-label="打开微信"><span className="pocket-icon-wechat"><MessageCircle size={33} strokeWidth={2.3} fill="white" /><MessageCircle className="pocket-chat-icon-small" size={23} fill="#d8f4dc" /></span><strong>微信</strong></button>
                 {!owner && <button className="pocket-app-icon" type="button" onClick={() => setApp("xiaohongshu")} aria-label="打开小红书"><span className="pocket-icon-xiaohongshu"><b>小红书</b></span><strong>小红书</strong></button>}
                 {!owner && <button className="pocket-app-icon" type="button" onClick={() => setApp("character")} aria-label="打开ta的手机"><span className="pocket-icon-character"><UserRound size={33} /></span><strong>ta 的手机</strong></button>}
+                <button className="pocket-app-icon" type="button" onClick={() => setApp("calendar")} aria-label="打开日历"><span className="pocket-icon-calendar"><CalendarDays size={33} /></span><strong>日历</strong></button>
                 <button className="pocket-app-icon" type="button" onClick={() => setApp("settings")} aria-label="打开手机设置"><span className="pocket-icon-settings"><Settings size={34} strokeWidth={1.7} /></span><strong>设置</strong></button>
               </div>
-            </div> : app === "character" ? <div className="pocket-list-body pocket-scroll">
+            </div> : app === "calendar" ? <PocketCalendar now={wechatNow.toISOString()} onJump={jumpCalendar} onExit={() => setApp("home")} /> : app === "character" ? <div className="pocket-list-body pocket-scroll">
               <div className="pocket-app-heading"><button type="button" onClick={() => setApp("home")} aria-label="返回手机桌面"><ArrowLeft size={19} /></button><h2>ta 的手机</h2></div>
               <p className="pocket-character-note">选择手机主人，看看 ta 的微信。与你的聊天会同步显示。</p>
               {rootState.contacts.map(contact => <button className="pocket-contact-row" type="button" key={contact.id} onClick={() => switchOwner(contact.id)} aria-label={`查看${pocketDisplayName(contact)}的手机`}><Avatar avatar={contact.avatar} name={pocketDisplayName(contact)} /><span><strong>{pocketDisplayName(contact)}</strong><small>{contact.sourceLabel || "微信角色"}</small></span><ChevronRight size={16} /></button>)}
