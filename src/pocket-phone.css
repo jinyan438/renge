@@ -60,7 +60,7 @@
 .pocket-home-date { display: grid; justify-items: center; margin-top: 9px; flex-shrink: 0; }
 .pocket-home-date > span { font-size: 11px; letter-spacing: 2px; }
 .pocket-home-date strong { font-family: "Segoe UI", sans-serif; font-size: clamp(40px, 14cqw, 55px); line-height: 1.2; font-weight: 300; letter-spacing: -2px; }
-.pocket-app-grid { display: flex; gap: 24px; padding: 21px 10px 14px; flex-shrink: 0; }
+.pocket-app-grid { display: flex; flex-wrap: wrap; gap: clamp(12px, 5cqw, 24px); padding: 21px 0 14px; flex-shrink: 0; }
 .pocket-app-icon { background: none; display: flex; flex-direction: column; align-items: center; gap: 7px; width: 59px; }
 .pocket-app-icon > span { position: relative; display: grid; width: 56px; height: 56px; border-radius: 18px; place-items: center; box-shadow: inset 0 1px 2px #ffffff9c, 0 4px 8px #84656616; transition: transform .18s; }
 .pocket-app-icon:hover > span { transform: translateY(-3px) rotate(-3deg); }

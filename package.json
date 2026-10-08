@@ -18,7 +18,8 @@
     "electron:install-local": "node scripts/install-electron-local.mjs",
     "electron": "npm run build && electron electron/main.mjs",
     "desktop": "npm run electron",
-    "test:pocket-phone": "tsx --test test/pocketPhoneChat.test.mjs test/pocketPhoneContext.test.mjs test/pocketPhoneGroup.test.mjs test/pocketPhoneSync.test.mjs && node test/pocketPhoneBrowser.test.mjs"
+    "test:pocket-phone": "tsx --test test/pocketPhoneChat.test.mjs test/pocketPhoneContext.test.mjs test/pocketPhoneGroup.test.mjs test/pocketPhoneSync.test.mjs && node test/pocketPhoneBrowser.test.mjs",
+    "test:pocket-red": "node --experimental-strip-types --test test/pocketXiaohongshuState.test.mjs && node test/pocketXiaohongshuBrowser.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.87.1",

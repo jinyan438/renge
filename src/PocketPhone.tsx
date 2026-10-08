@@ -8,6 +8,7 @@ import type { PocketContextSync, PocketConversationBuilder } from "./pocketPhone
 import { requestPocketReply, resolvePocketModel, type PocketProvider } from "./pocketPhoneChat";
 import { applyPocketContextChanges, recordPocketContextDeletions, subscribePocketContextChanges } from "./pocketPhoneSync";
 import "./pocket-phone.css";
+import { PocketXiaohongshu } from "./PocketXiaohongshu";
 
 type PocketPhoneProps = {
   sessionId: string; personas: AgentPersona[]; characterCards: CharacterCard[];
@@ -16,7 +17,7 @@ type PocketPhoneProps = {
   onSyncContext: PocketContextSync; onBuildConversation: PocketConversationBuilder;
   onBack: () => void; onClose: () => void;
 };
-type PhoneApp = "home" | "wechat" | "settings";
+type PhoneApp = "home" | "wechat" | "xiaohongshu" | "settings";
 type WechatTab = "chats" | "contacts";
 type ContactDraft = Pick<PocketContact, "name" | "avatar" | "personality" | "greeting" | "sourceLabel" | "sourceCharacterCardId">;
 type Confirmation = { title: string; description: string; action: () => void };
@@ -263,9 +264,10 @@ export function PocketPhone(props: PocketPhoneProps) {
               <div className="pocket-home-date"><span>{now.toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "long" })}</span><strong>{formatTime(now.toISOString())}</strong></div>
               <div className="pocket-app-grid">
                 <button className="pocket-app-icon" type="button" onClick={() => openWechat()} aria-label="打开微信"><span className="pocket-icon-wechat"><MessageCircle size={33} strokeWidth={2.3} fill="white" /><MessageCircle className="pocket-chat-icon-small" size={23} fill="#d8f4dc" /></span><strong>微信</strong></button>
+                <button className="pocket-app-icon" type="button" onClick={() => setApp("xiaohongshu")} aria-label="打开小红书"><span className="pocket-icon-xiaohongshu"><b>小红书</b></span><strong>小红书</strong></button>
                 <button className="pocket-app-icon" type="button" onClick={() => setApp("settings")} aria-label="打开手机设置"><span className="pocket-icon-settings"><Settings size={34} strokeWidth={1.7} /></span><strong>设置</strong></button>
               </div>
-            </div> : app === "settings" ? <div className="pocket-settings pocket-scroll">
+            </div> : app === "xiaohongshu" ? <PocketXiaohongshu sessionId={props.sessionId} nickname={nickname} avatar={props.userProfile.avatarImage} onExit={() => setApp("home")} /> : app === "settings" ? <div className="pocket-settings pocket-scroll">
               <div className="pocket-app-heading"><button type="button" onClick={() => setApp("home")} aria-label="返回手机桌面"><ArrowLeft size={19} /></button><h2>设置</h2></div>
               <div className="pocket-profile-card"><Avatar avatar={props.userProfile.avatarImage || DEFAULT_POCKET_USER_AVATAR} name={nickname} self /><span><strong>{nickname}</strong></span><Sparkles size={19} /></div>
               <label className="pocket-settings-label" htmlFor="pocket-nickname">我的昵称</label><input id="pocket-nickname" className="pocket-input" maxLength={24} placeholder={props.userProfile.nickname || "小小的我"} value={state.settings.nickname} onChange={event => updateSettings({ nickname: event.target.value })} />
