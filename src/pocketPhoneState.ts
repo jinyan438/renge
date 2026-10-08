@@ -223,6 +223,15 @@ export function getPocketMessageBubbles(message: Pick<PocketMessage, "role" | "c
   return lines;
 }
 
+export function getPocketConversationBubbles(conversation: PocketConversation, message: PocketMessage): string[] {
+  // Mirroring changes which side sends a message, but its original formatting
+  // still applies: role replies split, while the user's manual line breaks stay.
+  const role = !isPocketGroup(conversation) && conversation.syncedOwnerId
+    ? message.role === "user" ? "assistant" : "user"
+    : message.role;
+  return getPocketMessageBubbles({ ...message, role });
+}
+
 export function makePocketContact(input: Pick<PocketContact, "name" | "nickname" | "avatar" | "personality" | "greeting" | "sourceLabel" | "sourceCharacterCardId">): PocketContact {
   if (!input.name.trim()) throw new Error("给这位朋友起个名字吧。");
   if (!input.personality.trim()) throw new Error("写一点角色设定，让 TA 更了解自己吧。");

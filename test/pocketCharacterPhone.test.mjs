@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { emptyPocketState, makePocketContact, normalizePocketState, getPocketConversations, getPocketGenerationMode } from "../src/pocketPhoneState.ts";
+import { emptyPocketState, makePocketContact, normalizePocketState, getPocketConversations, getPocketGenerationMode, getPocketConversationBubbles } from "../src/pocketPhoneState.ts";
 import { characterPhoneView, commitCharacterPhoneView, applyCharacterPhoneGeneration, characterPhoneGenerationPrompt, syncCharacterPhoneWallets } from "../src/pocketCharacterPhone.ts";
 import { buildPocketHistoryMessage, buildSharedPocketConversation, formatPocketContextMessage, syncPocketContext } from "../src/pocketPhoneContext.ts";
 import { applyPocketContextChanges, recordPocketContextDeletions } from "../src/pocketPhoneSync.ts";
@@ -11,6 +11,23 @@ const actor = name => makePocketContact({ name, personality: "{{char}}是{{user}
 const message = (id, role, extra = {}) => ({ id, role, content: id, createdAt: "2026-10-08T10:00:00Z", ...extra });
 const seed = () => ({ ...emptyPocketState(), contacts: [{ ...actor("奶糖"), messages: [message("用户消息", "user"), message("角色消息", "assistant")] }, actor("薄荷")] });
 const generated = (name = "同事") => JSON.stringify({ contacts: [{ name, personality: "喜欢烘焙的同事", avatarIndex: 2, messages: [{ from: "ta", text: "明天一起值班" }, { from: "them", text: "好呀" }] }] });
+
+test("synchronized views retain original reply segmentation, manual line breaks and single attachment/code bubbles after reload", () => {
+  const root = seed(); const owner = root.contacts[0];
+  owner.messages = [message("manual", "user", { content: "学校门口\n我在这边" }),
+    message("reply", "assistant", { content: "你发校门口做什么？\n这个点你怎么跑出去的，下午还有课。\n上课前回来。\n别当没听见。" }),
+    message("code", "assistant", { content: "代码：\n```js\nconsole.log(1)\n```" }),
+    message("location", "assistant", { content: "[位置：学校门口]", attachment: { kind: "location", name: "学校门口", address: "南门" } })];
+  const restored = normalizePocketState(JSON.parse(JSON.stringify(root)));
+  const original = restored.contacts[0]; const mirror = characterPhoneView(restored, owner.id, user).contacts[0];
+  original.messages.forEach((item, index) => assert.deepEqual(getPocketConversationBubbles(mirror, mirror.messages[index]), getPocketConversationBubbles(original, item)));
+  assert.equal(getPocketConversationBubbles(mirror, mirror.messages[0]).length, 1);
+  assert.equal(getPocketConversationBubbles(mirror, mirror.messages[1]).length, 4);
+  assert.equal(getPocketConversationBubbles(mirror, mirror.messages[2]).length, 1);
+  assert.equal(getPocketConversationBubbles(mirror, mirror.messages[3]).length, 1);
+  const npc = actor("同事"); npc.messages = [message("npc-reply", "assistant", { content: "好呀\n明天见" })];
+  assert.equal(getPocketConversationBubbles(npc, npc.messages[0]).length, 2);
+});
 
 test("owner phone projects a single canonical user chat and writes both directions without duplicate records", () => {
   const root = seed(); const owner = root.contacts[0];
