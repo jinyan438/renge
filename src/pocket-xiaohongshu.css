@@ -127,8 +127,10 @@
 .xhs-note-cover { aspect-ratio: 6 / 7; padding: 36px; }
 .xhs-note-cover strong { font-size: clamp(20px, 10cqw, 33px); line-height: 1.65; }
 .xhs-note-cover > span { left: 32px; top: 10px; font-size: 64px; }
-.xhs-generation-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; border-bottom: 1px solid #f3f3f3; flex-shrink: 0; }
-.xhs-generation-toolbar > button { display: flex; align-items: center; gap: 5px; padding: 4px 12px !important; }
+.xhs-generation-toolbar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid #f3f3f3; flex-shrink: 0; }
+.xhs-generation-toolbar > button { display: flex; align-items: center; gap: 5px; padding: 4px 12px !important; flex-shrink: 0; white-space: nowrap; }
+.xhs-generation-toolbar .xhs-role-shortcut { padding: 4px 5px !important; }
+.xhs-app .xhs-generation-toolbar > input { flex: 1; min-width: 0; width: 0; height: 28px; padding: 4px 8px; border: 1px solid #eee; border-radius: 7px; background: #fafafa; color: #262626; font-size: 11px; }
 .xhs-generation-toolbar svg { width: 13px; height: 13px; }
 .xhs-generation-status { display: flex; align-items: center; gap: 6px; padding: 6px 10px; flex-shrink: 0; background: #fff6f7; color: #c66a78; font-size: 10px; }
 .xhs-generation-status > span { flex: 1; }

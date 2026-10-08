@@ -4,7 +4,7 @@ import { redContextConversation } from "./pocketXiaohongshuContext";
 import { isRedCommunityActor, randomRedAvatar, redActorNickname, redActorProfile, RED_COVER_TONES, redCount, redText, safeRedImage, type RedActor, type RedComment, type RedCoverTone, type RedNote, type RedState } from "./pocketXiaohongshuState";
 
 export type RedRole = Omit<RedActor, "avatar"> & { avatar?: string };
-export type RedTask = { kind: "feed" } | { kind: "reply"; noteId: string; commentId: string };
+export type RedTask = { kind: "feed"; category?: string; topic?: string } | { kind: "reply"; noteId: string; commentId: string };
 export function getRedRoles(contacts: PocketContact[], personas: AgentPersona[]): RedRole[] {
   const roles: RedRole[] = [
     ...contacts.map(contact => ({ id: contact.sourceXiaohongshuActorId || `contact:${contact.id}`, name: contact.name, ...(contact.nickname ? { nickname: contact.nickname } : {}), avatar: safeRedImage(contact.avatar) ? contact.avatar : undefined, personality: contact.personality, ...(contact.sourceCharacterCardId ? { sourceCharacterCardId: contact.sourceCharacterCardId } : {}) })),
@@ -45,8 +45,10 @@ export function buildRedTaskContact(state: RedState, nickname: string, roles: Re
   const role = speakers.find(role => role.id === actor?.id || role.name === actor?.name || role.name === note?.author) || speakers[0];
   const expand = (value: string, name: string) => value.replace(/\{\{char\}\}/gi, name).replace(/\{\{user\}\}/gi, nickname);
   const index = roles.map(item => ({ id: item.id, name: item.name, nickname: item.nickname, personality: expand(item.personality, item.name) }));
+  const category = task.kind === "feed" ? redText(task.category, 20) || "推荐" : "推荐";
+  const topic = task.kind === "feed" ? redText(task.topic, 500) : "";
   const actorSchema = '"actors":[{"id":"new:1","name":"人物真实角色名称","nickname":"独立的社交账号昵称，与角色名称不同","personality":"人物身份、经历、性格、爱好、说话方式及与社区的关系，须完整具体且与当前世界一致","profile":{"handle":"英文数字下划线的账号","bio":"简短个人签名","gender":"女/男/其他","age":22,"location":"符合当前世界的所在地","following":12,"followers":1083,"receivedLikes":3836,"background":"ocean/forest/sunset/violet"}}]';
-  const feedSchema = `{${actorSchema},"notes":[{"authorId":"已有id或new:1","author":"人物昵称","title":"标题","content":"正文","tags":["话题"],"category":"生活/游戏/职场/情感/穿搭","location":"人物所在地","coverText":"适合封面的短文字","coverTone":"mint/cream/rose/blue/lavender/white","likes":0,"saves":0,"comments":[{"authorId":"已有id或新人物id","author":"评论者昵称","content":"评论内容","likes":0}]}]}`;
+  const feedSchema = `{${actorSchema},"notes":[{"authorId":"已有id或new:1","author":"人物昵称","title":"标题","content":"正文","tags":["话题"],"category":"生活/游戏/职场/情感/穿搭/直播/短剧，或本次指定标签","location":"人物所在地","coverText":"适合封面的短文字","coverTone":"mint/cream/rose/blue/lavender/white","likes":0,"saves":0,"comments":[{"authorId":"已有id或新人物id","author":"评论者昵称","content":"评论内容","likes":0}]}]}`;
   contact.name = role?.name || "小红书社区";
   contact.sourceCharacterCardId = role?.sourceCharacterCardId;
   contact.contextCharacterCardIds = [...new Set(roles.flatMap(role => role.sourceCharacterCardId || []))];
@@ -58,6 +60,8 @@ export function buildRedTaskContact(state: RedState, nickname: string, roles: Re
     "name 是角色名称，nickname 是独立账号昵称，必须不同。所有发帖、评论和回复的 author 使用昵称，authorId 必须引用人物 id。已保存的昵称保持不变；缺少昵称的已勾选角色需在 actors 中用其原 id 声明 {id,name,nickname}，只补昵称，不改角色身份、人设或头像。回复时用对方的社交昵称称呼对方，不把角色名称当作账号名。",
     task.kind === "feed" ? [
       "本次任务：增量生成 3 篇全新的小红书笔记，以及每篇 1~3 条自然评论。已有内容全部保留，不重复标题或改写同一篇旧帖子。",
+      `本次笔记生成目标：${JSON.stringify(topic ? { topic } : { category })}`,
+      topic ? "用户输入的想看内容是本次主题，优先于当前分类标签。所有新笔记的标题、正文、话题标签和评论都围绕该主题，category 按实际内容填写。" : category === "推荐" ? "用户选中推荐标签，结合会话上下文生成多样的推荐内容，category 按各篇实际内容填写。" : `用户选中 ${JSON.stringify(category)} 标签，所有新笔记及评论围绕该标签生成；每篇笔记的 category 必须填写 ${JSON.stringify(category)}，确保能在该标签下看到。`,
       roles.length ? "本批笔记必须混合至少一位已勾选角色和至少一位本次新创建的社区人物发帖。" : "未勾选角色，本批笔记由社区人物发帖，至少一位作者必须是本次新创建的独立人物。",
       "每篇正文约 100~250 个汉字，标题不超过 40 字。coverText 是简短的文字封面，coverTone 从限定值中选择，不生成图片或网址。内容、标签和所在地符合上下文；不要强行使用现实世界的地点或热点。",
       `只输出此格式的 JSON：${feedSchema}`,

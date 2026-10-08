@@ -9,6 +9,26 @@ const post = title => ({ authorId: "contact:friend", author: "奶糖", title, co
 const community = title => ({ id: `new:${title}`, name: `花店${title}`, personality: "北街花店的店员，温和开朗，喜欢水彩，说话简短。", profile: { bio: "日子会开花", age: 22, location: "北街" } });
 const batch = title => ({ actors: [community(title)], notes: [{ ...post(`${title}社区`), authorId: `new:${title}`, author: `花店${title}`, comments: [] }, post(title)] });
 const generate = (state, title, random = () => .8) => appendGeneratedRedFeed(state, JSON.stringify(batch(title)), roles, "小月", random);
+
+test("feed targets the selected label, with recommendation as the default", () => {
+  const prompt = task => buildRedTaskContact(emptyRedState(), "小月", roles, task).personality;
+  assert.match(prompt({ kind: "feed" }), /本次笔记生成目标：\{"category":"推荐"\}/);
+  for (const category of ["游戏", "穿搭", "直播", "短剧", "热点", "RED"]) {
+    const result = prompt({ kind: "feed", category, topic: "   " });
+    assert.ok(result.includes(`本次笔记生成目标：${JSON.stringify({ category })}`));
+    assert.ok(result.includes(`category 必须填写 ${JSON.stringify(category)}`));
+  }
+});
+
+test("custom feed topics override the selected label and stay within the input limit", () => {
+  const result = buildRedTaskContact(emptyRedState(), "小月", roles, { kind: "feed", category: "游戏", topic: "  古风婚礼穿搭和配色  " }).personality;
+  assert.match(result, /本次笔记生成目标：\{"topic":"古风婚礼穿搭和配色"\}/);
+  assert.match(result, /优先于当前分类标签/);
+  assert.doesNotMatch(result, /category 必须填写 "游戏"/);
+  const long = buildRedTaskContact(emptyRedState(), "小月", roles, { kind: "feed", topic: "画".repeat(501) }).personality;
+  const target = JSON.parse(long.match(/本次笔记生成目标：([^\n]+)/)[1]);
+  assert.equal(target.topic.length, 500);
+});
 test("generation appends new posts and comments, assigning stable random pool avatars", () => {
   const first = generate(emptyRedState(), "第一篇"); const second = generate(first, "第二篇", () => 0);
   assert.equal(first.notes.length, 2); assert.equal(second.notes.length, 4); assert.equal(second.comments.length, 2);
@@ -32,6 +52,7 @@ test("comment replies target the submitted snapshot and retry without duplicate 
   const task = { kind: "reply", noteId: note.id, commentId: comment.id };
   const request = buildRedTaskContact(state, "小月", roles, task);
   assert.match(request.personality, /奶糖是小月的绘画搭档/); assert.match(request.personality, /user-one/);
+  assert.doesNotMatch(request.personality, /本次笔记生成目标/);
   const output = JSON.stringify({ replies: [{ authorId: "contact:friend", content: "一起画吧" }] });
   const replied = appendGeneratedRedReplies(state, output, roles, "小月", task);
   assert.equal(replied.comments.at(-1).parentId, comment.id); assert.equal(replied.comments.at(-1).responseToId, comment.id);

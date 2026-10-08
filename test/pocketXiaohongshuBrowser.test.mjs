@@ -30,11 +30,12 @@ const upstream = createServer(async (request, response) => {
   else if (mode === "unselected") { mode = "success"; output = JSON.stringify({ notes: [{ authorId: "contact:friend", author: "奶糖", title: "未勾选角色的帖子", content: "不能保存" }] }); }
   else if (prompt.includes("本次任务：增量生成")) {
     round++;
+    const target = JSON.parse(prompt.match(/本次笔记生成目标：([^\n]+)/)[1]);
     output = JSON.stringify({ actors: [...allowed.filter(role => !role.nickname).map(role => ({ id: role.id, name: role.name, nickname: nicknames[role.name] })), { id: fresh().authorId, name: `许鹿${round}`, nickname: fresh().author, personality: "北街花店的店员，性格温柔慢热，喜欢水彩和植物，说话简短，有自己的生活，刚加入社区。", profile: { handle: `deer_${round}`, bio: "心里有光便是晴天\n每天都是值得纪念的日子", gender: "女", age: 22, location: "北街", following: 12, followers: 1083, receivedLikes: 3836, background: "ocean" } }], notes: [
       { ...author("奶糖"), title: `北街画画日常 ${round}`, content: `第${round}次去北街的草莓花园画画，记得带上水彩和画本。`, tags: ["草莓", "画画"], category: "生活", coverText: `今天\n也想和你\n一起画画`, coverTone: "mint", likes: 24, saves: 5, comments: [{ ...author("同桌"), content: `第${round}篇：这个画本真好看！`, likes: 2 }] },
       { ...author("薄荷"), title: `花园里的小事 ${round}`, content: `第${round}篇：浇完花，坐下来看看今天的云。`, tags: ["生活"], category: "情感", coverText: "慢慢来\n日子会开花", coverTone: "rose", comments: [{ ...author("街角咖啡"), content: "周末也想来看看花。" }] },
       { ...fresh(), title: `周末灵感 ${round}`, content: `第${round}篇：散步时发现了新的灵感，分享给喜欢日常的朋友。`, tags: ["周末"], category: "生活", coverText: "留一点时间\n给自己", coverTone: "cream", comments: [] },
-    ] });
+    ].map(note => target.topic ? { ...note, title: `${target.topic} · ${note.title}`, content: `${target.topic}。${note.content}`, tags: [target.topic] } : target.category !== "推荐" ? { ...note, category: target.category, tags: [target.category] } : note) });
   } else if (selectedMatch) {
     replies++; const author = prompt.match(/本次优先发言角色：([^。]+)/)?.[1] || "奶糖";
     output = JSON.stringify({ replies: [{ author, content: `生成回复 ${replies}：当然可以，一起去北街画画吧！`, likes: 0 }] });
@@ -87,7 +88,9 @@ try {
   const back = () => red.getByRole("button", { name: "返回小红书列表", exact: true }).click();
   const profile = () => red.getByRole("button", { name: "我", exact: true }).click();
   const checkbox = name => red.getByRole("checkbox", { name: `参与生成：${name}`, exact: true });
-  async function generate(expected) { await red.getByRole("button", { name: "生成小红书笔记", exact: true }).click(); await page.waitForFunction(count => document.querySelectorAll(".xhs-card").length === count, expected); await red.getByRole("button", { name: "生成小红书笔记", exact: true }).waitFor({ state: "visible" }); }
+  async function generate(expected, visibleCount = expected) { await red.getByRole("button", { name: "生成小红书笔记", exact: true }).click(); await page.waitForFunction(({ total, visible }) => JSON.parse(localStorage.getItem("renge_pocket_red_v1:red-one")).notes.length === total && document.querySelectorAll(".xhs-card").length === visible, { total: expected, visible: visibleCount }); await red.getByRole("button", { name: "生成小红书笔记", exact: true }).waitFor({ state: "visible" }); }
+  async function chooseCategory(name) { await red.getByRole("button", { name: "展开频道分类", exact: true }).click(); await red.locator(".xhs-category-picker").getByRole("button", { name, exact: true }).click(); }
+  const feedTarget = request => JSON.parse((request.body.messages || request.body.input).map(text).join("\n").match(/本次笔记生成目标：([^\n]+)/)[1]);
   async function comment(content) { await red.getByRole("button", { name: "说点什么...", exact: true }).click(); await red.getByRole("textbox", { name: "评论内容", exact: true }).fill(content); await red.getByRole("dialog").getByRole("button", { name: "发送", exact: true }).click(); }
   const waitReplies = count => page.waitForFunction(count => { const state = JSON.parse(localStorage.getItem("renge_pocket_red_v1:red-one")); return state.comments.filter(comment => comment.responseToId).length === count && state.pendingReplies.length === 0; }, count);
   async function sendMain(content) { const count = mainRequests.length; await page.getByPlaceholder("输入消息，可粘贴图片", { exact: true }).fill(content); await page.getByRole("button", { name: "发送", exact: true }).click(); await page.locator(".chat-message.assistant").filter({ hasText: mainReply }).nth(count).waitFor(); }
@@ -123,16 +126,30 @@ try {
   assert.match(firstRequest, /小月和奶糖约好周末去北街画画/); assert.match(firstRequest, /微信里约好了带草莓去画画/); assert.match(firstRequest, /草莓花园世界书/);
   assert.doesNotMatch(firstRequest, /DISABLED_RED_LORE|INACTIVE_RED_LORE|这是另一个会话|微信回复规则|UNCHECKED_ROLE_SETTING/);
   assert.equal(requests[0].body.model, "fixture-chat");
+  assert.deepEqual(feedTarget(requests[0]), { category: "推荐" });
   await phone.screenshot({ path: ".runtime/xiaohongshu-generated-home.png", animations: "disabled" });
   await sendMain("记住小红书刚生成的笔记"); const firstScope = mainRequests.at(-1).piSessionScope;
   assert.match(JSON.stringify(mainRequests.at(-1).request.messages), /小红书 · 草莓画画中/);
-  await generate(6); const second = await readState(); firstIds.forEach(id => assert.ok(second.notes.some(note => note.id === id)));
+  await chooseCategory("游戏");
+  assert.match(await red.getByRole("textbox", { name: "想看的小红书内容", exact: true }).getAttribute("placeholder"), /按游戏生成/);
+  await generate(6, 3); const second = await readState(); firstIds.forEach(id => assert.ok(second.notes.some(note => note.id === id)));
+  assert.deepEqual(feedTarget(requests.at(-1)), { category: "游戏" });
+  assert.ok(second.notes.slice(0, 3).every(note => note.category === "游戏"));
+  assert.equal(await red.getByRole("navigation", { name: "发现分类", exact: true }).getByRole("button", { name: "游戏", exact: true }).getAttribute("aria-pressed"), "true");
+  await phone.screenshot({ path: ".runtime/xiaohongshu-category-generation.png", animations: "disabled" });
   assert.match(JSON.stringify(requests.at(-1).body), /北街画画日常 1/); assert.match(JSON.stringify(requests.at(-1).body), /记住小红书刚生成的笔记/);
   assert.equal(second.notes.find(note => note.title === "北街画画日常 2").avatar, firstState.notes.find(note => note.title === "北街画画日常 1").avatar);
   await sendMain("第二轮笔记也记住"); assert.notEqual(mainRequests.at(-1).piSessionScope, firstScope);
+  await red.getByRole("textbox", { name: "想看的小红书内容", exact: true }).fill("  古风婚礼穿搭和配色  ");
   mode = "bad"; await red.getByRole("button", { name: "生成小红书笔记", exact: true }).click(); await red.getByRole("button", { name: "重试生成", exact: true }).waitFor();
+  assert.deepEqual(feedTarget(requests.at(-1)), { topic: "古风婚礼穿搭和配色" });
   assert.equal((await readState()).notes.length, 6); assert.equal(await red.getByText("不应部分保存", { exact: true }).count(), 0);
+  await red.getByRole("textbox", { name: "想看的小红书内容", exact: true }).fill("下一次想看甜品"); await chooseCategory("职场");
   await red.getByRole("button", { name: "重试生成", exact: true }).click(); await page.waitForFunction(() => document.querySelectorAll(".xhs-card").length === 9);
+  assert.deepEqual(feedTarget(requests.at(-1)), { topic: "古风婚礼穿搭和配色" });
+  assert.ok((await readState()).notes.slice(0, 3).every(note => note.content.includes("古风婚礼穿搭和配色")));
+  assert.equal(await red.getByRole("navigation", { name: "发现分类", exact: true }).getByRole("button", { name: "推荐", exact: true }).getAttribute("aria-pressed"), "true");
+  await red.getByRole("textbox", { name: "想看的小红书内容", exact: true }).fill("");
   await red.getByRole("button", { name: "打开笔记：北街画画日常 1", exact: true }).click();
   await red.getByRole("button", { name: "点赞笔记", exact: true }).click(); await red.getByRole("button", { name: "收藏笔记", exact: true }).click();
   await comment("我也想一起去北街画画"); await waitReplies(1);
@@ -175,6 +192,11 @@ try {
   const actorAvatars = (await readState()).actors.map(actor => actor.avatar);
   await page.evaluate(() => localStorage.setItem("renge-chat-right-sidebar-width", "260")); await page.reload(); await openPhone();
   assert.equal(await red.locator(".xhs-card").count(), 13); assert.deepEqual((await readState()).actors.map(actor => actor.avatar), actorAvatars);
+  assert.equal(await red.locator(".xhs-generation-toolbar").evaluate(node => node.scrollWidth <= node.clientWidth + 1), true);
+  const topicBounds = await red.getByRole("textbox", { name: "想看的小红书内容", exact: true }).boundingBox();
+  const generateBounds = await red.getByRole("button", { name: "生成小红书笔记", exact: true }).boundingBox();
+  assert.ok(topicBounds.width >= 80 && topicBounds.x + topicBounds.width <= generateBounds.x);
+  await phone.screenshot({ path: ".runtime/xiaohongshu-generation-toolbar-narrow.png", animations: "disabled" });
   await red.getByRole("button", { name: "打开笔记：北街画画日常 1", exact: true }).click();
   assert.equal(await red.getByRole("button", { name: "取消点赞笔记", exact: true }).count(), 1);
   assert.equal(await red.getByRole("button", { name: "取消收藏笔记", exact: true }).count(), 1);
@@ -321,7 +343,7 @@ try {
   assert.ok((await readState()).followed.includes("鹿鹿今天开花"));
   assert.deepEqual(dialogs, []);
   assert.deepEqual(pageErrors, []);
-  console.log("PASS: independent generated people and profiles, mixed authors, no-selection replies, persona persistence, private-message WeChat friend/chat/dedup/reload, avatar pool, role filtering, silent clear/cancellation, shared context, queued replies, Responses and narrow layout");
+  console.log("PASS: label and custom-topic generation, request snapshots on retry, narrow input toolbar, independent generated people and profiles, mixed authors, no-selection replies, persona persistence, private-message WeChat friend/chat/dedup/reload, avatar pool, role filtering, silent clear/cancellation, shared context, queued replies, Responses and narrow layout");
 } catch (error) {
   if (page && !page.isClosed()) { await page.screenshot({ path: ".runtime/xiaohongshu-test-failure.png" }); console.error((await page.locator("body").innerText()).slice(-3500)); }
   throw error;
