@@ -4,7 +4,7 @@ import { emptyPocketState, makePocketContact, normalizePocketState, getPocketCon
 import { characterPhoneView, commitCharacterPhoneView, applyCharacterPhoneGeneration, characterPhoneGenerationPrompt, syncCharacterPhoneWallets } from "../src/pocketCharacterPhone.ts";
 import { buildPocketHistoryMessage, buildSharedPocketConversation, formatPocketContextMessage, syncPocketContext } from "../src/pocketPhoneContext.ts";
 import { applyPocketContextChanges, recordPocketContextDeletions } from "../src/pocketPhoneSync.ts";
-import { appendPocketAttachment, settlePocketTransfer } from "../src/pocketWechatMedia.ts";
+import { appendPocketAttachment, settlePocketTransfer, pocketReplyMessages } from "../src/pocketWechatMedia.ts";
 
 const user = { nickname: "小月", bio: "喜欢画画", avatarImage: "/touxiang/20.png" };
 const actor = name => makePocketContact({ name, personality: "{{char}}是{{user}}的朋友", avatar: "/touxiang/9.png", greeting: "", sourceLabel: "角色卡", sourceCharacterCardId: `card-${name}` });
@@ -27,6 +27,29 @@ test("synchronized views retain original reply segmentation, manual line breaks 
   assert.equal(getPocketConversationBubbles(mirror, mirror.messages[3]).length, 1);
   const npc = actor("同事"); npc.messages = [message("npc-reply", "assistant", { content: "好呀\n明天见" })];
   assert.equal(getPocketConversationBubbles(npc, npc.messages[0]).length, 2);
+});
+
+test("generated user replies split in both phones immediately and after reload, with compatibility for older generation markers", () => {
+  const root = seed(); const owner = root.contacts[0];
+  const view = characterPhoneView(root, owner.id, user);
+  const texts = ["是，真的", "我什么时候拿这种事逗过你", "你不信的话我可以再说一遍", "你先把月考考完，我不走"];
+  const replies = pocketReplyMessages(texts, new Date().toISOString(), "角色消息");
+  view.contacts[0].messages.push(...replies);
+  assert.deepEqual(getPocketConversationBubbles(view.contacts[0], replies[0]), texts);
+  const saved = commitCharacterPhoneView(root, owner.id, view);
+  assert.equal(saved.contacts[0].messages.at(-1).role, "user");
+  assert.deepEqual(getPocketConversationBubbles(saved.contacts[0], saved.contacts[0].messages.at(-1)), texts);
+  const legacy = message("legacy", "user", { content: texts.join("\n"), replyContextMessageId: "" });
+  saved.contacts[0].messages.push(legacy);
+  const restored = normalizePocketState(JSON.parse(JSON.stringify(saved)));
+  const mirror = characterPhoneView(restored, owner.id, user).contacts[0];
+  for (const item of restored.contacts[0].messages.slice(-2)) {
+    assert.equal(item.generated, true);
+    assert.deepEqual(getPocketConversationBubbles(restored.contacts[0], item), texts);
+    assert.deepEqual(getPocketConversationBubbles(mirror, mirror.messages.find(message => message.id === item.id)), texts);
+  }
+  const edited = applyPocketContextChanges(restored, [{ contactId: owner.id, messageId: legacy.id, content: "修改第一段\n修改第二段" }]);
+  assert.deepEqual(getPocketConversationBubbles(edited.contacts[0], edited.contacts[0].messages.at(-1)), ["修改第一段", "修改第二段"]);
 });
 
 test("owner phone projects a single canonical user chat and writes both directions without duplicate records", () => {

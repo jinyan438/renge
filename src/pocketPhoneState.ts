@@ -7,6 +7,7 @@ export type PocketMessage = {
   content: string;
   createdAt: string;
   replyContextMessageId?: string;
+  generated?: true;
   speaker?: Pick<PocketContact, "id" | "name" | "avatar">;
   attachment?: PocketAttachment;
 };
@@ -107,6 +108,8 @@ function normalizeMessages(value: unknown, group = false): PocketMessage[] {
     const attachment = normalizePocketAttachment(message.attachment);
     return [{ id: text(message.id), role: message.role, content: text(message.content), createdAt: text(message.createdAt),
       ...(typeof message.replyContextMessageId === "string" ? { replyContextMessageId: message.replyContextMessageId } : {}),
+      // Older simulated user replies kept their generation marker when mirrored.
+      ...(message.generated === true || message.role === "user" && typeof message.replyContextMessageId === "string" ? { generated: true as const } : {}),
       ...(speaker ? { speaker } : {}),
       ...(attachment ? { attachment } : {}),
     }];
@@ -214,9 +217,9 @@ export function getPocketGenerationMode(contact: Pick<PocketContact, "messages">
   return getPocketPendingMessages(contact).length ? "reply" : "proactive";
 }
 
-export function getPocketMessageBubbles(message: Pick<PocketMessage, "role" | "content" | "attachment">): string[] {
+export function getPocketMessageBubbles(message: Pick<PocketMessage, "role" | "content" | "attachment" | "generated">): string[] {
   if (message.attachment) return [message.content];
-  if (message.role === "user" || /```|~~~/.test(message.content)) return [message.content];
+  if (message.role === "user" && !message.generated || /```|~~~/.test(message.content)) return [message.content];
   const lines = message.content.replace(/\r\n?/g, "\n").split("\n").map(line => line.trim()).filter(Boolean);
   // Keep lists, tables and other structured replies together.
   if (lines.some(line => /^(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|\|)/.test(line))) return [message.content];
@@ -225,7 +228,7 @@ export function getPocketMessageBubbles(message: Pick<PocketMessage, "role" | "c
 
 export function getPocketConversationBubbles(conversation: PocketConversation, message: PocketMessage): string[] {
   // Mirroring changes which side sends a message, but its original formatting
-  // still applies: role replies split, while the user's manual line breaks stay.
+  // still applies: generated replies split, while manual line breaks stay.
   const role = !isPocketGroup(conversation) && conversation.syncedOwnerId
     ? message.role === "user" ? "assistant" : "user"
     : message.role;

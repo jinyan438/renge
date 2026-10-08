@@ -106,7 +106,7 @@ export function pocketReplyMessages(texts: string[], createdAt: string, replyCon
     if (image) attachment = normalizePocketAttachment({ kind: "image", description: image[1] });
     if (voice) attachment = normalizePocketAttachment({ kind: "voice", seconds: Number(voice[1]), text: voice[2] });
     if (location) attachment = normalizePocketAttachment({ kind: "location", name: location[1], address: location[2] });
-    return { id, role: "assistant", content: attachment ? pocketAttachmentContent(attachment, id) : content, createdAt, replyContextMessageId, ...(attachment ? { attachment } : {}), ...(speaker ? { speaker: { id: speaker.id, name: speaker.nickname || speaker.name, avatar: speaker.avatar } } : {}) };
+    return { id, role: "assistant", generated: true, content: attachment ? pocketAttachmentContent(attachment, id) : content, createdAt, replyContextMessageId, ...(attachment ? { attachment } : {}), ...(speaker ? { speaker: { id: speaker.id, name: speaker.nickname || speaker.name, avatar: speaker.avatar } } : {}) };
   });
 }
 export function applyPocketTransferReplies(state: PocketState, conversationId: string, replies: PocketMessage[]): PocketState {

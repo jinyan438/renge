@@ -27,6 +27,7 @@ try {
   owner.messages = [{ id: "real-user", role: "user", content: "用户手机发出的消息", createdAt: now }, { id: "real-owner", role: "assistant", content: "角色已有的回复", createdAt: now }];
   owner.messages.push({ id: "multiline-user", role: "user", content: "用户手动换行第一段\n用户手动换行第二段", createdAt: now },
     { id: "multiline-owner", role: "assistant", content: "角色回复第一段\n角色回复第二段\n角色回复第三段\n角色回复第四段", createdAt: now });
+  owner.messages.push({ id: "legacy-generated-user", role: "user", content: "旧用户生成第一段\n旧用户生成第二段", createdAt: now, replyContextMessageId: "multiline-owner" });
   const other = makePocketContact({ name: "薄荷", avatar: "/touxiang/10.png", personality: "喜欢园艺", greeting: "", sourceLabel: "自定义角色" });
   const state = { ...emptyPocketState(), contacts: [owner, other] };
   browser = await chromium.launch({ headless: true });
@@ -58,7 +59,7 @@ try {
   }
   async function openContact(name) { await phone.locator(".pocket-contact-row").filter({ hasText: name }).click(); }
   async function queue(content) { await phone.locator(".pocket-composer textarea").fill(content); await phone.getByRole("button", { name: "发送消息", exact: true }).click(); }
-  async function generate() { await phone.getByRole("button", { name: "发送消息", exact: true }).click(); await phone.locator(".pocket-message.assistant").filter({ hasText: reply }).last().waitFor(); }
+  async function generate() { await phone.getByRole("button", { name: "发送消息", exact: true }).click(); await phone.locator(".pocket-message.assistant").filter({ hasText: reply.split("\n").at(-1) }).last().waitFor(); }
   async function backToOwnHome() { await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click(); await phone.getByRole("button", { name: "选择其他角色", exact: true }).click(); await phone.getByRole("button", { name: "返回手机桌面", exact: true }).click(); }
 
   await page.goto(server.url); await openPhone(); await openOwner();
@@ -84,8 +85,9 @@ try {
   assert.equal(await phone.locator(".pocket-message.user").filter({ hasText: "角色已有的回复" }).count(), 1);
   assert.equal(await phone.locator('[data-message-id="multiline-owner"] .pocket-message.user').count(), 4);
   assert.equal(await phone.locator('[data-message-id="multiline-user"] .pocket-message.assistant').count(), 1);
+  assert.equal(await phone.locator('[data-message-id="legacy-generated-user"] .pocket-message.assistant').count(), 2);
   assert.equal(await phone.getByRole("button", { name: "编辑联系人", exact: true }).isDisabled(), true);
-  await queue("从角色手机发给用户"); reply = "用户模拟回复角色"; await generate();
+  await queue("从角色手机发给用户"); reply = "用户模拟回复角色\n用户生成第二段\n用户生成第三段\n用户生成第四段"; await generate();
   const mirrorRequest = requests.at(-1).request.messages;
   assert.match(mirrorRequest[0].content, /扮演「小月」/); assert.match(mirrorRequest[0].content, /与「奶糖」/);
   assert.equal(mirrorRequest.filter(message => message.content === "从角色手机发给用户").length, 1);
@@ -93,11 +95,16 @@ try {
   assert.equal(mirrorRequest.find(message => message.content === "用户手机发出的消息").role, "assistant");
   let saved = await read();
   assert.equal(saved.contacts[0].messages.at(-2).role, "assistant"); assert.equal(saved.contacts[0].messages.at(-1).role, "user");
+  const simulatedId = saved.contacts[0].messages.at(-1).id;
+  assert.equal(saved.contacts[0].messages.at(-1).generated, true);
+  assert.equal(await phone.locator(`[data-message-id="${simulatedId}"] .pocket-message.assistant`).count(), 4);
   assert.equal(saved.characterPhones[owner.id].contacts.length, 1);
   await phone.screenshot({ path: ".runtime/character-phone-sync.png", animations: "disabled" });
   await backToOwnHome(); await phone.getByRole("button", { name: "打开微信", exact: true }).click(); await openContact("奶糖");
   assert.equal(await phone.locator('[data-message-id="multiline-owner"] .pocket-message.assistant').count(), 4);
   assert.equal(await phone.locator('[data-message-id="multiline-user"] .pocket-message.user').count(), 1);
+  assert.equal(await phone.locator('[data-message-id="legacy-generated-user"] .pocket-message.user').count(), 2);
+  assert.equal(await phone.locator(`[data-message-id="${simulatedId}"] .pocket-message.user`).count(), 4);
   assert.equal(await phone.locator(".pocket-message.assistant").filter({ hasText: "从角色手机发给用户" }).count(), 1);
   assert.equal(await phone.locator(".pocket-message.user").filter({ hasText: "用户模拟回复角色" }).count(), 1);
   await queue("用户手机的新消息");
@@ -111,6 +118,8 @@ try {
   await openContact("小月");
   assert.equal(await phone.locator('[data-message-id="multiline-owner"] .pocket-message.user').count(), 4);
   assert.equal(await phone.locator('[data-message-id="multiline-user"] .pocket-message.assistant').count(), 1);
+  assert.equal(await phone.locator('[data-message-id="legacy-generated-user"] .pocket-message.assistant').count(), 2);
+  assert.equal(await phone.locator(`[data-message-id="${simulatedId}"] .pocket-message.assistant`).count(), 4);
   await phone.getByRole("button", { name: "返回微信列表", exact: true }).click();
   await openContact("阿禾");
   assert.equal(await phone.locator(".pocket-message.assistant").filter({ hasText: "同事收到角色的微信" }).count(), 1);
