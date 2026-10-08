@@ -82,8 +82,8 @@ test("shared history keeps every monologue but injects only the latest hormone s
     assert.ok(request[0].content.includes(item.effect));
     assert.ok(request[0].content.includes(item.update));
   }
-  assert.match(request[0].content, /性激素[\s\S]*作为较慢变化的状态，普通聊天通常不变/);
-  assert.match(request[0].content, /甲状腺素[\s\S]*普通聊天和一时心动通常不变/);
+  assert.match(request[0].content, /9 项的变化幅度均可大可小/);
+  assert.doesNotMatch(request[0].content, /较慢变化|缓慢变化|普通交流优先维持|通常不变/);
   assert.ok(history.filter(message => getPocketMessageIdentity(message).kind).every(message => buildPocketHistoryMessage(message, a.id).role === "user"));
 });
 

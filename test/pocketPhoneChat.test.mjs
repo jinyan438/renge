@@ -134,6 +134,8 @@ test("single and quiet group updates resend all hormone effects/directions with 
       assert.match(task, /没有新的触发依据就保持不变/);
       assert.match(task, /同一情绪、重复话题.*不能每次都继续累加/);
       assert.match(task, /不要把增量当作新值/);
+      assert.match(task, /9 项的变化幅度均可大可小/);
+      assert.doesNotMatch(task, /较慢变化|缓慢变化|普通交流优先维持|通常不变/);
       assert.match(task, /"dopamine":61/);
       assert.doesNotMatch(task, /"dopamine":12|previousHormones/);
       assert.deepEqual(request.messages.slice(0, history.length), history);
