@@ -709,7 +709,7 @@ type ChatMessage = {
   createdAt: string;
   sender?: ChatSenderIdentity;
   attachments?: ChatAttachment[];
-  source?: "heartbeat" | "roleplay-greeting" | "wechat" | "xiaohongshu" | "calendar";
+  source?: "heartbeat" | "roleplay-greeting" | "wechat" | "xiaohongshu" | "notes" | "calendar";
   choiceRequest?: ChatChoiceRequest;
   toolVisualization?: ToolVisualization;
   dialogueRewritePending?: boolean;
@@ -2795,7 +2795,7 @@ function normalizeChatMessage(
     ...(attachments.length > 0 ? { attachments } : {}),
     ...(rawMessage.source === "heartbeat" ||
     rawMessage.source === "roleplay-greeting" ||
-    rawMessage.source === "wechat" || rawMessage.source === "xiaohongshu" || rawMessage.source === "calendar"
+    rawMessage.source === "wechat" || rawMessage.source === "xiaohongshu" || rawMessage.source === "notes" || rawMessage.source === "calendar"
       ? { source: rawMessage.source }
       : {}),
     ...(role === "assistant" && choiceRequest ? { choiceRequest } : {}),
@@ -37897,7 +37897,7 @@ export function App() {
                       )
                     : null;
                 const messageName =
-                  (pocketIdentity ? `${pocketIdentity.app === "xiaohongshu" ? "小红书" : "微信"} · ${pocketIdentity.groupName ? `${pocketIdentity.groupName} · ` : ""}${message.role === "user" ? pocketIdentity.app === "xiaohongshu" ? pocketIdentity.userName : `${pocketIdentity.userName} → ${pocketIdentity.contactName}` : pocketIdentity.contactName}` : "") || tavernMessageName || (message.role === "user"
+                  (pocketIdentity ? `${pocketIdentity.app === "notes" ? "便签" : pocketIdentity.app === "xiaohongshu" ? "小红书" : "微信"} · ${pocketIdentity.groupName ? `${pocketIdentity.groupName} · ` : ""}${message.role === "user" ? pocketIdentity.app ? pocketIdentity.userName : `${pocketIdentity.userName} → ${pocketIdentity.contactName}` : pocketIdentity.contactName}` : "") || tavernMessageName || (message.role === "user"
                     ? getChatSenderName(messageSender, personas, userProfile)
                     : chatMode === "roleplay" && activeSessionRoleplayCard
                       ? activeSessionRoleplayCard.name

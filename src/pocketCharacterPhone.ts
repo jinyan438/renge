@@ -23,6 +23,7 @@ export function characterPhoneView(root: PocketState, ownerId: string, user: Poc
     innerState: phone?.userInnerState, innerHistory: phone?.userInnerHistory,
   };
   return { ...emptyPocketState(), settings: root.settings, wallet: phone?.wallet || { balance: 0, bills: [] },
+    notes: phone?.notes || [],
     wechatClock: root.wechatClock,
     deletedContextMessages: root.deletedContextMessages,
     contacts: [userContact, ...(phone?.contacts || []).map(contact => ({ ...contact, phoneOwner,
@@ -65,7 +66,7 @@ export function commitCharacterPhoneView(root: PocketState, ownerId: string, vie
     characterPhones: { ...root.characterPhones, [ownerId]: {
       contacts: view.contacts.filter(contact => !contact.syncedOwnerId).map(strip),
       groups: view.groups.map(group => { const { phoneOwner: _owner, ...saved } = group; return saved; }),
-      wallet: view.wallet, userInnerState: mirror.innerState, userInnerHistory: mirror.innerHistory,
+      wallet: view.wallet, notes: view.notes || [], userInnerState: mirror.innerState, userInnerHistory: mirror.innerHistory,
     } },
   };
 }

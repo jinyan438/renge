@@ -1,0 +1,34 @@
+.pocket-icon-notes { background: linear-gradient(#f4c94c 0 30%, #fffdf3 30%); color: #d6a52b; }
+.pocket-icon-notes::after { content: ""; position: absolute; inset: 45% 18% 16%; background: repeating-linear-gradient(transparent 0 6px, #e4dfd2 6px 7px); }
+.pocket-screen.app-notes { background: #fcfbf7; color: #30302c; }
+.pocket-notes { display: flex; flex: 1; flex-direction: column; width: 100%; min-width: 0; min-height: 0; color: #282824; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+.pocket-notes-header { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; padding: 5px 12px 8px; gap: 8px; }
+.pocket-notes-header button, .pocket-notes-toolbar button { display: flex; align-items: center; justify-content: center; gap: 2px; padding: 5px; background: transparent; color: #bb8a15; font-size: 12px; min-height: 32px; }
+.pocket-notes-list { min-height: 0; flex: 1; padding: 0 16px 15px; }
+.pocket-notes-list h2 { margin: 0 0 12px; color: #1d1d19; font-size: 26px; font-weight: 750; }
+.pocket-notes-search { display: flex; align-items: center; gap: 7px; padding: 9px 10px; background: #eeede7; border-radius: 9px; color: #96948b; margin-bottom: 17px; }
+.pocket-notes-search input { flex: 1; width: 100%; min-width: 0; border: 0; background: transparent; color: #333; font-size: 12px; }
+.pocket-notes-rows { overflow: hidden; border-radius: 11px; background: #fff; }
+.pocket-panel .pocket-note-row { display: block; width: 100%; padding: 12px; text-align: left; border-bottom: 1px solid #eeece4; background: #fff; }
+.pocket-note-row:last-child { border-bottom: 0; }
+.pocket-note-row strong { display: block; font-size: 13px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #272722; }
+.pocket-note-row > span { display: flex; gap: 8px; margin-top: 4px; font-size: 10px; color: #969289; min-width: 0; }
+.pocket-note-row time { flex-shrink: 0; max-width: 50%; overflow: hidden; white-space: nowrap; }
+.pocket-note-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: inherit; }
+.pocket-notes-toolbar { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; padding: 7px 17px; border-top: 1px solid #efede4; }
+.pocket-notes-toolbar > span { flex: 1; text-align: center; font-size: 10px; color: #8e8a80; padding-left: 30px; }
+.pocket-note-detail { flex: 1; min-height: 0; padding: 6px 19px 24px; background: #fff; }
+.pocket-note-detail > time { display: block; text-align: center; margin-bottom: 18px; color: #a29d91; font-size: 10px; }
+.pocket-note-detail h2 { margin: 0 0 12px; font-size: 18px; line-height: 1.5; overflow-wrap: anywhere; }
+.pocket-note-detail p { margin: 0; font-size: 13px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pocket-note-editor { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 10px 18px; background: #fff; }
+.pocket-note-editor input, .pocket-note-editor textarea { display: block; width: 100%; box-sizing: border-box; border: 0; outline-offset: 0; background: transparent; color: #282824; }
+.pocket-note-editor input { padding: 5px 0 12px; font-size: 18px; font-weight: 650; }
+.pocket-note-editor textarea { flex: 1; min-height: 170px; resize: none; padding: 3px 0; font-size: 13px; line-height: 1.85; }
+.pocket-notes-empty { display: grid; justify-items: center; gap: 9px; margin: 44px 8px; color: #bcb39b; text-align: center; }
+.pocket-notes-empty p { margin: 0; font-size: 14px; color: #8c8678; }
+.pocket-notes-empty small { font-size: 11px; line-height: 1.7; }
+.pocket-notes-progress { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 8px 14px; background: #faf1d9; color: #a07a28; font-size: 11px; }
+.pocket-notes-progress button { display: flex; align-items: center; gap: 3px; padding: 3px 6px; color: #9a711b; border-radius: 6px; background: #fff9e8; }
+.pocket-notes-error { padding: 9px 14px; margin: 0; color: #b34f45; font-size: 11px; line-height: 1.6; }
+.large-text .pocket-note-detail p, .large-text .pocket-note-editor textarea { font-size: 15px; }

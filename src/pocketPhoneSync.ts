@@ -3,6 +3,7 @@ import { emptyPocketState, getPocketConversations, normalizePocketState, pocketS
 import { applyRedContextChanges } from "./pocketXiaohongshuContext";
 import { normalizeRedState, RED_CONTEXT_ID, redStorageKey } from "./pocketXiaohongshuState";
 import { getPocketContextRecords } from "./pocketPhoneInner";
+import { applyPocketNoteChanges, pocketNotesContextId } from "./pocketNotesState";
 
 export type PocketContextChange = { contactId: string; messageId: string; content: string | null };
 const messageKey = (contactId: string, messageId: string) => JSON.stringify([contactId, messageId]);
@@ -100,12 +101,15 @@ export function applyPocketContextChanges(state: PocketState, changes: PocketCon
   const characterPhones = state.characterPhones ? Object.fromEntries(Object.entries(state.characterPhones).map(([id, phone]) => {
     const ids = new Set([...phone.contacts, ...phone.groups].map(contact => contact.id));
     const relevant = changes.filter(change => ids.has(change.contactId));
-    if (!relevant.length) return [id, phone];
+    const noteChanges = changes.filter(change => change.contactId === pocketNotesContextId(id));
+    const previousNotes = phone.notes || [];
+    const notes = applyPocketNoteChanges(previousNotes, noteChanges);
+    if (!relevant.length && !noteChanges.length) return [id, phone];
     const base = { ...emptyPocketState(), contacts: phone.contacts, groups: phone.groups };
     const next = applyPocketContextChanges(base, relevant);
-    if (next === base) return [id, phone];
+    if (next === base && notes === previousNotes) return [id, phone];
     nestedChanged = true;
-    return [id, { ...phone, contacts: next.contacts, groups: next.groups }];
+    return [id, { ...phone, contacts: next.contacts, groups: next.groups, notes }];
   })) : undefined;
   return nestedChanged || deletedContextMessages !== state.deletedContextMessages || contacts.some((contact, index) => contact !== state.contacts[index]) || groups.some((group, index) => group !== state.groups[index])
     ? { ...state, contacts, groups, deletedContextMessages, ...(characterPhones ? { characterPhones } : {}) } : state;

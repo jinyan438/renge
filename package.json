@@ -23,7 +23,8 @@
     "test:pocket-wechat": "tsx --test test/pocketWechatMedia.test.mjs && node test/pocketWechatBrowser.test.mjs",
     "test:pocket-character-phone": "tsx --test test/pocketCharacterPhone.test.mjs && node --experimental-strip-types test/pocketCharacterPhoneBrowser.test.mjs",
     "test:pocket-wechat-clock": "tsx --test test/pocketWechatClock.test.mjs && node --experimental-strip-types test/pocketWechatClockBrowser.test.mjs",
-    "test:pocket-calendar": "tsx --test test/pocketCalendar.test.mjs && node --experimental-strip-types test/pocketCalendarBrowser.test.mjs"
+    "test:pocket-calendar": "tsx --test test/pocketCalendar.test.mjs && node --experimental-strip-types test/pocketCalendarBrowser.test.mjs",
+    "test:pocket-notes": "tsx --test test/pocketNotes.test.mjs && node --experimental-strip-types test/pocketNotesBrowser.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.87.1",

@@ -1,6 +1,7 @@
 import { normalizePocketInnerHistory, normalizePocketInnerState, type PocketInnerEntry, type PocketInnerState } from "./pocketPhoneInner.ts";
 import { normalizePocketAttachment, normalizePocketWallet, type PocketAttachment, type PocketWallet } from "./pocketWechatMedia.ts";
 import { normalizePocketWechatClock, type PocketWechatClock } from "./pocketWechatClock.ts";
+import { normalizePocketNotes, pocketNotesConversation, type PocketNote } from "./pocketNotesState.ts";
 
 export type PocketMessage = {
   id: string;
@@ -26,7 +27,7 @@ export type PocketContact = {
   sourceXiaohongshuActorId?: string;
   messages: PocketMessage[];
   createdAt: string;
-  app?: "xiaohongshu";
+  app?: "xiaohongshu" | "notes";
   contextCharacterCardIds?: string[];
   innerState?: PocketInnerState;
   innerHistory?: PocketInnerEntry[];
@@ -35,7 +36,7 @@ export type PocketContact = {
 };
 
 export type PocketPhoneOwner = Pick<PocketContact, "id" | "name" | "nickname" | "avatar" | "personality" | "sourceCharacterCardId"> & { userName?: string };
-export type PocketCharacterPhone = { contacts: PocketContact[]; groups: PocketGroup[]; wallet: PocketWallet; userInnerState?: PocketInnerState; userInnerHistory?: PocketInnerEntry[] };
+export type PocketCharacterPhone = { contacts: PocketContact[]; groups: PocketGroup[]; wallet: PocketWallet; notes?: PocketNote[]; userInnerState?: PocketInnerState; userInnerHistory?: PocketInnerEntry[] };
 
 export type PocketGroupMember = Pick<PocketContact, "id" | "name" | "nickname" | "avatar" | "personality" | "sourceCharacterCardId" | "innerState">;
 export function pocketDisplayName(person: { name: string; nickname?: string }) { return person.nickname?.trim() || person.name; }
@@ -58,7 +59,7 @@ export function pocketSpeakerName(conversation: PocketConversation, message: Pic
 export function getPocketConversations(state: PocketState): PocketConversation[] {
   return [...state.contacts, ...state.groups, ...Object.entries(state.characterPhones || {}).flatMap(([id, phone]) => {
     const owner = state.contacts.find(contact => contact.id === id);
-    return owner ? [...phone.contacts, ...phone.groups].map(contact => ({ ...contact, phoneOwner: owner })) : [];
+    return owner ? [...[...phone.contacts, ...phone.groups].map(contact => ({ ...contact, phoneOwner: owner })), pocketNotesConversation(owner, phone.notes || [])] : [];
   })];
 }
 
@@ -71,7 +72,7 @@ export type PocketSettings = {
   largeText: boolean;
 };
 export type PocketContextDeletion = { contactId: string; messageId: string };
-export type PocketState = { version: 1; contacts: PocketContact[]; groups: PocketGroup[]; settings: PocketSettings; wallet: PocketWallet; deletedContextMessages: PocketContextDeletion[]; characterPhones?: Record<string, PocketCharacterPhone>; wechatClock?: PocketWechatClock };
+export type PocketState = { version: 1; contacts: PocketContact[]; groups: PocketGroup[]; settings: PocketSettings; wallet: PocketWallet; notes?: PocketNote[]; deletedContextMessages: PocketContextDeletion[]; characterPhones?: Record<string, PocketCharacterPhone>; wechatClock?: PocketWechatClock };
 export type PocketGenerationMode = "reply" | "proactive";
 export type PocketRequestMessage = Pick<PocketMessage, "role" | "content"> | { role: "system"; content: string };
 
@@ -196,7 +197,7 @@ export function normalizePocketState(value: unknown): PocketState {
       if (!record(phone) || !state.contacts.some(contact => contact.id === ownerId)) continue;
       const normalized = normalizePocketState({ version: 1, contacts: phone.contacts, groups: phone.groups, wallet: phone.wallet });
       const unique = <T extends PocketConversation>(items: T[]) => items.filter(item => { if (usedIds.has(item.id)) return false; usedIds.add(item.id); return true; });
-      state.characterPhones[ownerId] = { contacts: unique(normalized.contacts), groups: unique(normalized.groups), wallet: normalized.wallet,
+      state.characterPhones[ownerId] = { contacts: unique(normalized.contacts), groups: unique(normalized.groups), wallet: normalized.wallet, notes: normalizePocketNotes(phone.notes),
         userInnerState: normalizePocketInnerState(phone.userInnerState), userInnerHistory: normalizePocketInnerHistory(phone.userInnerHistory, safePocketAvatar) };
     }
   }
