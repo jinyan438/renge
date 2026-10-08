@@ -114,11 +114,11 @@ test("format repair is bounded and never substitutes defaults or hides configura
 test("single and quiet group updates resend all hormone effects/directions with only the latest saved baseline, including format completion", async t => {
   const previous = { monologue: "已经很安心", hormones: { ...hormones, dopamine: 61 }, previousHormones: { ...hormones, dopamine: 12 }, updatedAt: "" };
   const requests = [];
-  const modelLevels = { ...hormones, dopamine: 59, oxytocin: 68, cortisol: 30 };
+  const modelLevels = { ...hormones, dopamine: 83, oxytocin: 79, cortisol: 19 };
   let group = false;
   t.mock.method(globalThis, "fetch", async (_, options) => {
     requests.push(JSON.parse(options.body).request);
-    return replyResponse(requests.length % 2 ? "抱抱就好" : JSON.stringify({ ...(group ? { speak: false } : {}), texts: group ? [] : ["抱抱就好"], innerMonologue: "有他陪着已经很安心，不必再期待什么", hormones: modelLevels }));
+    return replyResponse(requests.length % 2 ? "抱抱就好" : JSON.stringify({ ...(group ? { speak: false } : {}), texts: group ? [] : ["抱抱就好"], innerMonologue: "有他陪着很安心，却又期待下一次见面", hormones: modelLevels }));
   });
   for (const quiet of [false, true]) {
     group = quiet;
@@ -135,6 +135,12 @@ test("single and quiet group updates resend all hormone effects/directions with 
       assert.match(task, /同一情绪、重复话题.*不能每次都继续累加/);
       assert.match(task, /不要把增量当作新值/);
       assert.match(task, /9 项的变化幅度均可大可小/);
+      assert.match(task, /明确变化可为 5~12.*强烈变化可为 13~25.*状态反转可为 26~40/);
+      assert.match(task, /区间是强弱参考，不是固定配方或硬限制/);
+      assert.match(task, /接近 0 或 100 时以剩余空间为准/);
+      assert.match(task, /每项都需要自己的升降依据/);
+      assert.match(task, /GABA 由是否真的放松决定/);
+      assert.match(task, /不能因为想黏着对方就增加性激素/);
       assert.doesNotMatch(task, /较慢变化|缓慢变化|普通交流优先维持|通常不变/);
       assert.match(task, /"dopamine":61/);
       assert.doesNotMatch(task, /"dopamine":12|previousHormones/);
@@ -143,6 +149,9 @@ test("single and quiet group updates resend all hormone effects/directions with 
     assert.match(requests.at(-1).messages.at(-1).content, /同一轮格式补全.*只从最新已保存基线更新一次/);
     assert.deepEqual(turn.innerState.hormones, modelLevels);
     assert.deepEqual(turn.innerState.previousHormones, previous.hormones);
+    assert.equal(turn.innerState.hormones.dopamine - turn.innerState.previousHormones.dopamine, 22);
+    assert.equal(turn.innerState.hormones.cortisol - turn.innerState.previousHormones.cortisol, -31);
+    assert.equal(turn.innerState.hormones.gaba, previous.hormones.gaba);
     assert.equal(turn.speak, !group);
   }
   assert.equal(requests.length, 4);
