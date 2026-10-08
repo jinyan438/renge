@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Flag, Heart, History, ImagePlus, ListFilter, MessageCircle, MoreHorizontal, Music2, PencilLine, Plus, Search, Smile, Sparkles, Square, Star, Users, VolumeX, X } from "lucide-react";
 import { DEFAULT_POCKET_AVATAR, DEFAULT_POCKET_USER_AVATAR } from "./pocketPhoneState";
-import { emptyRedState, normalizeRedState, redStorageKey, safeRedImage, toggleRedItem, type RedComment, type RedNote, type RedState } from "./pocketXiaohongshuState";
+import { emptyRedState, normalizeRedState, redStorageKey, safeRedImage, toggleRedItem, type RedActor, type RedComment, type RedNote, type RedState } from "./pocketXiaohongshuState";
+import { PocketXiaohongshuPerson } from "./PocketXiaohongshuPerson";
 import { appendGeneratedRedFeed, appendGeneratedRedReplies, buildRedTaskContact, getRedRoleChoices, selectedRedRoles, syncRedRoleAvatars, type RedRole, type RedTask } from "./pocketXiaohongshuGeneration";
 import { applyRedContextChanges, clearRedContent, redContextConversation } from "./pocketXiaohongshuContext";
 import { subscribePocketContextChanges } from "./pocketPhoneSync";
@@ -10,12 +11,13 @@ import type { PocketContextSync, PocketConversationBuilder } from "./pocketPhone
 import "./pocket-xiaohongshu.css";
 
 type View = "feed" | "search" | "profile" | "messages" | "history" | "market";
-type Sheet = "menu" | "share" | "publish" | "comment" | null;
+type Sheet = "menu" | "share" | "publish" | "comment" | "person" | null;
 type Props = {
   sessionId: string; nickname: string; bio: string; avatar: string; roles: RedRole[];
   provider: PocketProvider | undefined; modelId: string;
   onBuildConversation: PocketConversationBuilder; onSyncContext: PocketContextSync;
   onSettings: () => void; onExit: () => void;
+  onMessage: (actor: RedActor) => void;
 };
 const channels = ["推荐", "RED", "热点", "直播", "短剧", "穿搭"];
 const categories = ["推荐", "游戏", "生活", "职场", "情感", "穿搭"];
@@ -42,7 +44,7 @@ async function readPhoto(file: File): Promise<string> {
   return canvas.toDataURL("image/jpeg", .78);
 }
 
-export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, provider, modelId, onBuildConversation, onSyncContext, onSettings, onExit }: Props) {
+export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, provider, modelId, onBuildConversation, onSyncContext, onSettings, onExit, onMessage }: Props) {
   const storageKey = redStorageKey(sessionId);
   const [state, setState] = useState<RedState>(() => {
     try { return normalizeRedState(JSON.parse(localStorage.getItem(storageKey) || "null")); } catch { return emptyRedState(); }
@@ -61,6 +63,9 @@ export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, pro
   const [category, setCategory] = useState("推荐");
   const [categoryPicker, setCategoryPicker] = useState(false);
   const [noteId, setNoteId] = useState("");
+  const [personId, setPersonId] = useState("");
+  const personOriginsRef = useRef<{ noteId: string; scroll: number; returnPerson: string }[]>([]);
+  const noteReturnPersonRef = useRef("");
   const [slide, setSlide] = useState(0);
   const [query, setQuery] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
@@ -87,6 +92,7 @@ export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, pro
   const selfAvatar = safeRedImage(avatar) ? avatar : DEFAULT_POCKET_USER_AVATAR;
   const notes = state.notes;
   const note = notes.find(item => item.id === noteId);
+  const person = state.actors.find(actor => actor.id === personId);
   const allComments = state.comments;
   const noteComments = allComments.filter(comment => comment.noteId === noteId);
   const countComments = (item: RedNote) => state.comments.filter(comment => comment.noteId === item.id).length;
@@ -123,12 +129,12 @@ export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, pro
   const generationContextKey = JSON.stringify([provider?.id, modelId, generationRoles]);
   useEffect(() => { controllerRef.current?.abort(new Error("模型或角色设定已变化，请重试生成。")); }, [generationContextKey]);
   useEffect(() => {
-    if (controllerRef.current || !generationRoles.length) return;
+    if (controllerRef.current) return;
     const id = state.pendingReplies.find(id => !failedReplyIds.includes(id));
     const comment = state.comments.find(comment => comment.id === id);
     if (comment) void generate({ kind: "reply", noteId: comment.noteId, commentId: comment.id });
   }, [state.pendingReplies, generation, failedReplyIds, generationContextKey]);
-  useEffect(() => { if (!noteId && feedRef.current) feedRef.current.scrollTop = feedScroll.current; }, [noteId]);
+  useEffect(() => { if (!noteId && feedRef.current) feedRef.current.scrollTop = feedScroll.current; }, [noteId, personId]);
   useEffect(() => {
     if (!sheet) return;
     const element = sheetRef.current; if (!element) return;
@@ -156,12 +162,12 @@ export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, pro
     const timeout = setTimeout(() => controller.abort(new Error("等待有点久，请重试生成。")), 120000);
     try {
       const snapshot = stateRef.current;
-      const contact = buildRedTaskContact(snapshot, nickname, generationRoles, task);
+      const contact = buildRedTaskContact(snapshot, nickname, generationRoles, task, roles);
       const request = onBuildConversation(sessionId, contact, { nickname, bio }, "proactive");
       const reply = await requestPocketReply(provider, modelId, request, controller.signal, task.kind === "feed" ? 6144 : 2048);
       controller.signal.throwIfAborted();
       if (!mountedRef.current || revision !== contentRevisionRef.current) return;
-      update(previous => task.kind === "feed" ? appendGeneratedRedFeed(previous, reply, generationRoles, nickname) : appendGeneratedRedReplies(previous, reply, generationRoles, nickname, task));
+      update(previous => task.kind === "feed" ? appendGeneratedRedFeed(previous, reply, generationRoles, nickname, Math.random, roles) : appendGeneratedRedReplies(previous, reply, generationRoles, nickname, task, Math.random, roles));
       if (task.kind === "feed") { setTopTab("发现"); setCategory("推荐"); navigate("feed"); feedRef.current?.scrollTo(0, 0); notify("新笔记已生成"); }
       else {
         const target = stateRef.current.comments.find(comment => comment.id === task.commentId);
@@ -178,13 +184,31 @@ export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, pro
     }
   }
 
-  function navigate(next: View) { setNoteId(""); setView(next); setCategoryPicker(false); feedScroll.current = 0; }
+  function navigate(next: View) { setPersonId(""); personOriginsRef.current = []; noteReturnPersonRef.current = ""; setNoteId(""); setView(next); setCategoryPicker(false); feedScroll.current = 0; }
+  function openPerson(id: string | undefined, name: string) {
+    if (id === "self" || name === nickname) { navigate("profile"); return; }
+    const actor = state.actors.find(actor => actor.id === id || actor.name === name);
+    if (!actor || actor.id === personId) return;
+    personOriginsRef.current.push({ noteId, scroll: detailRef.current?.scrollTop || 0, returnPerson: noteReturnPersonRef.current });
+    if (feedRef.current) feedScroll.current = feedRef.current.scrollTop;
+    setPersonId(actor.id);
+  }
+  function backFromPerson() {
+    const origin = personOriginsRef.current.pop();
+    setPersonId(""); setNoteId(origin?.noteId || ""); noteReturnPersonRef.current = origin?.returnPerson || "";
+    requestAnimationFrame(() => { if (detailRef.current) detailRef.current.scrollTop = origin?.scroll || 0; });
+  }
+  function backFromNote() {
+    if (noteReturnPersonRef.current) { setPersonId(noteReturnPersonRef.current); setNoteId(personOriginsRef.current.at(-1)?.noteId || ""); noteReturnPersonRef.current = ""; }
+    else setNoteId("");
+  }
   function clearAll() {
     contentRevisionRef.current++;
     controllerRef.current?.abort(); controllerRef.current = null;
     setGeneration(null); setFailure(null); setFailedReplyIds([]);
     if (toastTimer.current) clearTimeout(toastTimer.current);
     setToast(""); setNoteId(""); setSheet(null); setReplyTarget(null); setCommentText(""); setExpanded([]);
+    setPersonId(""); personOriginsRef.current = []; noteReturnPersonRef.current = "";
     setQuery(""); setSearchTerm(""); setDraftTitle(""); setDraftContent(""); setDraftImages([]); setPublishError("");
     setProfileTab("笔记"); setTopTab("发现"); setCategory("推荐"); setCategoryPicker(false); feedScroll.current = 0;
     update(clearRedContent);
@@ -195,6 +219,7 @@ export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, pro
     update(previous => ({ ...previous, selectedRoleIds: toggleRedItem(previous.selectedRoleIds, id) }));
   }
   function openNote(item: RedNote) {
+    noteReturnPersonRef.current = personId; setPersonId("");
     feedScroll.current = feedRef.current?.scrollTop || 0;
     setNoteId(item.id); setSlide(0); setExpanded([]); setCommentSort("default"); setReplyTarget(null); setCommentText("");
     update(previous => ({ ...previous, history: [...previous.history.filter(id => id !== item.id), item.id].slice(-100) }));
@@ -254,13 +279,13 @@ export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, pro
         {item.images.length ? <img className="xhs-card-cover" src={item.images[0]} alt={item.title} loading="lazy" decoding="async" /> : <div className={`xhs-text-cover tone-${item.coverTone || "cream"}`}><span>“</span><strong>{item.coverText || item.title}</strong><i /></div>}
         <h3>{item.title}</h3>
       </button>
-      <div className="xhs-card-meta"><button type="button" className="xhs-card-author" onClick={() => openNote(item)}><RedAvatar src={item.avatar} name={item.author} /><span>{item.author}</span></button><button className={`xhs-card-like${state.liked.includes(item.id) ? " is-liked" : ""}`} type="button" aria-label={`${state.liked.includes(item.id) ? "取消点赞" : "点赞"}：${item.title}`} aria-pressed={state.liked.includes(item.id)} onClick={() => like(item)}><Heart /><span>{item.likes + Number(state.liked.includes(item.id))}</span></button></div>
+      <div className="xhs-card-meta"><button type="button" className="xhs-card-author" aria-label={`查看${item.author}的主页`} onClick={() => openPerson(item.authorId, item.author)}><RedAvatar src={item.avatar} name={item.author} /><span>{item.author}</span></button><button className={`xhs-card-like${state.liked.includes(item.id) ? " is-liked" : ""}`} type="button" aria-label={`${state.liked.includes(item.id) ? "取消点赞" : "点赞"}：${item.title}`} aria-pressed={state.liked.includes(item.id)} onClick={() => like(item)}><Heart /><span>{item.likes + Number(state.liked.includes(item.id))}</span></button></div>
     </article>)}</div>)}</div> : <div className="xhs-empty"><Search size={34} /><p>暂无笔记</p><button type="button" onClick={() => { setTopTab("发现"); setCategory("推荐"); setSearchTerm(""); setQuery(""); navigate("feed"); }}>看看推荐</button></div>;
   }
   function renderComment(comment: RedComment, nested = false) {
     const liked = state.likedComments.includes(comment.id);
     return <div className={`xhs-comment${nested ? " is-reply" : ""}`} key={comment.id}>
-      <RedAvatar src={comment.avatar} name={comment.author} />
+      <button type="button" className="xhs-avatar-link" aria-label={`查看${comment.author}的主页`} onClick={() => openPerson(comment.actorId, comment.author)}><RedAvatar src={comment.avatar} name={comment.author} /></button>
       <div className="xhs-comment-body"><div className="xhs-comment-name"><span>{comment.author}</span>{comment.isAuthor && <b>作者</b>}</div><p>{comment.content}</p>
         <div className="xhs-comment-meta"><span>{comment.time} {comment.location}</span><button type="button" onClick={() => openComment(comment)}>回复</button><button type="button" className={`xhs-comment-like${liked ? " is-liked" : ""}`} aria-label={`${liked ? "取消点赞" : "点赞"}${comment.author}的评论`} aria-pressed={liked} onClick={() => update(previous => ({ ...previous, likedComments: toggleRedItem(previous.likedComments, comment.id) }))}><Heart /><span>{comment.likes + Number(liked) || ""}</span></button><button type="button" aria-label={`用表情回复${comment.author}`} onClick={() => { setCommentText(previous => previous + "😄"); openComment(comment); }}><Smile /></button></div>
         {comment.authorLiked && <small className="xhs-author-liked">作者赞过</small>}
@@ -289,8 +314,8 @@ export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, pro
       {generation && <div className="xhs-generation-status" role="status"><Sparkles /><span>{generation.kind === "feed" ? "正在生成新笔记…" : "正在生成评论回复…"}</span><button type="button" aria-label="停止小红书生成" onClick={() => controllerRef.current?.abort(new Error("已停止生成，点击重试继续。"))}><Square /></button></div>}
       {failure && <div className="xhs-generation-error" role="alert"><p>{failure.message}</p><button type="button" disabled={!!generation} onClick={() => void generate(failure.task)}>重试生成</button><button type="button" onClick={onSettings}>手机设置</button></div>}
       {!failure && failedReplyIds.some(id => state.pendingReplies.includes(id)) && <div className="xhs-generation-error"><p>有评论暂未收到回复</p><button type="button" disabled={!!generation} onClick={() => { const pending = state.comments.find(comment => failedReplyIds.includes(comment.id) && state.pendingReplies.includes(comment.id)); if (pending) void generate({ kind: "reply", noteId: pending.noteId, commentId: pending.id }); }}>重试回复</button></div>}
-      {note ? <>
-        <header className="xhs-note-header"><button type="button" aria-label="返回小红书列表" onClick={() => setNoteId("")}><ChevronLeft /></button><RedAvatar src={note.avatar} name={note.author} /><span className="xhs-note-author"><span>{note.author}</span>{note.music && <small><Music2 />{note.music}</small>}</span><button type="button" className={`xhs-follow${state.followed.includes(note.author) ? " is-followed" : ""}`} aria-pressed={state.followed.includes(note.author)} onClick={() => follow(note.author)}>{state.followed.includes(note.author) ? "已关注" : "关注"}</button><button type="button" aria-label="分享笔记" onClick={() => setSheet("share")}><RedShareIcon /></button></header>
+      {person ? <PocketXiaohongshuPerson key={person.id} actor={person} notes={visible.filter(item => item.authorId === person.id)} followed={state.followed.includes(person.name)} onBack={backFromPerson} onFollow={() => follow(person.name)} onMessage={() => onMessage(person)} onPersonality={() => setSheet("person")} renderNotes={renderCards} /> : note ? <>
+        <header className="xhs-note-header"><button type="button" aria-label="返回小红书列表" onClick={backFromNote}><ChevronLeft /></button><button type="button" className="xhs-avatar-link" aria-label={`查看${note.author}的主页`} onClick={() => openPerson(note.authorId, note.author)}><RedAvatar src={note.avatar} name={note.author} /></button><span className="xhs-note-author"><span>{note.author}</span>{note.music && <small><Music2 />{note.music}</small>}</span><button type="button" className={`xhs-follow${state.followed.includes(note.author) ? " is-followed" : ""}`} aria-pressed={state.followed.includes(note.author)} onClick={() => follow(note.author)}>{state.followed.includes(note.author) ? "已关注" : "关注"}</button><button type="button" aria-label="分享笔记" onClick={() => setSheet("share")}><RedShareIcon /></button></header>
         <div className="xhs-note-scroll" ref={detailRef}>
           {!note.images.length && <div className={`xhs-text-cover xhs-note-cover tone-${note.coverTone || "cream"}`}><span>“</span><strong>{note.coverText || note.title}</strong><i /></div>}
           {note.images.length > 0 && <div className="xhs-carousel" tabIndex={note.images.length > 1 ? 0 : undefined} aria-label={`笔记图片 ${slide + 1}/${note.images.length}`} onKeyDown={carouselKey} onTouchStart={event => { touchX.current = event.touches[0]?.clientX ?? null; }} onTouchEnd={event => { const end = event.changedTouches[0]?.clientX; if (touchX.current !== null && end !== undefined && Math.abs(end - touchX.current) > 35) setSlide(previous => Math.max(0, Math.min(note.images.length - 1, previous + (end < touchX.current! ? 1 : -1)))); touchX.current = null; }}>
@@ -311,7 +336,7 @@ export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, pro
         <footer className="xhs-interactions"><button className="xhs-say-something" type="button" onClick={() => openComment()}><PencilLine /><span>说点什么...</span></button><button type="button" className={state.liked.includes(note.id) ? "is-liked" : ""} aria-label={state.liked.includes(note.id) ? "取消点赞笔记" : "点赞笔记"} aria-pressed={state.liked.includes(note.id)} onClick={() => like(note)}><Heart /><span>{note.likes + Number(state.liked.includes(note.id))}</span></button><button type="button" className={state.saved.includes(note.id) ? "is-saved" : ""} aria-label={state.saved.includes(note.id) ? "取消收藏笔记" : "收藏笔记"} aria-pressed={state.saved.includes(note.id)} onClick={() => update(previous => ({ ...previous, saved: toggleRedItem(previous.saved, note.id) }))}><Star /><span>{note.saves + Number(state.saved.includes(note.id))}</span></button><button type="button" aria-label="查看评论" onClick={jumpToComments}><MessageCircle /><span>{countComments(note)}</span></button></footer>
       </> : <>
         {view === "feed" ? <><header className="xhs-feed-header"><button type="button" aria-label="小红书菜单" onClick={() => setSheet("menu")}><MessageCircle /></button><nav aria-label="首页频道">{["关注", "发现", "合肥"].map(label => <button type="button" key={label} className={topTab === label ? "is-active" : ""} aria-current={topTab === label ? "page" : undefined} onClick={() => { setTopTab(label); feedRef.current?.scrollTo(0, 0); }}>{label}</button>)}</nav><button type="button" aria-label="搜索小红书" onClick={() => navigate("search")}><Search /></button></header><div className="xhs-channels"><nav aria-label="发现分类">{[...new Set([...channels, ...(!channels.includes(category) ? [category] : [])])].map(label => <button type="button" key={label} className={category === label ? "is-active" : ""} aria-pressed={category === label} onClick={() => { setCategory(label); feedRef.current?.scrollTo(0, 0); }}>{label}</button>)}</nav><button type="button" aria-label="展开频道分类" aria-expanded={categoryPicker} onClick={() => setCategoryPicker(previous => !previous)}><ChevronDown /></button></div>{categoryPicker && <div className="xhs-category-picker">{categories.map(label => <button key={label} type="button" className={category === label ? "is-active" : ""} onClick={() => { setCategory(label); setCategoryPicker(false); }}>{label}</button>)}</div>}</> : view === "search" ? <form className="xhs-search-header" onSubmit={event => submitSearch(event)}><button type="button" aria-label="返回小红书首页" onClick={() => navigate("feed")}><ChevronLeft /></button><label><Search /><input autoFocus aria-label="搜索笔记" placeholder="搜索感兴趣的内容" maxLength={100} value={query} onChange={event => setQuery(event.target.value)} />{query && <button type="button" aria-label="清空搜索" onClick={() => { setQuery(""); setSearchTerm(""); }}><X /></button>}</label><button type="submit">搜索</button></form> : <header className="xhs-page-header"><button type="button" aria-label="返回小红书首页" onClick={() => navigate("feed")}><ChevronLeft /></button><h2>{view === "profile" ? "我" : view === "history" ? "浏览记录" : view === "market" ? "市集" : "消息"}</h2>{view === "profile" ? <button type="button" className="xhs-clear-button" onClick={clearAll}>清空</button> : <button type="button" aria-label="小红书菜单" onClick={() => setSheet("menu")}><MoreHorizontal /></button>}</header>}
-        {view === "feed" && <div className="xhs-generation-toolbar"><button type="button" className="xhs-role-shortcut" aria-label="选择生成角色" onClick={() => navigate("profile")}><Users /></button><button type="button" className="xhs-red-button" disabled={!!generation || !generationRoles.length} onClick={() => void generate({ kind: "feed" })} aria-label="生成小红书笔记"><Sparkles />{generation?.kind === "feed" ? "生成中…" : "生成"}</button></div>}
+        {view === "feed" && <div className="xhs-generation-toolbar"><button type="button" className="xhs-role-shortcut" aria-label="选择生成角色" onClick={() => navigate("profile")}><Users /></button><button type="button" className="xhs-red-button" disabled={!!generation} onClick={() => void generate({ kind: "feed" })} aria-label="生成小红书笔记"><Sparkles />{generation?.kind === "feed" ? "生成中…" : "生成"}</button></div>}
         <div className="xhs-feed-scroll" ref={feedRef}>
           {view === "profile" && <><div className="xhs-profile"><RedAvatar src={selfAvatar} name={nickname} /><div><h2>{nickname}</h2><span>小红书号：renge</span></div><p>记录生活里的点点滴滴 ✨</p><div className="xhs-profile-stats"><span><b>{state.followed.length}</b>关注</span><span><b>{state.notes.length}</b>笔记</span><span><b>{state.liked.length + state.saved.length}</b>赞过与收藏</span></div></div>
             <section className="xhs-role-picker" aria-label="生成角色"><header><h3>生成角色</h3><span>已选 {generationRoles.length} 位</span></header><div>{roleChoices.map(role => <label className="xhs-role-choice" key={role.id}><input type="checkbox" checked={state.selectedRoleIds.includes(role.id)} onChange={() => selectRole(role.id)} aria-label={`参与生成：${role.name}`} /><RedAvatar src={role.avatar || state.actors.find(actor => actor.name === role.name)?.avatar || DEFAULT_POCKET_AVATAR} name={role.name} /><span><strong>{role.name}</strong></span></label>)}</div></section>
@@ -324,7 +349,8 @@ export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, pro
         <nav className="xhs-bottom-nav" aria-label="小红书导航"><button type="button" className={["feed", "search", "history"].includes(view) ? "is-active" : ""} aria-current={view === "feed" ? "page" : undefined} onClick={() => navigate("feed")}>首页</button><button type="button" className={view === "market" ? "is-active" : ""} aria-current={view === "market" ? "page" : undefined} onClick={() => navigate("market")}>市集</button><button className="xhs-publish-button" type="button" aria-label="发布笔记" onClick={() => { setPublishError(""); setSheet("publish"); }}><Plus /></button><button type="button" className={view === "messages" ? "is-active" : ""} aria-current={view === "messages" ? "page" : undefined} onClick={() => navigate("messages")}>消息{state.comments.length > 0 && <small>{state.comments.length}</small>}</button><button type="button" className={view === "profile" ? "is-active" : ""} aria-current={view === "profile" ? "page" : undefined} onClick={() => navigate("profile")}>我</button></nav>
       </>}
     </div>
-    {sheet && <div className="xhs-backdrop" onClick={event => { if (event.target === event.currentTarget && !loadingPhotos) setSheet(null); }}><div className={`xhs-sheet xhs-sheet-${sheet}`} ref={sheetRef} role="dialog" aria-modal="true" aria-labelledby="xhs-sheet-title"><header><h3 id="xhs-sheet-title">{sheet === "menu" ? "小红书" : sheet === "share" ? "分享笔记" : sheet === "publish" ? "发布笔记" : replyTarget ? `回复 ${replyTarget.author}` : "留下你的想法"}</h3><button type="button" aria-label="关闭弹层" disabled={loadingPhotos} onClick={() => setSheet(null)}><X /></button></header>
+    {sheet && <div className="xhs-backdrop" onClick={event => { if (event.target === event.currentTarget && !loadingPhotos) setSheet(null); }}><div className={`xhs-sheet xhs-sheet-${sheet}`} ref={sheetRef} role="dialog" aria-modal="true" aria-labelledby="xhs-sheet-title"><header><h3 id="xhs-sheet-title">{sheet === "person" ? person?.name : sheet === "menu" ? "小红书" : sheet === "share" ? "分享笔记" : sheet === "publish" ? "发布笔记" : replyTarget ? `回复 ${replyTarget.author}` : "留下你的想法"}</h3><button type="button" aria-label="关闭弹层" disabled={loadingPhotos} onClick={() => setSheet(null)}><X /></button></header>
+      {sheet === "person" && <p className="xhs-person-personality">{person?.personality}</p>}
       {sheet === "menu" && <div className="xhs-menu"><button type="button" onClick={() => { setSheet(null); setTopTab("关注"); navigate("feed"); }}><Users />我的关注<ChevronRight /></button><button type="button" onClick={() => { setSheet(null); navigate("history"); }}><History />浏览记录<ChevronRight /></button><button type="button" onClick={() => { setSheet(null); setProfileTab("收藏"); navigate("profile"); }}><Star />我的收藏<ChevronRight /></button><button type="button" onClick={onExit}><ArrowLeft />返回手机桌面<ChevronRight /></button><small>笔记和互动保存在当前会话的手机中</small></div>}
       {sheet === "share" && <div className="xhs-share-options"><button type="button" onClick={() => void copyNote()}><span><Copy /></span>复制笔记内容</button><button type="button" onClick={() => { if (!note) return; update(previous => ({ ...previous, saved: toggleRedItem(previous.saved, note.id) })); setSheet(null); notify(state.saved.includes(note.id) ? "已取消收藏" : "已收藏"); }}><span><Star /></span>{note && state.saved.includes(note.id) ? "取消收藏" : "收藏笔记"}</button></div>}
       {sheet === "comment" && <form className="xhs-comment-form" onSubmit={submitComment}><textarea aria-label="评论内容" placeholder={replyTarget ? `回复 ${replyTarget.author}…` : "友善评论，分享你的想法…"} maxLength={1000} rows={4} value={commentText} onChange={event => setCommentText(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><div><button type="button" aria-label="添加表情" onClick={() => setCommentText(previous => previous.slice(0, 998) + "😊")}><Smile /></button><span>{commentText.length}/1000</span><button className="xhs-red-button" type="submit" disabled={!commentText.trim()}>发送</button></div></form>}

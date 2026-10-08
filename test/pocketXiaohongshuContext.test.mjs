@@ -7,7 +7,7 @@ import { emptyRedState, normalizeRedState, RED_CONTEXT_ID } from "../src/pocketX
 import { normalizeWorldBook } from "../src/worldbookUtils.ts";
 
 const roles = [{ id: "friend", name: "奶糖", personality: "朋友" }];
-function fixture() { return appendGeneratedRedFeed(emptyRedState(), JSON.stringify({ notes: [{ author: "奶糖", title: "草莓花园", content: "和朋友在北街画画。", tags: ["草莓"], comments: [] }] }), roles, "小月"); }
+function fixture() { return appendGeneratedRedFeed(emptyRedState(), JSON.stringify({ actors: [{ id: "new:friend", name: "奶糖", personality: "朋友" }], notes: [{ author: "奶糖", title: "草莓花园", content: "和朋友在北街画画。", tags: ["草莓"], comments: [] }] }), [], "小月"); }
 const main = id => ({ id, role: "user", content: id, createdAt: "2026-10-08T01:00:00Z" });
 test("red notes share the ordered main timeline, label correctly and change the Pi context revision", () => {
   const state = fixture(); const contact = redContextConversation(state);
@@ -15,7 +15,7 @@ test("red notes share the ordered main timeline, label correctly and change the 
   assert.equal(history[1].source, "xiaohongshu"); assert.equal(getPocketMessageIdentity(history[1]).app, "xiaohongshu");
   assert.match(formatPocketContextMessage(history[1]), /小红书 · 奶糖/);
   const revision = pocketContextRevision(history);
-  const next = appendGeneratedRedFeed(state, JSON.stringify({ notes: [{ author: "奶糖", title: "第二篇", content: "新的日常" }] }), roles, "小月");
+  const next = appendGeneratedRedFeed(state, JSON.stringify({ actors: [{ id: "new:other", name: "新朋友", personality: "画画的朋友" }], notes: [{ author: "新朋友", title: "第二篇", content: "新的日常" }] }), [], "小月");
   history = syncPocketContext([...history, main("主会话B")], [contact], [redContextConversation(next)], "小月");
   assert.deepEqual(history.map(message => message.id), ["主会话A", history[1].id, "主会话B", history[3].id]);
   assert.match(history[3].content, /第二篇/); assert.notEqual(pocketContextRevision(history), revision);

@@ -1,6 +1,8 @@
 import { POCKET_AVATARS, safePocketAvatar, type PocketContextDeletion } from "./pocketPhoneState";
 
-export type RedActor = { id: string; name: string; avatar: string; personality: string; sourceCharacterCardId?: string };
+export const RED_PROFILE_TONES = ["ocean", "forest", "sunset", "violet"] as const;
+export type RedActorProfile = { handle: string; bio: string; gender: string; age: number; location: string; following: number; followers: number; receivedLikes: number; background: typeof RED_PROFILE_TONES[number] };
+export type RedActor = { id: string; name: string; avatar: string; personality: string; sourceCharacterCardId?: string; origin?: "community"; profile?: RedActorProfile };
 export type RedNote = {
   id: string; title: string; content: string; tags: string[]; images: string[];
   author: string; avatar: string; authorId?: string; generated?: boolean; createdAt?: string;
@@ -36,6 +38,12 @@ export function safeRedImage(value: unknown): value is string {
 export function redText(value: unknown, limit = 3000) { return typeof value === "string" ? value.trim().slice(0, limit) : ""; }
 export function redCount(value: unknown) { return typeof value === "number" && Number.isFinite(value) ? Math.min(1_000_000, Math.max(0, Math.floor(value))) : 0; }
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+export function redActorProfile(value: unknown, id: string): RedActorProfile {
+  const raw = record(value) ? value : {};
+  const handle = redText(raw.handle, 24);
+  return { handle: /^[a-z\d_]{3,24}$/i.test(handle) ? handle : `red_${id.replace(/[^a-z\d]/gi, "").slice(-8)}`, bio: redText(raw.bio, 200), gender: redText(raw.gender, 10), age: Math.min(120, redCount(raw.age)), location: redText(raw.location, 30), following: redCount(raw.following), followers: redCount(raw.followers), receivedLikes: redCount(raw.receivedLikes), background: RED_PROFILE_TONES.includes(raw.background as RedActorProfile["background"]) ? raw.background as RedActorProfile["background"] : "ocean" };
+}
+export function isRedCommunityActor(actor: Pick<RedActor, "id" | "origin">) { return actor.origin === "community" || actor.id.startsWith("community:") || /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(actor.id); }
 
 export function normalizeRedState(value: unknown): RedState {
   const state = emptyRedState();
@@ -49,7 +57,7 @@ export function normalizeRedState(value: unknown): RedState {
     const id = redText(actor.id, 100); const name = redText(actor.name, 30);
     if (!id || !name || seenActors.has(id)) continue;
     seenActors.add(id);
-    state.actors.push({ id, name, avatar: safeRedImage(actor.avatar) ? actor.avatar : randomRedAvatar(), personality: redText(actor.personality, 6000), ...(redText(actor.sourceCharacterCardId, 100) ? { sourceCharacterCardId: redText(actor.sourceCharacterCardId, 100) } : {}) });
+    state.actors.push({ id, name, avatar: safeRedImage(actor.avatar) ? actor.avatar : randomRedAvatar(), personality: redText(actor.personality, 6000), ...(redText(actor.sourceCharacterCardId, 100) ? { sourceCharacterCardId: redText(actor.sourceCharacterCardId, 100) } : {}), ...(isRedCommunityActor({ id, origin: actor.origin === "community" ? "community" : undefined }) ? { origin: "community" as const } : {}), ...(record(actor.profile) ? { profile: redActorProfile(actor.profile, id) } : {}) });
   }
   const seenNotes = new Set<string>();
   for (const note of Array.isArray(value.notes) ? value.notes : []) {

@@ -19,22 +19,24 @@ const upstream = createServer(async (request, response) => {
   if (mode === "fail") { mode = "success"; response.writeHead(503, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error: { message: "fixture temporarily unavailable" } })); return; }
   if (mode === "slow") { mode = "success"; await new Promise(resolve => { releaseSlow = resolve; }); }
   const prompt = (body.messages || body.input).map(text).join("\n");
-  const allowed = JSON.parse(prompt.match(/已勾选的生成角色及最新设定：(\[[^\n]*\])/)[1]);
-  const author = name => { const role = allowed.find(role => role.name === name) || allowed[0]; return { authorId: role.id, author: role.name }; };
+  const selectedMatch = prompt.match(/已勾选的生成角色及最新设定：(\[[^\n]*\])/);
+  const allowed = selectedMatch ? JSON.parse(selectedMatch[1]) : [];
+  const fresh = () => ({ authorId: `new:person-${round}`, author: `花店小鹿${round}` });
+  const author = name => { const role = allowed.find(role => role.name === name) || allowed[0]; return role ? { authorId: role.id, author: role.name } : fresh(); };
   let output;
   if (mode === "bad") { mode = "success"; output = '{"notes":[{"author":"奶糖","title":"不应部分保存","content":"有效"},{"title":"无效"}]}'; }
   else if (mode === "unselected") { mode = "success"; output = JSON.stringify({ notes: [{ authorId: "contact:friend", author: "奶糖", title: "未勾选角色的帖子", content: "不能保存" }] }); }
   else if (prompt.includes("本次任务：增量生成")) {
     round++;
-    output = JSON.stringify({ notes: [
+    output = JSON.stringify({ actors: [{ id: fresh().authorId, name: fresh().author, personality: "北街花店的店员，性格温柔慢热，喜欢水彩和植物，说话简短，有自己的生活，刚加入社区。", profile: { handle: `deer_${round}`, bio: "心里有光便是晴天\n每天都是值得纪念的日子", gender: "女", age: 22, location: "北街", following: 12, followers: 1083, receivedLikes: 3836, background: "ocean" } }], notes: [
       { ...author("奶糖"), title: `北街画画日常 ${round}`, content: `第${round}次去北街的草莓花园画画，记得带上水彩和画本。`, tags: ["草莓", "画画"], category: "生活", coverText: `今天\n也想和你\n一起画画`, coverTone: "mint", likes: 24, saves: 5, comments: [{ ...author("同桌"), content: `第${round}篇：这个画本真好看！`, likes: 2 }] },
-      { ...author("薄荷"), title: `花园里的小事 ${round}`, content: `第${round}篇：浇完花，坐下来看看今天的云。`, tags: ["生活"], category: "情感", coverText: "慢慢来\n日子会开花", coverTone: "rose", comments: [] },
-      { ...author("街角咖啡"), title: `周末灵感 ${round}`, content: `第${round}篇：散步时发现了新的灵感，分享给喜欢日常的朋友。`, tags: ["周末"], category: "生活", coverText: "留一点时间\n给自己", coverTone: "cream", comments: [] },
+      { ...author("薄荷"), title: `花园里的小事 ${round}`, content: `第${round}篇：浇完花，坐下来看看今天的云。`, tags: ["生活"], category: "情感", coverText: "慢慢来\n日子会开花", coverTone: "rose", comments: [{ ...author("街角咖啡"), content: "周末也想来看看花。" }] },
+      { ...fresh(), title: `周末灵感 ${round}`, content: `第${round}篇：散步时发现了新的灵感，分享给喜欢日常的朋友。`, tags: ["周末"], category: "生活", coverText: "留一点时间\n给自己", coverTone: "cream", comments: [] },
     ] });
-  } else {
+  } else if (selectedMatch) {
     replies++; const author = prompt.match(/本次优先发言角色：([^。]+)/)?.[1] || "奶糖";
     output = JSON.stringify({ replies: [{ author, content: `生成回复 ${replies}：当然可以，一起去北街画画吧！`, likes: 0 }] });
-  }
+  } else output = "微信里的新朋友回复：一起画画吧。";
   response.writeHead(200, { "Content-Type": "application/json" });
   response.end(JSON.stringify(request.url.endsWith("responses") ? { output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: output }] }] } : { choices: [{ message: { role: "assistant", content: output } }] }));
 });
@@ -92,7 +94,7 @@ try {
   await page.goto(server.url); await openPhone();
   assert.equal(await red.locator(".xhs-card").count(), 0);
   assert.equal(await red.getByText("为什么领导很少请假？", { exact: true }).count(), 0);
-  assert.equal(await red.getByRole("button", { name: "生成小红书笔记", exact: true }).isDisabled(), true);
+  assert.equal(await red.getByRole("button", { name: "生成小红书笔记", exact: true }).isDisabled(), false);
   await red.getByRole("button", { name: "选择生成角色", exact: true }).click();
   assert.equal(await checkbox("仅角色卡").count(), 0);
   assert.equal(await red.getByText("勾选的角色才会发帖、评论和回复", { exact: true }).count(), 0);
@@ -105,7 +107,9 @@ try {
   assert.equal(await red.getByText("先在「我」勾选生成角色", { exact: true }).count(), 0);
   assert.equal(await red.locator(".xhs-role-shortcut").innerText(), "");
   await generate(3); const firstState = await readState(); const firstIds = firstState.notes.map(note => note.id);
-  assert.equal(firstState.actors.length, 4);
+  assert.equal(firstState.actors.length, 5);
+  assert.ok(firstState.notes.some(note => note.authorId.startsWith("community:")));
+  assert.match(firstState.actors.find(actor => actor.origin === "community").personality, /花店/);
   assert.equal(firstState.actors.find(actor => actor.name === "奶糖").avatar, "/touxiang/1.png");
   assert.equal(firstState.actors.find(actor => actor.name === "薄荷").avatar, "/api/app-data/assets/fixture-mint.png");
   assert.equal(firstState.actors.find(actor => actor.name === "街角咖啡").avatar, "/api/app-data/assets/fixture-coffee.png");
@@ -181,7 +185,8 @@ try {
   assert.equal((await readState()).notes.length, 13);
   await red.getByRole("button", { name: "重试生成", exact: true }).click(); await page.waitForFunction(() => document.querySelectorAll(".xhs-card").length === 16);
   const deskState = await readState();
-  assert.deepEqual(deskState.notes.slice(0, 3).map(note => note.author), ["同桌", "同桌", "同桌"]);
+  assert.equal(deskState.notes.slice(0, 3).filter(note => note.author === "同桌").length, 2);
+  assert.ok(deskState.notes[0].authorId.startsWith("community:"));
   const pool = body => JSON.parse((body.messages || body.input).map(text).join("\n").match(/已勾选的生成角色及最新设定：(\[[^\n]*\])/)[1]);
   assert.deepEqual(pool(requests.at(-1).body).map(role => role.name), ["同桌"]);
   const replyCount = deskState.comments.filter(comment => comment.responseToId).length;
@@ -189,13 +194,13 @@ try {
   await comment("原作者取消勾选后只由已选角色回复"); await waitReplies(replyCount + 1);
   assert.equal((await readState()).comments.at(-1).author, "同桌");
   await back(); await profile(); await checkbox("同桌").uncheck(); await home();
-  assert.equal(await red.getByRole("button", { name: "生成小红书笔记", exact: true }).isDisabled(), true);
+  assert.equal(await red.getByRole("button", { name: "生成小红书笔记", exact: true }).isDisabled(), false);
   await red.getByRole("button", { name: "打开笔记：北街画画日常 1", exact: true }).click();
   const beforePending = requests.length;
-  await comment("全部取消勾选时保留评论等待角色回复");
-  await red.getByText("请先到「我」勾选参与生成的角色。", { exact: true }).waitFor(); assert.equal(requests.length, beforePending);
-  await back(); await profile(); await checkbox("影子").check(); await waitReplies(replyCount + 2);
-  assert.equal((await readState()).comments.at(-1).author, "影子");
+  await comment("全部取消勾选时社区人物仍可回复"); await waitReplies(replyCount + 2);
+  assert.equal(requests.length, beforePending + 1);
+  assert.ok((await readState()).comments.at(-1).actorId.startsWith("community:"));
+  await back(); await profile(); await checkbox("影子").check();
   await home(); mode = "slow";
   await red.getByRole("button", { name: "生成小红书笔记", exact: true }).click();
   while (!releaseSlow) await new Promise(resolve => setTimeout(resolve, 10));
@@ -207,7 +212,7 @@ try {
   assert.deepEqual(pool(requests.at(-1).body).map(role => role.name), ["同桌"]);
   await page.reload(); await openPhone(); await profile();
   assert.equal(await checkbox("同桌").isChecked(), true); assert.equal(await checkbox("奶糖").isChecked(), false); assert.equal(await checkbox("影子").isChecked(), false);
-  assert.deepEqual((await readState()).actors.filter(actor => actor.name !== "影子").map(actor => actor.avatar), actorAvatars);
+  assert.deepEqual((await readState()).actors.slice(0, actorAvatars.length).map(actor => actor.avatar), actorAvatars);
   await phone.screenshot({ path: ".runtime/xiaohongshu-role-picker-narrow.png", animations: "disabled" });
   const beforeClear = await readState();
   const otherSession = { ...beforeClear, selectedRoleIds: [] };
@@ -240,10 +245,62 @@ try {
   releaseSlow(); releaseSlow = undefined; await assertCleared();
   await page.reload(); await openPhone(); await profile(); await assertCleared();
   assert.equal(await checkbox("同桌").isChecked(), true);
+  await checkbox("同桌").uncheck(); await home(); await generate(3);
+  const generated = await readState(); const stranger = generated.actors.find(actor => actor.id === generated.notes[0].authorId);
+  assert.deepEqual(generated.selectedRoleIds, []);
+  assert.ok(generated.notes.every(note => note.authorId === stranger.id));
+  assert.ok(POCKET_AVATARS.includes(stranger.avatar)); assert.equal(stranger.profile.age, 22);
+  await red.getByRole("button", { name: `查看${stranger.name}的主页`, exact: true }).first().click();
+  assert.equal(await red.locator(".xhs-person-page").count(), 1); assert.equal(await red.locator(".xhs-bottom-nav").count(), 0);
+  assert.equal(await red.getByText("22岁", { exact: false }).count(), 1);
+  assert.equal(await red.locator(".xhs-person-identity img").getAttribute("src"), stranger.avatar);
+  assert.equal(await red.locator(".xhs-person-identity h2").evaluate(node => getComputedStyle(node).color), "rgb(255, 255, 255)");
+  assert.equal(await red.locator(".xhs-person-actions").evaluate(node => node.scrollWidth <= node.clientWidth + 1), true);
+  await red.getByRole("button", { name: "查看人物资料", exact: true }).click();
+  assert.match(await red.getByRole("dialog").innerText(), /北街花店的店员/);
+  await red.getByRole("button", { name: "关闭弹层", exact: true }).click();
+  await red.getByRole("button", { name: "收藏", exact: true }).click();
+  assert.equal(await red.locator(".xhs-card").count(), 0);
+  await red.getByRole("button", { name: "笔记", exact: true }).click();
+  await red.getByRole("button", { name: "搜索人物笔记", exact: true }).click();
+  await red.getByRole("textbox", { name: "搜索此人的笔记", exact: true }).fill(generated.notes[0].title);
+  assert.equal(await red.locator(".xhs-card").count(), 1);
+  await red.getByRole("button", { name: "搜索人物笔记", exact: true }).click();
+  await red.getByRole("button", { name: "关注", exact: true }).click();
+  assert.ok((await readState()).followed.includes(stranger.name));
+  await phone.screenshot({ path: ".runtime/xiaohongshu-person-narrow.png", animations: "disabled" });
+  await red.getByRole("button", { name: `打开笔记：${generated.notes[0].title}`, exact: true }).click();
+  await comment("没有勾选角色，也回复一下吧"); await waitReplies(1);
+  assert.equal((await readState()).comments.at(-1).actorId, stranger.id);
+  await red.locator(".xhs-note-header").getByRole("button", { name: `查看${stranger.name}的主页`, exact: true }).click();
+  await red.getByRole("button", { name: "返回人物主页上一页", exact: true }).click();
+  assert.equal(await red.locator(".xhs-note-header").count(), 1);
+  await back();
+  assert.equal(await red.locator(".xhs-person-page").count(), 1);
+  const contactCount = await page.evaluate(() => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:red-one")).contacts.length);
+  await red.getByRole("button", { name: "发私信", exact: true }).click();
+  await phone.locator(".pocket-wechat-header").getByText(stranger.name, { exact: true }).waitFor();
+  const friendship = await page.evaluate(() => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:red-one")));
+  assert.equal(friendship.contacts.length, contactCount + 1);
+  const newFriend = friendship.contacts.find(contact => contact.sourceXiaohongshuActorId === stranger.id);
+  assert.equal(newFriend.avatar, stranger.avatar); assert.match(newFriend.personality, /花店的店员/); assert.deepEqual(newFriend.messages, []);
+  await phone.getByRole("textbox", { name: `给${stranger.name}发消息`, exact: true }).fill("我们来聊聊水彩吧");
+  await phone.getByRole("button", { name: "发送消息", exact: true }).click();
+  await phone.getByRole("button", { name: "发送消息", exact: true }).click();
+  await phone.getByText("微信里的新朋友回复：一起画画吧。", { exact: true }).waitFor();
+  assert.match(JSON.stringify(requests.at(-1).body), /花店的店员/); assert.match(JSON.stringify(requests.at(-1).body), /草莓花园世界书/);
+  await page.evaluate(() => localStorage.setItem("renge-chat-right-sidebar-width", "430"));
+  await page.reload(); await openPhone();
+  await red.getByRole("button", { name: `查看${stranger.name}的主页`, exact: true }).first().click();
+  assert.equal(await red.locator(".xhs-person-identity img").getAttribute("src"), stranger.avatar);
+  await phone.screenshot({ path: ".runtime/xiaohongshu-person-profile.png", animations: "disabled" });
+  await red.getByRole("button", { name: "发私信", exact: true }).click();
+  await phone.locator(".pocket-wechat-header").getByText(stranger.name, { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:red-one")).contacts.length), contactCount + 1);
+  assert.equal(await phone.getByText("我们来聊聊水彩吧", { exact: true }).count(), 1);
   assert.deepEqual(dialogs, []);
-  await phone.screenshot({ path: ".runtime/xiaohongshu-cleared-profile.png", animations: "disabled" });
   assert.deepEqual(pageErrors, []);
-  console.log("PASS: no direct card roles or explanatory labels, one-click silent clear with main sync and reload, cancellation of stale notes/replies, role opt-in, own avatars, incremental generation, shared context, queued replies, Responses and narrow layout");
+  console.log("PASS: independent generated people and profiles, mixed authors, no-selection replies, persona persistence, private-message WeChat friend/chat/dedup/reload, avatar pool, role filtering, silent clear/cancellation, shared context, queued replies, Responses and narrow layout");
 } catch (error) {
   if (page && !page.isClosed()) { await page.screenshot({ path: ".runtime/xiaohongshu-test-failure.png" }); console.error((await page.locator("body").innerText()).slice(-3500)); }
   throw error;

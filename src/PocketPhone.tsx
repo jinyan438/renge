@@ -10,8 +10,9 @@ import { applyPocketContextChanges, recordPocketContextDeletions, subscribePocke
 import "./pocket-phone.css";
 import { PocketXiaohongshu } from "./PocketXiaohongshu";
 import { getRedRoles } from "./pocketXiaohongshuGeneration";
-import { normalizeRedState, redStorageKey } from "./pocketXiaohongshuState";
+import { normalizeRedState, redStorageKey, type RedActor } from "./pocketXiaohongshuState";
 import { redContextConversation } from "./pocketXiaohongshuContext";
+import { addRedWechatFriend } from "./pocketXiaohongshuFriend";
 
 type PocketPhoneProps = {
   sessionId: string; personas: AgentPersona[]; characterCards: CharacterCard[];
@@ -99,6 +100,11 @@ export function PocketPhone(props: PocketPhoneProps) {
   }
   function openWechat(nextTab: WechatTab = "chats") { setApp("wechat"); setTab(nextTab); setContactId(""); setQuery(""); }
   function openContact(contact: PocketConversation) { setContactId(contact.id); setApp("wechat"); setQuery(""); }
+  function openRedFriend(actor: RedActor) {
+    const result = addRedWechatFriend(stateRef.current, actor);
+    if (result.state !== stateRef.current) updateState(() => result.state);
+    openContact(result.contact);
+  }
   function addContact() { setEditorError(""); setEditor({ draft: { name: "", avatar: DEFAULT_POCKET_AVATAR, personality: "", greeting: "", sourceLabel: "自定义角色" } }); }
   function editContact(contact: PocketContact) { setEditorError(""); setEditor({ id: contact.id, draft: { name: contact.name, avatar: contact.avatar, personality: contact.personality, greeting: contact.greeting, sourceLabel: contact.sourceLabel, sourceCharacterCardId: contact.sourceCharacterCardId } }); }
   function editGroup(group?: PocketGroup) {
@@ -274,7 +280,7 @@ export function PocketPhone(props: PocketPhoneProps) {
                 <button className="pocket-app-icon" type="button" onClick={() => setApp("xiaohongshu")} aria-label="打开小红书"><span className="pocket-icon-xiaohongshu"><b>小红书</b></span><strong>小红书</strong></button>
                 <button className="pocket-app-icon" type="button" onClick={() => setApp("settings")} aria-label="打开手机设置"><span className="pocket-icon-settings"><Settings size={34} strokeWidth={1.7} /></span><strong>设置</strong></button>
               </div>
-            </div> : app === "xiaohongshu" ? <PocketXiaohongshu sessionId={props.sessionId} nickname={nickname} bio={props.userProfile.bio} avatar={props.userProfile.avatarImage} roles={getRedRoles(state.contacts, props.personas)} provider={selection.provider} modelId={selection.modelId} onBuildConversation={props.onBuildConversation} onSyncContext={props.onSyncContext} onSettings={() => setApp("settings")} onExit={() => setApp("home")} /> : app === "settings" ? <div className="pocket-settings pocket-scroll">
+            </div> : app === "xiaohongshu" ? <PocketXiaohongshu sessionId={props.sessionId} nickname={nickname} bio={props.userProfile.bio} avatar={props.userProfile.avatarImage} roles={getRedRoles(state.contacts, props.personas)} provider={selection.provider} modelId={selection.modelId} onBuildConversation={props.onBuildConversation} onSyncContext={props.onSyncContext} onMessage={openRedFriend} onSettings={() => setApp("settings")} onExit={() => setApp("home")} /> : app === "settings" ? <div className="pocket-settings pocket-scroll">
               <div className="pocket-app-heading"><button type="button" onClick={() => setApp("home")} aria-label="返回手机桌面"><ArrowLeft size={19} /></button><h2>设置</h2></div>
               <div className="pocket-profile-card"><Avatar avatar={props.userProfile.avatarImage || DEFAULT_POCKET_USER_AVATAR} name={nickname} self /><span><strong>{nickname}</strong></span><Sparkles size={19} /></div>
               <label className="pocket-settings-label" htmlFor="pocket-nickname">我的昵称</label><input id="pocket-nickname" className="pocket-input" maxLength={24} placeholder={props.userProfile.nickname || "小小的我"} value={state.settings.nickname} onChange={event => updateSettings({ nickname: event.target.value })} />

@@ -4,21 +4,23 @@ import { POCKET_AVATARS } from "../src/pocketPhoneState.ts";
 import { emptyRedState } from "../src/pocketXiaohongshuState.ts";
 import { appendGeneratedRedFeed, appendGeneratedRedReplies, buildRedTaskContact, getRedRoleChoices, getRedRoles, selectedRedRoles, syncRedRoleAvatars } from "../src/pocketXiaohongshuGeneration.ts";
 
-const roles = [{ id: "card:friend", name: "奶糖", personality: "{{char}}是{{user}}的绘画搭档", sourceCharacterCardId: "friend" }, { id: "persona:stranger", name: "路人", personality: "喜欢画画" }];
-const post = title => ({ authorId: "card:friend", author: "奶糖", title, content: `${title}正文`, tags: ["画画"], coverText: title, coverTone: "mint", avatar: "https://example.com/tracker.jpg", likes: 3, comments: [{ author: "路人", content: "好好看", likes: 2 }] });
-const generate = (state, title, random = () => .8) => appendGeneratedRedFeed(state, JSON.stringify({ notes: [post(title)] }), roles, "小月", random);
+const roles = [{ id: "contact:friend", name: "奶糖", personality: "{{char}}是{{user}}的绘画搭档", sourceCharacterCardId: "friend" }, { id: "persona:stranger", name: "路人", personality: "喜欢画画" }];
+const post = title => ({ authorId: "contact:friend", author: "奶糖", title, content: `${title}正文`, tags: ["画画"], coverText: title, coverTone: "mint", avatar: "https://example.com/tracker.jpg", likes: 3, comments: [{ author: "路人", content: "好好看", likes: 2 }] });
+const community = title => ({ id: `new:${title}`, name: `花店${title}`, personality: "北街花店的店员，温和开朗，喜欢水彩，说话简短。", profile: { bio: "日子会开花", age: 22, location: "北街" } });
+const batch = title => ({ actors: [community(title)], notes: [{ ...post(`${title}社区`), authorId: `new:${title}`, author: `花店${title}`, comments: [] }, post(title)] });
+const generate = (state, title, random = () => .8) => appendGeneratedRedFeed(state, JSON.stringify(batch(title)), roles, "小月", random);
 test("generation appends new posts and comments, assigning stable random pool avatars", () => {
   const first = generate(emptyRedState(), "第一篇"); const second = generate(first, "第二篇", () => 0);
-  assert.equal(first.notes.length, 1); assert.equal(second.notes.length, 2); assert.equal(second.comments.length, 2);
-  assert.deepEqual(second.notes[1], first.notes[0]); assert.equal(second.notes[0].avatar, first.notes[0].avatar);
+  assert.equal(first.notes.length, 2); assert.equal(second.notes.length, 4); assert.equal(second.comments.length, 2);
+  assert.deepEqual(second.notes[2], first.notes[0]); assert.equal(second.notes[0].avatar, first.notes[0].avatar);
   assert.ok(POCKET_AVATARS.includes(first.notes[0].avatar)); assert.notEqual(first.notes[0].avatar, post("x").avatar);
-  assert.equal(second.actors.length, 2); assert.equal(first.actors[0].sourceCharacterCardId, "friend");
+  assert.equal(second.actors.length, 4); assert.equal(first.actors.find(actor => actor.name === "奶糖").sourceCharacterCardId, "friend");
 });
 test("malformed batches are atomic, repeats are rejected and model output cannot impersonate the user", () => {
   const state = generate(emptyRedState(), "已有"); const snapshot = structuredClone(state);
   assert.throws(() => appendGeneratedRedFeed(state, '{"notes":[', roles, "小月"), /JSON/);
   assert.throws(() => appendGeneratedRedFeed(state, JSON.stringify({ notes: [post("新"), { ...post("坏"), content: "" }] }), roles, "小月"), /正文/);
-  assert.throws(() => generate(state, "已有"), /没有生成新内容/);
+  assert.throws(() => appendGeneratedRedFeed(state, JSON.stringify({ notes: [post("已有")] }), roles, "小月"), /没有生成新内容/);
   assert.throws(() => appendGeneratedRedFeed(state, JSON.stringify({ notes: [{ ...post("冒充"), authorId: "self", author: "小月" }] }), roles, "小月"), /替用户发言/);
   assert.deepEqual(state, snapshot);
 });
@@ -30,7 +32,7 @@ test("comment replies target the submitted snapshot and retry without duplicate 
   const task = { kind: "reply", noteId: note.id, commentId: comment.id };
   const request = buildRedTaskContact(state, "小月", roles, task);
   assert.match(request.personality, /奶糖是小月的绘画搭档/); assert.match(request.personality, /user-one/);
-  const output = JSON.stringify({ replies: [{ authorId: "card:friend", content: "一起画吧" }] });
+  const output = JSON.stringify({ replies: [{ authorId: "contact:friend", content: "一起画吧" }] });
   const replied = appendGeneratedRedReplies(state, output, roles, "小月", task);
   assert.equal(replied.comments.at(-1).parentId, comment.id); assert.equal(replied.comments.at(-1).responseToId, comment.id);
   assert.equal(replied.comments.at(-1).isAuthor, true); assert.deepEqual(replied.pendingReplies, [late.id]);
@@ -49,7 +51,7 @@ test("only checked roles enter the pool; saved authors cannot rejoin through fee
   const old = generate(emptyRedState(), "历史帖子");
   assert.equal(getRedRoleChoices(roles, old.actors).length, 2);
   assert.deepEqual(selectedRedRoles(old, roles), []);
-  assert.throws(() => buildRedTaskContact(old, "小月", [], { kind: "feed" }), /勾选/);
+  assert.match(buildRedTaskContact(old, "小月", [], { kind: "feed" }).personality, /未勾选角色/);
   const state = { ...old, selectedRoleIds: [roles[1].id] };
   const selected = selectedRedRoles(state, roles);
   assert.deepEqual(selected.map(role => role.name), ["路人"]);
@@ -64,7 +66,7 @@ test("unselected authors, commenters and replies are rejected atomically", () =>
   const state = generate(emptyRedState(), "历史帖子"); const snapshot = structuredClone(state);
   const selected = [roles[0]];
   assert.throws(() => appendGeneratedRedFeed(state, JSON.stringify({ notes: [post("新帖")] }), selected, "小月"), /未勾选/);
-  assert.throws(() => appendGeneratedRedFeed(state, JSON.stringify({ notes: [{ ...post("旧作者"), authorId: state.actors[1].id, author: "路人", comments: [] }] }), selected, "小月"), /未勾选/);
+  assert.throws(() => appendGeneratedRedFeed(state, JSON.stringify({ notes: [{ ...post("旧作者"), authorId: state.actors.find(actor => actor.name === "路人").id, author: "路人", comments: [] }] }), selected, "小月"), /未勾选/);
   const target = { id: "user", noteId: state.notes[0].id, actorId: "self", author: "小月", content: "你好", generated: false };
   const pending = { ...state, comments: [...state.comments, target], pendingReplies: [target.id] };
   const task = { kind: "reply", noteId: target.noteId, commentId: target.id };
@@ -78,7 +80,9 @@ test("existing contact and persona avatars override random avatars, including sa
   const image = "data:image/png;base64,aGVsbG8=";
   const candidates = getRedRoles([{ id: "friend", name: "奶糖", avatar: "/touxiang/7.png", personality: "朋友" }], [{ id: "stranger", name: "路人", avatarImage: image, description: "朋友", entryTypes: [] }]);
   assert.deepEqual(candidates.map(role => role.avatar), ["/touxiang/7.png", image]);
-  const result = appendGeneratedRedFeed(emptyRedState(), JSON.stringify({ notes: [{ ...post("已有头像"), authorId: "contact:friend" }] }), candidates, "小月", () => { throw new Error("有头像时不应随机分配"); });
+  let randomCalls = 0;
+  const result = appendGeneratedRedFeed(emptyRedState(), JSON.stringify(batch("已有头像")), candidates, "小月", () => { randomCalls++; return .8; });
+  assert.equal(randomCalls, 1);
   assert.equal(result.notes[0].avatar, "/touxiang/7.png"); assert.equal(result.comments[0].avatar, image);
   const restored = syncRedRoleAvatars(result, candidates.map(role => ({ ...role, avatar: image })));
   assert.equal(restored.notes[0].avatar, image);

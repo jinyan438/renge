@@ -29,6 +29,47 @@
 .xhs-app p, .xhs-app h2, .xhs-app h3 { margin: 0; letter-spacing: 0; }
 .xhs-main { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .xhs-avatar { display: block; width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
+.xhs-avatar-link { display: block; flex-shrink: 0; border-radius: 50% !important; }
+.app-xiaohongshu:has(.xhs-person-page) .pocket-status { color: #e1e6e9; background: #20384c; }
+.app-xiaohongshu:has(.background-forest) .pocket-status { background: #254439; }
+.app-xiaohongshu:has(.background-sunset) .pocket-status { background: #73494a; }
+.app-xiaohongshu:has(.background-violet) .pocket-status { background: #3e3656; }
+.xhs-person-page { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; background: linear-gradient(#20384c, #414946 340px); }
+.xhs-person-page.background-forest { background: linear-gradient(#254439, #414946 340px); }
+.xhs-person-page.background-sunset { background: linear-gradient(#73494a, #504b46 340px); }
+.xhs-person-page.background-violet { background: linear-gradient(#3e3656, #464550 340px); }
+.xhs-person-hero { padding: 0 14px 14px; color: #fff; }
+.xhs-person-hero > header { display: flex; align-items: center; justify-content: space-between; height: 42px; margin: 0 -4px 18px; }
+.xhs-person-hero > header button { display: grid; place-items: center; width: 32px; height: 32px; }
+.xhs-person-hero > header svg { width: 26px; height: 26px; }
+.xhs-person-identity { display: flex; align-items: center; gap: 15px; min-width: 0; }
+.xhs-person-identity > .xhs-avatar { width: 76px; height: 76px; border: 1px solid #ffffffb0; }
+.xhs-person-identity > div { min-width: 0; }
+.xhs-person-identity h2 { font-size: clamp(17px, 6cqw, 24px); font-weight: 500; overflow-wrap: anywhere; }
+.xhs-app .xhs-person-identity h2 { color: #fff; }
+.xhs-person-identity > div > span { display: flex; align-items: center; gap: 5px; margin-top: 5px; font-size: clamp(8px, 2.8cqw, 11px); color: #aebbbb; overflow-wrap: anywhere; }
+.xhs-person-identity button { display: grid; place-items: center; padding: 3px; }
+.xhs-person-identity button svg { width: 12px; height: 12px; }
+.xhs-person-stats { display: flex; gap: 23px; margin: 21px 0 13px; }
+.xhs-person-stats span { display: grid; gap: 2px; color: #d4dddd; font-size: 12px; }
+.xhs-person-stats b { color: #fff; font-size: 19px; font-weight: 600; line-height: 1.4; }
+.xhs-person-bio { font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
+.xhs-person-chips { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0 9px; }
+.xhs-person-chips span { padding: 2px 9px; border-radius: 20px; color: #ebeded; background: #ffffff1c; font-size: 10px; }
+.xhs-person-actions { display: flex; gap: 7px; margin-top: 9px; }
+.xhs-person-actions button { flex: 1; min-width: 0; border-radius: 7px; background: #ffffff15; padding: 8px 0; font-size: 14px; }
+.xhs-person-actions .xhs-person-follow { background: var(--xhs-red); }
+.xhs-person-actions button:last-child { flex: 0 0 32px; display: grid; place-items: center; }
+.xhs-person-actions svg { width: 18px; height: 18px; }
+.xhs-person-notes { min-height: 260px; background: #fafafa; border-radius: 13px 13px 0 0; overflow: hidden; }
+.xhs-person-notes > nav { display: flex; align-items: center; justify-content: space-between; padding: 0 16px; height: 46px; background: #fff; border-bottom: 1px solid #efefef; }
+.xhs-person-notes > nav > div { display: flex; gap: 25px; height: 100%; }
+.xhs-person-notes > nav > div button { position: relative; color: #999; font-size: 15px; }
+.xhs-person-notes > nav button.is-active { color: #222; font-weight: 600; }
+.xhs-person-notes > nav button.is-active::after { content: ""; position: absolute; bottom: 5px; left: 50%; width: 24px; height: 2px; border-radius: 2px; transform: translateX(-50%); background: var(--xhs-red); }
+.xhs-person-search { display: flex; align-items: center; gap: 7px; padding: 6px 12px; background: #fff; }
+.xhs-person-search input { width: 100%; min-width: 0; border: 0; border-radius: 16px; padding: 5px 9px; background: #f5f5f5; color: #222; font: inherit; }
+.xhs-person-personality { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; padding: 5px 0 16px; }
 .xhs-role-picker { padding: 14px 16px; background: #fff; border-top: 7px solid #fafafa; border-bottom: 7px solid #fafafa; }
 .xhs-role-picker > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .xhs-role-picker h3 { font-size: 13px; font-weight: 600; }
@@ -103,7 +144,7 @@
 .xhs-publish-button svg { width: 24px; height: 24px; stroke-width: 3; }
 .xhs-bottom-nav small { position: absolute; right: 7px; top: -1px; min-width: 16px; padding: 0 3px; border-radius: 10px; background: var(--xhs-red); color: white; font-size: 9px; line-height: 16px; }
 .xhs-note-header { display: flex; height: 50px; padding: 3px 12px 7px; align-items: center; gap: 8px; border-bottom: 1px solid #f2f2f2; flex-shrink: 0; background: #fff; }
-.xhs-note-header > button:not(.xhs-follow) { display: grid; place-items: center; flex-shrink: 0; width: 19px; height: 30px; }
+.xhs-note-header > button:not(.xhs-follow):not(.xhs-avatar-link) { display: grid; place-items: center; flex-shrink: 0; width: 19px; height: 30px; }
 .xhs-note-header > button:first-child { margin-left: -5px; }
 .xhs-note-header > button:first-child svg { width: 25px; height: 25px; }
 .xhs-note-header > button:last-child svg { width: 23px; height: 23px; }

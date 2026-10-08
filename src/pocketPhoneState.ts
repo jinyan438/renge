@@ -15,6 +15,7 @@ export type PocketContact = {
   greeting: string;
   sourceLabel: string;
   sourceCharacterCardId?: string;
+  sourceXiaohongshuActorId?: string;
   messages: PocketMessage[];
   createdAt: string;
   app?: "xiaohongshu";
@@ -123,6 +124,7 @@ export function normalizePocketState(value: unknown): PocketState {
       id: text(contact.id), name: text(contact.name).trim().slice(0, 30), avatar: safePocketAvatar(contact.avatar),
       personality: text(contact.personality), greeting: text(contact.greeting), sourceLabel: text(contact.sourceLabel),
       ...(text(contact.sourceCharacterCardId) ? { sourceCharacterCardId: text(contact.sourceCharacterCardId) } : {}),
+      ...(text(contact.sourceXiaohongshuActorId) ? { sourceXiaohongshuActorId: text(contact.sourceXiaohongshuActorId) } : {}),
       messages, createdAt: text(contact.createdAt),
     });
   }
