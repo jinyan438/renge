@@ -22,6 +22,7 @@ export type PocketMessageIdentity = {
   speakerId?: string;
   app?: "xiaohongshu";
   kind?: "inner-monologue";
+  phoneOwnerId?: string;
 };
 export type PocketContextSync = (sessionId: string, previous: PocketConversation[] | null, contacts: PocketConversation[], nickname: string, deletedMessages?: PocketContextDeletion[]) => void;
 export type PocketConversationBuilder = (sessionId: string, contact: PocketConversation, user: { nickname: string; bio: string }, mode: PocketGenerationMode, speaker?: PocketGroupMember, excludedMessageIds?: string[]) => PocketRequestMessage[];
@@ -36,6 +37,7 @@ export function getPocketMessageIdentity(message: Pick<PocketContextMessage, "so
     ...(typeof item.speakerId === "string" && item.speakerId ? { speakerId: item.speakerId } : {}),
     ...(message.source === "xiaohongshu" ? { app: "xiaohongshu" as const } : {}),
     ...(item.kind === "inner-monologue" ? { kind: "inner-monologue" as const } : {}),
+    ...(typeof item.phoneOwnerId === "string" ? { phoneOwnerId: item.phoneOwnerId } : {}),
   };
 }
 
@@ -56,13 +58,13 @@ export function formatPocketContextMessage(message: PocketContextMessage) {
 // Only this contact's own replies are assistant examples. Shared records are
 // quoted reference data, so their narration and instructions do not define the
 // phone's voice. Each record keeps its original position in the timeline.
-export function buildPocketHistoryMessage(message: PocketContextMessage, contactId: string, speakerName = "助手", groupSpeakerId?: string): PocketRequestMessage {
+export function buildPocketHistoryMessage(message: PocketContextMessage, contactId: string, speakerName = "助手", groupSpeakerId?: string, reverse = false): PocketRequestMessage {
   const identity = getPocketMessageIdentity(message);
   if (identity?.kind === "inner-monologue") return { role: "user", content: formatPocketContextMessage(message) };
   if (identity?.contactId === contactId && identity.app !== "xiaohongshu") return identity.groupName ? {
     role: message.role === "assistant" && identity.speakerId === groupSpeakerId ? "assistant" : "user",
     content: JSON.stringify({ 发言者: message.role === "user" ? identity.userName : identity.contactName, 内容: message.content }),
-  } : { role: message.role, content: message.content };
+  } : { role: reverse ? message.role === "user" ? "assistant" : "user" : message.role, content: message.content };
   const label = identity?.app === "xiaohongshu" ? "小红书背景资料" : identity ? "其他微信聊天背景资料" : "主会话背景资料";
   const speaker = identity ? (message.role === "user" ? identity.userName : identity.contactName) : speakerName;
   return {
@@ -93,7 +95,8 @@ export function syncPocketContext<T extends PocketContextMessage>(history: T[], 
   const identify = (contact: PocketConversation, message: PocketContextRecord): PocketMessageIdentity => ({
     contactId: contact.id, messageId: message.id,
     contactName: isPocketGroup(contact) && message.role === "assistant" || !isPocketGroup(contact) && contact.app === "xiaohongshu" ? pocketSpeakerName(contact, message) : pocketDisplayName(contact),
-    userName: nickname,
+    userName: contact.phoneOwner ? pocketDisplayName(contact.phoneOwner) : nickname,
+    ...(contact.phoneOwner ? { phoneOwnerId: contact.phoneOwner.id } : {}),
     contactAvatar: safePocketAvatar(isPocketGroup(contact) || !isPocketGroup(contact) && contact.app === "xiaohongshu" ? message.speaker?.avatar || DEFAULT_POCKET_AVATAR : contact.avatar),
     ...(!isPocketGroup(contact) && contact.app === "xiaohongshu" ? { app: "xiaohongshu" as const } : {}),
     ...(isPocketGroup(contact) ? { groupName: contact.name, ...(message.speaker ? { speakerId: message.speaker.id } : {}) } : {}),
@@ -168,6 +171,7 @@ export function buildSharedPocketConversation(contact: PocketConversation, user:
   const pending = mode === "reply" ? getPocketPendingMessages(contact) : [];
   const systemPrompt = [
     placements.beforeCharacter, rolePrompt, placements.afterCharacter,
+    contact.phoneOwner ? `当前查看的是「${contact.phoneOwner.name}」的手机。操作方使用手机主人「${pocketDisplayName(contact.phoneOwner)}」的微信身份，当前聊天的对方是「${characterName}」。手机主人资料：\n${contact.phoneOwner.personality.replace(/\{\{char\}\}/gi, contact.phoneOwner.name).replace(/\{\{user\}\}/gi, contact.phoneOwner.userName || "真实用户")}\n主会话中的真实用户和手机主人是不同身份，不能混淆。${!group && contact.syncedOwnerId ? "当前联系人是真实用户，记录由用户手机实时同步；只按用户资料和已发生的聊天模拟其微信回复，不编造新的经历、重大决定或行为。" : "只以当前联系人或群成员身份回复手机主人，不代替真实用户发言。"}` : "",
     placements.beforeExamples, placements.afterExamples, placements.beforeAuthorNote, placements.afterAuthorNote,
     [
       "微信回复规则（独立于主会话的文风）：",

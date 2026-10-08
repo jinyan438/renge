@@ -96,8 +96,19 @@ export function applyPocketContextChanges(state: PocketState, changes: PocketCon
   });
   const deletedContextMessages = mergeDeletions(state.deletedContextMessages, changes.filter(change => change.content === null)
     .map(({ contactId, messageId }) => ({ contactId, messageId })));
-  return deletedContextMessages !== state.deletedContextMessages || contacts.some((contact, index) => contact !== state.contacts[index]) || groups.some((group, index) => group !== state.groups[index])
-    ? { ...state, contacts, groups, deletedContextMessages } : state;
+  let nestedChanged = false;
+  const characterPhones = state.characterPhones ? Object.fromEntries(Object.entries(state.characterPhones).map(([id, phone]) => {
+    const ids = new Set([...phone.contacts, ...phone.groups].map(contact => contact.id));
+    const relevant = changes.filter(change => ids.has(change.contactId));
+    if (!relevant.length) return [id, phone];
+    const base = { ...emptyPocketState(), contacts: phone.contacts, groups: phone.groups };
+    const next = applyPocketContextChanges(base, relevant);
+    if (next === base) return [id, phone];
+    nestedChanged = true;
+    return [id, { ...phone, contacts: next.contacts, groups: next.groups }];
+  })) : undefined;
+  return nestedChanged || deletedContextMessages !== state.deletedContextMessages || contacts.some((contact, index) => contact !== state.contacts[index]) || groups.some((group, index) => group !== state.groups[index])
+    ? { ...state, contacts, groups, deletedContextMessages, ...(characterPhones ? { characterPhones } : {}) } : state;
 }
 
 const POCKET_CONTEXT_CHANGED = "renge:pocket-context-changed";

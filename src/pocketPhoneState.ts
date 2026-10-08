@@ -27,7 +27,12 @@ export type PocketContact = {
   contextCharacterCardIds?: string[];
   innerState?: PocketInnerState;
   innerHistory?: PocketInnerEntry[];
+  phoneOwner?: PocketPhoneOwner;
+  syncedOwnerId?: string;
 };
+
+export type PocketPhoneOwner = Pick<PocketContact, "id" | "name" | "nickname" | "avatar" | "personality" | "sourceCharacterCardId"> & { userName?: string };
+export type PocketCharacterPhone = { contacts: PocketContact[]; groups: PocketGroup[]; wallet: PocketWallet; userInnerState?: PocketInnerState; userInnerHistory?: PocketInnerEntry[] };
 
 export type PocketGroupMember = Pick<PocketContact, "id" | "name" | "nickname" | "avatar" | "personality" | "sourceCharacterCardId" | "innerState">;
 export function pocketDisplayName(person: { name: string; nickname?: string }) { return person.nickname?.trim() || person.name; }
@@ -39,6 +44,7 @@ export type PocketGroup = {
   createdAt: string;
   replyContextMessageId?: string;
   innerHistory?: PocketInnerEntry[];
+  phoneOwner?: PocketPhoneOwner;
 };
 export type PocketConversation = PocketContact | PocketGroup;
 export function isPocketGroup(conversation: PocketConversation): conversation is PocketGroup { return "members" in conversation; }
@@ -46,7 +52,12 @@ export function pocketSpeakerName(conversation: PocketConversation, message: Pic
   const member = isPocketGroup(conversation) ? conversation.members.find(member => member.id === message.speaker?.id) : undefined;
   return member?.nickname?.trim() || message.speaker?.name || pocketDisplayName(conversation);
 }
-export function getPocketConversations(state: PocketState): PocketConversation[] { return [...state.contacts, ...state.groups]; }
+export function getPocketConversations(state: PocketState): PocketConversation[] {
+  return [...state.contacts, ...state.groups, ...Object.entries(state.characterPhones || {}).flatMap(([id, phone]) => {
+    const owner = state.contacts.find(contact => contact.id === id);
+    return owner ? [...phone.contacts, ...phone.groups].map(contact => ({ ...contact, phoneOwner: owner })) : [];
+  })];
+}
 
 export type PocketTheme = "rose" | "mint" | "lavender";
 export type PocketSettings = {
@@ -57,7 +68,7 @@ export type PocketSettings = {
   largeText: boolean;
 };
 export type PocketContextDeletion = { contactId: string; messageId: string };
-export type PocketState = { version: 1; contacts: PocketContact[]; groups: PocketGroup[]; settings: PocketSettings; wallet: PocketWallet; deletedContextMessages: PocketContextDeletion[] };
+export type PocketState = { version: 1; contacts: PocketContact[]; groups: PocketGroup[]; settings: PocketSettings; wallet: PocketWallet; deletedContextMessages: PocketContextDeletion[]; characterPhones?: Record<string, PocketCharacterPhone> };
 export type PocketGenerationMode = "reply" | "proactive";
 export type PocketRequestMessage = Pick<PocketMessage, "role" | "content"> | { role: "system"; content: string };
 
@@ -95,7 +106,7 @@ function normalizeMessages(value: unknown, group = false): PocketMessage[] {
     ids.add(text(message.id));
     const attachment = normalizePocketAttachment(message.attachment);
     return [{ id: text(message.id), role: message.role, content: text(message.content), createdAt: text(message.createdAt),
-      ...(message.role === "assistant" && typeof message.replyContextMessageId === "string" ? { replyContextMessageId: message.replyContextMessageId } : {}),
+      ...(typeof message.replyContextMessageId === "string" ? { replyContextMessageId: message.replyContextMessageId } : {}),
       ...(speaker ? { speaker } : {}),
       ...(attachment ? { attachment } : {}),
     }];
@@ -144,6 +155,7 @@ export function normalizePocketState(value: unknown): PocketState {
       ...(text(contact.nickname).trim() ? { nickname: text(contact.nickname).trim().slice(0, 30) } : {}),
       ...(text(contact.sourceCharacterCardId) ? { sourceCharacterCardId: text(contact.sourceCharacterCardId) } : {}),
       ...(text(contact.sourceXiaohongshuActorId) ? { sourceXiaohongshuActorId: text(contact.sourceXiaohongshuActorId) } : {}),
+      ...(Array.isArray(contact.contextCharacterCardIds) ? { contextCharacterCardIds: contact.contextCharacterCardIds.filter((id): id is string => typeof id === "string" && !!id) } : {}),
       messages, createdAt: text(contact.createdAt),
       ...(innerState ? { innerState } : {}), ...(innerHistory.length ? { innerHistory } : {}),
     });
@@ -168,6 +180,17 @@ export function normalizePocketState(value: unknown): PocketState {
       ...(typeof group.replyContextMessageId === "string" ? { replyContextMessageId: group.replyContextMessageId } : {}),
       ...(innerHistory.length ? { innerHistory } : {}),
     });
+  }
+  if (record(value.characterPhones)) {
+    state.characterPhones = {};
+    const usedIds = new Set([...state.contacts, ...state.groups].map(contact => contact.id));
+    for (const [ownerId, phone] of Object.entries(value.characterPhones)) {
+      if (!record(phone) || !state.contacts.some(contact => contact.id === ownerId)) continue;
+      const normalized = normalizePocketState({ version: 1, contacts: phone.contacts, groups: phone.groups, wallet: phone.wallet });
+      const unique = <T extends PocketConversation>(items: T[]) => items.filter(item => { if (usedIds.has(item.id)) return false; usedIds.add(item.id); return true; });
+      state.characterPhones[ownerId] = { contacts: unique(normalized.contacts), groups: unique(normalized.groups), wallet: normalized.wallet,
+        userInnerState: normalizePocketInnerState(phone.userInnerState), userInnerHistory: normalizePocketInnerHistory(phone.userInnerHistory, safePocketAvatar) };
+    }
   }
   return state;
 }

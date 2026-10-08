@@ -5,7 +5,8 @@ import type { AgentPersona } from "./types";
 import { DEFAULT_POCKET_AVATAR, DEFAULT_POCKET_USER_AVATAR, emptyPocketState, getPocketConversations, getPocketGenerationMode, getPocketMessageBubbles, isPocketGroup, makePocketContact, normalizePocketState, pocketDisplayName, pocketId, pocketSpeakerName, pocketStorageKey, POCKET_AVATARS, POCKET_THEMES, resetPocketContactChat, safePocketAvatar, type PocketContact, type PocketConversation, type PocketGroup, type PocketGroupMember, type PocketMessage, type PocketSettings, type PocketState } from "./pocketPhoneState";
 import { makePocketGroup, pocketGroupMember, resetPocketGroupChat, resolvePocketGroup } from "./pocketPhoneGroup";
 import type { PocketContextSync, PocketConversationBuilder } from "./pocketPhoneContext";
-import { requestPocketWechatTurn, resolvePocketModel, type PocketProvider } from "./pocketPhoneChat";
+import { requestPocketReply, requestPocketWechatTurn, resolvePocketModel, type PocketProvider } from "./pocketPhoneChat";
+import { applyCharacterPhoneGeneration, characterPhoneGenerationPrompt, characterPhoneView, commitCharacterPhoneView, syncCharacterPhoneWallets } from "./pocketCharacterPhone";
 import { applyPocketContextChanges, recordPocketContextDeletions, subscribePocketContextChanges } from "./pocketPhoneSync";
 import "./pocket-phone.css";
 import { PocketXiaohongshu } from "./PocketXiaohongshu";
@@ -26,7 +27,7 @@ type PocketPhoneProps = {
   onSyncContext: PocketContextSync; onBuildConversation: PocketConversationBuilder;
   onBack: () => void; onClose: () => void;
 };
-type PhoneApp = "home" | "wechat" | "xiaohongshu" | "settings";
+type PhoneApp = "home" | "wechat" | "xiaohongshu" | "settings" | "character";
 type WechatTab = "chats" | "contacts" | "me";
 type ContactDraft = Pick<PocketContact, "name" | "nickname" | "avatar" | "personality" | "greeting" | "sourceLabel" | "sourceCharacterCardId">;
 type Confirmation = { title: string; description: string; action: () => void };
@@ -51,11 +52,17 @@ function ConversationAvatar({ conversation }: { conversation: PocketConversation
 export function PocketPhone(props: PocketPhoneProps) {
   const storageKey = pocketStorageKey(props.sessionId);
   const [storageWarning, setStorageWarning] = useState("");
-  const [state, setState] = useState<PocketState>(() => {
+  const [rootState, setRootState] = useState<PocketState>(() => {
     try { const saved = localStorage.getItem(storageKey); return saved ? normalizePocketState(JSON.parse(saved)) : emptyPocketState(); }
     catch { return emptyPocketState(); }
   });
+  const rootRef = useRef(rootState);
+  const [ownerId, setOwnerId] = useState("");
+  const owner = rootState.contacts.find(contact => contact.id === ownerId);
+  const userProfile = owner ? { nickname: pocketDisplayName(owner), bio: owner.personality, avatarImage: owner.avatar } : props.userProfile;
+  const state = owner ? characterPhoneView(rootState, owner.id, props.userProfile) : { ...rootState, characterPhones: undefined };
   const stateRef = useRef(state);
+  stateRef.current = state;
   const [app, setApp] = useState<PhoneApp>("home");
   const [tab, setTab] = useState<WechatTab>("chats");
   const [contactId, setContactId] = useState("");
@@ -83,17 +90,20 @@ export function PocketPhone(props: PocketPhoneProps) {
   const conversations = getPocketConversations(state);
   const activeContact = conversations.find(contact => contact.id === contactId);
   const innerPerson = state.contacts.find(person => person.id === innerPersonId) || (activeContact && isPocketGroup(activeContact) ? activeContact.members.find(person => person.id === innerPersonId) : undefined);
-  const nickname = state.settings.nickname.trim() || props.userProfile.nickname.trim() || "小小的我";
+  const nickname = owner ? pocketDisplayName(owner) : state.settings.nickname.trim() || props.userProfile.nickname.trim() || "小小的我";
   const selection = resolvePocketModel(props.providers, props.activeProviderId, state.settings.providerId, state.settings.modelId);
   const currentTheme = POCKET_THEMES.find(theme => theme.id === state.settings.theme)!;
   const canChat = !!selection.provider?.apiBaseUrl.trim() && !!selection.modelId.trim();
 
   function updateState(change: (previous: PocketState) => PocketState) {
-    const previous = stateRef.current;
-    const changed = change(previous);
-    const next = recordPocketContextDeletions(previous, { ...changed, groups: changed.groups.map(group => resolvePocketGroup(group, changed.contacts)) });
-    stateRef.current = next;
-    setState(next);
+    const previous = rootRef.current;
+    const changed = change(stateRef.current);
+    const resolved = { ...changed, groups: changed.groups.map(group => resolvePocketGroup(group, changed.contacts)) };
+    const merged = owner ? commitCharacterPhoneView(previous, owner.id, resolved) : { ...resolved, characterPhones: previous.characterPhones };
+    const next = recordPocketContextDeletions(previous, syncCharacterPhoneWallets(previous, merged));
+    rootRef.current = next;
+    stateRef.current = owner ? characterPhoneView(next, owner.id, props.userProfile) : { ...next, characterPhones: undefined };
+    setRootState(next);
     props.onSyncContext(props.sessionId, getPocketConversations(previous), getPocketConversations(next), next.settings.nickname.trim() || props.userProfile.nickname.trim() || "小小的我", next.deletedContextMessages);
     try { localStorage.setItem(storageKey, JSON.stringify(next)); setStorageWarning(""); }
     catch { setStorageWarning("手机存储空间不足或不可用，这次改动暂未保存。请保留当前页面。"); }
@@ -118,7 +128,11 @@ export function PocketPhone(props: PocketPhoneProps) {
       if (next !== stateRef.current) updateState(() => next);
     } catch { /* Keep existing contacts if local storage is unavailable. */ }
   }
-  function openWechat(nextTab: WechatTab = "chats") { refreshRedNicknames(); setApp("wechat"); setTab(nextTab); setMePage("me"); setContactId(""); setQuery(""); }
+  function openWechat(nextTab: WechatTab = "chats") { if (!owner) refreshRedNicknames(); setApp("wechat"); setTab(nextTab); setMePage("me"); setContactId(""); setQuery(""); }
+  function switchOwner(id: string) {
+    controllerRef.current?.abort();
+    setPendingContactId(""); setPendingSpeaker(null); setErrors({}); setOwnerId(id); setContactId(""); setInnerPersonId(""); setQuery(""); setTab("chats"); setApp(id ? "home" : "character");
+  }
   function openContact(contact: PocketConversation) { setContactId(contact.id); setApp("wechat"); setQuery(""); }
   function openRedFriend(actor: RedActor) {
     const result = addRedWechatFriend(stateRef.current, actor);
@@ -135,20 +149,20 @@ export function PocketPhone(props: PocketPhoneProps) {
   useEffect(() => { setAttachOpen(false); setAttachmentKind(null); }, [contactId, app]);
   useEffect(() => { const timer = setInterval(() => setNow(new Date()), 15000); return () => clearInterval(timer); }, []);
   useEffect(() => subscribePocketContextChanges(props.sessionId, (changes, warning) => {
-    const previous = stateRef.current;
+    const previous = rootRef.current;
     const next = applyPocketContextChanges(previous, changes);
     if (next === previous) return;
-    const pending = getPocketConversations(previous).find(conversation => conversation.id === pendingContactId);
-    if (pending && getPocketConversations(next).find(conversation => conversation.id === pending.id) !== pending) {
+    if (changes.some(change => change.contactId === pendingContactId)) {
       controllerRef.current?.abort();
     }
-    stateRef.current = next;
-    setState(next);
+    rootRef.current = next;
+    stateRef.current = owner ? characterPhoneView(next, owner.id, props.userProfile) : { ...next, characterPhones: undefined };
+    setRootState(next);
     setStorageWarning(warning);
-  }), [props.sessionId, pendingContactId]);
+  }), [props.sessionId, pendingContactId, ownerId]);
   useEffect(() => {
     mountedRef.current = true;
-    props.onSyncContext(props.sessionId, null, getPocketConversations(stateRef.current), nickname, stateRef.current.deletedContextMessages);
+    props.onSyncContext(props.sessionId, null, getPocketConversations(rootRef.current), nickname, rootRef.current.deletedContextMessages);
     try {
       const redState = normalizeRedState(JSON.parse(localStorage.getItem(redStorageKey(props.sessionId)) || "null"));
       props.onSyncContext(props.sessionId, null, [redContextConversation(redState)], nickname, redState.deletedContextMessages);
@@ -197,6 +211,7 @@ export function PocketPhone(props: PocketPhoneProps) {
     if (!editor) return;
     try {
       const validated = makePocketContact(editor.draft);
+      if (owner && stateRef.current.contacts.some(contact => contact.syncedOwnerId && [validated.name, validated.nickname].filter(Boolean).some(name => name?.normalize("NFKC").trim().toLocaleLowerCase() === contact.name.normalize("NFKC").trim().toLocaleLowerCase()))) throw new Error("与你的聊天已同步，请直接打开同步联系人。");
       if (editor.id) {
         const previous = stateRef.current.contacts.find(contact => contact.id === editor.id);
         const roleChanged = previous && (previous.name !== validated.name || previous.nickname !== validated.nickname || previous.personality !== validated.personality || previous.sourceCharacterCardId !== validated.sourceCharacterCardId);
@@ -224,6 +239,28 @@ export function PocketPhone(props: PocketPhoneProps) {
     setErrors(previous => ({ ...previous, [contact.id]: "" }));
   }
 
+  async function generateCharacterWechat(contactsOnly = false) {
+    if (!owner || controllerRef.current) return;
+    const controller = new AbortController();
+    controllerRef.current = controller; setPendingContactId(`generate:${owner.id}`); setErrors(previous => ({ ...previous, generation: "" }));
+    const timeout = setTimeout(() => controller.abort(new Error("生成等待超时，请重试。")), 120000);
+    try {
+      const view = stateRef.current;
+      const task: PocketContact = { ...owner, id: `generate:${owner.id}`, phoneOwner: owner, messages: [], greeting: "", contextCharacterCardIds: owner.sourceCharacterCardId ? [owner.sourceCharacterCardId] : [] };
+      const context = props.onBuildConversation(props.sessionId, task, { nickname, bio: owner.personality }, "reply");
+      const raw = await requestPocketReply(selection.provider, selection.modelId, [...context, { role: "user", content: characterPhoneGenerationPrompt(owner, view, props.userProfile, contactsOnly) }], controller.signal, 6144);
+      if (controller.signal.aborted || !mountedRef.current) return;
+      // Validate the complete response before changing storage or shared history.
+      const generated = applyCharacterPhoneGeneration(stateRef.current, raw, [props.userProfile.nickname, rootRef.current.settings.nickname], owner, contactsOnly);
+      updateState(() => generated);
+    } catch (error) {
+      if (mountedRef.current && (!controller.signal.aborted || controller.signal.reason instanceof Error && controller.signal.reason.name !== "AbortError")) setErrors(previous => ({ ...previous, generation: error instanceof Error ? error.message : "生成失败，请重试。" }));
+    } finally {
+      clearTimeout(timeout);
+      if (controllerRef.current === controller) { controllerRef.current = null; if (mountedRef.current) setPendingContactId(""); }
+    }
+  }
+
   async function generateReply() {
     const found = getPocketConversations(stateRef.current).find(item => item.id === contactId);
     const contact = found && isPocketGroup(found) ? resolvePocketGroup(found, stateRef.current.contacts) : found;
@@ -241,7 +278,7 @@ export function PocketPhone(props: PocketPhoneProps) {
       // Exclude only messages sent locally during this round. Restored shared
       // records absent from local storage must still remain in the context.
       const excludedIds = isPocketGroup(contact) ? stateRef.current.groups.find(group => group.id === contact.id)?.messages.filter(message => !snapshotIds.has(message.id)).map(message => message.id) : undefined;
-      try { return await requestPocketWechatTurn(selection.provider, selection.modelId, props.onBuildConversation(props.sessionId, conversation, { nickname, bio: props.userProfile.bio }, mode, speaker, excludedIds), controller.signal, speaker?.innerState || (!isPocketGroup(conversation) ? conversation.innerState : undefined), isPocketGroup(conversation)); }
+      try { return await requestPocketWechatTurn(selection.provider, selection.modelId, props.onBuildConversation(props.sessionId, conversation, { nickname, bio: userProfile.bio }, mode, speaker, excludedIds), controller.signal, speaker?.innerState || (!isPocketGroup(conversation) ? conversation.innerState : undefined), isPocketGroup(conversation)); }
       catch (error) { if (speaker && error instanceof PocketWechatFormatError) throw new Error(`${speaker.name}的群聊回复格式有误，请重试。`); throw error; }
       finally { clearTimeout(timeout); }
     };
@@ -303,7 +340,7 @@ export function PocketPhone(props: PocketPhoneProps) {
   return <section className="pocket-panel" aria-label="口袋手机">
     <header className="pocket-panel-header">
       <button type="button" onClick={props.onBack} aria-label="返回右侧工具"><ArrowLeft size={17} /></button>
-      <span><strong>口袋手机</strong><small>把可爱和想念，随身收藏</small></span>
+      <span><strong>{owner ? `${pocketDisplayName(owner)}的手机` : "口袋手机"}</strong><small>{owner ? "正在使用 ta 的微信身份" : "把可爱和想念，随身收藏"}</small></span>
       <button type="button" onClick={props.onClose} aria-label="关闭手机模块"><X size={17} /></button>
     </header>
     <div className="pocket-stage">
@@ -314,16 +351,23 @@ export function PocketPhone(props: PocketPhoneProps) {
           {storageWarning && <div className="pocket-storage-warning" role="alert">{storageWarning}</div>}
           <div className="pocket-content" key={app} inert={editor || groupEditor || confirmation || innerPerson || attachmentKind ? true : undefined}>
             {app === "home" ? <div className="pocket-home">
+              {owner && <button className="pocket-owner-back" type="button" onClick={() => switchOwner("")}><ArrowLeft size={16} />选择其他角色</button>}
               <div className="pocket-home-date"><span>{now.toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "long" })}</span><strong>{formatTime(now.toISOString())}</strong></div>
               <div className="pocket-app-grid">
                 <button className="pocket-app-icon" type="button" onClick={() => openWechat()} aria-label="打开微信"><span className="pocket-icon-wechat"><MessageCircle size={33} strokeWidth={2.3} fill="white" /><MessageCircle className="pocket-chat-icon-small" size={23} fill="#d8f4dc" /></span><strong>微信</strong></button>
-                <button className="pocket-app-icon" type="button" onClick={() => setApp("xiaohongshu")} aria-label="打开小红书"><span className="pocket-icon-xiaohongshu"><b>小红书</b></span><strong>小红书</strong></button>
+                {!owner && <button className="pocket-app-icon" type="button" onClick={() => setApp("xiaohongshu")} aria-label="打开小红书"><span className="pocket-icon-xiaohongshu"><b>小红书</b></span><strong>小红书</strong></button>}
+                {!owner && <button className="pocket-app-icon" type="button" onClick={() => setApp("character")} aria-label="打开ta的手机"><span className="pocket-icon-character"><UserRound size={33} /></span><strong>ta 的手机</strong></button>}
                 <button className="pocket-app-icon" type="button" onClick={() => setApp("settings")} aria-label="打开手机设置"><span className="pocket-icon-settings"><Settings size={34} strokeWidth={1.7} /></span><strong>设置</strong></button>
               </div>
-            </div> : app === "xiaohongshu" ? <PocketXiaohongshu sessionId={props.sessionId} nickname={nickname} bio={props.userProfile.bio} avatar={props.userProfile.avatarImage} roles={getRedRoles(state.contacts, props.personas)} provider={selection.provider} modelId={selection.modelId} onBuildConversation={props.onBuildConversation} onSyncContext={props.onSyncContext} onMessage={openRedFriend} onSettings={() => setApp("settings")} onExit={() => setApp("home")} /> : app === "settings" ? <div className="pocket-settings pocket-scroll">
+            </div> : app === "character" ? <div className="pocket-list-body pocket-scroll">
+              <div className="pocket-app-heading"><button type="button" onClick={() => setApp("home")} aria-label="返回手机桌面"><ArrowLeft size={19} /></button><h2>ta 的手机</h2></div>
+              <p className="pocket-character-note">选择手机主人，看看 ta 的微信。与你的聊天会同步显示。</p>
+              {rootState.contacts.map(contact => <button className="pocket-contact-row" type="button" key={contact.id} onClick={() => switchOwner(contact.id)} aria-label={`查看${pocketDisplayName(contact)}的手机`}><Avatar avatar={contact.avatar} name={pocketDisplayName(contact)} /><span><strong>{pocketDisplayName(contact)}</strong><small>{contact.sourceLabel || "微信角色"}</small></span><ChevronRight size={16} /></button>)}
+              {!rootState.contacts.length && <div className="pocket-empty"><p>先在你的微信通讯录添加一位角色。</p><button className="pocket-primary" type="button" onClick={() => { openWechat("contacts"); addContact(); }}>添加手机主人</button></div>}
+            </div> : app === "xiaohongshu" ? <PocketXiaohongshu sessionId={props.sessionId} nickname={nickname} bio={props.userProfile.bio} avatar={userProfile.avatarImage} roles={getRedRoles(state.contacts, props.personas)} provider={selection.provider} modelId={selection.modelId} onBuildConversation={props.onBuildConversation} onSyncContext={props.onSyncContext} onMessage={openRedFriend} onSettings={() => setApp("settings")} onExit={() => setApp("home")} /> : app === "settings" ? <div className="pocket-settings pocket-scroll">
               <div className="pocket-app-heading"><button type="button" onClick={() => setApp("home")} aria-label="返回手机桌面"><ArrowLeft size={19} /></button><h2>设置</h2></div>
-              <div className="pocket-profile-card"><Avatar avatar={props.userProfile.avatarImage || DEFAULT_POCKET_USER_AVATAR} name={nickname} self /><span><strong>{nickname}</strong></span><Sparkles size={19} /></div>
-              <label className="pocket-settings-label" htmlFor="pocket-nickname">我的昵称</label><input id="pocket-nickname" className="pocket-input" maxLength={24} placeholder={props.userProfile.nickname || "小小的我"} value={state.settings.nickname} onChange={event => updateSettings({ nickname: event.target.value })} />
+              <div className="pocket-profile-card"><Avatar avatar={userProfile.avatarImage || DEFAULT_POCKET_USER_AVATAR} name={nickname} self /><span><strong>{nickname}</strong></span><Sparkles size={19} /></div>
+              {!owner && <><label className="pocket-settings-label" htmlFor="pocket-nickname">我的昵称</label><input id="pocket-nickname" className="pocket-input" maxLength={24} placeholder={props.userProfile.nickname || "小小的我"} value={state.settings.nickname} onChange={event => updateSettings({ nickname: event.target.value })} /></>}
               <div className="pocket-settings-label">手机主题</div><div className="pocket-theme-options">{POCKET_THEMES.map(theme => <button type="button" key={theme.id} className={state.settings.theme === theme.id ? "is-selected" : ""} onClick={() => updateSettings({ theme: theme.id })} aria-pressed={state.settings.theme === theme.id}><span style={{ background: theme.color }}>{state.settings.theme === theme.id && <Check size={16} />}</span><small>{theme.name}</small></button>)}</div>
               <div className="pocket-settings-label">角色聊天</div><div className="pocket-settings-group">
                 <label htmlFor="pocket-provider">模型渠道</label><select id="pocket-provider" value={state.settings.providerId} onChange={event => updateSettings({ providerId: event.target.value, modelId: "" })}><option value="">跟随应用当前渠道</option>{props.providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}{state.settings.providerId && !selection.provider && <option value={state.settings.providerId}>渠道已移除，请重新选择</option>}</select>
@@ -332,13 +376,14 @@ export function PocketPhone(props: PocketPhoneProps) {
               </div>
               <button className="pocket-setting-toggle" type="button" role="switch" aria-checked={state.settings.largeText} onClick={() => updateSettings({ largeText: !state.settings.largeText })}><span><strong>大一点的聊天文字</strong></span><i className={state.settings.largeText ? "is-on" : ""} /></button>
             </div> : <div className="pocket-wechat">
-              {(activeContact || tab !== "me") && <header className="pocket-wechat-header"><button type="button" onClick={() => activeContact ? setContactId("") : setApp("home")} aria-label={activeContact ? "返回微信列表" : "返回手机桌面"}><ArrowLeft size={19} /></button>{activeContact && !isPocketGroup(activeContact) && <Avatar avatar={activeContact.avatar} name={pocketDisplayName(activeContact)} onClick={() => setInnerPersonId(activeContact.id)} />}<span><strong>{(activeContact ? pocketDisplayName(activeContact) : "") || (tab === "contacts" ? "通讯录" : "微信")}{activeContact && isPocketGroup(activeContact) && <em> ({activeContact.members.length + 1})</em>}</strong>{activeContact && pendingContactId === activeContact.id && <small>{pendingSpeaker ? `${pocketDisplayName(pendingSpeaker)}正在输入…` : "对方正在输入…"}</small>}</span>{!activeContact && <button type="button" onClick={() => editGroup()} aria-label="发起群聊" title="发起群聊"><Users size={20} /></button>}<button type="button" onClick={() => activeContact ? isPocketGroup(activeContact) ? editGroup(activeContact) : editContact(activeContact) : addContact()} aria-label={activeContact ? isPocketGroup(activeContact) ? "群聊设置" : "编辑联系人" : "添加联系人"}>{activeContact ? <MoreHorizontal size={22} /> : <Plus size={22} />}</button></header>}
+              {owner && !activeContact && tab !== "me" && <div className="pocket-character-generate"><span>{pocketDisplayName(owner)}的微信</span><div><button type="button" disabled={!!pendingContactId} onClick={() => void generateCharacterWechat(true)}><Users size={15} />生成联系人</button><button type="button" disabled={!!pendingContactId} onClick={() => void generateCharacterWechat()}><Sparkles size={15} />{pendingContactId === `generate:${owner.id}` ? "正在生成…" : "生成聊天记录"}</button></div>{errors.generation && <p role="alert">{errors.generation}</p>}</div>}
+              {(activeContact || tab !== "me") && <header className="pocket-wechat-header"><button type="button" onClick={() => activeContact ? setContactId("") : setApp("home")} aria-label={activeContact ? "返回微信列表" : "返回手机桌面"}><ArrowLeft size={19} /></button>{activeContact && !isPocketGroup(activeContact) && <Avatar avatar={activeContact.avatar} name={pocketDisplayName(activeContact)} onClick={() => setInnerPersonId(activeContact.id)} />}<span><strong>{(activeContact ? pocketDisplayName(activeContact) : "") || (tab === "contacts" ? "通讯录" : "微信")}{activeContact && isPocketGroup(activeContact) && <em> ({activeContact.members.length + 1})</em>}</strong>{activeContact && pendingContactId === activeContact.id && <small>{pendingSpeaker ? `${pocketDisplayName(pendingSpeaker)}正在输入…` : "对方正在输入…"}</small>}</span>{!activeContact && <button type="button" onClick={() => editGroup()} aria-label="发起群聊" title="发起群聊"><Users size={20} /></button>}<button type="button" onClick={() => activeContact ? isPocketGroup(activeContact) ? editGroup(activeContact) : editContact(activeContact) : addContact()} disabled={!!activeContact && !isPocketGroup(activeContact) && !!activeContact.syncedOwnerId} title={activeContact && !isPocketGroup(activeContact) && activeContact.syncedOwnerId ? "用户资料与聊天跟随你的手机同步" : undefined} aria-label={activeContact ? isPocketGroup(activeContact) ? "群聊设置" : "编辑联系人" : "添加联系人"}>{activeContact ? <MoreHorizontal size={22} /> : <Plus size={22} />}</button></header>}
               {activeContact ? <>
                 {isPocketGroup(activeContact) && <div className="pocket-group-people">{activeContact.members.map(member => <Avatar key={member.id} avatar={member.avatar} name={pocketDisplayName(member)} onClick={() => setInnerPersonId(member.id)} />)}</div>}
                 <div className="pocket-conversation pocket-scroll" ref={conversationRef} role="log" aria-label={`${pocketDisplayName(activeContact)}的聊天记录`} aria-live="polite">
                   {activeContact.messages.map((message, index) => <div key={message.id} className="pocket-message-group" data-message-id={message.id}>
                     {(index === 0 || new Date(message.createdAt).getTime() - new Date(activeContact.messages[index - 1].createdAt).getTime() > 300000) && <time className="pocket-message-time">{new Date(message.createdAt).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })} {formatTime(message.createdAt)}</time>}
-                    {getPocketMessageBubbles(message).map((content, segmentIndex) => <div key={segmentIndex} className={`pocket-message ${message.role}`}><Avatar avatar={message.role === "user" ? props.userProfile.avatarImage || DEFAULT_POCKET_USER_AVATAR : isPocketGroup(activeContact) ? message.speaker?.avatar || DEFAULT_POCKET_AVATAR : activeContact.avatar} name={message.role === "user" ? nickname : pocketSpeakerName(activeContact, message)} self={message.role === "user"} onClick={message.role === "assistant" ? () => setInnerPersonId(isPocketGroup(activeContact) ? message.speaker!.id : activeContact.id) : undefined} /><div className="pocket-message-body">{isPocketGroup(activeContact) && message.role === "assistant" && <button className="pocket-speaker-name" type="button" title={`@${pocketSpeakerName(activeContact, message)}`} onClick={() => setDrafts(previous => ({ ...previous, [activeContact.id]: `${previous[activeContact.id] || ""}@${pocketSpeakerName(activeContact, message)} ` }))}>{pocketSpeakerName(activeContact, message)}</button>}<PocketWechatMessage message={{ ...message, content }} onVoice={() => toggleVoice(message.id)} onTransfer={action => settleTransfer(message.id, action)} /></div></div>)}
+                    {getPocketMessageBubbles(message).map((content, segmentIndex) => <div key={segmentIndex} className={`pocket-message ${message.role}`}><Avatar avatar={message.role === "user" ? userProfile.avatarImage || DEFAULT_POCKET_USER_AVATAR : isPocketGroup(activeContact) ? message.speaker?.avatar || DEFAULT_POCKET_AVATAR : activeContact.avatar} name={message.role === "user" ? nickname : pocketSpeakerName(activeContact, message)} self={message.role === "user"} onClick={message.role === "assistant" ? () => setInnerPersonId(isPocketGroup(activeContact) ? message.speaker!.id : activeContact.id) : undefined} /><div className="pocket-message-body">{isPocketGroup(activeContact) && message.role === "assistant" && <button className="pocket-speaker-name" type="button" title={`@${pocketSpeakerName(activeContact, message)}`} onClick={() => setDrafts(previous => ({ ...previous, [activeContact.id]: `${previous[activeContact.id] || ""}@${pocketSpeakerName(activeContact, message)} ` }))}>{pocketSpeakerName(activeContact, message)}</button>}<PocketWechatMessage message={{ ...message, content }} onVoice={() => toggleVoice(message.id)} onTransfer={action => settleTransfer(message.id, action)} /></div></div>)}
                   </div>)}
                   {pendingContactId === activeContact.id && <div className="pocket-message assistant"><Avatar avatar={isPocketGroup(activeContact) ? pendingSpeaker?.avatar || DEFAULT_POCKET_AVATAR : activeContact.avatar} name={pendingSpeaker ? pocketDisplayName(pendingSpeaker) : pocketDisplayName(activeContact)} onClick={() => setInnerPersonId(pendingSpeaker?.id || activeContact.id)} /><div className="pocket-typing" aria-label="对方正在输入"><i /><i /><i /></div></div>}
                   {errors[activeContact.id] && <div className="pocket-chat-error" role="alert"><span>{errors[activeContact.id]}</span><div>{canChat && <button type="button" disabled={!!pendingContactId} onClick={() => void generateReply()}>重试回复</button>}<button type="button" onClick={() => setApp("settings")}>手机设置</button></div></div>}
@@ -347,7 +392,7 @@ export function PocketPhone(props: PocketPhoneProps) {
                 {attachOpen && <div className="pocket-wx-attach-panel" aria-label="聊天附件">{([{ kind: "transfer", label: "转账", icon: Wallet }, { kind: "image", label: "图片", icon: ImageIcon }, { kind: "voice", label: "语音", icon: Mic }, { kind: "location", label: "位置", icon: MapPin }] as const).map(item => <button type="button" key={item.kind} onClick={() => setAttachmentKind(item.kind)}><span><item.icon size={25} strokeWidth={1.7} /></span><small>{item.label}</small></button>)}</div>}
                 <form className="pocket-composer" onSubmit={event => { event.preventDefault(); void sendMessage(); }}><textarea rows={1} aria-label={`给${pocketDisplayName(activeContact)}发消息`} placeholder="发消息…" value={draft} onChange={event => setDrafts(previous => ({ ...previous, [activeContact.id]: event.target.value }))} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} /><button className="pocket-attach-toggle" type="button" aria-label="更多聊天功能" aria-expanded={attachOpen} onClick={() => setAttachOpen(!attachOpen)}><Plus size={23} /></button>{pendingContactId === activeContact.id && !draft.trim() ? <button type="button" aria-label="停止回复" onClick={event => { event.preventDefault(); controllerRef.current?.abort(); setErrors(previous => ({ ...previous, [activeContact.id]: "已停止等待，可以重试回复。" })); }}><Square size={15} fill="currentColor" /></button> : <button className="pocket-send" type="submit" aria-label="发送消息" title={draft.trim() ? "发送消息" : getPocketGenerationMode(activeContact) === "reply" ? "生成回复" : "让对方主动发消息"} disabled={!draft.trim() && !!pendingContactId}><Send size={17} /></button>}</form>
               </> : <>
-                {tab === "me" ? <PocketWechatWallet wallet={state.wallet} nickname={nickname} avatar={props.userProfile.avatarImage} page={mePage} onPage={setMePage} onBalance={amount => updateState(previous => editPocketBalance(previous, amount))} onSettings={() => setApp("settings")} /> : <div className="pocket-list-body pocket-scroll">
+                {tab === "me" ? <PocketWechatWallet wallet={state.wallet} nickname={nickname} avatar={userProfile.avatarImage} page={mePage} onPage={setMePage} onBalance={amount => updateState(previous => editPocketBalance(previous, amount))} onSettings={() => setApp("settings")} /> : <div className="pocket-list-body pocket-scroll">
                   <label className="pocket-search"><Search size={15} /><input aria-label="搜索联系人" placeholder="搜索" value={query} onChange={event => setQuery(event.target.value)} /></label>
                   {tab === "contacts" && <button className="pocket-new-friend" type="button" onClick={addContact}><span><Plus size={21} /></span><strong>新的朋友</strong><small>添加</small><ChevronRight size={15} /></button>}
                   {!!listedContacts.length && <div className="pocket-list-label">{tab === "contacts" ? `我的朋友 · ${listedContacts.length}` : "最近的聊天"}</div>}
@@ -373,7 +418,7 @@ export function PocketPhone(props: PocketPhoneProps) {
             <header><h3 id="pocket-group-title">{groupEditor.id ? "群聊设置" : "发起群聊"}</h3><button type="button" aria-label="关闭群聊设置" onClick={() => setGroupEditor(null)}><X size={18} /></button></header>
             <label className="pocket-field">群名称<input autoFocus maxLength={30} placeholder="群名称" value={groupEditor.name} onChange={event => setGroupEditor(previous => previous ? { ...previous, name: event.target.value } : null)} /></label>
             <div className="pocket-group-label">群成员 ({groupEditor.memberIds.length + 1})</div>
-            <div className="pocket-member-self"><input type="checkbox" checked disabled aria-label={nickname} /><Avatar avatar={props.userProfile.avatarImage || DEFAULT_POCKET_USER_AVATAR} name={nickname} self /><strong>{nickname}</strong><span>我</span></div>
+            <div className="pocket-member-self"><input type="checkbox" checked disabled aria-label={nickname} /><Avatar avatar={userProfile.avatarImage || DEFAULT_POCKET_USER_AVATAR} name={nickname} self /><strong>{nickname}</strong><span>我</span></div>
             <div className="pocket-group-picker">{groupChoices.map(member => <label key={member.id} className="pocket-member-choice"><input type="checkbox" checked={groupEditor.memberIds.includes(member.id)} onChange={event => { const checked = event.target.checked; setGroupEditor(previous => previous ? { ...previous, memberIds: checked ? [...previous.memberIds, member.id] : previous.memberIds.filter(id => id !== member.id) } : null); }} /><Avatar avatar={member.avatar} name={pocketDisplayName(member)} /><strong>{pocketDisplayName(member)}</strong></label>)}</div>
             {!groupChoices.length && <button type="button" className="pocket-new-friend" onClick={() => { setGroupEditor(null); addContact(); }}><Plus size={17} /> 添加联系人</button>}
             {editorError && <p className="pocket-editor-error" role="alert">{editorError}</p>}

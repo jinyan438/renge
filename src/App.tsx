@@ -127,6 +127,7 @@ import {
 } from "./presetUtils";
 import { buildPocketHistoryMessage, buildSharedPocketConversation, formatPocketContextMessage, getPocketMessageIdentity, pocketContextRevision, syncPocketContext, type PocketContextSync, type PocketConversationBuilder } from "./pocketPhoneContext";
 import { isPocketGroup } from "./pocketPhoneState";
+import { reversePocketMessage } from "./pocketCharacterPhone";
 import { syncPocketPhoneFromContext } from "./pocketPhoneSync";
 import {
   buildWorldBookPrompt,
@@ -13607,7 +13608,13 @@ export function App() {
       : undefined;
     // Earlier members' replies are staged until the whole round succeeds. They
     // enter later members' requests in order, without persisting partial rounds.
-    const staged: ChatMessage[] = syncPocketContext(getMessagesForSession(sessionId), null, [contact], user.nickname);
+    const reversed = !isPocketGroup(contact) && !!contact.syncedOwnerId;
+    const contextContact = !isPocketGroup(contact) && reversed && contact.phoneOwner ? {
+      ...contact, name: contact.phoneOwner.name, nickname: contact.phoneOwner.nickname, avatar: contact.phoneOwner.avatar,
+      phoneOwner: undefined, syncedOwnerId: undefined, innerState: undefined, innerHistory: undefined,
+      messages: contact.messages.map(reversePocketMessage),
+    } : contact;
+    const staged: ChatMessage[] = syncPocketContext(getMessagesForSession(sessionId), null, [contextContact], reversed ? contact.name : user.nickname);
     const excludedIds = new Set(excludedMessageIds);
     const history = staged.filter(message => {
       const identity = getPocketMessageIdentity(message);
@@ -13615,7 +13622,7 @@ export function App() {
     }).filter(message =>
       !isTavernHiddenMessage(message) && (message.content.trim() || message.attachments?.length),
     ).map(message => {
-      if (getPocketMessageIdentity(message)) return buildPocketHistoryMessage(message, contact.id, "助手", speaker?.id);
+      if (getPocketMessageIdentity(message)) return buildPocketHistoryMessage(message, contact.id, "助手", speaker?.id, reversed);
       const content = getChatApiMessageText(buildChatMessageForApi(message, personas, userProfile, undefined));
       const name = getTavernMessageName(message) || (message.role === "user"
         ? getChatSenderName(message.sender, personas, userProfile)
@@ -13624,7 +13631,7 @@ export function App() {
     });
     const books = new Map(worldBooks.map(book => [book.id, book]));
     const activeIds = new Set(activeWorldBookIds);
-    const cardIds = [session?.mode === "roleplay" ? session.roleplayCharacterCardId : undefined, isPocketGroup(contact) ? speaker?.sourceCharacterCardId : contact.sourceCharacterCardId, ...(!isPocketGroup(contact) ? contact.contextCharacterCardIds || [] : [])];
+    const cardIds = [session?.mode === "roleplay" ? session.roleplayCharacterCardId : undefined, contact.phoneOwner?.sourceCharacterCardId, isPocketGroup(contact) ? speaker?.sourceCharacterCardId : contact.sourceCharacterCardId, ...(!isPocketGroup(contact) ? contact.contextCharacterCardIds || [] : [])];
     for (const id of cardIds) {
       const card = characterCards.find(candidate => candidate.id === id);
       const book = card ? resolveSessionCharacterWorldBook(session, card, worldBooks) : null;
