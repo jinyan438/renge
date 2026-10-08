@@ -1,20 +1,20 @@
 import type { AgentPersona } from "./types";
 import { type PocketContact } from "./pocketPhoneState";
 import { redContextConversation } from "./pocketXiaohongshuContext";
-import { isRedCommunityActor, randomRedAvatar, redActorProfile, RED_COVER_TONES, redCount, redText, safeRedImage, type RedActor, type RedComment, type RedCoverTone, type RedNote, type RedState } from "./pocketXiaohongshuState";
+import { isRedCommunityActor, randomRedAvatar, redActorNickname, redActorProfile, RED_COVER_TONES, redCount, redText, safeRedImage, type RedActor, type RedComment, type RedCoverTone, type RedNote, type RedState } from "./pocketXiaohongshuState";
 
 export type RedRole = Omit<RedActor, "avatar"> & { avatar?: string };
 export type RedTask = { kind: "feed" } | { kind: "reply"; noteId: string; commentId: string };
 export function getRedRoles(contacts: PocketContact[], personas: AgentPersona[]): RedRole[] {
   const roles: RedRole[] = [
-    ...contacts.map(contact => ({ id: contact.sourceXiaohongshuActorId || `contact:${contact.id}`, name: contact.name, avatar: safeRedImage(contact.avatar) ? contact.avatar : undefined, personality: contact.personality, ...(contact.sourceCharacterCardId ? { sourceCharacterCardId: contact.sourceCharacterCardId } : {}) })),
+    ...contacts.map(contact => ({ id: contact.sourceXiaohongshuActorId || `contact:${contact.id}`, name: contact.name, ...(contact.nickname ? { nickname: contact.nickname } : {}), avatar: safeRedImage(contact.avatar) ? contact.avatar : undefined, personality: contact.personality, ...(contact.sourceCharacterCardId ? { sourceCharacterCardId: contact.sourceCharacterCardId } : {}) })),
     ...personas.map(persona => ({ id: `persona:${persona.id}`, name: persona.name, avatar: safeRedImage(persona.avatarImage) ? persona.avatarImage : undefined, personality: [persona.description, ...persona.entryTypes.flatMap(type => type.entries.filter(entry => entry.enabled).map(entry => `${type.name} · ${entry.key}：${entry.value}`))].filter(Boolean).join("\n") })),
   ];
   return roles.filter((role, index) => role.name.trim() && roles.findIndex(other => other.name === role.name) === index).map(role => ({ ...role, avatar: role.avatar || roles.find(other => other.name === role.name && other.avatar)?.avatar }));
 }
 
 export function getRedRoleChoices(roles: RedRole[], actors: RedActor[]): RedRole[] {
-  return [...roles, ...actors.filter(actor => !roles.some(role => role.name === actor.name || role.id === actor.id))].filter(role => !role.id.startsWith("card:") && !isRedCommunityActor(role));
+  return [...roles.map(role => { const actor = actors.find(actor => actor.id === role.id || actor.name === role.name); return actor?.nickname && !role.nickname ? { ...role, nickname: actor.nickname } : role; }), ...actors.filter(actor => !roles.some(role => role.name === actor.name || role.id === actor.id))].filter(role => !role.id.startsWith("card:") && !isRedCommunityActor(role));
 }
 export function selectedRedRoles(state: RedState, roles: RedRole[]): RedRole[] {
   return getRedRoleChoices(roles, state.actors).filter(role => state.selectedRoleIds.includes(role.id));
@@ -22,12 +22,15 @@ export function selectedRedRoles(state: RedState, roles: RedRole[]): RedRole[] {
 export function syncRedRoleAvatars(state: RedState, roles: RedRole[]): RedState {
   const actors = state.actors.map(actor => {
     const role = roles.find(role => role.id === actor.id || role.name === actor.name);
-    return role?.avatar && safeRedImage(role.avatar) && role.avatar !== actor.avatar ? { ...actor, avatar: role.avatar } : actor;
+    const nickname = redActorNickname({ ...actor, nickname: role?.nickname || actor.nickname });
+    const avatar = role?.avatar && safeRedImage(role.avatar) ? role.avatar : actor.avatar;
+    return nickname !== actor.nickname || avatar !== actor.avatar ? { ...actor, nickname, avatar } : actor;
   });
-  const avatarFor = (id: string | undefined, name: string, previous: string) => actors.find(actor => actor.id === id || actor.name === name)?.avatar || previous;
-  const notes = state.notes.map(note => { const avatar = note.generated ? avatarFor(note.authorId, note.author, note.avatar) : note.avatar; return avatar === note.avatar ? note : { ...note, avatar }; });
-  const comments = state.comments.map(comment => { const avatar = comment.generated ? avatarFor(comment.actorId, comment.author, comment.avatar) : comment.avatar; return avatar === comment.avatar ? comment : { ...comment, avatar }; });
-  return actors.every((actor, index) => actor === state.actors[index]) && notes.every((note, index) => note === state.notes[index]) && comments.every((comment, index) => comment === state.comments[index]) ? state : { ...state, actors, notes, comments };
+  const actorFor = (id: string | undefined, name: string) => actors.find(actor => actor.id === id || actor.name === name || actor.nickname === name);
+  const notes = state.notes.map(note => { const actor = note.generated ? actorFor(note.authorId, note.author) : undefined; return !actor || actor.avatar === note.avatar && actor.nickname === note.author ? note : { ...note, avatar: actor.avatar, author: redActorNickname(actor) }; });
+  const comments = state.comments.map(comment => { const actor = comment.generated ? actorFor(comment.actorId, comment.author) : undefined; return !actor || actor.avatar === comment.avatar && actor.nickname === comment.author ? comment : { ...comment, avatar: actor.avatar, author: redActorNickname(actor) }; });
+  const followed = state.followed.map(name => { const actor = state.actors.find(actor => actor.id === name || actor.name === name || actor.nickname === name); return actor ? redActorNickname(actors.find(item => item.id === actor.id)!) : name; });
+  return actors.every((actor, index) => actor === state.actors[index]) && notes.every((note, index) => note === state.notes[index]) && comments.every((comment, index) => comment === state.comments[index]) && followed.every((name, index) => name === state.followed[index]) ? state : { ...state, actors, notes, comments, followed };
 }
 
 export function buildRedTaskContact(state: RedState, nickname: string, roles: RedRole[], task: RedTask, reservedRoles: RedRole[] = roles): PocketContact {
@@ -41,17 +44,18 @@ export function buildRedTaskContact(state: RedState, nickname: string, roles: Re
   const actor = state.actors.find(actor => actor.id === (target?.actorId === "self" ? note?.authorId : target?.actorId || note?.authorId));
   const role = speakers.find(role => role.id === actor?.id || role.name === actor?.name || role.name === note?.author) || speakers[0];
   const expand = (value: string, name: string) => value.replace(/\{\{char\}\}/gi, name).replace(/\{\{user\}\}/gi, nickname);
-  const index = roles.map(item => ({ id: item.id, name: item.name, personality: expand(item.personality, item.name) }));
-  const actorSchema = '"actors":[{"id":"new:1","name":"新人物昵称","personality":"人物身份、经历、性格、爱好、说话方式及与社区的关系，须完整具体且与当前世界一致","profile":{"handle":"英文数字下划线的账号","bio":"简短个人签名","gender":"女/男/其他","age":22,"location":"符合当前世界的所在地","following":12,"followers":1083,"receivedLikes":3836,"background":"ocean/forest/sunset/violet"}}]';
+  const index = roles.map(item => ({ id: item.id, name: item.name, nickname: item.nickname, personality: expand(item.personality, item.name) }));
+  const actorSchema = '"actors":[{"id":"new:1","name":"人物真实角色名称","nickname":"独立的社交账号昵称，与角色名称不同","personality":"人物身份、经历、性格、爱好、说话方式及与社区的关系，须完整具体且与当前世界一致","profile":{"handle":"英文数字下划线的账号","bio":"简短个人签名","gender":"女/男/其他","age":22,"location":"符合当前世界的所在地","following":12,"followers":1083,"receivedLikes":3836,"background":"ocean/forest/sunset/violet"}}]';
   const feedSchema = `{${actorSchema},"notes":[{"authorId":"已有id或new:1","author":"人物昵称","title":"标题","content":"正文","tags":["话题"],"category":"生活/游戏/职场/情感/穿搭","location":"人物所在地","coverText":"适合封面的短文字","coverTone":"mint/cream/rose/blue/lavender/white","likes":0,"saves":0,"comments":[{"authorId":"已有id或新人物id","author":"评论者昵称","content":"评论内容","likes":0}]}]}`;
   contact.name = role?.name || "小红书社区";
   contact.sourceCharacterCardId = role?.sourceCharacterCardId;
   contact.contextCharacterCardIds = [...new Set(roles.flatMap(role => role.sourceCharacterCardId || []))];
   contact.personality = [
     `当前用户：${nickname}。已勾选的生成角色及最新设定：${JSON.stringify(index)}`,
-    `已有社区人物及保存的人设：${JSON.stringify(community.map(actor => ({ id: actor.id, name: actor.name, personality: expand(actor.personality, actor.name), profile: actor.profile })))}`,
+    `已有社区人物及保存的人设：${JSON.stringify(community.map(actor => ({ id: actor.id, name: actor.name, nickname: redActorNickname(actor), personality: expand(actor.personality, actor.name), profile: actor.profile })))}`,
     `未勾选角色不能发言，也不能用新增人物绕过勾选。新增人物不得冒用这些昵称：${JSON.stringify([...new Set([...reservedRoles, ...state.actors].filter(item => !isRedCommunityActor(item) && !roles.some(role => role.id === item.id || role.name === item.name)).map(item => item.name))])}。`,
-    "可以使用已勾选角色、已有社区人物，或创建独立的新社区人物。新增人物必须先在 actors 中声明完整人设与主页资料，再用对应 id 发帖或评论；已有人物沿用 id 和人设，不重复声明。不得替用户发言或虚构与用户已经认识。头像由应用分配，不输出头像字段、图片或网址。",
+    "可以使用已勾选角色、已有社区人物，或创建独立的新社区人物。新增人物必须先在 actors 中声明完整人设与主页资料，再用对应 id 发帖或评论；已有人物沿用 id 和人设，不重新创建。不得替用户发言或虚构与用户已经认识。头像由应用分配，不输出头像字段、图片或网址。",
+    "name 是角色名称，nickname 是独立账号昵称，必须不同。所有发帖、评论和回复的 author 使用昵称，authorId 必须引用人物 id。已保存的昵称保持不变；缺少昵称的已勾选角色需在 actors 中用其原 id 声明 {id,name,nickname}，只补昵称，不改角色身份、人设或头像。回复时用对方的社交昵称称呼对方，不把角色名称当作账号名。",
     task.kind === "feed" ? [
       "本次任务：增量生成 3 篇全新的小红书笔记，以及每篇 1~3 条自然评论。已有内容全部保留，不重复标题或改写同一篇旧帖子。",
       roles.length ? "本批笔记必须混合至少一位已勾选角色和至少一位本次新创建的社区人物发帖。" : "未勾选角色，本批笔记由社区人物发帖，至少一位作者必须是本次新创建的独立人物。",
@@ -83,38 +87,45 @@ function actorWriter(state: RedState, roles: RedRole[], nickname: string, random
   const actors = [...state.actors];
   const aliases = new Map<string, RedActor>();
   const newActors: RedActor[] = [];
+  const allowed = [...roles, ...state.actors.filter(isRedCommunityActor).filter(actor => !roles.some(role => role.id === actor.id || role.name === actor.name))].map(role => ({ ...role, nickname: role.nickname || state.actors.find(actor => actor.id === role.id || actor.name === role.name)?.nickname }));
   if (definitions !== undefined && (!Array.isArray(definitions) || definitions.length > 12)) throw new Error("新增人物资料格式无效，请重试。");
   for (const value of (definitions || []) as unknown[]) {
     const raw = object(value); const alias = redText(raw.id, 100); const name = redText(raw.name, 30); const personality = redText(raw.personality, 6000);
-    if (name === nickname || alias === "self") throw new Error("模型生成了无效角色或替用户发言，请重试。");
+    const requestedNickname = redText(raw.nickname, 30);
+    if (name === nickname || requestedNickname === nickname || alias === "self") throw new Error("模型生成了无效角色或替用户发言，请重试。");
+    const known = allowed.find(role => role.id === alias);
+    if (known) {
+      if (name && name !== known.name) throw new Error("人物角色名称和 id 不一致，请重试。");
+      if (!requestedNickname || requestedNickname === known.name) throw new Error("人物缺少独立昵称，请重试。");
+      known.nickname ||= requestedNickname;
+      continue;
+    }
     if (!alias || !name || !personality || aliases.has(alias) || newActors.some(actor => actor.name === name) || [...state.actors, ...reservedRoles, ...roles].some(actor => actor.id === alias || actor.name === name)) throw new Error("新增人物缺少独立人设、昵称重复或使用了未勾选的角色，请重试。");
     const id = `community:${crypto.randomUUID()}`;
-    const actor: RedActor = { id, name, personality, avatar: randomRedAvatar(random), origin: "community", profile: redActorProfile(raw.profile, id) };
+    const actor: RedActor = { id, name, nickname: redActorNickname({ id, name, nickname: requestedNickname }), personality, avatar: randomRedAvatar(random), origin: "community", profile: redActorProfile(raw.profile, id) };
     aliases.set(alias, actor); newActors.push(actor);
   }
-  const allowed = [...roles, ...state.actors.filter(isRedCommunityActor).filter(actor => !roles.some(role => role.id === actor.id || role.name === actor.name))];
   return { actors, newActors, resolve(input: Record<string, unknown>): RedActor {
     const requestedId = redText(input.authorId, 100);
     const requestedName = redText(input.author, 30);
     if (requestedName === nickname || requestedId === "self") throw new Error("模型生成了无效角色或替用户发言，请重试。");
-    const fresh = requestedId ? aliases.get(requestedId) : newActors.find(actor => actor.name === requestedName);
+    const fresh = requestedId ? aliases.get(requestedId) : newActors.find(actor => actor.name === requestedName || actor.nickname === requestedName);
     if (fresh) {
-      if (requestedName && fresh.name !== requestedName) throw new Error("人物昵称和 id 不一致，请重试。");
+      if (requestedName && fresh.name !== requestedName && fresh.nickname !== requestedName) throw new Error("人物昵称和 id 不一致，请重试。");
       if (!actors.some(actor => actor.id === fresh.id)) actors.push(fresh);
       return fresh;
     }
     const existing = actors.find(actor => actor.id === requestedId);
-    const known = requestedId ? allowed.find(role => role.id === requestedId || role.name === existing?.name) : allowed.find(role => role.name === requestedName);
+    const known = requestedId ? allowed.find(role => role.id === requestedId || role.name === existing?.name) : allowed.find(role => role.name === requestedName || redActorNickname(role) === requestedName);
     if (!known) throw new Error("模型使用了未勾选的角色，请重试生成。");
-    if (requestedName && requestedName !== known.name) throw new Error("人物昵称和 id 不一致，请重试。");
+    if (requestedName && requestedName !== known.name && requestedName !== redActorNickname(known)) throw new Error("人物昵称和 id 不一致，请重试。");
     const name = known.name;
     const index = actors.findIndex(actor => actor.id === known?.id || actor.name === name);
     if (index >= 0) {
-      if (known === actors[index]) return actors[index];
-      const actor = { ...actors[index], name, personality: known.personality, ...(known.sourceCharacterCardId ? { sourceCharacterCardId: known.sourceCharacterCardId } : {}), avatar: safeRedImage(known.avatar) ? known.avatar : actors[index].avatar };
+      const actor = { ...actors[index], name, nickname: redActorNickname(known), personality: known.personality, ...(known.sourceCharacterCardId ? { sourceCharacterCardId: known.sourceCharacterCardId } : {}), avatar: safeRedImage(known.avatar) ? known.avatar : actors[index].avatar };
       actors[index] = actor; return actor;
     }
-    const actor: RedActor = { id: known.id, name, avatar: safeRedImage(known.avatar) ? known.avatar : randomRedAvatar(random), personality: known.personality, ...(known.sourceCharacterCardId ? { sourceCharacterCardId: known.sourceCharacterCardId } : {}) };
+    const actor: RedActor = { id: known.id, name, nickname: redActorNickname(known), avatar: safeRedImage(known.avatar) ? known.avatar : randomRedAvatar(random), personality: known.personality, ...(known.sourceCharacterCardId ? { sourceCharacterCardId: known.sourceCharacterCardId } : {}) };
     actors.push(actor); return actor;
   } };
 }
@@ -130,18 +141,18 @@ export function appendGeneratedRedFeed(state: RedState, output: string, roles: R
     const key = `${title}\n${content}`; if (keys.has(key)) continue; keys.add(key);
     const actor = writer.resolve(raw); const id = crypto.randomUUID();
     const createdAt = new Date(timestamp + notes.length * 10).toISOString();
-    notes.push({ id, title, content, tags: [...new Set((Array.isArray(raw.tags) ? raw.tags : []).map(tag => redText(tag, 30)).filter(Boolean))].slice(0, 10), images: [], author: actor.name, authorId: actor.id, avatar: actor.avatar, generated: true, createdAt, coverText: redText(raw.coverText, 120) || title, coverTone: RED_COVER_TONES.includes(raw.coverTone as RedCoverTone) ? raw.coverTone as RedCoverTone : RED_COVER_TONES[notes.length % RED_COVER_TONES.length], category: redText(raw.category, 20) || "生活", location: redText(raw.location, 30), time: "刚刚", likes: redCount(raw.likes), saves: redCount(raw.saves), comments: 0 });
+    notes.push({ id, title, content, tags: [...new Set((Array.isArray(raw.tags) ? raw.tags : []).map(tag => redText(tag, 30)).filter(Boolean))].slice(0, 10), images: [], author: redActorNickname(actor), authorId: actor.id, avatar: actor.avatar, generated: true, createdAt, coverText: redText(raw.coverText, 120) || title, coverTone: RED_COVER_TONES.includes(raw.coverTone as RedCoverTone) ? raw.coverTone as RedCoverTone : RED_COVER_TONES[notes.length % RED_COVER_TONES.length], category: redText(raw.category, 20) || "生活", location: redText(raw.location, 30), time: "刚刚", likes: redCount(raw.likes), saves: redCount(raw.saves), comments: 0 });
     const initial = raw.comments === undefined ? [] : raw.comments;
     if (!Array.isArray(initial) || initial.length > 3) throw new Error("生成的评论格式无效，请重试。");
     for (const value of initial) {
       const comment = object(value); const text = redText(comment.content, 1000); if (!text) throw new Error("生成的评论为空，请重试。");
       const commenter = writer.resolve(comment);
-      comments.push({ id: crypto.randomUUID(), noteId: id, actorId: commenter.id, author: commenter.name, avatar: commenter.avatar, generated: true, content: text, createdAt: new Date(timestamp + notes.length * 10 - 9 + comments.length).toISOString(), time: "刚刚", location: "", likes: redCount(comment.likes), ...(commenter.id === actor.id ? { isAuthor: true } : {}) });
+      comments.push({ id: crypto.randomUUID(), noteId: id, actorId: commenter.id, author: redActorNickname(commenter), avatar: commenter.avatar, generated: true, content: text, createdAt: new Date(timestamp + notes.length * 10 - 9 + comments.length).toISOString(), time: "刚刚", location: "", likes: redCount(comment.likes), ...(commenter.id === actor.id ? { isAuthor: true } : {}) });
     }
   }
   if (!notes.length) throw new Error("这次没有生成新内容，请重试。");
   if (!notes.some(note => writer.newActors.some(actor => actor.id === note.authorId))) throw new Error("这次没有新社区人物发帖，请重试生成。");
-  if (roles.length && !notes.some(note => roles.some(role => role.id === note.authorId || role.name === note.author))) throw new Error("这次没有已勾选角色发帖，请重试生成。");
+  if (roles.length && !notes.some(note => roles.some(role => role.id === note.authorId || role.name === writer.actors.find(actor => actor.id === note.authorId)?.name))) throw new Error("这次没有已勾选角色发帖，请重试生成。");
   return syncRedRoleAvatars({ ...state, actors: writer.actors, notes: [...notes.reverse(), ...state.notes], comments: [...state.comments, ...comments] }, roles);
 }
 export function appendGeneratedRedReplies(state: RedState, output: string, roles: RedRole[], nickname: string, task: Extract<RedTask, { kind: "reply" }>, random: () => number = Math.random, reservedRoles: RedRole[] = roles): RedState {
@@ -154,7 +165,7 @@ export function appendGeneratedRedReplies(state: RedState, output: string, roles
   const replies: RedComment[] = value.replies.map((item, index) => {
     const raw = object(item); const content = redText(raw.content, 1000); if (!content) throw new Error("生成的回复为空，请重试。");
     const actor = writer.resolve(raw);
-    return { id: crypto.randomUUID(), noteId: note.id, actorId: actor.id, author: actor.name, avatar: actor.avatar, generated: true, content, createdAt: new Date(Date.now() + index).toISOString(), time: "刚刚", location: "", likes: redCount(raw.likes), parentId: target.parentId || target.id, replyToId: target.id, responseToId: target.id, ...(actor.id === note.authorId ? { isAuthor: true } : {}) };
+    return { id: crypto.randomUUID(), noteId: note.id, actorId: actor.id, author: redActorNickname(actor), avatar: actor.avatar, generated: true, content, createdAt: new Date(Date.now() + index).toISOString(), time: "刚刚", location: "", likes: redCount(raw.likes), parentId: target.parentId || target.id, replyToId: target.id, responseToId: target.id, ...(actor.id === note.authorId ? { isAuthor: true } : {}) };
   });
   return syncRedRoleAvatars({ ...state, actors: writer.actors, comments: [...state.comments, ...replies], pendingReplies: state.pendingReplies.filter(id => id !== task.commentId) }, roles);
 }

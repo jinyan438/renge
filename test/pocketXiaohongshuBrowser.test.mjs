@@ -13,6 +13,7 @@ const requests = [], mainRequests = [];
 let mode = "success", round = 0, replies = 0, releaseSlow;
 let server, browser, page;
 const text = message => typeof message.content === "string" ? message.content : (message.content || []).map(part => part.text || "").join("");
+const nicknames = { 奶糖: "草莓画画中", 薄荷: "薄荷花园", 同桌: "画本同桌", 街角咖啡: "周末一杯", 影子: "夜色日记" };
 const upstream = createServer(async (request, response) => {
   const chunks = []; for await (const chunk of request) chunks.push(chunk);
   const body = JSON.parse(Buffer.concat(chunks).toString()); requests.push({ path: request.url, body });
@@ -21,14 +22,14 @@ const upstream = createServer(async (request, response) => {
   const prompt = (body.messages || body.input).map(text).join("\n");
   const selectedMatch = prompt.match(/已勾选的生成角色及最新设定：(\[[^\n]*\])/);
   const allowed = selectedMatch ? JSON.parse(selectedMatch[1]) : [];
-  const fresh = () => ({ authorId: `new:person-${round}`, author: `花店小鹿${round}` });
-  const author = name => { const role = allowed.find(role => role.name === name) || allowed[0]; return role ? { authorId: role.id, author: role.name } : fresh(); };
+  const fresh = () => ({ authorId: `new:person-${round}`, author: `鹿鹿种花${round}` });
+  const author = name => { const role = allowed.find(role => role.name === name) || allowed[0]; return role ? { authorId: role.id, author: role.nickname || nicknames[role.name] } : fresh(); };
   let output;
   if (mode === "bad") { mode = "success"; output = '{"notes":[{"author":"奶糖","title":"不应部分保存","content":"有效"},{"title":"无效"}]}'; }
   else if (mode === "unselected") { mode = "success"; output = JSON.stringify({ notes: [{ authorId: "contact:friend", author: "奶糖", title: "未勾选角色的帖子", content: "不能保存" }] }); }
   else if (prompt.includes("本次任务：增量生成")) {
     round++;
-    output = JSON.stringify({ actors: [{ id: fresh().authorId, name: fresh().author, personality: "北街花店的店员，性格温柔慢热，喜欢水彩和植物，说话简短，有自己的生活，刚加入社区。", profile: { handle: `deer_${round}`, bio: "心里有光便是晴天\n每天都是值得纪念的日子", gender: "女", age: 22, location: "北街", following: 12, followers: 1083, receivedLikes: 3836, background: "ocean" } }], notes: [
+    output = JSON.stringify({ actors: [...allowed.filter(role => !role.nickname).map(role => ({ id: role.id, name: role.name, nickname: nicknames[role.name] })), { id: fresh().authorId, name: `许鹿${round}`, nickname: fresh().author, personality: "北街花店的店员，性格温柔慢热，喜欢水彩和植物，说话简短，有自己的生活，刚加入社区。", profile: { handle: `deer_${round}`, bio: "心里有光便是晴天\n每天都是值得纪念的日子", gender: "女", age: 22, location: "北街", following: 12, followers: 1083, receivedLikes: 3836, background: "ocean" } }], notes: [
       { ...author("奶糖"), title: `北街画画日常 ${round}`, content: `第${round}次去北街的草莓花园画画，记得带上水彩和画本。`, tags: ["草莓", "画画"], category: "生活", coverText: `今天\n也想和你\n一起画画`, coverTone: "mint", likes: 24, saves: 5, comments: [{ ...author("同桌"), content: `第${round}篇：这个画本真好看！`, likes: 2 }] },
       { ...author("薄荷"), title: `花园里的小事 ${round}`, content: `第${round}篇：浇完花，坐下来看看今天的云。`, tags: ["生活"], category: "情感", coverText: "慢慢来\n日子会开花", coverTone: "rose", comments: [{ ...author("街角咖啡"), content: "周末也想来看看花。" }] },
       { ...fresh(), title: `周末灵感 ${round}`, content: `第${round}篇：散步时发现了新的灵感，分享给喜欢日常的朋友。`, tags: ["周末"], category: "生活", coverText: "留一点时间\n给自己", coverTone: "cream", comments: [] },
@@ -108,6 +109,9 @@ try {
   assert.equal(await red.locator(".xhs-role-shortcut").innerText(), "");
   await generate(3); const firstState = await readState(); const firstIds = firstState.notes.map(note => note.id);
   assert.equal(firstState.actors.length, 5);
+  assert.equal(firstState.actors.find(actor => actor.name === "奶糖").nickname, nicknames.奶糖);
+  assert.ok(firstState.notes.every(note => note.author === firstState.actors.find(actor => actor.id === note.authorId).nickname));
+  assert.ok(firstState.comments.every(comment => comment.author === firstState.actors.find(actor => actor.id === comment.actorId).nickname));
   assert.ok(firstState.notes.some(note => note.authorId.startsWith("community:")));
   assert.match(firstState.actors.find(actor => actor.origin === "community").personality, /花店/);
   assert.equal(firstState.actors.find(actor => actor.name === "奶糖").avatar, "/touxiang/1.png");
@@ -120,7 +124,7 @@ try {
   assert.equal(requests[0].body.model, "fixture-chat");
   await phone.screenshot({ path: ".runtime/xiaohongshu-generated-home.png", animations: "disabled" });
   await sendMain("记住小红书刚生成的笔记"); const firstScope = mainRequests.at(-1).piSessionScope;
-  assert.match(JSON.stringify(mainRequests.at(-1).request.messages), /小红书 · 奶糖/);
+  assert.match(JSON.stringify(mainRequests.at(-1).request.messages), /小红书 · 草莓画画中/);
   await generate(6); const second = await readState(); firstIds.forEach(id => assert.ok(second.notes.some(note => note.id === id)));
   assert.match(JSON.stringify(requests.at(-1).body), /北街画画日常 1/); assert.match(JSON.stringify(requests.at(-1).body), /记住小红书刚生成的笔记/);
   assert.equal(second.notes.find(note => note.title === "北街画画日常 2").avatar, firstState.notes.find(note => note.title === "北街画画日常 1").avatar);
@@ -185,14 +189,14 @@ try {
   assert.equal((await readState()).notes.length, 13);
   await red.getByRole("button", { name: "重试生成", exact: true }).click(); await page.waitForFunction(() => document.querySelectorAll(".xhs-card").length === 16);
   const deskState = await readState();
-  assert.equal(deskState.notes.slice(0, 3).filter(note => note.author === "同桌").length, 2);
+  assert.equal(deskState.notes.slice(0, 3).filter(note => note.author === nicknames.同桌).length, 2);
   assert.ok(deskState.notes[0].authorId.startsWith("community:"));
   const pool = body => JSON.parse((body.messages || body.input).map(text).join("\n").match(/已勾选的生成角色及最新设定：(\[[^\n]*\])/)[1]);
   assert.deepEqual(pool(requests.at(-1).body).map(role => role.name), ["同桌"]);
   const replyCount = deskState.comments.filter(comment => comment.responseToId).length;
   await red.getByRole("button", { name: "打开笔记：北街画画日常 1", exact: true }).click();
   await comment("原作者取消勾选后只由已选角色回复"); await waitReplies(replyCount + 1);
-  assert.equal((await readState()).comments.at(-1).author, "同桌");
+  assert.equal((await readState()).comments.at(-1).author, nicknames.同桌);
   await back(); await profile(); await checkbox("同桌").uncheck(); await home();
   assert.equal(await red.getByRole("button", { name: "生成小红书笔记", exact: true }).isDisabled(), false);
   await red.getByRole("button", { name: "打开笔记：北街画画日常 1", exact: true }).click();
@@ -247,10 +251,12 @@ try {
   assert.equal(await checkbox("同桌").isChecked(), true);
   await checkbox("同桌").uncheck(); await home(); await generate(3);
   const generated = await readState(); const stranger = generated.actors.find(actor => actor.id === generated.notes[0].authorId);
+  assert.notEqual(stranger.name, stranger.nickname);
+  assert.ok(generated.notes.every(note => note.author === stranger.nickname));
   assert.deepEqual(generated.selectedRoleIds, []);
   assert.ok(generated.notes.every(note => note.authorId === stranger.id));
   assert.ok(POCKET_AVATARS.includes(stranger.avatar)); assert.equal(stranger.profile.age, 22);
-  await red.getByRole("button", { name: `查看${stranger.name}的主页`, exact: true }).first().click();
+  await red.getByRole("button", { name: `查看${stranger.nickname}的主页`, exact: true }).first().click();
   assert.equal(await red.locator(".xhs-person-page").count(), 1); assert.equal(await red.locator(".xhs-bottom-nav").count(), 0);
   assert.equal(await red.getByText("22岁", { exact: false }).count(), 1);
   assert.equal(await red.locator(".xhs-person-identity img").getAttribute("src"), stranger.avatar);
@@ -267,37 +273,51 @@ try {
   assert.equal(await red.locator(".xhs-card").count(), 1);
   await red.getByRole("button", { name: "搜索人物笔记", exact: true }).click();
   await red.getByRole("button", { name: "关注", exact: true }).click();
-  assert.ok((await readState()).followed.includes(stranger.name));
+  assert.ok((await readState()).followed.includes(stranger.nickname));
   await phone.screenshot({ path: ".runtime/xiaohongshu-person-narrow.png", animations: "disabled" });
   await red.getByRole("button", { name: `打开笔记：${generated.notes[0].title}`, exact: true }).click();
   await comment("没有勾选角色，也回复一下吧"); await waitReplies(1);
   assert.equal((await readState()).comments.at(-1).actorId, stranger.id);
-  await red.locator(".xhs-note-header").getByRole("button", { name: `查看${stranger.name}的主页`, exact: true }).click();
+  await red.locator(".xhs-note-header").getByRole("button", { name: `查看${stranger.nickname}的主页`, exact: true }).click();
   await red.getByRole("button", { name: "返回人物主页上一页", exact: true }).click();
   assert.equal(await red.locator(".xhs-note-header").count(), 1);
   await back();
   assert.equal(await red.locator(".xhs-person-page").count(), 1);
   const contactCount = await page.evaluate(() => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:red-one")).contacts.length);
   await red.getByRole("button", { name: "发私信", exact: true }).click();
-  await phone.locator(".pocket-wechat-header").getByText(stranger.name, { exact: true }).waitFor();
+  await phone.locator(".pocket-wechat-header").getByText(stranger.nickname, { exact: true }).waitFor();
   const friendship = await page.evaluate(() => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:red-one")));
   assert.equal(friendship.contacts.length, contactCount + 1);
   const newFriend = friendship.contacts.find(contact => contact.sourceXiaohongshuActorId === stranger.id);
   assert.equal(newFriend.avatar, stranger.avatar); assert.match(newFriend.personality, /花店的店员/); assert.deepEqual(newFriend.messages, []);
-  await phone.getByRole("textbox", { name: `给${stranger.name}发消息`, exact: true }).fill("我们来聊聊水彩吧");
+  await phone.getByRole("textbox", { name: `给${stranger.nickname}发消息`, exact: true }).fill("我们来聊聊水彩吧");
   await phone.getByRole("button", { name: "发送消息", exact: true }).click();
   await phone.getByRole("button", { name: "发送消息", exact: true }).click();
   await phone.getByText("微信里的新朋友回复：一起画画吧。", { exact: true }).waitFor();
   assert.match(JSON.stringify(requests.at(-1).body), /花店的店员/); assert.match(JSON.stringify(requests.at(-1).body), /草莓花园世界书/);
   await page.evaluate(() => localStorage.setItem("renge-chat-right-sidebar-width", "430"));
   await page.reload(); await openPhone();
-  await red.getByRole("button", { name: `查看${stranger.name}的主页`, exact: true }).first().click();
+  await red.getByRole("button", { name: `查看${stranger.nickname}的主页`, exact: true }).first().click();
   assert.equal(await red.locator(".xhs-person-identity img").getAttribute("src"), stranger.avatar);
   await phone.screenshot({ path: ".runtime/xiaohongshu-person-profile.png", animations: "disabled" });
   await red.getByRole("button", { name: "发私信", exact: true }).click();
-  await phone.locator(".pocket-wechat-header").getByText(stranger.name, { exact: true }).waitFor();
+  await phone.locator(".pocket-wechat-header").getByText(stranger.nickname, { exact: true }).waitFor();
   assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:red-one")).contacts.length), contactCount + 1);
   assert.equal(await phone.getByText("我们来聊聊水彩吧", { exact: true }).count(), 1);
+  await phone.getByRole("button", { name: "编辑联系人", exact: true }).click();
+  assert.equal(await phone.getByRole("textbox", { name: "朋友的名字", exact: true }).inputValue(), stranger.name);
+  assert.equal(await phone.getByRole("textbox", { name: "昵称", exact: true }).inputValue(), stranger.nickname);
+  await phone.getByRole("textbox", { name: "昵称", exact: true }).fill("鹿鹿今天开花");
+  await phone.getByRole("button", { name: "保存小档案", exact: true }).click();
+  await phone.locator(".pocket-wechat-header").getByText("鹿鹿今天开花", { exact: true }).waitFor();
+  const editedFriend = await page.evaluate(id => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:red-one")).contacts.find(contact => contact.id === id), newFriend.id);
+  assert.equal(editedFriend.name, stranger.name); assert.equal(editedFriend.nickname, "鹿鹿今天开花");
+  assert.equal(editedFriend.messages.length, 2);
+  await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click();
+  await phone.getByRole("button", { name: "打开小红书", exact: true }).click();
+  await red.getByRole("button", { name: "查看鹿鹿今天开花的主页", exact: true }).first().click();
+  assert.equal(await red.locator(".xhs-person-identity h2").innerText(), "鹿鹿今天开花");
+  assert.ok((await readState()).followed.includes("鹿鹿今天开花"));
   assert.deepEqual(dialogs, []);
   assert.deepEqual(pageErrors, []);
   console.log("PASS: independent generated people and profiles, mixed authors, no-selection replies, persona persistence, private-message WeChat friend/chat/dedup/reload, avatar pool, role filtering, silent clear/cancellation, shared context, queued replies, Responses and narrow layout");

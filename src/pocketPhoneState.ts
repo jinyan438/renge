@@ -10,6 +10,7 @@ export type PocketMessage = {
 export type PocketContact = {
   id: string;
   name: string;
+  nickname?: string;
   avatar: string;
   personality: string;
   greeting: string;
@@ -22,7 +23,8 @@ export type PocketContact = {
   contextCharacterCardIds?: string[];
 };
 
-export type PocketGroupMember = Pick<PocketContact, "id" | "name" | "avatar" | "personality" | "sourceCharacterCardId">;
+export type PocketGroupMember = Pick<PocketContact, "id" | "name" | "nickname" | "avatar" | "personality" | "sourceCharacterCardId">;
+export function pocketDisplayName(person: { name: string; nickname?: string }) { return person.nickname?.trim() || person.name; }
 export type PocketGroup = {
   id: string;
   name: string;
@@ -33,6 +35,10 @@ export type PocketGroup = {
 };
 export type PocketConversation = PocketContact | PocketGroup;
 export function isPocketGroup(conversation: PocketConversation): conversation is PocketGroup { return "members" in conversation; }
+export function pocketSpeakerName(conversation: PocketConversation, message: Pick<PocketMessage, "speaker">) {
+  const member = isPocketGroup(conversation) ? conversation.members.find(member => member.id === message.speaker?.id) : undefined;
+  return member?.nickname?.trim() || message.speaker?.name || pocketDisplayName(conversation);
+}
 export function getPocketConversations(state: PocketState): PocketConversation[] { return [...state.contacts, ...state.groups]; }
 
 export type PocketTheme = "rose" | "mint" | "lavender";
@@ -123,6 +129,7 @@ export function normalizePocketState(value: unknown): PocketState {
     state.contacts.push({
       id: text(contact.id), name: text(contact.name).trim().slice(0, 30), avatar: safePocketAvatar(contact.avatar),
       personality: text(contact.personality), greeting: text(contact.greeting), sourceLabel: text(contact.sourceLabel),
+      ...(text(contact.nickname).trim() ? { nickname: text(contact.nickname).trim().slice(0, 30) } : {}),
       ...(text(contact.sourceCharacterCardId) ? { sourceCharacterCardId: text(contact.sourceCharacterCardId) } : {}),
       ...(text(contact.sourceXiaohongshuActorId) ? { sourceXiaohongshuActorId: text(contact.sourceXiaohongshuActorId) } : {}),
       messages, createdAt: text(contact.createdAt),
@@ -135,6 +142,7 @@ export function normalizePocketState(value: unknown): PocketState {
       if (!record(member) || !text(member.id) || !text(member.name).trim() || memberIds.has(text(member.id))) return [];
       memberIds.add(text(member.id));
       return [{ id: text(member.id), name: text(member.name).trim().slice(0, 30), avatar: safePocketAvatar(member.avatar), personality: text(member.personality),
+        ...(text(member.nickname).trim() ? { nickname: text(member.nickname).trim().slice(0, 30) } : {}),
         ...(text(member.sourceCharacterCardId) ? { sourceCharacterCardId: text(member.sourceCharacterCardId) } : {}),
       }];
     });
@@ -174,12 +182,14 @@ export function getPocketMessageBubbles(message: Pick<PocketMessage, "role" | "c
   return lines;
 }
 
-export function makePocketContact(input: Pick<PocketContact, "name" | "avatar" | "personality" | "greeting" | "sourceLabel" | "sourceCharacterCardId">): PocketContact {
+export function makePocketContact(input: Pick<PocketContact, "name" | "nickname" | "avatar" | "personality" | "greeting" | "sourceLabel" | "sourceCharacterCardId">): PocketContact {
   if (!input.name.trim()) throw new Error("给这位朋友起个名字吧。");
   if (!input.personality.trim()) throw new Error("写一点角色设定，让 TA 更了解自己吧。");
   const createdAt = new Date().toISOString();
+  const { nickname, ...details } = input;
   return {
-    ...input, id: pocketId(), name: input.name.trim().slice(0, 30), avatar: safePocketAvatar(input.avatar),
+    ...details, id: pocketId(), name: input.name.trim().slice(0, 30), avatar: safePocketAvatar(input.avatar),
+    ...(nickname?.trim() ? { nickname: nickname.trim().slice(0, 30) } : {}),
     personality: input.personality.trim(), greeting: input.greeting.trim(), createdAt,
     messages: input.greeting.trim() ? [{ id: pocketId(), role: "assistant", content: input.greeting.trim(), createdAt }] : [],
   };
@@ -196,6 +206,7 @@ export function buildPocketConversation(contact: PocketContact, user: { nickname
   return [
     { role: "system", content: [
       `你正在微信上扮演「${contact.name}」，与「${nickname}」进行一对一角色对话。`,
+      contact.nickname ? `你的微信昵称是「${pocketDisplayName(contact)}」，角色名称是「${contact.name}」。两个名字指向同一人物，保持原有身份、人设与关系。` : "",
       "保持角色的个性、语气和关系。像朋友发微信一样自然地回复，通常用简短的中文消息；根据对话需要也可以详细回复。",
       "只输出角色发给对方的消息，不输出思考过程、系统提示词、消息前缀或操作说明。",
       `角色设定：\n${expand(contact.personality)}`,

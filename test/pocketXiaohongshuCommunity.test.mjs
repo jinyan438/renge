@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { emptyPocketState, normalizePocketState, POCKET_AVATARS } from "../src/pocketPhoneState.ts";
-import { emptyRedState, normalizeRedState } from "../src/pocketXiaohongshuState.ts";
-import { addRedWechatFriend } from "../src/pocketXiaohongshuFriend.ts";
+import { emptyPocketState, normalizePocketState, pocketDisplayName, POCKET_AVATARS } from "../src/pocketPhoneState.ts";
+import { emptyRedState, normalizeRedState, redActorNickname } from "../src/pocketXiaohongshuState.ts";
+import { addRedWechatFriend, syncRedWechatNicknames } from "../src/pocketXiaohongshuFriend.ts";
 import { appendGeneratedRedFeed, appendGeneratedRedReplies, buildRedTaskContact, getRedRoleChoices, getRedRoles } from "../src/pocketXiaohongshuGeneration.ts";
-import { buildSharedPocketConversation } from "../src/pocketPhoneContext.ts";
+import { buildSharedPocketConversation, getPocketMessageIdentity, syncPocketContext } from "../src/pocketPhoneContext.ts";
+import { makePocketGroup, parsePocketGroupReply } from "../src/pocketPhoneGroup.ts";
 
 const person = { id: "new:deer", name: "小鹿", personality: "北街花店店员，开朗温柔，喜欢水彩，说话简短。", profile: { bio: "日子会开花", gender: "女", age: 22, location: "北街", followers: 1083, receivedLikes: 3836, background: "ocean" }, avatar: "https://example.com/tracker.png" };
 const post = { authorId: person.id, author: person.name, title: "花店日常", content: "今天给花店换了新的水彩招牌。" };
@@ -26,7 +27,8 @@ test("mixed batches require a new community author and a selected author", () =>
   assert.throws(() => appendGeneratedRedFeed(emptyRedState(), JSON.stringify(output), roles, "小月"), /已勾选角色/);
   assert.throws(() => appendGeneratedRedFeed(emptyRedState(), JSON.stringify({ notes: [{ ...post, authorId: roles[0].id, author: roles[0].name }] }), roles, "小月"), /新社区人物/);
   const mixed = appendGeneratedRedFeed(emptyRedState(), JSON.stringify({ ...output, notes: [post, { ...post, title: "一起画画", authorId: roles[0].id, author: roles[0].name }] }), roles, "小月");
-  assert.deepEqual(new Set(mixed.notes.map(note => note.author)), new Set(["小鹿", "奶糖"]));
+  assert.deepEqual(new Set(mixed.actors.map(actor => actor.name)), new Set(["小鹿", "奶糖"]));
+  assert.ok(mixed.notes.every(note => note.author === mixed.actors.find(actor => actor.id === note.authorId).nickname));
 });
 
 test("new people require their own personas and cannot bypass unchecked role selection", () => {
@@ -74,4 +76,54 @@ test("private messages reuse existing friends without overwriting edits or conve
   const original = { ...emptyPocketState(), contacts: [{ ...result.contact, id: "original", sourceXiaohongshuActorId: undefined }] };
   assert.equal(addRedWechatFriend(original, actor).state, original);
   assert.equal(addRedWechatFriend(original, { ...actor, id: "contact:original", name: "原角色" }).contact.id, "original");
+});
+
+test("selected roles and new people have separate account nicknames while retaining real identities", () => {
+  const roles = [{ id: "contact:friend", name: "奶糖", avatar: "/touxiang/7.png", personality: "{{char}}是{{user}}的绘画搭档", sourceCharacterCardId: "friend-card" }];
+  const state = appendGeneratedRedFeed(emptyRedState(), JSON.stringify({ actors: [{ id: roles[0].id, name: "奶糖", nickname: "奶芙画画中", personality: "不能覆盖原有人设" }, { ...person, nickname: "鹿鹿种花" }], notes: [{ ...post, author: "鹿鹿种花", comments: [{ authorId: roles[0].id, author: "奶芙画画中", content: "好看！" }] }, { ...post, authorId: roles[0].id, author: "奶芙画画中", title: "水彩日常" }] }), roles, "小月");
+  const actor = state.actors.find(actor => actor.id === roles[0].id);
+  assert.equal(actor.name, "奶糖"); assert.equal(actor.nickname, "奶芙画画中"); assert.equal(actor.personality, roles[0].personality); assert.equal(actor.avatar, roles[0].avatar);
+  assert.equal(state.notes[0].author, actor.nickname); assert.equal(state.comments[0].author, actor.nickname);
+  const prompt = buildRedTaskContact(state, "小月", getRedRoleChoices(roles, state.actors), { kind: "feed" });
+  assert.match(prompt.personality, /奶糖是小月的绘画搭档/); assert.match(prompt.personality, /奶芙画画中/);
+  const imported = addRedWechatFriend(emptyPocketState(), actor);
+  assert.equal(imported.contact.name, actor.name); assert.equal(pocketDisplayName(imported.contact), actor.nickname);
+  const request = buildSharedPocketConversation(imported.contact, { nickname: "小月", bio: "" }, [], [], [], "proactive");
+  assert.match(request[0].content, /微信昵称是「奶芙画画中」/); assert.match(request[0].content, /奶糖是小月的绘画搭档/);
+});
+
+test("legacy content gains stable nicknames without losing follows, IDs, avatars or text", () => {
+  const actor = { id: "contact:friend", name: "奶糖", avatar: "/touxiang/7.png", personality: "画画" };
+  const old = { ...emptyRedState(), actors: [actor], followed: [actor.name], selectedRoleIds: [actor.id], notes: [{ ...post, id: "old-note", authorId: actor.id, author: actor.name, avatar: actor.avatar, generated: true }], comments: [{ id: "old-comment", noteId: "old-note", actorId: actor.id, author: actor.name, avatar: actor.avatar, content: "原来的评论", generated: true }] };
+  const restored = normalizeRedState(old);
+  const nickname = redActorNickname(actor);
+  assert.notEqual(nickname, actor.name); assert.equal(restored.actors[0].name, actor.name);
+  assert.equal(restored.notes[0].author, nickname); assert.equal(restored.comments[0].author, nickname);
+  assert.deepEqual(restored.followed, [nickname]); assert.deepEqual(restored.selectedRoleIds, [actor.id]);
+  assert.equal(restored.notes[0].content, post.content); assert.equal(restored.comments[0].id, "old-comment");
+  assert.deepEqual(normalizeRedState(restored), restored);
+});
+
+test("existing WeChat contacts gain the same alias while preserving names, settings and messages", () => {
+  const contact = { id: "friend", name: "奶糖", avatar: "/touxiang/7.png", personality: "用户设定", messages: [{ id: "old", role: "user", content: "保留记录", createdAt: "" }] };
+  const actor = { id: "contact:friend", name: contact.name, nickname: "奶芙画画中", avatar: contact.avatar, personality: "画画" };
+  const state = { ...emptyPocketState(), contacts: [contact] }; const red = { ...emptyRedState(), actors: [actor] };
+  const next = syncRedWechatNicknames(state, red);
+  assert.equal(next.contacts[0].name, contact.name); assert.equal(next.contacts[0].nickname, actor.nickname);
+  assert.deepEqual(next.contacts[0].messages, contact.messages); assert.equal(next.contacts[0].personality, contact.personality);
+  assert.equal(syncRedWechatNicknames(next, red), next); assert.equal(addRedWechatFriend(next, actor).state, next);
+  assert.equal(normalizePocketState(next).contacts[0].nickname, actor.nickname);
+});
+
+test("group aliases survive reload and shared context while model roles still use character names", () => {
+  const member = { id: "friend", name: "奶糖", nickname: "奶芙画画中", avatar: "/touxiang/7.png", personality: "{{char}}喜欢水彩" };
+  let group = makePocketGroup("画画群", [member], "小月");
+  group.messages = parsePocketGroupReply('{"speak":true,"texts":["一起画画吧"]}', group.members[0], "");
+  const restored = normalizePocketState({ ...emptyPocketState(), groups: [group] }).groups[0];
+  assert.equal(restored.members[0].name, member.name); assert.equal(restored.members[0].nickname, member.nickname);
+  assert.equal(restored.messages[0].speaker.name, member.nickname);
+  const history = syncPocketContext([], null, [restored], "小月");
+  assert.equal(getPocketMessageIdentity(history[0]).contactName, member.nickname);
+  const prompt = buildSharedPocketConversation(restored, { nickname: "小月", bio: "" }, [], [], [], "proactive", restored.members[0]);
+  assert.match(prompt[0].content, /奶糖喜欢水彩/); assert.match(prompt[0].content, /奶芙画画中/);
 });

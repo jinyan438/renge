@@ -13,7 +13,7 @@ test("red notes share the ordered main timeline, label correctly and change the 
   const state = fixture(); const contact = redContextConversation(state);
   let history = syncPocketContext([main("主会话A")], null, [contact], "小月");
   assert.equal(history[1].source, "xiaohongshu"); assert.equal(getPocketMessageIdentity(history[1]).app, "xiaohongshu");
-  assert.match(formatPocketContextMessage(history[1]), /小红书 · 奶糖/);
+  assert.ok(formatPocketContextMessage(history[1]).includes(`小红书 · ${state.actors[0].nickname}`));
   const revision = pocketContextRevision(history);
   const next = appendGeneratedRedFeed(state, JSON.stringify({ actors: [{ id: "new:other", name: "新朋友", personality: "画画的朋友" }], notes: [{ author: "新朋友", title: "第二篇", content: "新的日常" }] }), [], "小月");
   history = syncPocketContext([...history, main("主会话B")], [contact], [redContextConversation(next)], "小月");

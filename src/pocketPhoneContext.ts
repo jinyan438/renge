@@ -1,4 +1,4 @@
-import { DEFAULT_POCKET_AVATAR, buildPocketConversation, getPocketPendingMessages, isPocketGroup, safePocketAvatar, type PocketContextDeletion, type PocketConversation, type PocketGroupMember, type PocketGenerationMode, type PocketRequestMessage } from "./pocketPhoneState";
+import { DEFAULT_POCKET_AVATAR, buildPocketConversation, getPocketPendingMessages, isPocketGroup, pocketDisplayName, pocketSpeakerName, safePocketAvatar, type PocketContextDeletion, type PocketConversation, type PocketGroupMember, type PocketGenerationMode, type PocketRequestMessage } from "./pocketPhoneState";
 import { buildWorldBookPromptPlacements, insertWorldBookPromptAtDepth, type WorldBook } from "./worldbookUtils";
 import { buildSharedRedConversation } from "./pocketXiaohongshuContext";
 
@@ -71,7 +71,7 @@ export function syncPocketContext<T extends PocketContextMessage>(history: T[], 
   deletedMessages.forEach(message => previousKeys.add(key(message.contactId, message.messageId)));
   const identify = (contact: PocketConversation, message: PocketConversation["messages"][number]): PocketMessageIdentity => ({
     contactId: contact.id, messageId: message.id,
-    contactName: isPocketGroup(contact) && message.role === "assistant" || !isPocketGroup(contact) && contact.app === "xiaohongshu" ? message.speaker?.name || contact.name : contact.name,
+    contactName: isPocketGroup(contact) && message.role === "assistant" || !isPocketGroup(contact) && contact.app === "xiaohongshu" ? pocketSpeakerName(contact, message) : pocketDisplayName(contact),
     userName: nickname,
     contactAvatar: safePocketAvatar(isPocketGroup(contact) || !isPocketGroup(contact) && contact.app === "xiaohongshu" ? message.speaker?.avatar || DEFAULT_POCKET_AVATAR : contact.avatar),
     ...(!isPocketGroup(contact) && contact.app === "xiaohongshu" ? { app: "xiaohongshu" as const } : {}),
@@ -126,7 +126,8 @@ export function buildSharedPocketConversation(contact: PocketConversation, user:
   const rolePrompt = group ? [
     `你正在微信群「${contact.name}」扮演「${characterName}」本人，群里有「${user.nickname}」和以下朋友。`,
     `你的角色设定：\n${expand(speaker!.personality, characterName)}`,
-    `群成员：\n${contact.members.map(member => `${member.id === speaker!.id ? "你" : "朋友"}「${member.name}」：${expand(member.personality, member.name)}`).join("\n")}`,
+    speaker!.nickname ? `你的微信昵称是「${pocketDisplayName(speaker!)}」，角色名称是「${characterName}」，两个名字指向同一人物。` : "",
+    `群成员：\n${contact.members.map(member => `${member.id === speaker!.id ? "你" : "朋友"}「${pocketDisplayName(member)}」${member.nickname ? `（角色名称：${member.name}）` : ""}：${expand(member.personality, member.name)}`).join("\n")}`,
     user.bio.trim() ? `「${user.nickname}」的个人简介：\n${user.bio.trim()}` : "",
   ].filter(Boolean).join("\n\n") : buildPocketConversation(contact, user)[0].content;
   const pending = mode === "reply" ? getPocketPendingMessages(contact) : [];

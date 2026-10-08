@@ -1,7 +1,8 @@
-import { getPocketMessageBubbles, pocketId, type PocketContact, type PocketGroup, type PocketGroupMember, type PocketMessage } from "./pocketPhoneState";
+import { getPocketMessageBubbles, pocketDisplayName, pocketId, type PocketContact, type PocketGroup, type PocketGroupMember, type PocketMessage } from "./pocketPhoneState";
 
 export function pocketGroupMember(contact: PocketGroupMember): PocketGroupMember {
   return { id: contact.id, name: contact.name, avatar: contact.avatar, personality: contact.personality,
+    ...(contact.nickname ? { nickname: contact.nickname } : {}),
     ...(contact.sourceCharacterCardId ? { sourceCharacterCardId: contact.sourceCharacterCardId } : {}),
   };
 }
@@ -15,7 +16,7 @@ export function resolvePocketGroup(group: PocketGroup, contacts: PocketContact[]
 export function makePocketGroup(name: string, members: PocketGroupMember[], nickname: string): PocketGroup {
   const unique = [...new Map(members.map(member => [member.id, pocketGroupMember(member)])).values()];
   if (!unique.length) throw new Error("至少选择一位朋友。");
-  return { id: pocketId(), name: (name.trim() || `${[nickname, ...unique.map(member => member.name)].slice(0, 3).join("、")}${unique.length > 2 ? "等" : ""}的群聊`).slice(0, 30),
+  return { id: pocketId(), name: (name.trim() || `${[nickname, ...unique.map(pocketDisplayName)].slice(0, 3).join("、")}${unique.length > 2 ? "等" : ""}的群聊`).slice(0, 30),
     members: unique, messages: [], createdAt: new Date().toISOString(),
   };
 }
@@ -32,6 +33,6 @@ export function parsePocketGroupReply(raw: string, member: PocketGroupMember, re
   if (reply.speak !== true || !Array.isArray(reply.texts) || !reply.texts.length || reply.texts.some(text => typeof text !== "string" || !text.trim())) throw new Error(`${member.name}的群聊回复格式有误，请重试。`);
   return reply.texts.slice(0, 4).flatMap(content => getPocketMessageBubbles({ role: "assistant", content })).map(content => ({
     id: pocketId(), role: "assistant", content, createdAt: new Date().toISOString(), replyContextMessageId,
-    speaker: { id: member.id, name: member.name, avatar: member.avatar },
+    speaker: { id: member.id, name: pocketDisplayName(member), avatar: member.avatar },
   }));
 }
