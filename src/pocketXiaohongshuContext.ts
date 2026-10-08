@@ -1,5 +1,5 @@
 import { DEFAULT_POCKET_AVATAR, type PocketContact, type PocketMessage, type PocketRequestMessage } from "./pocketPhoneState";
-import { RED_CONTEXT_ID, type RedState } from "./pocketXiaohongshuState";
+import { emptyRedState, RED_CONTEXT_ID, type RedState } from "./pocketXiaohongshuState";
 import { buildWorldBookPromptPlacements, insertWorldBookPromptAtDepth, type WorldBook } from "./worldbookUtils";
 
 export function redContextConversation(state: RedState): PocketContact {
@@ -32,6 +32,10 @@ export function buildSharedRedConversation(contact: PocketContact, user: { nickn
 }
 
 export type RedContextChange = { contactId: string; messageId: string; content: string | null };
+export function clearRedContent(state: RedState): RedState {
+  const deleted = [...state.deletedContextMessages, ...redContextConversation(state).messages.map(message => ({ contactId: RED_CONTEXT_ID, messageId: message.id }))];
+  return { ...emptyRedState(), actors: state.actors, selectedRoleIds: state.selectedRoleIds, deletedContextMessages: [...new Map(deleted.map(item => [item.messageId, item])).values()] };
+}
 export function applyRedContextChanges(state: RedState, changes: RedContextChange[]): RedState {
   const relevant = changes.filter(change => change.contactId === RED_CONTEXT_ID);
   if (!relevant.length) return state;

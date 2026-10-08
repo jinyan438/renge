@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildPocketHistoryMessage, buildSharedPocketConversation, formatPocketContextMessage, getPocketMessageIdentity, pocketContextRevision, syncPocketContext } from "../src/pocketPhoneContext.ts";
-import { applyRedContextChanges, redContextConversation } from "../src/pocketXiaohongshuContext.ts";
+import { applyRedContextChanges, clearRedContent, redContextConversation } from "../src/pocketXiaohongshuContext.ts";
 import { appendGeneratedRedFeed, buildRedTaskContact } from "../src/pocketXiaohongshuGeneration.ts";
-import { emptyRedState, RED_CONTEXT_ID } from "../src/pocketXiaohongshuState.ts";
+import { emptyRedState, normalizeRedState, RED_CONTEXT_ID } from "../src/pocketXiaohongshuState.ts";
 import { normalizeWorldBook } from "../src/worldbookUtils.ts";
 
 const roles = [{ id: "friend", name: "奶糖", personality: "朋友" }];
@@ -21,6 +21,20 @@ test("red notes share the ordered main timeline, label correctly and change the 
   assert.match(history[3].content, /第二篇/); assert.notEqual(pocketContextRevision(history), revision);
   assert.equal(syncPocketContext(history, null, [redContextConversation(next)], "小月"), history);
   assert.equal(buildPocketHistoryMessage(history[1], "wechat-friend").role, "user");
+});
+
+test("clearing all content removes shared red records, prevents stale restores and retains role settings", () => {
+  const old = fixture(); const note = old.notes[0];
+  const state = { ...old, selectedRoleIds: ["friend"], liked: [note.id], saved: [note.id], history: [note.id], hidden: [note.id], followed: [note.author], likedComments: ["comment"], pendingReplies: ["comment"], comments: [{ id: "comment", noteId: note.id, author: "小月", avatar: "/touxiang/20.png", content: "未回复评论", time: "刚刚", location: "", likes: 0 }] };
+  const history = syncPocketContext([main("保留主聊天")], null, [redContextConversation(state)], "小月");
+  const cleared = clearRedContent(state);
+  for (const key of ["notes", "comments", "liked", "saved", "history", "hidden", "followed", "likedComments", "pendingReplies"]) assert.deepEqual(cleared[key], []);
+  assert.deepEqual(cleared.selectedRoleIds, ["friend"]); assert.deepEqual(cleared.actors, state.actors);
+  assert.equal(cleared.deletedContextMessages.length, 2);
+  assert.deepEqual(normalizeRedState(JSON.parse(JSON.stringify(cleared))), cleared);
+  assert.deepEqual(syncPocketContext(history, null, [redContextConversation(cleared)], "小月", cleared.deletedContextMessages), [main("保留主聊天")]);
+  assert.deepEqual(clearRedContent(cleared), cleared);
+  assert.equal(state.notes.length, 1); assert.equal(state.comments.length, 1);
 });
 test("red generation includes complete quoted history and enabled worldbook placement without WeChat output rules", () => {
   const state = fixture(); const contact = buildRedTaskContact(state, "小月", roles, { kind: "feed" });

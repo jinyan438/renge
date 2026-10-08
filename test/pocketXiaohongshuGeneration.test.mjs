@@ -41,7 +41,7 @@ test("comment replies target the submitted snapshot and retry without duplicate 
   assert.equal(withActorId.comments.at(-1).avatar, stranger.avatar);
 });
 test("role candidates use enabled persona traits and latest saved phone roles", () => {
-  const result = getRedRoles([{ id: "friend", name: "奶糖", personality: "最新手机设定" }], [{ id: "persona", name: "小林", description: "温柔", entryTypes: [{ name: "喜好", entries: [{ key: "喜欢", value: "蓝莓", enabled: true }, { key: "禁用", value: "不能导入", enabled: false }] }] }], []);
+  const result = getRedRoles([{ id: "friend", name: "奶糖", personality: "最新手机设定" }], [{ id: "persona", name: "小林", description: "温柔", entryTypes: [{ name: "喜好", entries: [{ key: "喜欢", value: "蓝莓", enabled: true }, { key: "禁用", value: "不能导入", enabled: false }] }] }]);
   assert.equal(result[0].personality, "最新手机设定"); assert.match(result[1].personality, /蓝莓/); assert.doesNotMatch(result[1].personality, /不能导入/);
 });
 
@@ -74,14 +74,23 @@ test("unselected authors, commenters and replies are rejected atomically", () =>
   assert.deepEqual(state, snapshot); assert.deepEqual(pending.pendingReplies, [target.id]);
 });
 
-test("existing contact, persona and card avatars override random avatars, including saved posts", () => {
+test("existing contact and persona avatars override random avatars, including saved posts", () => {
   const image = "data:image/png;base64,aGVsbG8=";
-  const candidates = getRedRoles([{ id: "friend", name: "奶糖", avatar: "/touxiang/7.png", personality: "朋友" }], [{ id: "stranger", name: "路人", avatarImage: image, description: "朋友", entryTypes: [] }], [{ id: "card", name: "卡片角色", avatarDataUrl: "/api/app-data/assets/portrait.png" }]);
-  assert.deepEqual(candidates.map(role => role.avatar), ["/touxiang/7.png", image, "/api/app-data/assets/portrait.png"]);
+  const candidates = getRedRoles([{ id: "friend", name: "奶糖", avatar: "/touxiang/7.png", personality: "朋友" }], [{ id: "stranger", name: "路人", avatarImage: image, description: "朋友", entryTypes: [] }]);
+  assert.deepEqual(candidates.map(role => role.avatar), ["/touxiang/7.png", image]);
   const result = appendGeneratedRedFeed(emptyRedState(), JSON.stringify({ notes: [{ ...post("已有头像"), authorId: "contact:friend" }] }), candidates, "小月", () => { throw new Error("有头像时不应随机分配"); });
   assert.equal(result.notes[0].avatar, "/touxiang/7.png"); assert.equal(result.comments[0].avatar, image);
   const restored = syncRedRoleAvatars(result, candidates.map(role => ({ ...role, avatar: image })));
   assert.equal(restored.notes[0].avatar, image);
   assert.equal(syncRedRoleAvatars(restored, candidates.map(role => ({ ...role, avatar: image }))), restored);
   assert.equal(result.notes[0].avatar, "/touxiang/7.png");
+});
+
+test("direct card actors stay out of role choices and the pool, while imported contacts remain eligible", () => {
+  const roles = getRedRoles([{ id: "friend", name: "奶糖", avatar: "/touxiang/7.png", personality: "手机设定", sourceCharacterCardId: "friend-card" }], []);
+  const actors = [{ id: "card:legacy", name: "仅角色卡", avatar: "/touxiang/1.png", personality: "旧的直接导入角色" }];
+  const state = { ...emptyRedState(), actors, selectedRoleIds: ["card:legacy", "contact:friend"] };
+  assert.deepEqual(getRedRoleChoices(roles, actors).map(role => role.name), ["奶糖"]);
+  assert.deepEqual(selectedRedRoles(state, roles).map(role => role.id), ["contact:friend"]);
+  assert.equal(roles[0].sourceCharacterCardId, "friend-card");
 });

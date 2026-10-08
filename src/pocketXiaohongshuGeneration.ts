@@ -1,4 +1,3 @@
-import type { CharacterCard } from "./characterCardUtils";
 import type { AgentPersona } from "./types";
 import { type PocketContact } from "./pocketPhoneState";
 import { redContextConversation } from "./pocketXiaohongshuContext";
@@ -6,18 +5,17 @@ import { randomRedAvatar, RED_COVER_TONES, redCount, redText, safeRedImage, type
 
 export type RedRole = Omit<RedActor, "avatar"> & { avatar?: string };
 export type RedTask = { kind: "feed" } | { kind: "reply"; noteId: string; commentId: string };
-export function getRedRoles(contacts: PocketContact[], personas: AgentPersona[], cards: CharacterCard[]): RedRole[] {
+export function getRedRoles(contacts: PocketContact[], personas: AgentPersona[]): RedRole[] {
   const roles: RedRole[] = [
     ...contacts.map(contact => ({ id: `contact:${contact.id}`, name: contact.name, avatar: safeRedImage(contact.avatar) ? contact.avatar : undefined, personality: contact.personality, ...(contact.sourceCharacterCardId ? { sourceCharacterCardId: contact.sourceCharacterCardId } : {}) })),
     ...personas.map(persona => ({ id: `persona:${persona.id}`, name: persona.name, avatar: safeRedImage(persona.avatarImage) ? persona.avatarImage : undefined, personality: [persona.description, ...persona.entryTypes.flatMap(type => type.entries.filter(entry => entry.enabled).map(entry => `${type.name} · ${entry.key}：${entry.value}`))].filter(Boolean).join("\n") })),
-    ...cards.map(card => ({ id: `card:${card.id}`, name: card.nickname || card.name, avatar: safeRedImage(card.avatarDataUrl) ? card.avatarDataUrl : undefined, sourceCharacterCardId: card.id, personality: [card.description, card.personality, card.scenario, card.systemPrompt].filter(Boolean).join("\n\n") })),
   ];
   return roles.filter((role, index) => role.name.trim() && roles.findIndex(other => other.name === role.name) === index).map(role => ({ ...role, avatar: role.avatar || roles.find(other => other.name === role.name && other.avatar)?.avatar }));
 }
 
 export function getRedRoleChoices(roles: RedRole[], actors: RedActor[]): RedRole[] {
   // Saved community actors are opt-in too; historical posts never enable them.
-  return [...roles, ...actors.filter(actor => !roles.some(role => role.name === actor.name || role.id === actor.id))];
+  return [...roles, ...actors.filter(actor => !actor.id.startsWith("card:") && !roles.some(role => role.name === actor.name || role.id === actor.id))];
 }
 export function selectedRedRoles(state: RedState, roles: RedRole[]): RedRole[] {
   return getRedRoleChoices(roles, state.actors).filter(role => state.selectedRoleIds.includes(role.id));
