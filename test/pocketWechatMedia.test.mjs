@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { emptyPocketState, makePocketContact, normalizePocketState } from "../src/pocketPhoneState.ts";
 import { makePocketGroup } from "../src/pocketPhoneGroup.ts";
-import { appendPocketAttachment, applyPocketTransferReplies, editPocketBalance, normalizePocketAttachment, parsePocketMoney, pocketMediaPrompt, pocketReplyMessages, settlePocketTransfer } from "../src/pocketWechatMedia.ts";
+import { appendPocketAttachment, applyPocketTransferReplies, editPocketBalance, normalizePocketAttachment, parsePocketMoney, pocketMediaPrompt, pocketMessagePreview, pocketReplyMessages, settlePocketTransfer } from "../src/pocketWechatMedia.ts";
 import { applyPocketContextChanges } from "../src/pocketPhoneSync.ts";
 import { syncPocketContext } from "../src/pocketPhoneContext.ts";
 
@@ -81,4 +81,38 @@ test("image and voice cards persist, share text context and retain wallet throug
   assert.equal(normalizePocketAttachment({ kind: "voice", text: "好", seconds: 61 }), undefined);
   assert.equal(normalizePocketAttachment({ ...transfer(.001) }), undefined);
   assert.equal(normalizePocketAttachment({ kind: "image", description: "图", url: "javascript:alert(1)" }).url, undefined);
+});
+
+test("sent locations persist and share their name and address with the model", () => {
+  const state = fixture(); const id = state.contacts[0].id;
+  const sent = appendPocketAttachment(state, id, { kind: "location", name: " 学校南门 ", address: " 文华路 18 号 " });
+  const message = sent.contacts[0].messages[0];
+  assert.deepEqual(message.attachment, { kind: "location", name: "学校南门", address: "文华路 18 号" });
+  assert.equal(message.role, "user"); assert.equal(pocketMessagePreview(message), "[位置] 学校南门");
+  assert.deepEqual(normalizePocketState(JSON.parse(JSON.stringify(sent))), sent);
+  assert.deepEqual(sent.wallet, state.wallet);
+  assert.match(syncPocketContext([], null, sent.contacts, "我")[0].content, /位置：学校南门.*文华路 18 号/);
+  assert.throws(() => appendPocketAttachment(state, id, { kind: "location", name: "  ", address: "路边" }), /消息内容/);
+  const noAddress = appendPocketAttachment(state, id, { kind: "location", name: "家", address: "" });
+  assert.deepEqual(noAddress.contacts[0].messages[0].attachment, { kind: "location", name: "家", address: "" });
+});
+
+test("characters can send locations alongside other media in direct and group chats", () => {
+  const texts = ["在这里等你", "[位置:星光咖啡店:文华路 20 号一楼]", "[语音:3:到门口给我打电话]", "[图片:咖啡店门口]"];
+  const replies = pocketReplyMessages(texts, "2026-10-08T09:00:00Z", "request");
+  assert.equal(replies.length, 4); assert.equal(replies[0].content, texts[0]);
+  assert.deepEqual(replies[1].attachment, { kind: "location", name: "星光咖啡店", address: "文华路 20 号一楼" });
+  assert.equal(replies[2].attachment.kind, "voice"); assert.equal(replies[3].attachment.kind, "image");
+  assert.equal(replies[1].replyContextMessageId, "request");
+  const state = fixture(); const group = makePocketGroup("约见群", state.contacts, "我");
+  group.messages = pocketReplyMessages(["【位置：学校南门】"], "2026-10-08T09:00:00Z", "request", group.members[0]);
+  state.groups.push(group);
+  assert.equal(group.messages[0].speaker.id, group.members[0].id);
+  assert.deepEqual(group.messages[0].attachment, { kind: "location", name: "学校南门", address: "" });
+  assert.deepEqual(normalizePocketState(JSON.parse(JSON.stringify(state))).groups[0].messages, group.messages);
+  assert.match(pocketMediaPrompt(state.contacts[0]), /\[位置:地点名称:详细地址\]/);
+  for (const token of ["[位置:]", "[位置:  :无效]", "[位置:咖啡店]还有文字"]) {
+    const message = pocketReplyMessages([token], "", "")[0];
+    assert.equal(message.attachment, undefined); assert.equal(message.content, token);
+  }
 });

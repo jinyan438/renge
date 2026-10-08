@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, ChevronRight, Image as ImageIcon, Mic, Wallet, X } from "lucide-react";
+import { Check, ChevronRight, Image as ImageIcon, MapPin, Mic, Wallet, X } from "lucide-react";
 import { formatPocketMoney, normalizePocketAttachment, parsePocketMoney, type PocketAttachment } from "./pocketWechatMedia";
 import { isPocketGroup, pocketDisplayName, type PocketConversation, type PocketMessage } from "./pocketPhoneState";
 import { PocketWechatVoiceGlyph } from "./PocketWechatVoiceGlyph";
+import { PocketWechatLocation } from "./PocketWechatLocation";
 
 export function PocketWechatMessage({ message, onVoice, onTransfer }: { message: PocketMessage; onVoice: () => void; onTransfer: (action: "received" | "returned") => void }) {
   const attachment = message.attachment;
@@ -15,6 +16,7 @@ export function PocketWechatMessage({ message, onVoice, onTransfer }: { message:
     return () => { if (previous?.isConnected) previous.focus(); };
   }, [zoomed]);
   if (!attachment) return <div className="pocket-message-bubble">{message.content}</div>;
+  if (attachment.kind === "location") return <PocketWechatLocation location={attachment} />;
   if (attachment.kind === "voice") {
     const width = Math.min(165, 76 + attachment.seconds * 2);
     return <div className="pocket-wx-voice"><button type="button" onClick={onVoice} aria-label={`${attachment.shown ? "收起" : "展开"}语音文字`} aria-expanded={!!attachment.shown} style={{ width }} title={`${attachment.seconds}秒语音`}><PocketWechatVoiceGlyph seconds={attachment.seconds} outgoing={message.role === "user"} /></button>{attachment.shown && <p>{attachment.text}</p>}</div>;
@@ -41,6 +43,7 @@ async function readPocketPhoto(file: File): Promise<string> {
 
 export function PocketWechatAttachDialog({ kind, conversation, balance, onSend, onClose }: { kind: PocketAttachment["kind"]; conversation: PocketConversation; balance: number; onSend: (attachment: PocketAttachment) => void; onClose: () => void }) {
   const [amount, setAmount] = useState(""); const [text, setText] = useState(""); const [seconds, setSeconds] = useState("2");
+  const [locationName, setLocationName] = useState("");
   const [recipientId, setRecipientId] = useState(isPocketGroup(conversation) ? conversation.members[0]?.id || "" : conversation.id);
   const [url, setUrl] = useState(""); const [reading, setReading] = useState(false); const [error, setError] = useState("");
   const dialogRef = useRef<HTMLFormElement>(null); const mountedRef = useRef(true);
@@ -58,18 +61,18 @@ export function PocketWechatAttachDialog({ kind, conversation, balance, onSend, 
     dialog?.addEventListener("keydown", trap);
     return () => { mountedRef.current = false; dialog?.removeEventListener("keydown", trap); if (previous?.isConnected) previous.focus(); };
   }, [onClose]);
-  const title = kind === "transfer" ? "转账" : kind === "image" ? "发送图片" : "发送语音";
+  const title = kind === "transfer" ? "转账" : kind === "image" ? "发送图片" : kind === "location" ? "发送位置" : "发送语音";
   return <div className="pocket-sheet-backdrop"><form ref={dialogRef} className="pocket-sheet pocket-wx-attach-sheet pocket-scroll" role="dialog" aria-modal="true" aria-label={title} onSubmit={event => {
     event.preventDefault(); if (reading) return;
     try {
       const recipient = isPocketGroup(conversation) ? conversation.members.find(member => member.id === recipientId) : conversation;
       if (kind === "transfer" && !recipient) throw new Error("请选择收款人。");
-      const attachment = normalizePocketAttachment(kind === "transfer" ? { kind, amount: parsePocketMoney(amount), note: text, status: "pending", recipientId: recipient!.id, recipientName: pocketDisplayName(recipient!) } : kind === "image" ? { kind, description: text || (url ? "发送了一张图片" : ""), url } : { kind, text, seconds: Number(seconds) });
-      if (!attachment) throw new Error(kind === "voice" ? "请填写语音内容，时长为 1 至 60 的整数秒数。" : "请填写图片描述或选择图片。");
+      const attachment = normalizePocketAttachment(kind === "transfer" ? { kind, amount: parsePocketMoney(amount), note: text, status: "pending", recipientId: recipient!.id, recipientName: pocketDisplayName(recipient!) } : kind === "image" ? { kind, description: text || (url ? "发送了一张图片" : ""), url } : kind === "location" ? { kind, name: locationName, address: text } : { kind, text, seconds: Number(seconds) });
+      if (!attachment) throw new Error(kind === "voice" ? "请填写语音内容，时长为 1 至 60 的整数秒数。" : kind === "location" ? "请填写地点名称。" : "请填写图片描述或选择图片。");
       onSend(attachment); onClose();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "消息发送失败。"); }
   }}><header><h3>{title}</h3><button type="button" aria-label="关闭附件编辑" onClick={onClose}><X size={18} /></button></header>
-    {kind === "transfer" ? <>{isPocketGroup(conversation) ? <label className="pocket-field">收款人<select aria-label="收款人" value={recipientId} onChange={event => setRecipientId(event.target.value)}>{conversation.members.map(member => <option key={member.id} value={member.id}>{pocketDisplayName(member)}</option>)}</select></label> : <div className="pocket-wx-recipient">转账给 {pocketDisplayName(conversation)}</div>}<label className="pocket-field">转账金额（元）<input aria-label="转账金额" inputMode="decimal" placeholder="0.00" value={amount} onChange={event => setAmount(event.target.value)} /></label><small>零钱余额 ¥{formatPocketMoney(balance)}</small><label className="pocket-field">转账说明<input maxLength={100} value={text} placeholder="添加转账说明" onChange={event => setText(event.target.value)} /></label></> : kind === "image" ? <><label className="pocket-field">图片描述<textarea aria-label="图片描述" rows={4} maxLength={2000} placeholder="描述这张图片里的画面…" value={text} onChange={event => setText(event.target.value)} /></label><label className="pocket-field">选择图片（可选）<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={reading} onChange={async event => { const file = event.target.files?.[0]; if (!file) return; setReading(true); setError(""); setUrl(""); try { const photo = await readPocketPhoto(file); if (mountedRef.current) { setUrl(photo); if (!text.trim()) setText(file.name); } } catch (cause) { if (mountedRef.current) setError(cause instanceof Error ? cause.message : "图片读取失败。"); } finally { if (mountedRef.current) setReading(false); } }} /></label>{url && <img className="pocket-wx-photo-preview" src={url} alt="待发送图片" />}{reading && <p role="status">正在读取图片…</p>}</> : <><label className="pocket-field">语音时长（秒）<input aria-label="语音时长" type="number" min={1} max={60} step={1} value={seconds} onChange={event => setSeconds(event.target.value)} /></label><label className="pocket-field">语音内容<textarea aria-label="语音内容" rows={4} maxLength={2000} value={text} placeholder="输入这条语音的文字内容…" onChange={event => setText(event.target.value)} /></label><small>点击聊天中的语音气泡可以展开文字。</small></>}
-    {error && <p className="pocket-editor-error" role="alert">{error}</p>}<button className="pocket-wx-green-button" type="submit" disabled={reading}>{kind === "transfer" ? <Wallet size={17} /> : kind === "image" ? <ImageIcon size={17} /> : <Mic size={17} />}{kind === "transfer" ? "确认转账" : "发送"}</button>
+    {kind === "transfer" ? <>{isPocketGroup(conversation) ? <label className="pocket-field">收款人<select aria-label="收款人" value={recipientId} onChange={event => setRecipientId(event.target.value)}>{conversation.members.map(member => <option key={member.id} value={member.id}>{pocketDisplayName(member)}</option>)}</select></label> : <div className="pocket-wx-recipient">转账给 {pocketDisplayName(conversation)}</div>}<label className="pocket-field">转账金额（元）<input aria-label="转账金额" inputMode="decimal" placeholder="0.00" value={amount} onChange={event => setAmount(event.target.value)} /></label><small>零钱余额 ¥{formatPocketMoney(balance)}</small><label className="pocket-field">转账说明<input maxLength={100} value={text} placeholder="添加转账说明" onChange={event => setText(event.target.value)} /></label></> : kind === "image" ? <><label className="pocket-field">图片描述<textarea aria-label="图片描述" rows={4} maxLength={2000} placeholder="描述这张图片里的画面…" value={text} onChange={event => setText(event.target.value)} /></label><label className="pocket-field">选择图片（可选）<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={reading} onChange={async event => { const file = event.target.files?.[0]; if (!file) return; setReading(true); setError(""); setUrl(""); try { const photo = await readPocketPhoto(file); if (mountedRef.current) { setUrl(photo); if (!text.trim()) setText(file.name); } } catch (cause) { if (mountedRef.current) setError(cause instanceof Error ? cause.message : "图片读取失败。"); } finally { if (mountedRef.current) setReading(false); } }} /></label>{url && <img className="pocket-wx-photo-preview" src={url} alt="待发送图片" />}{reading && <p role="status">正在读取图片…</p>}</> : kind === "location" ? <><label className="pocket-field">地点名称<input aria-label="地点名称" maxLength={80} value={locationName} placeholder="例如：学校南门、星光咖啡店" onChange={event => setLocationName(event.target.value)} /></label><label className="pocket-field">详细地址（可选）<textarea aria-label="详细地址" rows={3} maxLength={200} value={text} placeholder="输入街道、门牌号或附近地标…" onChange={event => setText(event.target.value)} /></label></> : <><label className="pocket-field">语音时长（秒）<input aria-label="语音时长" type="number" min={1} max={60} step={1} value={seconds} onChange={event => setSeconds(event.target.value)} /></label><label className="pocket-field">语音内容<textarea aria-label="语音内容" rows={4} maxLength={2000} value={text} placeholder="输入这条语音的文字内容…" onChange={event => setText(event.target.value)} /></label><small>点击聊天中的语音气泡可以展开文字。</small></>}
+    {error && <p className="pocket-editor-error" role="alert">{error}</p>}<button className="pocket-wx-green-button" type="submit" disabled={reading}>{kind === "transfer" ? <Wallet size={17} /> : kind === "image" ? <ImageIcon size={17} /> : kind === "location" ? <MapPin size={17} /> : <Mic size={17} />}{kind === "transfer" ? "确认转账" : "发送"}</button>
   </form></div>;
 }

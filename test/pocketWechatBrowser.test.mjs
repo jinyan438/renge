@@ -77,6 +77,7 @@ try {
   await phone.screenshot({ path: ".runtime/wechat-balance.png", animations: "disabled" });
   await openChat();
   await phone.getByRole("button", { name: "更多聊天功能", exact: true }).click();
+  assert.deepEqual(await phone.locator(".pocket-wx-attach-panel button small").allTextContents(), ["转账", "图片", "语音", "位置"]);
   await phone.screenshot({ path: ".runtime/wechat-attachments.png", animations: "disabled" });
   let dialog = await attachment("转账");
   await dialog.getByLabel("转账金额", { exact: true }).fill("100.01");
@@ -116,8 +117,33 @@ try {
   await dialog.getByRole("button", { name: "发送", exact: true }).click();
   await phone.getByRole("button", { name: "展开语音文字", exact: true }).click();
   await phone.locator(".pocket-wx-voice p").filter({ hasText: "今天一起吃蛋糕吧" }).waitFor();
-  await generate(["[图片:窗边的草莓蛋糕]", "[语音:3:好呀，等我一下]"]);
+  dialog = await attachment("位置");
+  await dialog.getByRole("button", { name: "发送", exact: true }).click();
+  await dialog.getByRole("alert").filter({ hasText: "请填写地点名称" }).waitFor();
+  await dialog.getByLabel("地点名称", { exact: true }).fill("学校南门");
+  await dialog.getByLabel("详细地址", { exact: true }).fill("文华路 18 号");
+  await phone.screenshot({ path: ".runtime/wechat-location-compose.png", animations: "disabled" });
+  const beforeLocation = requests.length;
+  await dialog.getByRole("button", { name: "发送", exact: true }).click();
+  assert.equal(requests.length, beforeLocation);
+  assert.deepEqual((await read()).contacts[0].messages.at(-1).attachment, { kind: "location", name: "学校南门", address: "文华路 18 号" });
+  const sentLocation = phone.locator(".pocket-message.user .pocket-wx-location");
+  assert.match(await sentLocation.innerText(), /学校南门.*文华路 18 号/s);
+  await sentLocation.click();
+  await phone.getByRole("dialog", { name: "位置信息", exact: true }).getByText("文华路 18 号", { exact: true }).waitFor();
+  await phone.screenshot({ path: ".runtime/wechat-location-details.png", animations: "disabled" });
+  await page.keyboard.press("Escape");
+  await phone.getByRole("dialog", { name: "位置信息", exact: true }).waitFor({ state: "hidden" });
+  assert.equal(await sentLocation.evaluate(node => node === document.activeElement), true);
+  await generate(["[图片:窗边的草莓蛋糕]", "[语音:3:好呀，等我一下]", "[位置:星光咖啡店:文华路 20 号一楼]"]);
   assert.match(JSON.stringify(requests.at(-1)), /图片.*草莓蛋糕/); assert.match(JSON.stringify(requests.at(-1)), /语音 5秒.*一起吃蛋糕/);
+  assert.match(JSON.stringify(requests.at(-1)), /位置：学校南门.*文华路 18 号/);
+  assert.match(requests.at(-1).request.messages[0].content, /\[位置:地点名称:详细地址\]/);
+  const receivedLocation = phone.locator(".pocket-message.assistant .pocket-wx-location");
+  assert.match(await receivedLocation.innerText(), /星光咖啡店.*文华路 20 号一楼/s);
+  await receivedLocation.click();
+  await phone.getByRole("dialog", { name: "位置信息", exact: true }).getByText("星光咖啡店", { exact: true }).waitFor();
+  await phone.getByRole("button", { name: "关闭位置信息", exact: true }).click();
   assert.equal(await phone.locator(".pocket-message.assistant .pocket-wx-image").count(), 1);
   await phone.screenshot({ path: ".runtime/wechat-rich-chat.png", animations: "disabled" });
   await openWallet(); await phone.getByRole("button", { name: "账单", exact: true }).click();
@@ -125,6 +151,7 @@ try {
   await phone.screenshot({ path: ".runtime/wechat-bills.png", animations: "disabled" });
   await page.reload(); await openPhone(); await openWallet();
   assert.equal((await read()).wallet.balance, 107.14);
+  assert.deepEqual((await read()).contacts[0].messages.filter(message => message.attachment?.kind === "location").map(message => message.attachment.name), ["学校南门", "星光咖啡店"]);
   await phone.getByRole("button", { name: /^零钱 ¥/, exact: true }).click();
   assert.equal(await phone.getByLabel("零钱余额", { exact: true }).innerText(), "¥107.14");
   // Exercise the actual sidebar resize handle and ensure the new pages fit.
@@ -133,8 +160,14 @@ try {
   if (bounds) { await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2); await page.mouse.down(); await page.mouse.move(bounds.x + 160, bounds.y + bounds.height / 2, { steps: 12 }); await page.mouse.up(); }
   assert.equal(await phone.locator(".pocket-wx-account").evaluate(node => node.scrollWidth <= node.clientWidth + 1), true);
   await phone.screenshot({ path: ".runtime/wechat-wallet-narrow.png", animations: "disabled" });
+  await openChat();
+  assert.equal(await phone.locator(".pocket-wx-location").count(), 2);
+  assert.equal(await phone.locator(".pocket-wx-location").evaluateAll(nodes => nodes.every(node => node.scrollWidth <= node.clientWidth + 1)), true);
+  await phone.getByRole("button", { name: "更多聊天功能", exact: true }).click();
+  assert.equal(await phone.locator(".pocket-wx-attach-panel").evaluate(node => node.scrollWidth <= node.clientWidth + 1), true);
+  await phone.screenshot({ path: ".runtime/wechat-location-narrow.png", animations: "disabled" });
   assert.deepEqual(errors, []);
-  console.log("PASS: wallet editing/reload, insufficient funds, NPC and user receipts, refusal, photo upload/preview, voice expansion, shared model context, narrow sidebar, no runtime errors");
+  console.log("PASS: wallet editing/reload, insufficient funds, NPC and user receipts, refusal, photo upload/preview, voice expansion, user and character locations, shared model context, narrow sidebar, no runtime errors");
 } catch (error) {
   if (page && !page.isClosed()) await page.screenshot({ path: ".runtime/wechat-test-failure.png" });
   throw error;

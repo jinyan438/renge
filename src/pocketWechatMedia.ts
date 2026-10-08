@@ -3,6 +3,7 @@ import type { PocketConversation, PocketGroupMember, PocketMessage, PocketState 
 export type PocketAttachment =
   | { kind: "transfer"; amount: number; note: string; status: "pending" | "received" | "returned"; recipientId?: string; recipientName?: string }
   | { kind: "image"; description: string; url?: string }
+  | { kind: "location"; name: string; address: string }
   | { kind: "voice"; text: string; seconds: number; shown?: boolean };
 export type PocketWalletEntry = { id: string; kind: "edit" | "send" | "receive" | "refund"; amount: number; balance: number; title: string; createdAt: string };
 export type PocketWallet = { balance: number; bills: PocketWalletEntry[] };
@@ -40,16 +41,19 @@ export function normalizePocketAttachment(value: unknown): PocketAttachment | un
     ...(typeof value.recipientId === "string" ? { recipientId: value.recipientId } : {}), ...(typeof value.recipientName === "string" ? { recipientName: value.recipientName.slice(0, 30) } : {}),
   };
   if (value.kind === "image" && typeof value.description === "string" && value.description.trim()) return { kind: "image", description: value.description.trim().slice(0, 2000), ...(safePocketImageUrl(value.url) ? { url: safePocketImageUrl(value.url) } : {}) };
+  if (value.kind === "location" && typeof value.name === "string" && value.name.trim()) return { kind: "location", name: value.name.trim().slice(0, 80), address: typeof value.address === "string" ? value.address.trim().slice(0, 200) : "" };
   if (value.kind === "voice" && typeof value.text === "string" && value.text.trim() && typeof value.seconds === "number" && Number.isInteger(value.seconds) && value.seconds >= 1 && value.seconds <= 60) return { kind: "voice", text: value.text.trim().slice(0, 2000), seconds: value.seconds, ...(value.shown === true ? { shown: true } : {}) };
 }
 
 export function pocketAttachmentContent(attachment: PocketAttachment, id: string) {
   if (attachment.kind === "image") return `[图片：${attachment.description}]`;
   if (attachment.kind === "voice") return `[语音 ${attachment.seconds}秒：${attachment.text}]`;
+  if (attachment.kind === "location") return `[位置：${attachment.name}${attachment.address ? ` · ${attachment.address}` : ""}]`;
   return `[微信转账 ¥${formatPocketMoney(attachment.amount)}${attachment.note ? ` · ${attachment.note}` : ""}${attachment.recipientName ? ` · 收款人：${attachment.recipientName}` : ""} · ${attachment.status === "received" ? "已收款" : attachment.status === "returned" ? "已退还" : "待收款"} · 编号：${id}]`;
 }
 export function pocketMessagePreview(message: PocketMessage) {
   if (!message.attachment) return message.content;
+  if (message.attachment.kind === "location") return `[位置] ${message.attachment.name}`;
   return message.attachment.kind === "transfer" ? `[转账] ¥${formatPocketMoney(message.attachment.amount)}` : message.attachment.kind === "image" ? "[图片]" : `[语音] ${message.attachment.seconds}秒`;
 }
 
@@ -90,16 +94,18 @@ export function settlePocketTransfer(state: PocketState, conversationId: string,
 
 // Preserve yuyuan's standalone tokens inside the existing validated texts array.
 export function pocketReplyMessages(texts: string[], createdAt: string, replyContextMessageId: string, speaker?: PocketGroupMember): PocketMessage[] {
-  const entries = !speaker && texts.every(text => !/^[\[【](转账|图片|语音|收款|退还)[:：]/.test(text)) ? [texts.join("\n")] : texts;
+  const entries = !speaker && texts.every(text => !/^[\[【](转账|图片|语音|位置|收款|退还)[:：]/.test(text)) ? [texts.join("\n")] : texts;
   return entries.map(content => {
     const id = crypto.randomUUID();
     let attachment: PocketAttachment | undefined;
     const transfer = content.match(/^[\[【]转账[:：](\d+(?:\.\d{1,2})?)(?:[:：]([^\]】]*))?[\]】]$/);
     const image = content.match(/^[\[【]图片[:：]([\s\S]+)[\]】]$/);
     const voice = content.match(/^[\[【]语音[:：](\d+)[:：]([\s\S]+)[\]】]$/);
+    const location = content.match(/^[\[【]位置[:：]([^:：\]】\r\n]+)(?:[:：]([^\]】]*))?[\]】]$/);
     if (transfer) { try { attachment = { kind: "transfer", amount: parsePocketMoney(transfer[1]), note: (transfer[2] || "").slice(0, 100), status: "pending" }; } catch { /* Invalid tokens remain ordinary text. */ } }
     if (image) attachment = normalizePocketAttachment({ kind: "image", description: image[1] });
     if (voice) attachment = normalizePocketAttachment({ kind: "voice", seconds: Number(voice[1]), text: voice[2] });
+    if (location) attachment = normalizePocketAttachment({ kind: "location", name: location[1], address: location[2] });
     return { id, role: "assistant", content: attachment ? pocketAttachmentContent(attachment, id) : content, createdAt, replyContextMessageId, ...(attachment ? { attachment } : {}), ...(speaker ? { speaker: { id: speaker.id, name: speaker.nickname || speaker.name, avatar: speaker.avatar } } : {}) };
   });
 }
@@ -120,6 +126,7 @@ export function pocketMediaPrompt(conversation: PocketConversation, speakerId?: 
   const pending = conversation.messages.filter(message => message.role === "user" && message.attachment?.kind === "transfer" && message.attachment.status === "pending" && (!message.attachment.recipientId || message.attachment.recipientId === (speakerId || conversation.id)));
   return [
     "需要图片或语音时，可在 texts 中单独发送一条 [图片:具体画面描述] 或 [语音:1至60的整数秒数:语音文字内容]。图片是画面描述卡，语音是文字语音卡；不要声称已经拍摄、上传或录制了真实文件。普通聊天仍发送普通文字。",
+    "需要分享地点、约见或指路时，可在 texts 中单独发送一条 [位置:地点名称:详细地址]，会显示为微信位置卡片。地点名称必填，地址可省略；根据聊天背景填写，不要声称获取了用户的实时定位。",
     "只有当前聊天明确涉及还钱、AA、请客或赠予等金钱往来时，才偶尔发送 [转账:金额:留言]，金额大于0且最多两位小数，一轮最多一笔。不要默认或频繁发钱。角色转账的收款人是用户。",
     pending.length ? `待你处理的用户转账编号：${JSON.stringify(pending.map(message => ({ id: message.id, content: message.content })))}。愿意收款则在 texts 单独发送 [收款:准确编号]，拒收则发送 [退还:准确编号]；仅实际输出此码才会改变收款状态。` : "没有需要你处理的用户转账，不要编造收款或退还编号。",
   ].join("\n");
