@@ -74,6 +74,7 @@ export type PocketSettings = {
   providerId: string;
   modelId: string;
   largeText: boolean;
+  /** Legacy session value, retained only for migration to global prompt settings. */
   promptOverrides?: PocketPromptOverrides;
 };
 export type PocketContextDeletion = { contactId: string; messageId: string };

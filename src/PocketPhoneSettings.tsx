@@ -11,27 +11,29 @@ function SettingsCard({ title, icon, children, open = false }: { title: string; 
   </details>;
 }
 
-export function PocketPhoneSettings({ settings, nickname, owner, providers, provider, modelId, canChat, onChange, onExit }: {
+export function PocketPhoneSettings({ settings, promptOverrides, nickname, owner, providers, provider, modelId, canChat, onChange, onPromptChange, onExit }: {
   settings: PocketSettings; nickname: string; owner: boolean; providers: PocketProvider[];
   provider?: PocketProvider; modelId: string; canChat: boolean;
+  promptOverrides: PocketPromptOverrides; onPromptChange: (prompts: PocketPromptOverrides) => string;
   onChange: (patch: Partial<PocketSettings>) => void; onExit: () => void;
 }) {
   const [drafts, setDrafts] = useState<PocketPromptOverrides>({});
   const [feedback, setFeedback] = useState<Partial<Record<PocketPromptId, string>>>({});
-  const overrides = settings.promptOverrides || {};
+  const overrides = promptOverrides;
   function save(id: PocketPromptId, defaultText: string) {
     const text = drafts[id] ?? overrides[id] ?? defaultText;
     if (!text.trim()) { setFeedback(previous => ({ ...previous, [id]: "提示词不能为空。" })); return; }
     const next = { ...overrides };
     if (text === defaultText) delete next[id]; else next[id] = text;
-    onChange({ promptOverrides: next });
-    setFeedback(previous => ({ ...previous, [id]: "已保存，下次生成生效。" }));
+    const warning = onPromptChange(next);
+    setDrafts(previous => { const nextDrafts = { ...previous }; delete nextDrafts[id]; return nextDrafts; });
+    setFeedback(previous => ({ ...previous, [id]: warning || "已全局保存，下次生成生效。" }));
   }
-  function reset(id: PocketPromptId, defaultText: string) {
+  function reset(id: PocketPromptId) {
     const next = { ...overrides }; delete next[id];
-    onChange({ promptOverrides: next });
-    setDrafts(previous => ({ ...previous, [id]: defaultText }));
-    setFeedback(previous => ({ ...previous, [id]: "已恢复默认。" }));
+    const warning = onPromptChange(next);
+    setDrafts(previous => { const nextDrafts = { ...previous }; delete nextDrafts[id]; return nextDrafts; });
+    setFeedback(previous => ({ ...previous, [id]: warning || "已全局恢复默认。" }));
   }
   return <div className="pocket-settings pocket-scroll">
     <header className="pocket-settings-heading">
@@ -59,8 +61,8 @@ export function PocketPhoneSettings({ settings, nickname, owner, providers, prov
     </SettingsCard>
     <div className="pocket-settings-section-title">生成</div>
     <SettingsCard title="提示词修改" icon={<SlidersHorizontal size={20} />}>
-      <p className="pocket-prompt-intro">按应用修改生成提示词，保存后用于当前会话的手机和 ta 的手机。双花括号内的变量会自动填入角色、资料和记录。请保留输出格式中的字段，方便应用读取。</p>
-      <button type="button" className="pocket-prompt-reset-all" onClick={() => { onChange({ promptOverrides: {} }); setDrafts({}); setFeedback({}); }}><RotateCcw size={13} />全部恢复默认</button>
+      <p className="pocket-prompt-intro">提示词全局共用，保存后适用于所有会话的手机和 ta 的手机。双花括号内的变量会自动填入当前角色、资料和记录。请保留输出格式中的字段，方便应用读取。</p>
+      <button type="button" className="pocket-prompt-reset-all" onClick={() => { onPromptChange({}); setDrafts({}); setFeedback({}); }}><RotateCcw size={13} />全部恢复默认</button>
       {(["微信", "ta 的手机", "便签", "朋友圈", "小红书", "通用"] as const).map(group => <details className="pocket-prompt-app" key={group}>
         <summary><strong>{group}</strong><small>{POCKET_PROMPTS.filter(prompt => prompt.group === group).length} 项</small><ChevronDown size={14} /></summary>
         {POCKET_PROMPTS.filter(prompt => prompt.group === group).map(prompt => {
@@ -72,7 +74,7 @@ export function PocketPhoneSettings({ settings, nickname, owner, providers, prov
               <label htmlFor={`pocket-prompt-${prompt.id}`}>{prompt.title}提示词</label>
               <textarea id={`pocket-prompt-${prompt.id}`} value={value} maxLength={50000} rows={12} spellCheck={false} onChange={event => { setDrafts(previous => ({ ...previous, [prompt.id]: event.target.value })); setFeedback(previous => ({ ...previous, [prompt.id]: "尚未保存" })); }} />
               {!!variables.length && <p className="pocket-prompt-variables">可用变量：{variables.join("、")}</p>}
-              <div className="pocket-prompt-actions"><button type="button" className="pocket-primary" onClick={() => save(prompt.id, prompt.defaultText)}>保存提示词</button><button type="button" onClick={() => reset(prompt.id, prompt.defaultText)}><RotateCcw size={12} />恢复默认</button></div>
+              <div className="pocket-prompt-actions"><button type="button" className="pocket-primary" onClick={() => save(prompt.id, prompt.defaultText)}>保存提示词</button><button type="button" onClick={() => reset(prompt.id)}><RotateCcw size={12} />恢复默认</button></div>
               <p className="pocket-prompt-feedback" role="status">{feedback[prompt.id] || "修改后点击保存提示词。"}</p>
             </div>
           </details>;

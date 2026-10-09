@@ -129,7 +129,7 @@ export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, pro
     const next = syncRedRoleAvatars(stateRef.current, roles);
     if (next !== stateRef.current) update(() => next);
   }, [roleSettingsKey]);
-  const generationContextKey = JSON.stringify([provider?.id, modelId, generationRoles]);
+  const generationContextKey = JSON.stringify([provider?.id, modelId, generationRoles, promptOverrides]);
   useEffect(() => { controllerRef.current?.abort(new Error("模型或角色设定已变化，请重试生成。")); }, [generationContextKey]);
   useEffect(() => {
     if (controllerRef.current) return;

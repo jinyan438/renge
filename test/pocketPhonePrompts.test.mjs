@@ -11,6 +11,7 @@ import { buildRedTaskContact } from "../src/pocketXiaohongshuGeneration.ts";
 import { emptyRedState } from "../src/pocketXiaohongshuState.ts";
 import { requestPocketWechatTurn } from "../src/pocketPhoneChat.ts";
 import { fixtureWechatTurn } from "./pocketPhoneInnerFixture.mjs";
+import { POCKET_PROMPTS_STORAGE_KEY, readPocketPromptSettings, writePocketPromptSettings, saveGlobalPocketPrompts, subscribeGlobalPocketPrompts } from "../src/pocketPhonePromptStorage.ts";
 
 const user = { nickname: "小月", bio: "爱画画", avatarImage: "" };
 const owner = makePocketContact({ name: "奶糖", avatar: "/touxiang/1.png", personality: "花店同事", greeting: "", sourceLabel: "自定义" });
@@ -18,7 +19,65 @@ const group = { id: "group", name: "花店群", members: [owner], messages: [], 
 const viewer = { id: owner.id, name: owner.name, avatar: owner.avatar, personality: owner.personality };
 const friend = { ...viewer, id: "friend", name: "阿禾" };
 
-test("old phones keep defaults; valid prompt changes persist in both owner views and reset without changing records", () => {
+function storageFixture(entries = {}) {
+  const values = new Map(Object.entries(entries));
+  return { get length() { return values.size; }, key: index => [...values.keys()][index] ?? null,
+    getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
+}
+
+test("prompt migration gathers saved sessions once, prioritizes the current session and never changes phone histories", () => {
+  const one = "renge_pocket_phone_v1:one"; const two = "renge_pocket_phone_v1:two";
+  const first = JSON.stringify({ version: 1, settings: { promptOverrides: { "wechat.style": "当前会话风格" } }, contacts: [{ messages: ["保留聊天"] }] });
+  const second = JSON.stringify({ version: 1, settings: { promptOverrides: { "wechat.style": "其他会话风格", "notes.task": "其他会话便签" } } });
+  const storage = storageFixture({ [one]: first, [two]: second, "renge_pocket_phone_v1:broken": "invalid JSON" });
+  const migrated = readPocketPromptSettings(storage, one);
+  assert.deepEqual(migrated, { prompts: { "wechat.style": "当前会话风格", "notes.task": "其他会话便签" }, storageWarning: "" });
+  assert.deepEqual(readPocketPromptSettings(storage, two), migrated);
+  assert.equal(storage.getItem(one), first); assert.equal(storage.getItem(two), second);
+  assert.deepEqual(readPocketPromptSettings(storage, "renge_pocket_phone_v1:new"), migrated);
+});
+
+test("global single/all resets persist across sessions and never resurrect stale session overrides", () => {
+  const one = "renge_pocket_phone_v1:one";
+  const storage = storageFixture({ [one]: JSON.stringify({ version: 1, settings: { promptOverrides: { "wechat.style": "旧自定义" } } }) });
+  writePocketPromptSettings(storage, { "notes.task": "新的全局便签" });
+  assert.deepEqual(readPocketPromptSettings(storage, one).prompts, { "notes.task": "新的全局便签" });
+  writePocketPromptSettings(storage, {});
+  assert.deepEqual(readPocketPromptSettings(storage, one).prompts, {});
+  assert.deepEqual(readPocketPromptSettings(storage, "renge_pocket_phone_v1:new").prompts, {});
+  assert.deepEqual(JSON.parse(storage.getItem(POCKET_PROMPTS_STORAGE_KEY)), { version: 1, prompts: {} });
+});
+
+test("failed global migration preserves the old edits for a later retry; malformed global data is not overwritten", () => {
+  const key = "renge_pocket_phone_v1:one"; const legacy = JSON.stringify({ version: 1, settings: { promptOverrides: { "notes.task": "原来的便签" } } });
+  const storage = storageFixture({ [key]: legacy }); const setItem = storage.setItem;
+  storage.setItem = () => { throw new Error("quota"); };
+  const failed = readPocketPromptSettings(storage, key);
+  assert.deepEqual(failed.prompts, { "notes.task": "原来的便签" }); assert.ok(failed.storageWarning); assert.equal(storage.getItem(key), legacy); assert.equal(storage.getItem(POCKET_PROMPTS_STORAGE_KEY), null);
+  storage.setItem = setItem;
+  assert.deepEqual(readPocketPromptSettings(storage, key).prompts, failed.prompts);
+  storage.setItem(POCKET_PROMPTS_STORAGE_KEY, "invalid global JSON");
+  assert.ok(readPocketPromptSettings(storage, key).storageWarning); assert.equal(storage.getItem(POCKET_PROMPTS_STORAGE_KEY), "invalid global JSON");
+});
+
+test("global changes notify mounted phones and other windows, including resetting defaults and ignoring unrelated storage", () => {
+  const originalWindow = globalThis.window; const originalStorage = globalThis.localStorage;
+  const storage = storageFixture(); const changes = []; globalThis.window = new EventTarget(); globalThis.localStorage = storage;
+  const unsubscribe = subscribeGlobalPocketPrompts(settings => changes.push(settings));
+  const emit = (key, newValue) => { const event = new Event("storage"); Object.assign(event, { key, newValue, storageArea: storage }); window.dispatchEvent(event); };
+  try {
+    saveGlobalPocketPrompts({ "wechat.style": "共用设置" });
+    assert.deepEqual(changes.at(-1).prompts, { "wechat.style": "共用设置" });
+    emit("renge_pocket_phone_v1:other", "{}"); assert.equal(changes.length, 1);
+    emit(POCKET_PROMPTS_STORAGE_KEY, JSON.stringify({ version: 1, prompts: { "notes.task": "另一窗口修改" } }));
+    assert.deepEqual(changes.at(-1).prompts, { "notes.task": "另一窗口修改" });
+    emit(POCKET_PROMPTS_STORAGE_KEY, "invalid JSON"); assert.equal(changes.length, 2);
+    saveGlobalPocketPrompts({}); assert.deepEqual(changes.at(-1).prompts, {});
+    unsubscribe(); saveGlobalPocketPrompts({}); assert.equal(changes.length, 3);
+  } finally { unsubscribe(); globalThis.window = originalWindow; globalThis.localStorage = originalStorage; }
+});
+
+test("legacy phone overrides remain readable for migration in both owner views without changing records", () => {
   const old = { ...emptyPocketState(), contacts: [owner] };
   assert.equal(normalizePocketState(old).settings.promptOverrides, undefined);
   const normalized = normalizePocketPromptOverrides({ "notes.task": "新的便签规则", "wechat.style": " ", "red.rules": 123, "unknown": "ignored", "phone.time": "x".repeat(50001), "wechat.role": POCKET_PROMPTS.find(p => p.id === "wechat.role").defaultText });
