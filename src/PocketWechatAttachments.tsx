@@ -26,7 +26,7 @@ export function PocketWechatMessage({ message, onVoice, onTransfer }: { message:
   return <div className={`pocket-wx-transfer status-${attachment.status}`}><div><span className="pocket-wx-transfer-icon">{attachment.status === "received" ? <Check size={23} /> : <Wallet size={23} />}</span><span><strong>¥{formatPocketMoney(attachment.amount)}</strong><small>{attachment.note || "微信转账"}</small>{attachment.recipientName && <small>给{attachment.recipientName}</small>}</span></div><footer>{attachment.status === "received" ? message.role === "user" ? "对方已收款" : "已收款" : attachment.status === "returned" ? "已退还" : message.role === "user" ? "待对方收款" : "待收款"}</footer>{pendingIncoming && <div className="pocket-wx-transfer-actions"><button type="button" onClick={() => onTransfer("received")}>确认收款 <ChevronRight size={12} /></button><button type="button" onClick={() => onTransfer("returned")}>退还</button></div>}</div>;
 }
 
-async function readPocketPhoto(file: File): Promise<string> {
+export async function readPocketPhoto(file: File): Promise<string> {
   if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) throw new Error("请选择 PNG、JPEG、WebP 或 GIF 图片。");
   if (file.size > 8 * 1024 * 1024) throw new Error("请选择小于 8 MB 的图片。");
   const bitmap = await createImageBitmap(file);

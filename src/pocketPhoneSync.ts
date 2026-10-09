@@ -4,6 +4,7 @@ import { applyRedContextChanges } from "./pocketXiaohongshuContext";
 import { normalizeRedState, RED_CONTEXT_ID, redStorageKey } from "./pocketXiaohongshuState";
 import { getPocketContextRecords } from "./pocketPhoneInner";
 import { applyPocketNoteChanges, pocketNotesContextId } from "./pocketNotesState";
+import { applyPocketMomentChanges, pocketMomentsConversation, POCKET_MOMENTS_ID, type PocketMoment } from "./pocketMomentsState";
 
 export type PocketContextChange = { contactId: string; messageId: string; content: string | null };
 const messageKey = (contactId: string, messageId: string) => JSON.stringify([contactId, messageId]);
@@ -47,6 +48,7 @@ export function applyPocketContextChanges(state: PocketState, changes: PocketCon
   changes = changes.filter(change => change.contactId !== RED_CONTEXT_ID);
   if (!changes.length) return state;
   const byKey = new Map(changes.map(change => [messageKey(change.contactId, change.messageId), change.content]));
+  const moments = state.moments ? applyPocketMomentChanges(state.moments, changes.filter(change => change.contactId === POCKET_MOMENTS_ID)) : state.moments;
   const update = <T extends PocketConversation>(conversation: T): T => {
     let changed = false;
     let messages = conversation.messages.flatMap(message => {
@@ -111,22 +113,44 @@ export function applyPocketContextChanges(state: PocketState, changes: PocketCon
     nestedChanged = true;
     return [id, { ...phone, contacts: next.contacts, groups: next.groups, notes }];
   })) : undefined;
-  return nestedChanged || deletedContextMessages !== state.deletedContextMessages || contacts.some((contact, index) => contact !== state.contacts[index]) || groups.some((group, index) => group !== state.groups[index])
-    ? { ...state, contacts, groups, deletedContextMessages, ...(characterPhones ? { characterPhones } : {}) } : state;
+  const next = nestedChanged || moments !== state.moments || deletedContextMessages !== state.deletedContextMessages || contacts.some((contact, index) => contact !== state.contacts[index]) || groups.some((group, index) => group !== state.groups[index])
+    ? { ...state, contacts, groups, deletedContextMessages, ...(state.moments ? { moments } : {}), ...(characterPhones ? { characterPhones } : {}) } : state;
+  return moments !== state.moments ? recordPocketContextDeletions(state, next) : next;
 }
 
 const POCKET_CONTEXT_CHANGED = "renge:pocket-context-changed";
 type PocketContextEvent = { sessionId: string; changes: PocketContextChange[]; storageWarning: string };
 
-export function syncPocketPhoneFromContext(sessionId: string, previous: PocketContextMessage[], next: PocketContextMessage[]) {
+// A main-chat post edit also updates the topic carried by its interactions.
+// Removing the post removes its dependent records immediately, even with the
+// phone closed. Unrelated or restored records absent locally stay untouched.
+export function reconcilePocketMomentsContext<T extends PocketContextMessage>(history: T[], previous: PocketMoment[], posts: PocketMoment[]): T[] {
+  const before = new Set(pocketMomentsConversation(previous).messages.map(message => message.id));
+  const current = new Map(pocketMomentsConversation(posts).messages.map(message => [message.id, message]));
+  let changed = false;
+  const next = history.flatMap(message => {
+    const identity = getPocketMessageIdentity(message);
+    if (identity?.contactId !== POCKET_MOMENTS_ID) return [message];
+    const record = current.get(identity.messageId);
+    if (!record) { if (before.has(identity.messageId)) { changed = true; return []; } return [message]; }
+    if (message.content === record.content && JSON.stringify(message.extra?.pocketMoment) === JSON.stringify(record.moment)) return [message];
+    changed = true;
+    return [{ ...message, content: record.content, extra: { ...message.extra, pocketMoment: record.moment } }];
+  });
+  return changed ? next : history;
+}
+
+export function syncPocketPhoneFromContext<T extends PocketContextMessage>(sessionId: string, previous: T[], next: T[]): T[] {
   const changes = getPocketContextChanges(previous, next);
-  if (!sessionId || !changes.length) return;
+  if (!sessionId || !changes.length) return next;
   let storageWarning = "";
+  let reconciled = next;
   try {
     const key = pocketStorageKey(sessionId);
     const saved = localStorage.getItem(key);
     const state = saved ? normalizePocketState(JSON.parse(saved)) : emptyPocketState();
     const updated = applyPocketContextChanges(state, changes);
+    if (updated.moments !== state.moments) reconciled = reconcilePocketMomentsContext(next, state.moments || [], updated.moments || []);
     if (updated !== state) localStorage.setItem(key, JSON.stringify(updated));
     const redKey = redStorageKey(sessionId);
     const redState = normalizeRedState(JSON.parse(localStorage.getItem(redKey) || "null"));
@@ -138,6 +162,7 @@ export function syncPocketPhoneFromContext(sessionId: string, previous: PocketCo
   // A mounted phone receives the same patch synchronously, without echoing it
   // back into the main timeline or overwriting its current drafts/settings.
   window.dispatchEvent(new CustomEvent<PocketContextEvent>(POCKET_CONTEXT_CHANGED, { detail: { sessionId, changes, storageWarning } }));
+  return reconciled;
 }
 
 export function subscribePocketContextChanges(sessionId: string, receive: (changes: PocketContextChange[], storageWarning: string) => void) {

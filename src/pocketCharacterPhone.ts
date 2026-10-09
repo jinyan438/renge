@@ -24,6 +24,7 @@ export function characterPhoneView(root: PocketState, ownerId: string, user: Poc
   };
   return { ...emptyPocketState(), settings: root.settings, wallet: phone?.wallet || { balance: 0, bills: [] },
     notes: phone?.notes || [],
+    moments: root.moments, momentCovers: root.momentCovers,
     wechatClock: root.wechatClock,
     deletedContextMessages: root.deletedContextMessages,
     contacts: [userContact, ...(phone?.contacts || []).map(contact => ({ ...contact, phoneOwner,
@@ -62,6 +63,7 @@ export function commitCharacterPhoneView(root: PocketState, ownerId: string, vie
   }
   const strip = (contact: PocketContact) => { const { phoneOwner: _owner, syncedOwnerId: _sync, ...saved } = contact; return saved; };
   return { ...root, settings: view.settings, wallet, wechatClock: root.wechatClock,
+    moments: view.moments, momentCovers: view.momentCovers,
     contacts: root.contacts.map(contact => contact.id === ownerId ? { ...contact, messages } : contact),
     characterPhones: { ...root.characterPhones, [ownerId]: {
       contacts: view.contacts.filter(contact => !contact.syncedOwnerId).map(strip),

@@ -4,9 +4,9 @@ import { DEFAULT_POCKET_USER_AVATAR, safePocketAvatar } from "./pocketPhoneState
 import { formatPocketMoney, parsePocketMoney, type PocketWallet } from "./pocketWechatMedia";
 
 export type PocketWalletPage = "me" | "service" | "wallet" | "balance" | "bills";
-export function PocketWechatWallet({ wallet, nickname, avatar, page, onPage, onBalance, onSettings }: {
+export function PocketWechatWallet({ wallet, nickname, avatar, page, onPage, onBalance, onSettings, onMoments }: {
   wallet: PocketWallet; nickname: string; avatar: string; page: PocketWalletPage;
-  onPage: (page: PocketWalletPage) => void; onBalance: (amount: number) => void; onSettings: () => void;
+  onPage: (page: PocketWalletPage) => void; onBalance: (amount: number) => void; onSettings: () => void; onMoments: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [amount, setAmount] = useState("");
@@ -32,7 +32,7 @@ export function PocketWechatWallet({ wallet, nickname, avatar, page, onPage, onB
   const back = () => onPage(page === "service" ? "me" : page === "wallet" ? "service" : "wallet");
   const rows = [
     { icon: Star, name: "收藏", color: "#f3ad38", note: "暂无收藏" },
-    { icon: CircleDollarSign, name: "朋友圈", color: "#10aeff", note: "暂无朋友圈动态" },
+    { icon: CircleDollarSign, name: "朋友圈", color: "#10aeff", note: "" },
     { icon: CreditCard, name: "卡包", color: "#2782d7", note: "暂无卡券" },
     { icon: Smile, name: "表情", color: "#f7b437", note: "暂无收藏的表情" },
   ];
@@ -41,7 +41,7 @@ export function PocketWechatWallet({ wallet, nickname, avatar, page, onPage, onB
       {page === "me" ? <>
         <div className="pocket-wx-profile"><img src={safePocketAvatar(avatar || DEFAULT_POCKET_USER_AVATAR)} alt={nickname} /><span><strong>{nickname}</strong><small>微信号：{nickname}</small><span className="pocket-wx-status"><Smile size={11} /> 状态</span></span><QrCode size={18} /><ChevronRight size={16} /></div>
         <button className="pocket-wx-row pocket-wx-service-entry" type="button" onClick={() => onPage("service")}><Wallet size={22} color="#07c160" /><span>服务</span><ChevronRight size={17} /></button>
-        <div className="pocket-wx-row-group">{rows.map(row => <button className="pocket-wx-row" type="button" key={row.name} onClick={() => setDetail(row.note)}><row.icon size={22} color={row.color} /><span>{row.name}</span><ChevronRight size={17} /></button>)}</div>
+        <div className="pocket-wx-row-group">{rows.map(row => <button className="pocket-wx-row" type="button" key={row.name} onClick={() => row.name === "朋友圈" ? onMoments() : setDetail(row.note)}><row.icon size={22} color={row.color} /><span>{row.name}</span><ChevronRight size={17} /></button>)}</div>
         <button className="pocket-wx-row" type="button" onClick={onSettings}><Settings size={22} /><span>设置</span><ChevronRight size={17} /></button>
       </> : <>
         <header className="pocket-wx-page-header"><button type="button" onClick={back} aria-label={page === "service" ? "返回我" : "返回钱包上一级"}><ArrowLeft size={20} /></button><strong>{page === "service" ? "服务" : page === "wallet" ? "钱包" : page === "balance" ? "零钱" : "账单"}</strong><button type="button" aria-label={page === "balance" ? "修改零钱余额" : "查看账单"} onClick={page === "balance" ? edit : () => onPage("bills")}><MoreHorizontal size={22} /></button></header>

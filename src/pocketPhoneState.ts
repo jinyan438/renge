@@ -2,6 +2,7 @@ import { normalizePocketInnerHistory, normalizePocketInnerState, type PocketInne
 import { normalizePocketAttachment, normalizePocketWallet, type PocketAttachment, type PocketWallet } from "./pocketWechatMedia.ts";
 import { normalizePocketWechatClock, type PocketWechatClock } from "./pocketWechatClock.ts";
 import { normalizePocketNotes, pocketNotesConversation, type PocketNote } from "./pocketNotesState.ts";
+import { normalizePocketMoments, pocketMomentsConversation, type PocketMoment, type PocketMomentContext } from "./pocketMomentsState.ts";
 
 export type PocketMessage = {
   id: string;
@@ -13,6 +14,7 @@ export type PocketMessage = {
   generated?: true;
   speaker?: Pick<PocketContact, "id" | "name" | "avatar">;
   attachment?: PocketAttachment;
+  moment?: PocketMomentContext;
 };
 
 export type PocketContact = {
@@ -27,7 +29,8 @@ export type PocketContact = {
   sourceXiaohongshuActorId?: string;
   messages: PocketMessage[];
   createdAt: string;
-  app?: "xiaohongshu" | "notes";
+  app?: "xiaohongshu" | "notes" | "moments";
+  momentViewerIds?: string[];
   contextCharacterCardIds?: string[];
   innerState?: PocketInnerState;
   innerHistory?: PocketInnerEntry[];
@@ -57,7 +60,7 @@ export function pocketSpeakerName(conversation: PocketConversation, message: Pic
   return member?.nickname?.trim() || message.speaker?.name || pocketDisplayName(conversation);
 }
 export function getPocketConversations(state: PocketState): PocketConversation[] {
-  return [...state.contacts, ...state.groups, ...Object.entries(state.characterPhones || {}).flatMap(([id, phone]) => {
+  return [...state.contacts, ...state.groups, ...(state.moments ? [pocketMomentsConversation(state.moments)] : []), ...Object.entries(state.characterPhones || {}).flatMap(([id, phone]) => {
     const owner = state.contacts.find(contact => contact.id === id);
     return owner ? [...[...phone.contacts, ...phone.groups].map(contact => ({ ...contact, phoneOwner: owner })), pocketNotesConversation(owner, phone.notes || [])] : [];
   })];
@@ -72,7 +75,7 @@ export type PocketSettings = {
   largeText: boolean;
 };
 export type PocketContextDeletion = { contactId: string; messageId: string };
-export type PocketState = { version: 1; contacts: PocketContact[]; groups: PocketGroup[]; settings: PocketSettings; wallet: PocketWallet; notes?: PocketNote[]; deletedContextMessages: PocketContextDeletion[]; characterPhones?: Record<string, PocketCharacterPhone>; wechatClock?: PocketWechatClock };
+export type PocketState = { version: 1; contacts: PocketContact[]; groups: PocketGroup[]; settings: PocketSettings; wallet: PocketWallet; notes?: PocketNote[]; moments?: PocketMoment[]; momentCovers?: Record<string, string>; deletedContextMessages: PocketContextDeletion[]; characterPhones?: Record<string, PocketCharacterPhone>; wechatClock?: PocketWechatClock };
 export type PocketGenerationMode = "reply" | "proactive";
 export type PocketRequestMessage = Pick<PocketMessage, "role" | "content"> | { role: "system"; content: string };
 
@@ -132,6 +135,8 @@ export function safePocketAvatar(value: unknown) {
 export function normalizePocketState(value: unknown): PocketState {
   const state = emptyPocketState();
   if (!record(value) || value.version !== 1) return state;
+  if (Array.isArray(value.moments)) state.moments = normalizePocketMoments(value.moments);
+  if (record(value.momentCovers)) state.momentCovers = Object.fromEntries(Object.entries(value.momentCovers).filter(([, url]) => typeof url === "string" && /^(data:image\/(?:png|jpeg|webp|gif);base64,|\/api\/app-data\/assets\/|https?:\/\/)/i.test(url))) as Record<string, string>;
   state.wallet = normalizePocketWallet(value.wallet);
   const wechatClock = normalizePocketWechatClock(value.wechatClock);
   if (wechatClock) state.wechatClock = wechatClock;

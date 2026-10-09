@@ -1,0 +1,83 @@
+.pocket-screen.app-moments { background: #fff; color: #333; }
+.pocket-moments { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; width: 100%; min-width: 0; color: #333; background: #fff; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+.pocket-moments-header, .pocket-moment-publish-header { display: flex; align-items: center; flex-shrink: 0; gap: 12px; padding: 8px 13px 12px; background: #ededed; }
+.pocket-moments-header > strong, .pocket-moment-publish-header > strong { flex: 1; min-width: 0; text-align: center; font-size: 14px; }
+.pocket-moments-header button, .pocket-moment-publish-header button { display: grid; place-items: center; background: transparent; padding: 3px; font-size: 12px; }
+.pocket-moment-publish-header button:last-child { color: #fff; background: #07c160; border-radius: 5px; padding: 6px 11px; }
+.pocket-moments-scroll { flex: 1; min-height: 0; padding-bottom: 16px; }
+.pocket-moments-cover { position: relative; min-height: 168px; background: linear-gradient(160deg, #344c51, #547876 60%, #9dad96); background-size: cover; background-position: center; margin-bottom: 30px; }
+.pocket-moments-cover::before { content: ""; position: absolute; inset: 0; background: linear-gradient(transparent 55%, #0004); pointer-events: none; }
+.pocket-moment-cover-picker { position: absolute; right: 10px; top: 9px; display: grid; place-items: center; padding: 6px; color: #fff; background: #0003; border-radius: 50%; cursor: pointer; }
+.pocket-moment-cover-picker input, .pocket-moment-photo-add input { position: absolute; inset: 0; opacity: 0; width: 100%; cursor: pointer; }
+.pocket-moments-profile { position: absolute; right: 14px; bottom: -22px; display: flex; gap: 12px; align-items: center; max-width: calc(100% - 28px); }
+.pocket-moments-profile strong { color: #fff; font-size: 16px; text-shadow: 0 1px 4px #0007; padding-bottom: 25px; overflow-wrap: anywhere; }
+.pocket-moments-profile img { width: 61px; height: 61px; border: 2px solid #fff; border-radius: 9px; object-fit: cover; flex-shrink: 0; }
+.pocket-moment-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding: 6px 14px 12px; }
+.pocket-moment-filters button { display: flex; align-items: center; gap: 3px; padding: 5px 7px; border-radius: 5px; font-size: 10px; background: #f5f5f5; color: #666; }
+.pocket-moment-filters button[aria-pressed="true"] { background: #e5f4e9; color: #218148; }
+.pocket-moment-filters button:last-child { margin-left: auto; }
+.pocket-moment-post { display: flex; gap: 9px; padding: 14px 13px; border-bottom: 1px solid #f0f0f0; min-width: 0; }
+.pocket-panel .pocket-moment-avatar { background: none; padding: 0; align-self: flex-start; flex-shrink: 0; }
+.pocket-moment-avatar img { width: 34px; height: 34px; border-radius: 5px; object-fit: cover; }
+.pocket-moment-body { flex: 1; min-width: 0; }
+.pocket-panel .pocket-moment-name { background: none; color: #526784; padding: 0; font-size: 12px; font-weight: 650; text-align: left; overflow-wrap: anywhere; }
+.pocket-moment-text { margin: 7px 0 9px; font-size: 12px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pocket-moment-description { display: flex; align-items: flex-start; gap: 7px; padding: 13px 10px; margin: 7px 0; background: linear-gradient(145deg, #f1eee9, #e5eae5); border-radius: 2px; color: #717773; }
+.pocket-moment-description svg { flex-shrink: 0; margin-top: 2px; }
+.pocket-moment-description p { font-size: 11px; line-height: 1.6; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pocket-moment-images { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; margin: 7px 0; }
+.pocket-moment-images button { background: #eee; padding: 0; aspect-ratio: 1; overflow: hidden; }
+.pocket-moment-images img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.pocket-moment-images.is-single { grid-template-columns: minmax(0, 165px); }
+.pocket-moment-images.is-single button { aspect-ratio: auto; max-height: 210px; }
+.pocket-moment-images.is-single img { height: auto; max-height: 210px; object-fit: contain; }
+.pocket-moment-location { display: flex; align-items: center; gap: 4px; color: #526784; font-size: 10px; margin: 8px 0; overflow-wrap: anywhere; }
+.pocket-moment-foot { display: flex; align-items: center; justify-content: space-between; gap: 7px; margin: 10px 0; }
+.pocket-moment-foot time { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; font-size: 9px; color: #a3a3a3; }
+.pocket-moment-foot time span { display: inline-flex; align-items: center; gap: 2px; }
+.pocket-moment-foot > button { display: grid; place-items: center; padding: 1px 4px; border-radius: 3px; background: #f0f0f0; color: #526784; }
+.pocket-moment-menu { display: flex; flex-wrap: wrap; gap: 2px; background: #4c5154; border-radius: 5px; padding: 4px; margin: 6px 0 9px; }
+.pocket-moment-menu button { display: flex; align-items: center; gap: 3px; padding: 5px 6px; color: #fff; font-size: 10px; background: transparent; }
+.pocket-moment-interactions { position: relative; background: #f5f5f5; font-size: 11px; line-height: 1.6; padding: 5px 8px; }
+.pocket-moment-interactions::before { content: ""; position: absolute; top: -5px; left: 10px; border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 5px solid #f5f5f5; }
+.pocket-moment-likes { display: flex; align-items: center; gap: 5px; color: #526784; overflow-wrap: anywhere; padding-bottom: 3px; }
+.pocket-moment-likes svg { flex-shrink: 0; }
+.pocket-moment-comment { display: flex; gap: 3px; align-items: flex-start; padding-top: 3px; }
+.pocket-moment-comment > button:first-child { flex: 1; min-width: 0; background: transparent; color: #343434; padding: 0; text-align: left; font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; white-space: pre-wrap; }
+.pocket-moment-comment > button:first-child:disabled { opacity: 1; }
+.pocket-moment-comment b { color: #526784; font-weight: 600; }
+.pocket-moment-comment-delete { background: transparent; padding: 2px 0; color: #aaa; }
+.pocket-moment-comment-form { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-top: 9px; }
+.pocket-moment-comment-form > span { width: 100%; font-size: 10px; color: #526784; }
+.pocket-moment-comment-form input { flex: 1; min-width: 65px; width: 0; border: 1px solid #e7e7e7; border-radius: 4px; padding: 6px; font-size: 11px; }
+.pocket-moment-comment-form button { background: #07c160; color: #fff; font-size: 10px; border-radius: 4px; padding: 6px; }
+.pocket-moment-comment-form button:last-child { background: #eee; color: #999; padding: 4px; }
+.pocket-moment-publish { flex: 1; min-height: 0; padding: 15px; }
+.pocket-moment-publish > textarea { width: 100%; box-sizing: border-box; border: 0; resize: vertical; min-height: 105px; font-size: 13px; line-height: 1.75; color: #333; background: #fff; }
+.pocket-moment-field { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding: 12px 0; border-bottom: 1px solid #eee; font-size: 12px; }
+.pocket-moment-field input, .pocket-moment-field select, .pocket-moment-field textarea { min-width: 0; box-sizing: border-box; width: 100%; border: 0; border-radius: 4px; padding: 7px; font-size: 11px; color: #666; background: #f7f7f7; }
+.pocket-moment-upload-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin: 13px 0; }
+.pocket-moment-upload-grid > span { position: relative; aspect-ratio: 1; overflow: hidden; }
+.pocket-moment-upload-grid img { width: 100%; height: 100%; object-fit: cover; }
+.pocket-moment-upload-grid > span button { position: absolute; right: 0; top: 0; background: #0006; color: #fff; padding: 3px; }
+.pocket-moment-photo-add { position: relative; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 3px; aspect-ratio: 1; background: #f1f1f1; color: #aaa; font-size: 10px; }
+.pocket-moment-audience { border: 0; margin: 12px 0; padding: 0; }
+.pocket-moment-audience legend { font-size: 11px; color: #999; margin-bottom: 7px; }
+.pocket-moment-audience label { display: flex; align-items: center; gap: 8px; padding: 7px 0; font-size: 12px; }
+.pocket-moment-audience label img { width: 27px; height: 27px; border-radius: 4px; object-fit: cover; }
+.pocket-moment-audience label span { flex: 1; overflow-wrap: anywhere; }
+.pocket-moment-audience input { accent-color: #07c160; }
+.pocket-moment-progress { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 8px 13px; font-size: 11px; background: #edf6ef; color: #538660; }
+.pocket-moment-progress button { display: flex; align-items: center; gap: 3px; padding: 3px 6px; background: #fff; font-size: 10px; color: #538660; border-radius: 4px; }
+.pocket-moment-error, .pocket-moment-feedback { margin: 0; padding: 8px 13px; font-size: 11px; line-height: 1.65; }
+.pocket-moment-error { color: #bc5961; background: #fff5f5; }
+.pocket-moment-feedback { color: #63816c; background: #f3f8f4; }
+.pocket-moments-empty { padding: 35px 20px; color: #aaa; text-align: center; }
+.pocket-moments-empty p { font-size: 13px; }.pocket-moments-empty small { font-size: 11px; line-height: 1.7; }
+.pocket-moment-author-filter { font-size: 11px; color: #999; margin: 0; padding: 0 14px; }
+.pocket-moment-lightbox { position: absolute; inset: 0; background: #161616f0; z-index: 8; display: flex; align-items: center; justify-content: center; }
+.pocket-moment-lightbox img { max-width: 100%; max-height: 90%; object-fit: contain; }
+.pocket-moment-lightbox button { position: absolute; top: 10px; right: 10px; color: #fff; background: #3338; border-radius: 50%; padding: 7px; }
+.pocket-moments-discover { display: flex; align-items: center; gap: 11px; width: 100%; padding: 17px 15px; background: #fff; font-size: 13px; text-align: left; }
+.pocket-moments-discover strong { flex: 1; }.pocket-moments-discover > span { width: 24px; height: 24px; flex-shrink: 0; border-radius: 50%; background: conic-gradient(#ec5b56 0 60deg, #f0a23b 60deg 120deg, #f5d13c 120deg 180deg, #7fc241 180deg 240deg, #3bb6a8 240deg 300deg, #4a90d9 300deg); border: 5px solid #fff; box-shadow: 0 0 0 1px #eee; }
+.large-text .pocket-moment-text { font-size: 14px; }.large-text .pocket-moment-comment > button:first-child { font-size: 13px; }

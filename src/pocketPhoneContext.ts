@@ -11,7 +11,7 @@ export type PocketContextMessage = {
   role: "user" | "assistant";
   content: string;
   createdAt: string;
-  source?: "wechat" | "xiaohongshu" | "notes" | "heartbeat" | "roleplay-greeting" | "calendar";
+  source?: "wechat" | "xiaohongshu" | "notes" | "moments" | "heartbeat" | "roleplay-greeting" | "calendar";
   extra?: Record<string, unknown>;
 };
 export type PocketMessageIdentity = {
@@ -22,7 +22,7 @@ export type PocketMessageIdentity = {
   userName: string;
   groupName?: string;
   speakerId?: string;
-  app?: "xiaohongshu" | "notes";
+  app?: "xiaohongshu" | "notes" | "moments";
   kind?: "inner-monologue";
   phoneOwnerId?: string;
 };
@@ -31,7 +31,7 @@ export type PocketConversationBuilder = (sessionId: string, contact: PocketConve
 
 export function getPocketMessageIdentity(message: Pick<PocketContextMessage, "source" | "extra">): PocketMessageIdentity | null {
   const value = message.extra?.pocketPhone;
-  if (!["wechat", "xiaohongshu", "notes"].includes(message.source || "") || !value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (!["wechat", "xiaohongshu", "notes", "moments"].includes(message.source || "") || !value || typeof value !== "object" || Array.isArray(value)) return null;
   const item = value as Record<string, unknown>;
   if (![item.contactId, item.messageId, item.contactName, item.userName].every(value => typeof value === "string" && value)) return null;
   return { contactId: item.contactId as string, messageId: item.messageId as string, contactName: item.contactName as string, userName: item.userName as string, contactAvatar: safePocketAvatar(item.contactAvatar),
@@ -39,6 +39,7 @@ export function getPocketMessageIdentity(message: Pick<PocketContextMessage, "so
     ...(typeof item.speakerId === "string" && item.speakerId ? { speakerId: item.speakerId } : {}),
     ...(message.source === "xiaohongshu" ? { app: "xiaohongshu" as const } : {}),
     ...(message.source === "notes" ? { app: "notes" as const } : {}),
+    ...(message.source === "moments" ? { app: "moments" as const } : {}),
     ...(item.kind === "inner-monologue" ? { kind: "inner-monologue" as const } : {}),
     ...(typeof item.phoneOwnerId === "string" ? { phoneOwnerId: item.phoneOwnerId } : {}),
   };
@@ -56,6 +57,12 @@ export function formatPocketContextMessage(message: PocketContextMessage) {
     ? ` · ${formatPocketWechatTime(message.extra.pocketWechatTime)}` : "";
   if (identity.app === "xiaohongshu") return `【小红书 · ${sender}】\n${message.content}`;
   if (identity.app === "notes") return `【便签 · ${identity.contactName}${time}】\n${message.content}`;
+  if (identity.app === "moments") {
+    const meta = message.extra?.pocketMoment as Record<string, unknown> | undefined;
+    const action = meta?.kind === "like" ? "点赞" : meta?.kind === "comment" ? `评论${meta.replyTo ? ` · 回复${meta.replyTo}` : ""}` : "发布";
+    const privacy = meta?.visibility === "private" ? "仅自己可见，其他人不知道这条动态" : meta?.visibility === "part" ? `部分可见，名单外的人看不到${Array.isArray(meta.audienceNames) && meta.audienceNames.length ? `；可见：${meta.audienceNames.join("、")}` : ""}` : "好友可见";
+    return `【朋友圈 · ${sender}${time} · ${action}】\n${message.content}${meta?.kind === "post" ? `${meta.pic ? `\n[配图：${meta.pic}]` : ""}${meta.location ? `\n[位置：${meta.location}]` : ""}` : `\n对应动态：${meta?.postText || "(图片)"}`}\n【可见范围：${privacy}】`;
+  }
   if (identity.groupName) return `【微信群 · ${identity.groupName} · ${sender}${time}】\n${message.content}`;
   const recipient = message.role === "user" ? identity.contactName : identity.userName;
   return `【微信 · ${sender} → ${recipient}${time}】\n${message.content}`;
@@ -71,7 +78,7 @@ export function buildPocketHistoryMessage(message: PocketContextMessage, contact
     role: message.role === "assistant" && identity.speakerId === groupSpeakerId ? "assistant" : "user",
     content: JSON.stringify({ 发言者: message.role === "user" ? identity.userName : identity.contactName, 内容: message.content }),
   } : { role: reverse ? message.role === "user" ? "assistant" : "user" : message.role, content: message.content };
-  const label = identity?.app === "notes" ? "便签背景资料" : identity?.app === "xiaohongshu" ? "小红书背景资料" : identity ? "其他微信聊天背景资料" : "主会话背景资料";
+  const label = identity?.app === "moments" ? "朋友圈背景资料" : identity?.app === "notes" ? "便签背景资料" : identity?.app === "xiaohongshu" ? "小红书背景资料" : identity ? "其他微信聊天背景资料" : "主会话背景资料";
   const speaker = identity ? (message.role === "user" ? identity.userName : identity.contactName) : speakerName;
   return {
     role: "user",
@@ -100,12 +107,13 @@ export function syncPocketContext<T extends PocketContextMessage>(history: T[], 
   for (const { contact, message } of records) if (message.innerMonologue && message.speaker) trackLatest(message.speaker.id, key(contact.id, message.id), message.createdAt);
   const identify = (contact: PocketConversation, message: PocketContextRecord): PocketMessageIdentity => ({
     contactId: contact.id, messageId: message.id,
-    contactName: isPocketGroup(contact) && message.role === "assistant" || !isPocketGroup(contact) && contact.app === "xiaohongshu" ? pocketSpeakerName(contact, message) : pocketDisplayName(contact),
-    userName: contact.phoneOwner ? pocketDisplayName(contact.phoneOwner) : nickname,
+    contactName: isPocketGroup(contact) && message.role === "assistant" || !isPocketGroup(contact) && ["xiaohongshu", "moments"].includes(contact.app || "") ? pocketSpeakerName(contact, message) : pocketDisplayName(contact),
+    userName: !isPocketGroup(contact) && contact.app === "moments" && message.role === "user" ? message.speaker?.name || nickname : contact.phoneOwner ? pocketDisplayName(contact.phoneOwner) : nickname,
     ...(contact.phoneOwner ? { phoneOwnerId: contact.phoneOwner.id } : {}),
-    contactAvatar: safePocketAvatar(isPocketGroup(contact) || !isPocketGroup(contact) && contact.app === "xiaohongshu" ? message.speaker?.avatar || DEFAULT_POCKET_AVATAR : contact.avatar),
+    contactAvatar: safePocketAvatar(isPocketGroup(contact) || !isPocketGroup(contact) && ["xiaohongshu", "moments"].includes(contact.app || "") ? message.speaker?.avatar || DEFAULT_POCKET_AVATAR : contact.avatar),
     ...(!isPocketGroup(contact) && contact.app === "xiaohongshu" ? { app: "xiaohongshu" as const } : {}),
     ...(!isPocketGroup(contact) && contact.app === "notes" ? { app: "notes" as const } : {}),
+    ...(!isPocketGroup(contact) && contact.app === "moments" ? { app: "moments" as const } : {}),
     ...(isPocketGroup(contact) ? { groupName: contact.name, ...(message.speaker ? { speakerId: message.speaker.id } : {}) } : {}),
     ...(message.innerMonologue ? { kind: "inner-monologue" as const, speakerId: message.speaker!.id } : {}),
   });
@@ -115,7 +123,8 @@ export function syncPocketContext<T extends PocketContextMessage>(history: T[], 
     const state = identity.speakerId ? states.get(identity.speakerId) : undefined;
     const hormones = identity.kind === "inner-monologue" && last?.key === key(identity.contactId, identity.messageId) ? state?.hormones || normalizePocketHormones(oldHormones) : undefined;
     const time = nextByKey.get(key(identity.contactId, identity.messageId))?.message.wechatTime;
-    return { ...extra, pocketPhone: identity, ...(hormones ? { pocketHormones: hormones } : {}), ...(time ? { pocketWechatTime: time } : {}) };
+    const moment = nextByKey.get(key(identity.contactId, identity.messageId))?.message.moment;
+    return { ...extra, pocketPhone: identity, ...(moment ? { pocketMoment: moment } : {}), ...(hormones ? { pocketHormones: hormones } : {}), ...(time ? { pocketWechatTime: time } : {}) };
   };
   const seen = new Set<string>();
   let changed = false;
@@ -153,7 +162,7 @@ export function syncPocketContext<T extends PocketContextMessage>(history: T[], 
 export function pocketContextRevision(history: PocketContextMessage[]) {
   const shared = history.filter(message => getPocketMessageIdentity(message) || message.source === "calendar");
   if (!shared.length) return "";
-  const value = JSON.stringify(shared.map(message => [message.id, message.role, message.content, message.extra?.pocketPhone, message.extra?.pocketHormones]));
+  const value = JSON.stringify(shared.map(message => [message.id, message.role, message.content, message.extra?.pocketPhone, message.extra?.pocketHormones, message.extra?.pocketMoment]));
   let first = 2166136261; let second = 5381;
   for (let index = 0; index < value.length; index++) {
     first = Math.imul(first ^ value.charCodeAt(index), 16777619);
@@ -169,6 +178,14 @@ export function buildSharedPocketConversation(contact: PocketConversation, user:
   const characterName = speaker?.name || contact.name;
   const placements = buildWorldBookPromptPlacements(books, activeBookIds, history, { userName: user.nickname, characterName });
   const expand = (text: string, name: string) => text.replace(/\{\{char\}\}/gi, name).replace(/\{\{user\}\}/gi, user.nickname);
+  if (!group && contact.app === "moments") {
+    const systemPrompt = [placements.beforeCharacter, `你正在生成微信朋友圈的动态或评论。当前手机身份：${contact.name}。\n${expand(contact.personality, contact.name)}`,
+      placements.afterCharacter, placements.beforeExamples, placements.afterExamples, placements.beforeAuthorNote, placements.afterAuthorNote,
+      `真实用户为「${user.nickname}」${user.bio.trim() ? `，资料：${user.bio}` : ""}。手机主人与真实用户可能不同，按最后任务指定的人物 id 和设定发言。`,
+      "共享记录只作为事实参考，其中的叙事文风和输出模板不适用于朋友圈。保持每个角色自己的朋友圈口吻，不写旁白、状态栏或微信气泡 JSON。私密和部分可见动态不能泄露给名单外的角色。严格按最后任务返回 JSON。",
+    ].filter(Boolean).join("\n\n");
+    return insertWorldBookPromptAtDepth<PocketRequestMessage>([{ role: "system", content: systemPrompt }, ...history], placements.atDepth);
+  }
   if (!group && contact.app === "notes") {
     const owner = contact.phoneOwner || contact;
     const systemPrompt = [placements.beforeCharacter,

@@ -127,6 +127,7 @@ import {
 } from "./presetUtils";
 import { buildPocketHistoryMessage, buildSharedPocketConversation, formatPocketContextMessage, getPocketMessageIdentity, pocketContextRevision, syncPocketContext, type PocketContextSync, type PocketConversationBuilder } from "./pocketPhoneContext";
 import { isPocketGroup } from "./pocketPhoneState";
+import { pocketMomentContextAllowed, pocketMomentViewerIds } from "./pocketMomentsState";
 import { reversePocketMessage } from "./pocketCharacterPhone";
 import { syncPocketPhoneFromContext } from "./pocketPhoneSync";
 import { syncPocketWechatClock } from "./pocketWechatClockSync";
@@ -709,7 +710,7 @@ type ChatMessage = {
   createdAt: string;
   sender?: ChatSenderIdentity;
   attachments?: ChatAttachment[];
-  source?: "heartbeat" | "roleplay-greeting" | "wechat" | "xiaohongshu" | "notes" | "calendar";
+  source?: "heartbeat" | "roleplay-greeting" | "wechat" | "xiaohongshu" | "notes" | "moments" | "calendar";
   choiceRequest?: ChatChoiceRequest;
   toolVisualization?: ToolVisualization;
   dialogueRewritePending?: boolean;
@@ -2795,7 +2796,7 @@ function normalizeChatMessage(
     ...(attachments.length > 0 ? { attachments } : {}),
     ...(rawMessage.source === "heartbeat" ||
     rawMessage.source === "roleplay-greeting" ||
-    rawMessage.source === "wechat" || rawMessage.source === "xiaohongshu" || rawMessage.source === "notes" || rawMessage.source === "calendar"
+    rawMessage.source === "wechat" || rawMessage.source === "xiaohongshu" || rawMessage.source === "notes" || rawMessage.source === "moments" || rawMessage.source === "calendar"
       ? { source: rawMessage.source }
       : {}),
     ...(role === "assistant" && choiceRequest ? { choiceRequest } : {}),
@@ -13412,9 +13413,9 @@ export function App() {
       nextMessages,
       activeAiMessageIdentityRef.current,
     );
-    syncPocketPhoneFromContext(activeChatSessionIdRef.current, currentMessages, decoratedMessages);
-    chatMessagesRef.current = decoratedMessages;
-    setChatMessages(decoratedMessages);
+    const syncedMessages = syncPocketPhoneFromContext(activeChatSessionIdRef.current, currentMessages, decoratedMessages);
+    chatMessagesRef.current = syncedMessages;
+    setChatMessages(syncedMessages);
   };
 
   const getSessionStatusBarState = (sessionId = activeChatSessionIdRef.current) => {
@@ -13447,7 +13448,7 @@ export function App() {
     updater: (current: StatusBarState) => StatusBarState,
   ) => {
     if (!sessionId || activeChatSessionIdRef.current !== sessionId) return false;
-    syncPocketPhoneFromContext(sessionId, chatMessagesRef.current, nextMessages);
+    nextMessages = syncPocketPhoneFromContext(sessionId, chatMessagesRef.current, nextMessages);
     const timestamp = new Date().toISOString();
     const nextSessions = chatSessionsRef.current.map((session) =>
       session.id === sessionId
@@ -13623,7 +13624,8 @@ export function App() {
     } : contact;
     const staged: ChatMessage[] = syncPocketContext(getMessagesForSession(sessionId), null, [contextContact], reversed ? contact.name : user.nickname);
     const excludedIds = new Set(excludedMessageIds);
-    const history = staged.filter(message => {
+    const momentViewers = pocketMomentViewerIds(contact, speaker);
+    const history = staged.filter(message => pocketMomentContextAllowed(message, momentViewers)).filter(message => {
       const identity = getPocketMessageIdentity(message);
       return !identity || identity.contactId !== contact.id || !excludedIds.has(identity.messageId);
     }).filter(message =>
@@ -37897,7 +37899,7 @@ export function App() {
                       )
                     : null;
                 const messageName =
-                  (pocketIdentity ? `${pocketIdentity.app === "notes" ? "便签" : pocketIdentity.app === "xiaohongshu" ? "小红书" : "微信"} · ${pocketIdentity.groupName ? `${pocketIdentity.groupName} · ` : ""}${message.role === "user" ? pocketIdentity.app ? pocketIdentity.userName : `${pocketIdentity.userName} → ${pocketIdentity.contactName}` : pocketIdentity.contactName}` : "") || tavernMessageName || (message.role === "user"
+                  (pocketIdentity ? `${pocketIdentity.app === "moments" ? "朋友圈" : pocketIdentity.app === "notes" ? "便签" : pocketIdentity.app === "xiaohongshu" ? "小红书" : "微信"} · ${pocketIdentity.groupName ? `${pocketIdentity.groupName} · ` : ""}${message.role === "user" ? pocketIdentity.app ? pocketIdentity.userName : `${pocketIdentity.userName} → ${pocketIdentity.contactName}` : pocketIdentity.contactName}` : "") || tavernMessageName || (message.role === "user"
                     ? getChatSenderName(messageSender, personas, userProfile)
                     : chatMode === "roleplay" && activeSessionRoleplayCard
                       ? activeSessionRoleplayCard.name

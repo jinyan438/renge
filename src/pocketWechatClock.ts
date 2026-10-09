@@ -94,7 +94,7 @@ export function parsePocketStoryTime(content: string, base: string): string | un
 export function updatePocketStoryClock(clock: PocketWechatClock, messages: PocketStoryMessage[], realNow = Date.now()): PocketWechatClock {
   let storyTime = clock.initialTime; let storyKey: string | undefined;
   for (const message of messages) {
-    if (["wechat", "xiaohongshu", "notes"].includes(message.source || "") || message.outputStatus === "running" || message.extra?.tavernIsHidden || message.extra?.tavernIsSystem) continue;
+    if (["wechat", "xiaohongshu", "notes", "moments"].includes(message.source || "") || message.outputStatus === "running" || message.extra?.tavernIsHidden || message.extra?.tavernIsSystem) continue;
     const parsed = parsePocketStoryTime(message.content, storyTime);
     if (!parsed) continue;
     storyTime = parsed; storyKey = JSON.stringify([message.id, parsed]);
