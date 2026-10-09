@@ -10,7 +10,7 @@ import { fixtureWechatTurn } from "./pocketPhoneInnerFixture.mjs";
 const root = await mkdtemp(join(tmpdir(), "renge-pocket-moments-"));
 const key = "renge_pocket_phone_v1:moments-fixture";
 const requests = []; const mainRequests = []; const errors = [];
-let server; let browser; let page; let mode = "valid"; let releaseSlow;
+let server; let browser; let page; let mode = "valid"; let releaseSlow; let contactSlowStarted;
 const photo = "public/touxiang/1.png";
 try {
   await mkdir(".runtime", { recursive: true });
@@ -39,11 +39,13 @@ try {
       ? JSON.stringify({ likes: [], comments: [{ authorId: owner.id, text: "下次带你来花店", replyToId: "pocket:real-user" }] })
       : JSON.stringify({ likes: [owner.id, other.id], comments: [{ authorId: owner.id, text: "窗边的花真好看" }] });
     else if (prompt.includes("朋友圈动态生成任务")) output = mode === "invalid" ? JSON.stringify({ moments: [{ authorId: owner.id, text: "不完整的数据", pic: "", likes: [], comments: [] }, { authorId: "unknown", text: "错误人物", pic: "", likes: [], comments: [] }] })
-      : prompt.includes("主人自己的动态") ? JSON.stringify({ moments: [{ authorId: owner.id, text: "奶糖私密心事", pic: "", location: "", visibility: "private", likes: [], comments: [] }] })
+      : prompt.includes("主人自己的动态") ? mode === "empty-self" ? '{"moments":[]}' : JSON.stringify({ moments: [{ authorId: prompt.includes(`当前手机主人：薄荷（id=${other.id}）`) ? other.id : owner.id, text: prompt.includes(`当前手机主人：薄荷（id=${other.id}）`) ? "薄荷的私密近况" : mode === "invalid-contacts" ? "失败后不应保存的主人动态" : mode === "slow-contacts" ? "取消后不应保存的主人动态" : "奶糖私密心事", pic: "", location: "", visibility: "private", likes: [], comments: [] }] })
+      : prompt.includes(`当前手机主人：奶糖（id=${owner.id}）`) ? JSON.stringify({ moments: [{ authorId: mode === "invalid-contacts" ? "unknown" : npc.id, text: mode === "empty-self" ? "阿禾另一条花店近况" : "阿禾的花束日常", pic: "新整理的花束", location: "北街花店", visibility: "public", likes: [owner.id], comments: [{ authorId: owner.id, text: "今天辛苦啦" }] }] })
       : JSON.stringify({ moments: [{ authorId: owner.id, text: "奶糖的花店近况", pic: "一束白花放在窗边", location: "北街花店", visibility: "public", likes: [other.id], comments: [{ authorId: other.id, text: "白花好漂亮" }] }, { authorId: other.id, text: "薄荷的园艺日常", pic: "", location: "", visibility: "public", likes: [], comments: [] }] });
     else if (prompt.includes("便签生成任务")) output = JSON.stringify({ notes: [{ title: "参考朋友圈的便签", body: "记下朋友的花店近况" }] });
     else output = fixtureWechatTurn("微信参考朋友圈后的回复", requests.length);
     if (mode === "slow") { await new Promise(resolve => { releaseSlow = resolve; }); output = JSON.stringify({ moments: [{ authorId: owner.id, text: "取消后不应保存", pic: "", visibility: "public", likes: [], comments: [] }] }); }
+    if (mode === "slow-contacts" && prompt.includes("朋友圈动态生成任务") && !prompt.includes("主人自己的动态")) await new Promise(resolve => { releaseSlow = resolve; contactSlowStarted?.(); });
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ choices: [{ message: { role: "assistant", content: output } }] }) }).catch(() => {});
   });
   await page.route("**/api/pi/chat", async route => {
@@ -116,8 +118,21 @@ try {
   await home(); await openOwner(); await openMoments();
   assert.equal(await post("用户私密日记修改").count(), 0); assert.equal(await post("只给奶糖看的动态").count(), 1); assert.equal(await post("公开花束照片").count(), 1);
   await operation("公开花束照片", "取消赞"); await post("公开花束照片").getByRole("button", { name: "赞", exact: true }).click(); await comment("只给奶糖看的动态", "只给你的回复");
-  await phone.getByRole("button", { name: "生成 ta 的动态", exact: true }).click(); await post("奶糖私密心事").waitFor();
-  let selfContext = JSON.stringify(requests.at(-1).request.messages); assert.match(selfContext, /只给奶糖看的动态/); assert.doesNotMatch(selfContext, /用户私密日记/);
+  await publish("奶糖旧的私密动态", "private");
+  const beforeCombined = (await read()).moments; const combinedRequestIndex = requests.length;
+  await phone.getByRole("button", { name: "生成 ta 的动态", exact: true }).click(); await post("奶糖私密心事").waitFor(); await post("阿禾的花束日常").waitFor();
+  assert.equal(requests.length - combinedRequestIndex, 2); assert.deepEqual((await read()).moments.slice(0, beforeCombined.length), beforeCombined); assert.equal((await read()).moments.length, beforeCombined.length + 2);
+  const selfContext = JSON.stringify(requests[combinedRequestIndex].request.messages); assert.match(selfContext, /只给奶糖看的动态/); assert.match(selfContext, /奶糖旧的私密动态/); assert.doesNotMatch(selfContext, /用户私密日记/);
+  const contactsContext = JSON.stringify(requests[combinedRequestIndex + 1].request.messages); assert.doesNotMatch(contactsContext, /只给奶糖看的动态|用户私密日记|奶糖旧的私密动态|奶糖私密心事/); assert.match(contactsContext, /奶糖的同事，负责花束/); assert.match(contactsContext, /主会话事实|手机主人绑定世界书/);
+  const npcPost = (await read()).moments.find(item => item.text === "阿禾的花束日常"); assert.equal(npcPost.author.id, npc.id); assert.equal(npcPost.likes[0].person.id, owner.id); assert.equal(npcPost.comments[0].person.id, owner.id);
+  assert.equal(await page.locator(".chat-message").filter({ hasText: "阿禾的花束日常" }).count(), 2);
+  await phone.getByRole("button", { name: "我的动态", exact: true }).click(); assert.equal(await post("阿禾的花束日常").count(), 0); await phone.getByRole("button", { name: "全部", exact: true }).click(); await post("阿禾的花束日常").waitFor();
+  const beforeInvalidContacts = (await read()).moments;
+  mode = "invalid-contacts"; await phone.getByRole("button", { name: "生成 ta 的动态", exact: true }).click(); await phone.getByRole("alert").filter({ hasText: "名单外" }).waitFor(); assert.deepEqual((await read()).moments, beforeInvalidContacts);
+  mode = "slow-contacts"; releaseSlow = undefined; const waitingForContacts = new Promise(resolve => { contactSlowStarted = resolve; });
+  await phone.getByRole("button", { name: "生成 ta 的动态", exact: true }).click(); await waitingForContacts; assert.deepEqual((await read()).moments, beforeInvalidContacts);
+  await phone.getByRole("button", { name: "停止朋友圈生成", exact: true }).click(); await phone.getByRole("button", { name: "停止朋友圈生成", exact: true }).waitFor({ state: "detached" }); releaseSlow?.(); mode = "valid"; assert.deepEqual((await read()).moments, beforeInvalidContacts);
+  mode = "empty-self"; await phone.getByRole("button", { name: "生成 ta 的动态", exact: true }).click(); await post("阿禾另一条花店近况").waitFor(); assert.equal((await read()).moments.length, beforeInvalidContacts.length + 1); mode = "valid";
   await phone.screenshot({ path: ".runtime/pocket-moments-owner.png", animations: "disabled" });
   await home(); await phone.getByRole("button", { name: "打开便签", exact: true }).click(); await phone.getByRole("button", { name: "生成便签", exact: true }).click(); await phone.locator(".pocket-note-row").filter({ hasText: "参考朋友圈的便签" }).waitFor();
   const notesContext = JSON.stringify(requests.at(-1).request.messages); assert.match(notesContext, /朋友圈背景资料.*奶糖私密心事/); assert.match(notesContext, /只给奶糖看的动态/); assert.doesNotMatch(notesContext, /用户私密日记/);
@@ -131,14 +146,15 @@ try {
   mode = "slow"; await phone.getByRole("button", { name: "生成好友朋友圈", exact: true }).click(); await phone.getByRole("button", { name: "停止朋友圈生成", exact: true }).waitFor(); await home();
   await openOwner("薄荷"); await openMoments(); releaseSlow?.(); await page.waitForTimeout(200); mode = "valid";
   assert.equal((await read()).moments.some(item => item.text === "取消后不应保存"), false); assert.equal(await post("只给奶糖看的动态").count(), 0); assert.equal(await post("奶糖私密心事").count(), 0);
+  const withoutContactsRequestIndex = requests.length; await phone.getByRole("button", { name: "生成 ta 的动态", exact: true }).click(); await post("薄荷的私密近况").waitFor(); assert.equal(requests.length - withoutContactsRequestIndex, 1);
   await ownHome(); await openMoments(); await operation("用户私密日记修改", "删除"); await phone.getByRole("alertdialog").getByRole("button", { name: "确认", exact: true }).click(); await post("用户私密日记修改").waitFor({ state: "detached" });
   await page.reload(); await enterApp(); await openMoments();
   assert.equal(await post("主会话修改的花束动态").count(), 0); assert.equal(await post("用户私密日记修改").count(), 0); assert.equal(await post("只给奶糖看的动态").count(), 1);
   assert.ok((await read()).momentCovers["pocket:real-user"]); assert.equal(await page.locator(".chat-message").filter({ hasText: "窗边的花真好看" }).count(), 0);
   await phone.getByRole("button", { name: "清空当前朋友圈", exact: true }).click(); await phone.getByRole("alertdialog").getByRole("button", { name: "确认", exact: true }).click(); await phone.getByText("还没有朋友圈动态", { exact: true }).waitFor();
-  assert.deepEqual((await read()).moments.map(item => item.text), ["奶糖私密心事"]);
+  assert.deepEqual((await read()).moments.map(item => item.text), ["奶糖旧的私密动态", "奶糖私密心事", "阿禾的花束日常", "阿禾另一条花店近况", "薄荷的私密近况"]);
   assert.deepEqual(errors, []);
-  console.log("PASS: discover/profile entries, publishing/photos/cover/privacy, cross-phone feed/likes/comments/replies, generation/shared context/worldbooks, WeChat and notes visibility, main references and edits/deletion cascade, reload, atomic validation, cancellation and no runtime errors");
+  console.log("PASS: discover/profile entries, publishing/photos/cover/privacy, cross-phone feed/likes/comments/replies, owner plus contacts generation with isolated context/atomic failure/cancellation/empty owner/no contacts, shared context/worldbooks, WeChat and notes visibility, main references and edits/deletion cascade, reload and no runtime errors");
 } catch (error) {
   if (page && !page.isClosed()) await page.screenshot({ path: ".runtime/pocket-moments-failure.png" });
   throw error;

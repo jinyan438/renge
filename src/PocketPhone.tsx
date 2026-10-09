@@ -360,12 +360,23 @@ export function PocketPhone(props: PocketPhoneProps) {
       const visible = visiblePocketMoments(stateRef.current.moments || [], circle.viewer, circle.friends).filter(post => eligible.every(actor => canSeePocketMoment(post, actor.id)));
       const raw = await requestPocketReply(selection.provider, selection.modelId, [...context, { role: "user", content: pocketMomentsGenerationPrompt(circle.viewer, circle.friends, visible, kind === "self", target, kind === "reply") }], controller.signal, 6144);
       if (controller.signal.aborted || !mountedRef.current) return;
+      let friendRaw: string | undefined;
+      const friendActors = circle.friends.filter(actor => actor.id !== POCKET_MOMENTS_USER_ID);
+      if (kind === "self" && friendActors.length) {
+        // The owner's private background must not reach their contacts.
+        const friendTask = pocketMomentsTask(circle.viewer, actors, friendActors.map(actor => actor.id));
+        const friendContext = withWechatTime(props.onBuildConversation(props.sessionId, friendTask, realUser, "reply"));
+        const friendVisible = visiblePocketMoments(stateRef.current.moments || [], circle.viewer, circle.friends).filter(post => friendActors.every(actor => canSeePocketMoment(post, actor.id)));
+        friendRaw = await requestPocketReply(selection.provider, selection.modelId, [...friendContext, { role: "user", content: pocketMomentsGenerationPrompt(circle.viewer, circle.friends, friendVisible, false) }], controller.signal, 6144);
+        if (controller.signal.aborted || !mountedRef.current) return;
+      }
       const now = pocketWechatNow(rootRef.current.wechatClock!);
       const currentCircle = pocketMomentActors(rootRef.current, ownerId, props.userProfile);
       if (target) updateMoment(target.id, saved => applyPocketMomentsInteraction(saved, raw, eligible.filter(actor => [currentCircle.viewer, ...currentCircle.friends].some(current => current.id === actor.id)), now));
       else {
         const before = stateRef.current.moments || [];
-        const moments = applyPocketMomentsGeneration(before, raw, currentCircle.viewer, currentCircle.friends, now, kind === "self");
+        let moments = applyPocketMomentsGeneration(before, raw, currentCircle.viewer, currentCircle.friends, now, kind === "self");
+        if (friendRaw !== undefined) moments = applyPocketMomentsGeneration(moments, friendRaw, currentCircle.viewer, currentCircle.friends, now);
         updateState(previous => ({ ...previous, moments }));
         setMomentFeedback(moments.length > before.length ? `新增 ${moments.length - before.length} 条朋友圈。` : "这次没有新增动态。");
       }
