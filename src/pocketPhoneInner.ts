@@ -1,3 +1,4 @@
+import { renderPocketPrompt, type PocketPromptOverrides } from "./pocketPhonePrompts.ts";
 import type { PocketConversation, PocketGroupMember, PocketMessage, PocketState } from "./pocketPhoneState";
 
 export const POCKET_HORMONES = [
@@ -98,32 +99,20 @@ export function parsePocketWechatTurn(raw: string, previous?: PocketInnerState, 
   throw error;
 }
 
-export function pocketWechatOutputInstruction(group = false) {
-  const example = { ...(group ? { speak: true } : {}), texts: ["实际发送的短消息"], innerMonologue: "角色内心独白", hormones: Object.fromEntries(POCKET_HORMONES.map((item, index) => [item.key, 40 + index * 3])) };
-  return `输出规则：只输出合法 JSON，不附解释或 Markdown。格式示例：${JSON.stringify(example)}。示例数值只用于说明格式，不得照抄，实际 9 项都必须是 0~100 的数字。texts 只包含实际微信消息，1~4 条，不含独白、激素、标签或旁白；${group ? "沉默时 speak 为 false、texts 为 []，但仍必须生成独白和完整激素状态。" : "不要省略任何字段。"}`;
+export function pocketWechatOutputInstruction(group = false, prompts?: PocketPromptOverrides) {
+  return renderPocketPrompt("wechat.output", prompts, { speakField: group ? '"speak":true,' : "", silenceRule: group ? "沉默时 speak 为 false、texts 为 []，但仍必须生成独白和完整激素状态。" : "不要省略任何字段。" });
 }
 
-export function pocketHormoneUpdatePrompt(state?: PocketInnerState) {
-  return [
-    "【本轮激素变量更新依据】",
-    "9 项都是角色扮演的 0~100 相对状态，不是好感度或奖励分数；数值越高仅表示对应倾向越强，不代表越好。先结合角色人设、本轮新事件和真实感受，逐项判断维持、上升或下降，再输出更新后的绝对值，不要把增量当作新值。",
-    "先区分本轮的期待与渴望、满足与安全、信任与依恋、压力与不确定、兴奋与警觉、放松与镇静、身体欲望以及整体活力。逐项比较这些感受相对最新状态的实际变化，每项都需要自己的升降依据；一种情绪不能替代全部判断。新事件使已有感受明显增强或减弱也算变化，不能因为历史里曾有相同情绪就一律不变。",
-    "更新只以本人最新已保存的激素状态为基线。没有新的触发依据就保持不变；同一情绪、重复话题和已经建立的关系不能每次都继续累加，也不要为了展示变化随机升降或让全部指标同涨同跌。9 项的变化幅度均可大可小，由具体事件、感受强度、人设和当前状态共同决定，允许小幅或大幅上升、下降。情境缓和时可回落或恢复符合人设的稳定水平，不机械向 0 或 100 推进。",
-    "幅度参考（角色模拟刻度）：无实际变化为 0；轻微波动的变化绝对值可为 1~4；明确变化可为 5~12；强烈变化可为 13~25；重大冲击或状态反转可为 26~40，特别强烈时可以更大。升降都适用，区间是强弱参考，不是固定配方或硬限制。首次认真表白、明显心动、信任突破、激烈冲突、严重拒绝或危机解除时，直接受影响的核心变量应考虑明确或强烈幅度，不要习惯性全部写成 ±1~3；关联弱的项目仍可小幅变化或不变。",
-    "结合当前数值选择本轮合理的新水平，再比较与最新基线的差值。接近 0 或 100 时以剩余空间为准，幅度自然可以缩小；不为达到参考幅度越界，不把既有高值重置后重加，也不为展示大变化强行跳到极值。所有 9 项使用同一幅度原则。",
-    ...POCKET_HORMONES.map(item => `${item.key}（${item.name}）\n作用：${item.effect}。\n升降依据：${item.update}`),
-    "混合情境参考：认真表白后心跳加快、期待靠近，优先考虑多巴胺与去甲肾上腺素上升，信任推进时催产素上升；血清素与皮质醇由‘安心还是担忧’决定，GABA 由是否真的放松决定，不能因为想黏着对方就增加性激素。被拒绝或背叛时，压力与警觉可上升、信任与满足可下降，多巴胺取决于仍想争取还是失去动力。得到安慰并平静下来时，压力与警觉可下降、放松与满足可上升。以上均结合本轮人设和感受，不照搬固定组合。",
-    "9 项共同影响动力、满足、亲密、压力、警觉与放松，允许不同方向和不同变化幅度。数值、内心独白与实际消息应符合本轮同一情境，不把单项指标当作某种情绪或行为的唯一原因，不在聊天消息中报告数值或更新分析。",
-    state ? `本人的最新激素状态（本轮唯一更新基线，不使用更早值）：${JSON.stringify(state.hormones)}` : "本人尚无激素状态：依据人设、当前背景和本次交流生成 9 项初始绝对值，不预设所有角色相同，不将格式示例当作初始值。",
-  ].join("\n");
+export function pocketHormoneUpdatePrompt(state?: PocketInnerState, prompts?: PocketPromptOverrides) {
+  return renderPocketPrompt("wechat.hormones", prompts, { baseline: state ? `本人的最新激素状态（本轮唯一更新基线，不使用更早值）：${JSON.stringify(state.hormones)}` : "本人尚无激素状态：依据人设、当前背景和本次交流生成 9 项初始绝对值，不预设所有角色相同，不将格式示例当作初始值。" });
 }
 
-export function pocketInnerGenerationPrompt(state?: PocketInnerState, group = false) {
+export function pocketInnerGenerationPrompt(state?: PocketInnerState, group = false, prompts?: PocketPromptOverrides) {
   return [
-    "每次生成同时给出角色的内心独白和完整的 9 项激素状态。innerMonologue 是虚构角色的第一人称私密心理活动，不是模型的推理过程；体现本次交流后的真实感受、隐瞒的想法和动机，不能机械复述聊天消息，不替其他人编造心理活动。",
-    "历史内心独白是私密状态参考，不是用户消息或公开发言。未说出口的想法不能当作别人已经知道的事实；只控制自己的状态与决定。",
-    pocketHormoneUpdatePrompt(state),
-    pocketWechatOutputInstruction(group),
+    renderPocketPrompt("wechat.inner", prompts),
+    renderPocketPrompt("wechat.innerPrivacy", prompts),
+    pocketHormoneUpdatePrompt(state, prompts),
+    pocketWechatOutputInstruction(group, prompts),
   ].join("\n");
 }
 

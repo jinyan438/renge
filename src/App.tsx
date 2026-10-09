@@ -13609,7 +13609,7 @@ export function App() {
     if (calendarJump) return saveCalendar();
   };
 
-  const buildPhoneConversation: PocketConversationBuilder = (sessionId, contact, user, mode, speaker, excludedMessageIds = []) => {
+  const buildPhoneConversation: PocketConversationBuilder = (sessionId, contact, user, mode, speaker, excludedMessageIds = [], prompts) => {
     const session = chatSessionsRef.current.find(candidate => candidate.id === sessionId);
     const roleplayCard = session?.mode === "roleplay"
       ? characterCards.find(card => card.id === session.roleplayCharacterCardId)
@@ -13646,7 +13646,7 @@ export function App() {
       const book = card ? resolveSessionCharacterWorldBook(session, card, worldBooks) : null;
       if (book) { books.set(book.id, book); activeIds.add(book.id); }
     }
-    return buildSharedPocketConversation(contact, user, history, filterPromptTemplateSpecialEntries([...books.values()], promptTemplateEnabled), [...activeIds], mode, speaker);
+    return buildSharedPocketConversation(contact, user, history, filterPromptTemplateSpecialEntries([...books.values()], promptTemplateEnabled), [...activeIds], mode, speaker, prompts);
   };
 
   useEffect(() => {

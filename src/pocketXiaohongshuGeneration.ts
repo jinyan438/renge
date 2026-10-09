@@ -1,3 +1,4 @@
+import { renderPocketPrompt, type PocketPromptOverrides } from "./pocketPhonePrompts.ts";
 import type { AgentPersona } from "./types";
 import { type PocketContact } from "./pocketPhoneState";
 import { redContextConversation } from "./pocketXiaohongshuContext";
@@ -33,7 +34,7 @@ export function syncRedRoleAvatars(state: RedState, roles: RedRole[]): RedState 
   return actors.every((actor, index) => actor === state.actors[index]) && notes.every((note, index) => note === state.notes[index]) && comments.every((comment, index) => comment === state.comments[index]) && followed.every((name, index) => name === state.followed[index]) ? state : { ...state, actors, notes, comments, followed };
 }
 
-export function buildRedTaskContact(state: RedState, nickname: string, roles: RedRole[], task: RedTask, reservedRoles: RedRole[] = roles): PocketContact {
+export function buildRedTaskContact(state: RedState, nickname: string, roles: RedRole[], task: RedTask, reservedRoles: RedRole[] = roles, prompts?: PocketPromptOverrides): PocketContact {
   const community = state.actors.filter(isRedCommunityActor);
   const speakers = [...roles, ...community.filter(actor => !roles.some(role => role.id === actor.id || role.name === actor.name))];
   const contact = redContextConversation(state);
@@ -47,31 +48,20 @@ export function buildRedTaskContact(state: RedState, nickname: string, roles: Re
   const index = roles.map(item => ({ id: item.id, name: item.name, nickname: item.nickname, personality: expand(item.personality, item.name) }));
   const category = task.kind === "feed" ? redText(task.category, 20) || "推荐" : "推荐";
   const topic = task.kind === "feed" ? redText(task.topic, 500) : "";
-  const actorSchema = '"actors":[{"id":"new:1","name":"人物真实角色名称","nickname":"独立的社交账号昵称，与角色名称不同","personality":"人物身份、经历、性格、爱好、说话方式及与社区的关系，须完整具体且与当前世界一致","profile":{"handle":"英文数字下划线的账号","bio":"简短个人签名","gender":"女/男/其他","age":22,"location":"符合当前世界的所在地","following":12,"followers":1083,"receivedLikes":3836,"background":"ocean/forest/sunset/violet"}}]';
-  const feedSchema = `{${actorSchema},"notes":[{"authorId":"已有id或new:1","author":"人物昵称","title":"标题","content":"正文","tags":["话题"],"category":"生活/游戏/职场/情感/穿搭/直播/短剧，或本次指定标签","location":"人物所在地","coverText":"适合封面的短文字","coverTone":"mint/cream/rose/blue/lavender/white","likes":0,"saves":0,"comments":[{"authorId":"已有id或新人物id","author":"评论者昵称","content":"评论内容","likes":0}]}]}`;
   contact.name = role?.name || "小红书社区";
   contact.sourceCharacterCardId = role?.sourceCharacterCardId;
   contact.contextCharacterCardIds = [...new Set(roles.flatMap(role => role.sourceCharacterCardId || []))];
   contact.personality = [
-    `当前用户：${nickname}。已勾选的生成角色及最新设定：${JSON.stringify(index)}`,
-    `已有社区人物及保存的人设：${JSON.stringify(community.map(actor => ({ id: actor.id, name: actor.name, nickname: redActorNickname(actor), personality: expand(actor.personality, actor.name), profile: actor.profile })))}`,
-    `未勾选角色不能发言，也不能用新增人物绕过勾选。新增人物不得冒用这些昵称：${JSON.stringify([...new Set([...reservedRoles, ...state.actors].filter(item => !isRedCommunityActor(item) && !roles.some(role => role.id === item.id || role.name === item.name)).map(item => item.name))])}。`,
-    "可以使用已勾选角色、已有社区人物，或创建独立的新社区人物。新增人物必须先在 actors 中声明完整人设与主页资料，再用对应 id 发帖或评论；已有人物沿用 id 和人设，不重新创建。不得替用户发言或虚构与用户已经认识。头像由应用分配，不输出头像字段、图片或网址。",
-    "name 是角色名称，nickname 是独立账号昵称，必须不同。所有发帖、评论和回复的 author 使用昵称，authorId 必须引用人物 id。已保存的昵称保持不变；缺少昵称的已勾选角色需在 actors 中用其原 id 声明 {id,name,nickname}，只补昵称，不改角色身份、人设或头像。回复时用对方的社交昵称称呼对方，不把角色名称当作账号名。",
-    task.kind === "feed" ? [
-      "本次任务：增量生成 3 篇全新的小红书笔记，以及每篇 1~3 条自然评论。已有内容全部保留，不重复标题或改写同一篇旧帖子。",
-      `本次笔记生成目标：${JSON.stringify(topic ? { topic } : { category })}`,
-      topic ? "用户输入的想看内容是本次主题，优先于当前分类标签。所有新笔记的标题、正文、话题标签和评论都围绕该主题，category 按实际内容填写。" : category === "推荐" ? "用户选中推荐标签，结合会话上下文生成多样的推荐内容，category 按各篇实际内容填写。" : `用户选中 ${JSON.stringify(category)} 标签，所有新笔记及评论围绕该标签生成；每篇笔记的 category 必须填写 ${JSON.stringify(category)}，确保能在该标签下看到。`,
-      roles.length ? "本批笔记必须混合至少一位已勾选角色和至少一位本次新创建的社区人物发帖。" : "未勾选角色，本批笔记由社区人物发帖，至少一位作者必须是本次新创建的独立人物。",
-      "每篇正文约 100~250 个汉字，标题不超过 40 字。coverText 是简短的文字封面，coverTone 从限定值中选择，不生成图片或网址。内容、标签和所在地符合上下文；不要强行使用现实世界的地点或热点。",
-      `只输出此格式的 JSON：${feedSchema}`,
-    ].join("\n") : [
-      `本次任务：立即回复用户刚刚在笔记「${note!.title}」发送的这条评论。帖子作者：${note!.author}。`,
-      `待回复评论索引（仅引用已存在记录）：${JSON.stringify({ id: comment!.id, author: comment!.author, content: comment!.content, replyTo: target?.author || note!.author })}`,
-      `本次优先发言角色：${role?.name || "新增社区人物"}。${role ? `最新角色设定：${expand(role.personality, role.name)}` : "创建有完整人设的独立社区人物，根据帖子和评论线程自然回应，不使用未勾选的旧作者。"}`,
-      "生成 1~3 条自然的角色回复，针对这条评论及所属线程，不抢答其他尚未回复的新评论。保持角色的性格和称呼，评论通常简短，不写旁白。不能替用户发言。",
-      `只输出此格式的 JSON：{${actorSchema},"replies":[{"authorId":"已有id或新人物id","author":"回复者昵称","content":"实际回复内容","likes":0}]}。不需要新增人物时 actors 输出空数组。`,
-    ].join("\n"),
+    renderPocketPrompt("red.people", prompts, { user: nickname, roles: JSON.stringify(index),
+      community: JSON.stringify(community.map(actor => ({ id: actor.id, name: actor.name, nickname: redActorNickname(actor), personality: expand(actor.personality, actor.name), profile: actor.profile }))),
+      excludedNames: JSON.stringify([...new Set([...reservedRoles, ...state.actors].filter(item => !isRedCommunityActor(item) && !roles.some(role => role.id === item.id || role.name === item.name)).map(item => item.name))]),
+    }),
+    task.kind === "feed" ? renderPocketPrompt("red.feed", prompts, { target: JSON.stringify(topic ? { topic } : { category }),
+      topicRules: topic ? "用户输入的想看内容是本次主题，优先于当前分类标签。所有新笔记的标题、正文、话题标签和评论都围绕该主题，category 按实际内容填写。" : category === "推荐" ? "用户选中推荐标签，结合会话上下文生成多样的推荐内容，category 按各篇实际内容填写。" : `用户选中 ${JSON.stringify(category)} 标签，所有新笔记及评论围绕该标签生成；每篇笔记的 category 必须填写 ${JSON.stringify(category)}，确保能在该标签下看到。`, mixRules: roles.length ? "本批笔记必须混合至少一位已勾选角色和至少一位本次新创建的社区人物发帖。" : "未勾选角色，本批笔记由社区人物发帖，至少一位作者必须是本次新创建的独立人物。",
+    }) : renderPocketPrompt("red.reply", prompts, { title: note!.title, author: note!.author,
+      comment: JSON.stringify({ id: comment!.id, author: comment!.author, content: comment!.content, replyTo: target?.author || note!.author }),
+      char: role?.name || "新增社区人物", personality: role ? `最新角色设定：${expand(role.personality, role.name)}` : "创建有完整人设的独立社区人物，根据帖子和评论线程自然回应，不使用未勾选的旧作者。",
+    }),
   ].join("\n\n");
   return contact;
 }

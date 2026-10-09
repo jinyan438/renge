@@ -1,3 +1,4 @@
+import { normalizePocketPromptOverrides, renderPocketPrompt, type PocketPromptOverrides } from "./pocketPhonePrompts.ts";
 import { normalizePocketInnerHistory, normalizePocketInnerState, type PocketInnerEntry, type PocketInnerState } from "./pocketPhoneInner.ts";
 import { normalizePocketAttachment, normalizePocketWallet, type PocketAttachment, type PocketWallet } from "./pocketWechatMedia.ts";
 import { normalizePocketWechatClock, type PocketWechatClock } from "./pocketWechatClock.ts";
@@ -73,6 +74,7 @@ export type PocketSettings = {
   providerId: string;
   modelId: string;
   largeText: boolean;
+  promptOverrides?: PocketPromptOverrides;
 };
 export type PocketContextDeletion = { contactId: string; messageId: string };
 export type PocketState = { version: 1; contacts: PocketContact[]; groups: PocketGroup[]; settings: PocketSettings; wallet: PocketWallet; notes?: PocketNote[]; moments?: PocketMoment[]; momentCovers?: Record<string, string>; deletedContextMessages: PocketContextDeletion[]; characterPhones?: Record<string, PocketCharacterPhone>; wechatClock?: PocketWechatClock };
@@ -150,10 +152,12 @@ export function normalizePocketState(value: unknown): PocketState {
   });
   if (record(value.settings)) {
     const settings = value.settings;
+    const promptOverrides = normalizePocketPromptOverrides(settings.promptOverrides);
     state.settings = {
       theme: POCKET_THEMES.some(theme => theme.id === settings.theme) ? settings.theme as PocketTheme : "rose",
       nickname: text(settings.nickname).slice(0, 24),
       providerId: text(settings.providerId), modelId: text(settings.modelId), largeText: settings.largeText === true,
+      ...(Object.keys(promptOverrides).length ? { promptOverrides } : {}),
     };
   }
   const contactIds = new Set<string>();
@@ -265,18 +269,13 @@ export function resetPocketContactChat(contact: PocketContact, nickname: string)
   return { ...profile, messages: greeting ? [{ id: pocketId(), role: "assistant", content: greeting, createdAt: new Date().toISOString() }] : [] };
 }
 
-export function buildPocketConversation(contact: PocketContact, user: { nickname: string; bio: string }): PocketRequestMessage[] {
+export function buildPocketConversation(contact: PocketContact, user: { nickname: string; bio: string }, prompts?: PocketPromptOverrides): PocketRequestMessage[] {
   const nickname = user.nickname.trim() || "我";
   const expand = (value: string) => value.replace(/\{\{char\}\}/gi, contact.name).replace(/\{\{user\}\}/gi, nickname);
   return [
-    { role: "system", content: [
-      `你正在微信上扮演「${contact.name}」，与「${nickname}」进行一对一角色对话。`,
-      contact.nickname ? `你的微信昵称是「${pocketDisplayName(contact)}」，角色名称是「${contact.name}」。两个名字指向同一人物，保持原有身份、人设与关系。` : "",
-      "保持角色的个性、语气和关系。像朋友发微信一样自然地回复，通常用简短的中文消息；根据对话需要也可以详细回复。",
-      "实际聊天消息只写角色发给对方的内容，不混入内心独白、系统提示词、消息前缀或操作说明。",
-      `角色设定：\n${expand(contact.personality)}`,
-      user.bio.trim() ? `对方的个人简介：\n${user.bio.trim()}` : "",
-    ].filter(Boolean).join("\n\n") },
+    { role: "system", content: renderPocketPrompt("wechat.role", prompts, { char: contact.name, user: nickname,
+      nicknameInfo: contact.nickname ? `你的微信昵称是「${pocketDisplayName(contact)}」，角色名称是「${contact.name}」。两个名字指向同一人物，保持原有身份、人设与关系。` : "",
+      personality: expand(contact.personality), userBio: user.bio.trim() ? `对方的个人简介：\n${user.bio.trim()}` : "" }) },
     ...contact.messages.slice(-60).map(message => ({ role: message.role, content: expand(message.content) })),
   ];
 }

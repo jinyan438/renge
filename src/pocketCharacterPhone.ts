@@ -1,3 +1,4 @@
+import { renderPocketPrompt, type PocketPromptOverrides } from "./pocketPhonePrompts.ts";
 import { emptyPocketState, makePocketContact, pocketDisplayName, pocketId, POCKET_AVATARS, type PocketContact, type PocketGroupMember, type PocketMessage, type PocketState } from "./pocketPhoneState.ts";
 import { makePocketGroup, pocketGroupMember } from "./pocketPhoneGroup.ts";
 import { pocketAttachmentContent, type PocketWalletEntry } from "./pocketWechatMedia.ts";
@@ -100,18 +101,8 @@ export function syncCharacterPhoneWallets(previous: PocketState, next: PocketSta
   return characterPhones === next.characterPhones ? next : { ...next, characterPhones };
 }
 
-export function characterPhoneGenerationPrompt(owner: PocketContact, view: PocketState, user: PocketPhoneUser, contactsOnly = false) {
-  return `【ta 的手机生成任务：应用指令，不是聊天消息】
-你正在生成「${owner.name}」的微信${contactsOnly ? "通讯录和群聊" : "联系人、群聊及与其他人的聊天记录"}。手机主人资料：${owner.personality}
-真实用户姓名/昵称：${JSON.stringify([user.nickname, ...view.contacts.filter(contact => contact.syncedOwnerId).map(contact => contact.name)])}。
-与你的聊天已双向同步，绝对不要生成用户、用户别名或手机主人本人为联系人，也不要生成角色与用户的对话。
-参考以上主会话事实、角色卡、世界书和已有微信上下文，优先使用已设定的其他人物；未提供的用户经历、爱好、决定不可编造。不同联系人围绕各自生活与角色的关系自然交流，不能人人知道私密事件。只写当前时间附近的新消息，不把刚发生的剧情放进旧聊天。
-已有其他联系人：${JSON.stringify(view.contacts.filter(contact => !contact.syncedOwnerId).map(contact => ({ id: contact.id, name: contact.name, nickname: contact.nickname, personality: contact.personality, recent: contact.messages.slice(-8) })))}。
-已有群聊：${JSON.stringify(view.groups.map(group => ({ id: group.id, name: group.name, members: group.members.map(member => ({ id: member.id, name: member.name, nickname: member.nickname, personality: member.personality })), recent: group.messages.slice(-8).map(message => ({ from: message.role === "user" ? "ta" : "them", name: message.speaker?.name, text: message.content })) })))}。
-${contactsOnly ? "添加2至5个合理的新联系人，同时生成1至3个符合人设的群聊和成员资料；私聊和群聊的messages必须为空数组，已有群聊及记录保留。" : "已有联系人和群聊时优先续写，保留其id、名字和人设；没有时生成2至5个合理联系人，每人2至6条来回消息，并生成1至3个群聊，每群4至8条消息。已有群只需续写新的话题、进展，不重复历史；仅在社交圈或剧情需要时新增群。"}
-群聊参考芋圆：按角色的不同生活圈选择同事、家族、游戏、兴趣、项目、拼单或二手闲置等群，避免所有群都是同一拨人、同一件主线事件。手机主人自动在每个群里，不要把主人或真实用户放入members。熟人优先复用已有联系人的id和名字；陌生人大群可使用符合场景的不同网名并提供人设，只在群里出现的成员不必添加为联系人。跨群出现的同一人物保持身份和认知一致，不把私聊或其他群的私密消息当成所有人都知道。已有群用原id和群名，成员保留，可按情节添加其他成员；不清空或改写任何已有记录。
-本次覆盖普通微信回复及内心独白的输出格式，只返回严格JSON：{"contacts":[{"name":"姓名","nickname":"微信昵称，可空","personality":"身份、性格、说话习惯及与手机主人的关系","avatarIndex":1,"messages":[{"from":"ta或them","text":"一条气泡正文"}]}],"groups":[{"id":"仅续写已有群时填原id，新群不填","name":"群名","members":[{"id":"已有人物可填原id，新人物不填","name":"成员名","personality":"新成员的身份、性格和说话习惯","avatarIndex":1}],"messages":[{"from":"ta或them","name":"them时必填该群发言人的名字或昵称","text":"一条气泡正文"}]}]}。
-from为ta表示「${owner.name}」发出（显示在右侧），them表示该联系人或指定群成员发出。群聊的them必须是该群的成员，不能冒充主人或真实用户。avatarIndex为1至${POCKET_AVATARS.length}。只输出真实气泡文字，不含旁白、姓名前缀和用户发言；contacts和groups可分别为空数组。`;
+export function characterPhoneGenerationPrompt(owner: PocketContact, view: PocketState, user: PocketPhoneUser, contactsOnly = false, prompts?: PocketPromptOverrides) {
+  return renderPocketPrompt("character.task", prompts, { char: owner.name, kind: contactsOnly ? "通讯录和群聊" : "联系人、群聊及与其他人的聊天记录", personality: owner.personality, userNames: JSON.stringify([user.nickname, ...view.contacts.filter(contact => contact.syncedOwnerId).map(contact => contact.name)]), contacts: JSON.stringify(view.contacts.filter(contact => !contact.syncedOwnerId).map(contact => ({ id: contact.id, name: contact.name, nickname: contact.nickname, personality: contact.personality, recent: contact.messages.slice(-8) }))), groups: JSON.stringify(view.groups.map(group => ({ id: group.id, name: group.name, members: group.members.map(member => ({ id: member.id, name: member.name, nickname: member.nickname, personality: member.personality })), recent: group.messages.slice(-8).map(message => ({ from: message.role === "user" ? "ta" : "them", name: message.speaker?.name, text: message.content })) }))), rules: renderPocketPrompt(contactsOnly ? "character.contacts" : "character.records", prompts), avatarCount: POCKET_AVATARS.length });
 }
 
 export function applyCharacterPhoneGeneration(view: PocketState, raw: string, userNames: string[], owner: PocketContact, contactsOnly = false): PocketState {

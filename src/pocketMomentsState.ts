@@ -1,3 +1,4 @@
+import { renderPocketPrompt, type PocketPromptOverrides } from "./pocketPhonePrompts.ts";
 import type { PocketContact, PocketGroupMember, PocketState } from "./pocketPhoneState.ts";
 import { safePocketImageUrl } from "./pocketWechatMedia.ts";
 
@@ -188,16 +189,9 @@ export function pocketMomentsTask(viewer: MomentActor, actors: MomentActor[], vi
   return { id: POCKET_MOMENTS_ID, name: viewer.name, avatar: viewer.avatar, personality: viewer.personality, app: "moments", greeting: "", sourceLabel: "朋友圈任务", messages: [], createdAt: "", sourceCharacterCardId: viewer.sourceCharacterCardId,
     contextCharacterCardIds: [...new Set(actors.flatMap(actor => actor.sourceCharacterCardId ? [actor.sourceCharacterCardId] : []))], momentViewerIds: viewerIds };
 }
-export function pocketMomentsGenerationPrompt(viewer: MomentActor, friends: MomentActor[], posts: PocketMoment[], self: boolean, post?: PocketMoment, replyOnly = false) {
+export function pocketMomentsGenerationPrompt(viewer: MomentActor, friends: MomentActor[], posts: PocketMoment[], self: boolean, post?: PocketMoment, replyOnly = false, prompts?: PocketPromptOverrides) {
   const actors = [viewer, ...friends]; const eligible = actors.filter(actor => actor.id !== POCKET_MOMENTS_USER_ID && (!post || canSeePocketMoment(post, actor.id)));
-  return `【朋友圈${post ? "互动" : "动态"}生成任务：应用指令，不是聊天消息】
-当前手机主人：${viewer.name}（id=${viewer.id}）。人物名单：${JSON.stringify(actors)}。
-最新主会话、角色设定、世界书、微信、便签及可见的朋友圈仅是事实背景。保持各自的人设与日常口吻，不模仿主会话文风，不写旁白、状态栏、微信 texts 或激素 JSON。不要给真实用户编造经历、喜好或决定，不代替真实用户（id=${POCKET_MOMENTS_USER_ID}）发帖、点赞或评论。
-内容以各自生活、工作、心情为主，不人人围着主线或用户展开，不复述私聊。待办不等于已发生；只有看得见动态的人能评论或点赞。图片描述写 pic，不混进正文；没有图片用空字符串。只使用名单里的稳定 id，不输出新的角色。
-已有动态（避免重复）：${JSON.stringify(posts.map(post => ({ authorId: post.author.id, text: post.text, pic: post.pic })))}。
-${post ? `本次仅针对这一条动态及其已有评论：${JSON.stringify({ ...post, images: post.images.length })}。
-${replyOnly ? "只让帖主回复已有的他人评论，不点赞，不重复回复。" : "让合适的好友新增 0 至 4 条评论或回复，按人设决定是否点赞，不必人人参与。"}可生成互动的人：${JSON.stringify(eligible.filter(actor => !replyOnly || actor.id === post.author.id).map(actor => actor.id))}。
-帖主只允许回复已有的他人评论，replyToId 必须是帖主或已有评论者的 id，不能回复自己。严格输出 JSON：{"likes":["好友id"],"comments":[{"authorId":"评论者id","text":"评论","replyToId":"可选，被回复者id"}]}。`
-    : `新增 ${self ? "0 至 3 条手机主人自己的动态，按照人设选择公开(public)、仅自己可见(private)或部分可见(part)，不会发就返回空数组" : "2 至 5 条好友的公开动态，只从好友名单中选发帖人，不生成手机主人本人"}。
-严格输出 JSON：{"moments":[{"authorId":"发帖人id","text":"正文","pic":"配图描述或空","location":"地点或空","visibility":"public/private/part","visibleTo":["部分可见时允许看的好友id"],"likes":["好友id"],"comments":[{"authorId":"评论者id","text":"评论","replyToId":"可选，被回复者id"}]}]}。私密帖必须无其他人的互动。`} `;
+  const task = post ? renderPocketPrompt("moments.interactTask", prompts, { post: JSON.stringify({ ...post, images: post.images.length }), rules: renderPocketPrompt(replyOnly ? "moments.reply" : "moments.interaction", prompts), eligible: JSON.stringify(eligible.filter(actor => !replyOnly || actor.id === post.author.id).map(actor => actor.id)) })
+    : renderPocketPrompt("moments.postTask", prompts, { rules: renderPocketPrompt(self ? "moments.self" : "moments.friends", prompts) });
+  return renderPocketPrompt("moments.task", prompts, { kind: post ? "互动" : "动态", owner: viewer.name, ownerId: viewer.id, actors: JSON.stringify(actors), userId: POCKET_MOMENTS_USER_ID, posts: JSON.stringify(posts.map(post => ({ authorId: post.author.id, text: post.text, pic: post.pic }))), task });
 }

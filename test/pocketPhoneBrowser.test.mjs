@@ -280,8 +280,10 @@ try {
 
   await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click();
   await phone.getByRole("button", { name: "打开手机设置", exact: true }).click();
+  await phone.getByText("API（全局共用）", { exact: true }).click();
   await phone.getByLabel("模型渠道").selectOption("fixture-responses");
   await phone.getByLabel("聊天模型").selectOption("phone-other");
+  await phone.getByText("手机主题", { exact: true }).click();
   await phone.getByRole("button", { name: "薄荷布丁", exact: true }).click();
   await phone.getByRole("switch").click();
   assert.equal(await phone.getByRole("switch").getAttribute("aria-checked"), "true");
@@ -616,6 +618,7 @@ try {
   assert.equal(syncedGroup.messages.find(message => message.content === editedGroupReply.join("\n\n")).speaker.name, "月岛");
   await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click();
   await phone.getByRole("button", { name: "打开手机设置", exact: true }).click();
+  await phone.getByText("手机主题", { exact: true }).click();
   await phone.getByRole("button", { name: "草莓奶霜", exact: true }).click();
   assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:phone-one")).groups[0]), syncedGroup);
   await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click();

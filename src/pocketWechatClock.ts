@@ -1,3 +1,4 @@
+import { renderPocketPrompt, type PocketPromptOverrides } from "./pocketPhonePrompts.ts";
 import type { PocketMessage, PocketState } from "./pocketPhoneState.ts";
 
 // Real timestamps remain available for storage ordering. This clock and each
@@ -140,6 +141,6 @@ export function pocketWechatMessageTime(message: Pick<PocketMessage, "createdAt"
 export function formatPocketWechatTime(value: string): string {
   return new Date(value).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
 }
-export function pocketWechatTimePrompt(clock: PocketWechatClock, realNow = Date.now()): string {
-  return `【微信时间变量】\n当前微信时间：${formatPocketWechatTime(pocketWechatNow(clock, realNow))}。这是独立于现实日期的剧情时间；无正文更新时按现实经过的时长等速推进，主会话正文的最新明确时间或时间流逝始终优先。过去的时间、未来约定和聊天中提到的日期不代表当前时间，不使用现实系统日期，不在气泡中报告这项应用规则。`;
+export function pocketWechatTimePrompt(clock: PocketWechatClock, realNow = Date.now(), prompts?: PocketPromptOverrides): string {
+  return renderPocketPrompt("phone.time", prompts, { time: formatPocketWechatTime(pocketWechatNow(clock, realNow)) });
 }

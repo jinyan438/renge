@@ -1,3 +1,4 @@
+import { renderPocketPrompt, type PocketPromptOverrides } from "./pocketPhonePrompts.ts";
 import type { PocketConversation, PocketGroupMember, PocketMessage, PocketState } from "./pocketPhoneState";
 
 export type PocketAttachment =
@@ -124,12 +125,7 @@ export function applyPocketTransferReplies(state: PocketState, conversationId: s
   return next;
 }
 
-export function pocketMediaPrompt(conversation: PocketConversation, speakerId?: string) {
+export function pocketMediaPrompt(conversation: PocketConversation, speakerId?: string, prompts?: PocketPromptOverrides) {
   const pending = conversation.messages.filter(message => message.role === "user" && message.attachment?.kind === "transfer" && message.attachment.status === "pending" && (!message.attachment.recipientId || message.attachment.recipientId === (speakerId || conversation.id)));
-  return [
-    "需要图片或语音时，可在 texts 中单独发送一条 [图片:具体画面描述] 或 [语音:1至60的整数秒数:语音文字内容]。图片是画面描述卡，语音是文字语音卡；不要声称已经拍摄、上传或录制了真实文件。普通聊天仍发送普通文字。",
-    "需要分享地点、约见或指路时，可在 texts 中单独发送一条 [位置:地点名称:详细地址]，会显示为微信位置卡片。地点名称必填，地址可省略；根据聊天背景填写，不要声称获取了用户的实时定位。",
-    "只有当前聊天明确涉及还钱、AA、请客或赠予等金钱往来时，才偶尔发送 [转账:金额:留言]，金额大于0且最多两位小数，一轮最多一笔。不要默认或频繁发钱。角色转账的收款人是用户。",
-    pending.length ? `待你处理的用户转账编号：${JSON.stringify(pending.map(message => ({ id: message.id, content: message.content })))}。愿意收款则在 texts 单独发送 [收款:准确编号]，拒收则发送 [退还:准确编号]；仅实际输出此码才会改变收款状态。` : "没有需要你处理的用户转账，不要编造收款或退还编号。",
-  ].join("\n");
+  return renderPocketPrompt("wechat.media", prompts, { transfers: pending.length ? `待你处理的用户转账编号：${JSON.stringify(pending.map(message => ({ id: message.id, content: message.content })))}。愿意收款则在 texts 单独发送 [收款:准确编号]，拒收则发送 [退还:准确编号]；仅实际输出此码才会改变收款状态。` : "没有需要你处理的用户转账，不要编造收款或退还编号。" });
 }

@@ -94,7 +94,41 @@
 .pocket-calendar-feedback { display: flex; align-items: center; justify-content: center; gap: 5px; margin: 10px 0 0; font-size: 10px; line-height: 1.6; color: var(--pocket-accent); }
 .pocket-panel-footer { display: flex; align-items: center; justify-content: center; gap: 8px; flex-shrink: 0; padding: 7px 8px 14px; color: #af9195; font-size: 10px; letter-spacing: 1px; }
 .pocket-scroll { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--pocket-pale) transparent; }
-.pocket-settings { width: 100%; padding: 4px 17px 15px; }
+.pocket-settings { width: 100%; padding: 4px 17px 24px; background: radial-gradient(ellipse at 20% 35%, #ddebfa88, transparent 60%), linear-gradient(165deg, #ffffffb8, #ffffff30); }
+.pocket-settings-heading { position: sticky; top: -4px; z-index: 2; display: grid; grid-template-columns: 36px 1fr 36px; align-items: center; gap: 8px; padding: 4px 0 16px; background: #fffaf7e8; backdrop-filter: blur(12px); }
+.pocket-settings-heading h2 { margin: 0; text-align: center; font-size: 20px; }
+.pocket-settings-heading button { display: grid; place-items: center; height: 36px; border-radius: 50%; background: #ffffffc0; box-shadow: 0 3px 12px #a9a9c012; }
+.pocket-settings-section-title { margin: 17px 3px 8px; color: #8190a9; font-size: 11px; font-weight: 700; letter-spacing: .5px; }
+.pocket-settings-card { margin-bottom: 12px; border: 1px solid #c9d2e080; border-radius: 18px; background: #ffffff9c; box-shadow: 0 5px 12px #94a5be12, inset 0 0 0 2px #ffffff65; }
+.pocket-settings-card > summary, .pocket-prompt-app > summary, .pocket-prompt-item > summary { display: flex; align-items: center; gap: 9px; min-height: 49px; padding: 12px; cursor: pointer; list-style: none; }
+.pocket-settings summary::-webkit-details-marker { display: none; }
+.pocket-settings summary:focus-visible { outline: 2px solid var(--pocket-accent); outline-offset: -3px; border-radius: 14px; }
+.pocket-settings-card > summary > svg:first-child { color: #85a5cb; flex-shrink: 0; }
+.pocket-settings-card > summary strong { flex: 1; font-size: 14px; }
+.pocket-settings summary > svg:last-child { flex-shrink: 0; color: #a3adbf; transition: transform .18s; }
+.pocket-settings details[open] > summary > svg:last-child { transform: rotate(180deg); }
+.pocket-settings-card-body { padding: 0 12px 12px; border-top: 1px solid #dce3ec50; }
+.pocket-settings-card-body > .pocket-settings-label { margin: 12px 1px 6px; }
+.pocket-settings-owner { margin: 5px 0 10px; font-size: 13px; }
+.pocket-settings .pocket-settings-group { padding: 12px 0 0; background: transparent; }
+.pocket-settings .pocket-setting-toggle { padding: 14px 0 2px; }
+.pocket-setting-toggle small { font-size: 10px; opacity: .55; }
+.pocket-settings .pocket-theme-options { padding-top: 12px; }
+.pocket-prompt-intro, .pocket-prompt-variables, .pocket-prompt-feedback { font-size: 10px; line-height: 1.7; margin: 10px 0; opacity: .7; overflow-wrap: anywhere; }
+.pocket-prompt-reset-all { display: flex; align-items: center; gap: 5px; padding: 6px 0; margin: 0 0 6px; background: transparent; color: var(--pocket-accent); font-size: 11px; }
+.pocket-prompt-app { border-top: 1px solid #dce3ec; }
+.pocket-prompt-app > summary { padding: 10px 0; min-height: 40px; }
+.pocket-prompt-app > summary strong, .pocket-prompt-item > summary span { flex: 1; font-size: 12px; }
+.pocket-prompt-app > summary small, .pocket-prompt-item > summary small { color: #8d96a8; font-size: 9px; flex-shrink: 0; }
+.pocket-prompt-item { margin-bottom: 7px; border: 1px solid #dce3ec80; border-radius: 10px; background: #ffffffa0; }
+.pocket-prompt-item > summary { padding: 9px 8px; min-height: 38px; gap: 5px; }
+.pocket-prompt-item > summary span { font-size: 11px; }
+.pocket-prompt-editor { padding: 0 8px 4px; }
+.pocket-prompt-editor label { display: block; font-size: 10px; margin: 3px 0 6px; }
+.pocket-prompt-editor textarea { width: 100%; min-width: 0; min-height: 150px; max-height: 400px; padding: 9px; border: 1px solid #d3dce9; border-radius: 9px; background: #fff; color: var(--pocket-text); font-size: 12px; line-height: 1.65; resize: vertical; }
+.pocket-prompt-actions { display: flex; align-items: center; gap: 6px; }
+.pocket-prompt-actions button { flex: 1; display: flex; justify-content: center; align-items: center; gap: 3px; padding: 8px 4px; border-radius: 9px; font-size: 10px; background: #edf1f7; }
+.pocket-prompt-actions button.pocket-primary { color: white; background: var(--pocket-accent); }
 .pocket-app-heading { display: flex; align-items: center; gap: 7px; margin-bottom: 17px; }
 .pocket-app-heading > button { background: transparent; padding: 4px; display: grid; place-items: center; }
 .pocket-app-heading h2 { margin: 0; font-size: 20px; font-weight: 700; }

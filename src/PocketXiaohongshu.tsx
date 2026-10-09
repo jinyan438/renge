@@ -8,6 +8,7 @@ import { applyRedContextChanges, clearRedContent, redContextConversation } from 
 import { subscribePocketContextChanges } from "./pocketPhoneSync";
 import { requestPocketReply, type PocketProvider } from "./pocketPhoneChat";
 import type { PocketContextSync, PocketConversationBuilder } from "./pocketPhoneContext";
+import type { PocketPromptOverrides } from "./pocketPhonePrompts";
 import "./pocket-xiaohongshu.css";
 
 type View = "feed" | "search" | "profile" | "messages" | "history" | "market";
@@ -15,6 +16,7 @@ type Sheet = "menu" | "share" | "publish" | "comment" | "person" | null;
 type Props = {
   sessionId: string; nickname: string; bio: string; avatar: string; roles: RedRole[];
   provider: PocketProvider | undefined; modelId: string;
+  promptOverrides?: PocketPromptOverrides;
   onBuildConversation: PocketConversationBuilder; onSyncContext: PocketContextSync;
   onSettings: () => void; onExit: () => void;
   onMessage: (actor: RedActor) => void;
@@ -44,7 +46,7 @@ async function readPhoto(file: File): Promise<string> {
   return canvas.toDataURL("image/jpeg", .78);
 }
 
-export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, provider, modelId, onBuildConversation, onSyncContext, onSettings, onExit, onMessage }: Props) {
+export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, provider, modelId, promptOverrides, onBuildConversation, onSyncContext, onSettings, onExit, onMessage }: Props) {
   const storageKey = redStorageKey(sessionId);
   const [state, setState] = useState<RedState>(() => {
     try { return normalizeRedState(JSON.parse(localStorage.getItem(storageKey) || "null")); } catch { return emptyRedState(); }
@@ -163,8 +165,8 @@ export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, pro
     const timeout = setTimeout(() => controller.abort(new Error("等待有点久，请重试生成。")), 120000);
     try {
       const snapshot = stateRef.current;
-      const contact = buildRedTaskContact(snapshot, nickname, generationRoles, task, roles);
-      const request = onBuildConversation(sessionId, contact, { nickname, bio }, "proactive");
+      const contact = buildRedTaskContact(snapshot, nickname, generationRoles, task, roles, promptOverrides);
+      const request = onBuildConversation(sessionId, contact, { nickname, bio }, "proactive", undefined, undefined, promptOverrides);
       const reply = await requestPocketReply(provider, modelId, request, controller.signal, task.kind === "feed" ? 6144 : 2048);
       controller.signal.throwIfAborted();
       if (!mountedRef.current || revision !== contentRevisionRef.current) return;

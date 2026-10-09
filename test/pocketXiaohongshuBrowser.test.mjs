@@ -180,7 +180,7 @@ try {
   await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click();
   await mainMenu("生成回复 1："); await page.locator(".chat-message-menu").getByRole("button", { name: "删除", exact: true }).click();
   assert.equal((await readState()).comments.filter(comment => comment.content.startsWith("生成回复 1：")).length, 0);
-  await phone.getByRole("button", { name: "打开手机设置", exact: true }).click(); await phone.getByLabel("模型渠道", { exact: true }).selectOption("responses");
+  await phone.getByRole("button", { name: "打开手机设置", exact: true }).click(); await phone.getByText("API（全局共用）", { exact: true }).click(); await phone.getByLabel("模型渠道", { exact: true }).selectOption("responses");
   await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click(); await phone.getByRole("button", { name: "打开小红书", exact: true }).click();
   await generate(12); assert.ok(requests.at(-1).path.endsWith("responses")); assert.equal(requests.at(-1).body.model, "fixture-responses");
   assert.match(JSON.stringify(requests.at(-1).body), /主会话里改过的评论/); assert.doesNotMatch(JSON.stringify(requests.at(-1).body), /生成回复 1：/);
