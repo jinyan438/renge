@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { Sparkles, Trash2 } from "lucide-react";
 import type { CharacterCard } from "./characterCardUtils";
-import { requestPocketReply, type PocketProvider } from "./pocketPhoneChat";
-import { availablePocketFriends, mergePocketFriends, parsePocketFriends, pocketFriendBatches, pocketFriendGenerationMessages, pocketFriendName, type PocketFriendContextBuilder, type PocketFriendProfile } from "./pocketFriendGeneration";
+import type { PocketProvider } from "./pocketPhoneChat";
+import { availablePocketFriends, mergePocketFriends, pocketFriendBatches, pocketFriendName, type PocketFriendContextBuilder, type PocketFriendProfile } from "./pocketFriendGeneration";
+import { requestPocketFriends } from "./pocketFriendRequest";
 import type { PocketFriendLibrary, PocketLibraryCharacter } from "./pocketFriendLibrary";
 
 export type PocketFriendMode = "manual" | "context" | "card" | "library";
@@ -46,9 +47,9 @@ export function PocketFriendPicker(props: Props) {
       for (const [index, batch] of batches.entries()) {
         setProgress(`正在识别 ${index + 1}/${batches.length}…`);
         timeout = setTimeout(() => controller.abort(new Error("角色识别超时，请重新识别。")), 120000);
-        const raw = await requestPocketReply(props.provider, props.modelId, pocketFriendGenerationMessages(batch, props.existing, props.excludedNames), controller.signal, 8192);
+        const roles = await requestPocketFriends(props.provider, props.modelId, batch, context, props.existing, props.excludedNames, controller.signal, () => setProgress(`正在补全 ${index + 1}/${batches.length} 的人物资料…`));
         clearTimeout(timeout); controller.signal.throwIfAborted();
-        found = mergePocketFriends([...found, ...parsePocketFriends(raw, context)]);
+        found = mergePocketFriends([...found, ...roles]);
       }
       if (controllerRef.current !== controller) return;
       const fresh = availablePocketFriends(found, props.existing, props.excludedNames);

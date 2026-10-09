@@ -39,6 +39,19 @@ test("Responses API output and text content parts both become character replies"
   assert.equal(await requestPocketReply(provider, "default", messages, new AbortController().signal), "今天很好");
 });
 
+test("empty gateway content does not mask final output in alternate response fields", async t => {
+  const payloads = [
+    { choices: [{ message: { content: "" } }], output_text: "最终正文" },
+    { choices: [{ message: { content: null }, text: "旧版正文" }] },
+    { choices: [{ message: { content: [{ type: "text", text: { value: "分段正文" } }] } }] },
+    { choices: [{ message: { content: [{ type: "text", text: '{"personality":"保留 ' }, { type: "text", text: ' 空格"}' }] } }] },
+    { choices: [{ message: { content: "", parsed: { characters: [] } } }] },
+    { choices: [{ message: { content: "", reasoning_content: "不能作为正文" } }], output: [{ type: "message", content: [{ type: "output_text", text: "Responses 正文" }] }] },
+  ];
+  t.mock.method(globalThis, "fetch", async () => Response.json(payloads.shift()));
+  for (const expected of ["最终正文", "旧版正文", "分段正文", '{"personality":"保留  空格"}', '{"characters":[]}', "Responses 正文"]) assert.equal(await requestPocketReply(provider, "default", messages, new AbortController().signal), expected);
+});
+
 test("configuration errors, upstream failures and empty replies are actionable errors", async t => {
   await assert.rejects(requestPocketReply(undefined, "", messages, new AbortController().signal), /手机设置/);
   t.mock.method(globalThis, "fetch", async () => Response.json({ error: { message: "channel unavailable" } }, { status: 503 }));

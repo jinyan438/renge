@@ -33,9 +33,16 @@ try {
   await page.route("**/api/chat/completions", async route => {
     const body = route.request().postDataJSON(); requests.push(body);
     const currentMode = mode;
-    if (currentMode === "slow") await new Promise(resolve => { releaseSlow = resolve; });
-    const output = currentMode === "bad" ? "没有有效JSON" : JSON.stringify({ characters: currentMode === "card" ? [role("季北", "冷静的画家，喜欢蓝莓。"), role("白露", "温柔的花店老板，喜欢向日葵。")] : [role("奶糖"), role("小月"), role("阿禾", "花店店员，开朗，认识林霖。"), role("林霖", "画家，内向，认识阿禾。"), role(" 林霖 ")] });
-    try { await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ choices: [{ message: { role: "assistant", content: output } }] }) }); } catch { /* A canceled request may no longer have a route. */ }
+    const repair = body.request.messages.at(-1).content.includes("【角色识别格式补全任务】");
+    if (currentMode === "slow" || currentMode === "repair-slow" && repair) await new Promise(resolve => { releaseSlow = resolve; });
+    let output = "";
+    if (currentMode === "bad") output = "没有有效JSON";
+    else if (currentMode === "card" && repair) output = JSON.stringify({ data: { roles: [role("季北", "冷静的画家，喜欢蓝莓。"), role("白露", "温柔的花店老板，喜欢向日葵。")] } });
+    else if (currentMode !== "card" && currentMode !== "empty") output = !repair ? "阿禾是花店店员，林霖是画家。" : `人物如下：\n\`\`\`json\n${JSON.stringify([role("奶糖"), role("小月"), role("阿禾", "花店店员，开朗，认识林霖。"), role("林霖", "画家，内向，认识阿禾。"), role(" 林霖 ")].map(person => ({ 姓名: person.name, 人设: person.personality, 问候语: person.greeting })))}\n\`\`\`\n完成。`;
+    const payload = currentMode === "card" || currentMode === "empty"
+      ? { choices: [{ message: { role: "assistant", content: "", reasoning_content: "只思考，没有正文" } }], ...(output ? { output_text: output } : {}) }
+      : { choices: [{ message: { role: "assistant", content: output } }] };
+    try { await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) }); } catch { /* A canceled request may no longer have a route. */ }
   });
   const phone = page.locator(".pocket-panel");
   const dialog = () => phone.getByRole("dialog");
@@ -59,6 +66,8 @@ try {
   assert.deepEqual((await readLibrary()).characters.map(person => person.name), ["奶糖"]);
   await dialog().getByRole("button", { name: "上下文识别", exact: true }).click(); await recognize();
   await dialog().getByRole("checkbox", { name: "添加林霖", exact: true }).waitFor();
+  assert.equal(requests.length, 2);
+  assert.match(requests.at(-1).request.messages.at(-1).content, /角色识别格式补全任务/);
   assert.equal(await dialog().getByRole("checkbox").count(), 2);
   assert.equal(await dialog().getByRole("button", { name: "添加所选朋友（0）", exact: true }).isDisabled(), true);
   const contextRequest = JSON.stringify(requests.at(-1).request.messages);
@@ -75,11 +84,14 @@ try {
   await dialog().getByRole("button", { name: "全选", exact: true }).click();
   await dialog().getByRole("button", { name: "添加所选朋友（1）", exact: true }).click();
   assert.equal((await readPhone(firstKey)).contacts.length, 3);
-  console.log("PASS: context recognition, player/duplicate exclusion and arbitrary candidate selection");
+  console.log("PASS: context recognition repairs plain text into wrapped arrays with Chinese fields, then excludes duplicates/player and allows arbitrary selection");
 
   await openAdd(); await dialog().getByRole("button", { name: "角色卡识别", exact: true }).click();
-  await dialog().getByLabel("选择角色卡", { exact: true }).selectOption("cast-card"); mode = "card"; await recognize();
+  await dialog().getByLabel("选择角色卡", { exact: true }).selectOption("cast-card"); mode = "card";
+  const beforeCardRequests = requests.length; await recognize();
   await dialog().getByRole("checkbox", { name: "添加季北", exact: true }).waitFor();
+  assert.equal(requests.length, beforeCardRequests + 2);
+  assert.match(requests.at(-1).request.messages.at(-1).content, /没有返回正文/);
   const cardRequest = JSON.stringify(requests.at(-1).request.messages);
   assert.match(cardRequest, /季北喜欢蓝莓/); assert.match(cardRequest, /白露向季北递来/); assert.match(cardRequest, /季北推开画室/);
   assert.doesNotMatch(cardRequest, /林霖和阿禾一起走进花店|OTHER_SESSION_SECRET|DISABLED_CARD_ROLE/);
@@ -88,11 +100,16 @@ try {
   assert.equal((await readPhone(firstKey)).contacts.find(person => person.name === "季北").sourceCharacterCardId, "cast-card");
   assert.equal((await readPhone(firstKey)).contacts.some(person => person.name === "白露"), false);
   assert.deepEqual(new Set((await readLibrary()).characters.map(person => person.name)), new Set(["奶糖", "林霖", "阿禾", "季北"]));
-  console.log("PASS: selected card recognition reads enabled book plus greetings and saves only added characters");
+  console.log("PASS: selected card recognition retries reasoning-only replies, accepts gateway output_text and nested roles, and saves only selected characters");
 
   await openAdd(); await dialog().getByRole("button", { name: "上下文识别", exact: true }).click();
-  const beforeFailure = await readPhone(firstKey); mode = "bad"; await recognize();
+  const beforeFailure = await readPhone(firstKey); mode = "bad";
+  const beforeBadRequests = requests.length; await recognize();
   await dialog().getByRole("alert").waitFor(); assert.deepEqual(await readPhone(firstKey), beforeFailure);
+  assert.equal(requests.length, beforeBadRequests + 2);
+  mode = "empty"; const beforeEmptyRequests = requests.length; await recognize();
+  await dialog().getByRole("alert").filter({ hasText: "自动重试后仍为空" }).waitFor();
+  assert.equal(requests.length, beforeEmptyRequests + 2); assert.deepEqual(await readPhone(firstKey), beforeFailure);
   mode = "slow"; await recognize();
   await page.waitForFunction(() => document.querySelector(".pocket-friend-tools .pocket-primary")?.textContent.includes("正在识别"));
   await dialog().getByRole("button", { name: "关闭联系人编辑", exact: true }).click();
@@ -101,7 +118,13 @@ try {
   assert.equal(await dialog().getByRole("checkbox").count(), 4);
   assert.deepEqual(await readPhone(firstKey), beforeFailure);
   await dialog().getByRole("button", { name: "关闭联系人编辑", exact: true }).click();
-  console.log("PASS: malformed and canceled recognition never modifies contacts");
+  await openAdd(); await dialog().getByRole("button", { name: "上下文识别", exact: true }).click();
+  mode = "repair-slow"; const beforeRepairRequests = requests.length; await recognize();
+  await page.waitForFunction(() => document.querySelector(".pocket-friend-tools .pocket-primary")?.textContent.includes("正在补全"));
+  await dialog().getByRole("button", { name: "关闭联系人编辑", exact: true }).click();
+  releaseSlow(); mode = "context";
+  assert.equal(requests.length, beforeRepairRequests + 2); assert.deepEqual(await readPhone(firstKey), beforeFailure);
+  console.log("PASS: bounded malformed/empty recovery and canceling initial or repair requests never modifies contacts");
 
   await page.locator(".chat-session-item").filter({ hasText: "朋友识别会话二" }).click();
   await phone.getByRole("button", { name: "打开微信", exact: true }).click(); await openAdd();

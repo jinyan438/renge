@@ -9,6 +9,15 @@ export type PocketProvider = {
   modelId: string; models: string[]; reasoningEnabled?: boolean;
 };
 
+export class PocketEmptyReplyError extends Error {}
+
+function pocketReplyText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(part => typeof part === "string" ? part : pocketReplyText(part?.text)).join("");
+  if (value && typeof value === "object" && "value" in value) return pocketReplyText(value.value);
+  return "";
+}
+
 export function resolvePocketModel(providers: PocketProvider[], activeProviderId: string, providerId: string, modelId: string) {
   const provider = providerId ? providers.find(item => item.id === providerId) : providers.find(item => item.id === activeProviderId) ?? providers[0];
   return { provider, modelId: providerId ? modelId || provider?.modelId || provider?.models[0] || "" : provider?.modelId || provider?.models[0] || "" };
@@ -31,9 +40,15 @@ export async function requestPocketReply(provider: PocketProvider | undefined, m
   signal.throwIfAborted();
   if (!payload || typeof payload !== "object") throw new Error("聊天服务返回了无效消息，请稍后重试。");
   if (!response.ok || payload.error) throw new Error(typeof payload.error === "string" ? payload.error : payload.error?.message || `消息发送失败（${response.status}）。`);
-  const content = payload.choices?.[0]?.message?.content ?? payload.output_text ?? (Array.isArray(payload.output) ? extractResponsesApiOutput(payload).content : "");
-  const reply = (typeof content === "string" ? content : Array.isArray(content) ? content.map(part => typeof part?.text === "string" ? part.text : "").join("") : "").trim();
-  if (!reply) throw new Error("TA 暂时没有回复，点重试再问一次吧。");
+  const message = payload.choices?.[0]?.message;
+  // Some compatible gateways leave content empty while returning the actual
+  // answer in output_text, legacy text, or a parsed structured response.
+  const reply = [message?.content, payload.output_text, payload.choices?.[0]?.text,
+    Array.isArray(payload.output) ? extractResponsesApiOutput(payload).content : "",
+    message?.parsed && typeof message.parsed === "object" ? JSON.stringify(message.parsed) : "",
+  ].map(value => pocketReplyText(value).trim()).find(Boolean);
+  // reasoning_content is never an answer or a character profile.
+  if (!reply) throw new PocketEmptyReplyError("TA 暂时没有回复，点重试再问一次吧。");
   return reply;
 }
 
