@@ -283,7 +283,7 @@ export function PocketPhone(props: PocketPhoneProps) {
       const view = stateRef.current;
       const task: PocketContact = { ...owner, id: `generate:${owner.id}`, phoneOwner: owner, messages: [], greeting: "", contextCharacterCardIds: owner.sourceCharacterCardId ? [owner.sourceCharacterCardId] : [] };
       const context = withWechatTime(props.onBuildConversation(props.sessionId, task, { nickname, bio: owner.personality }, "reply"));
-      const raw = await requestPocketReply(selection.provider, selection.modelId, [...context, { role: "user", content: characterPhoneGenerationPrompt(owner, view, props.userProfile, contactsOnly) }], controller.signal, 6144);
+      const raw = await requestPocketReply(selection.provider, selection.modelId, [...context, { role: "user", content: characterPhoneGenerationPrompt(owner, view, props.userProfile, contactsOnly) }], controller.signal, 8192);
       if (controller.signal.aborted || !mountedRef.current) return;
       // Validate the complete response before changing storage or shared history.
       const generated = applyCharacterPhoneGeneration(stateRef.current, raw, [props.userProfile.nickname, rootRef.current.settings.nickname], owner, contactsOnly);
@@ -519,8 +519,8 @@ export function PocketPhone(props: PocketPhoneProps) {
                 {activeContact && !isPocketGroup(activeContact) && <Avatar avatar={activeContact.avatar} name={pocketDisplayName(activeContact)} onClick={() => setInnerPersonId(activeContact.id)} />}
                 <span><strong>{(activeContact ? pocketDisplayName(activeContact) : "") || (tab === "discover" ? "发现" : tab === "contacts" ? "通讯录" : owner ? `${pocketDisplayName(owner)}的微信` : "微信")}{activeContact && isPocketGroup(activeContact) && <em> ({activeContact.members.length + 1})</em>}</strong>{activeContact && pendingContactId === activeContact.id && <small>{pendingSpeaker ? `${pocketDisplayName(pendingSpeaker)}正在输入…` : "对方正在输入…"}</small>}</span>
                 {owner && !activeContact && tab !== "discover" && <>
-                  <button type="button" disabled={!!pendingContactId} aria-label="生成联系人" title="生成联系人" aria-busy={pendingContactId === `generate:${owner.id}`} onClick={() => void generateCharacterWechat(true)}><UserRoundPlus size={20} /></button>
-                  <button type="button" disabled={!!pendingContactId} aria-label="生成聊天记录" title={pendingContactId === `generate:${owner.id}` ? "正在生成…" : "生成聊天记录"} aria-busy={pendingContactId === `generate:${owner.id}`} onClick={() => void generateCharacterWechat()}><Sparkles size={20} /></button>
+                  <button type="button" disabled={!!pendingContactId} aria-label="生成联系人" title="生成联系人和群聊" aria-busy={pendingContactId === `generate:${owner.id}`} onClick={() => void generateCharacterWechat(true)}><UserRoundPlus size={20} /></button>
+                  <button type="button" disabled={!!pendingContactId} aria-label="生成聊天记录" title={pendingContactId === `generate:${owner.id}` ? "正在生成…" : "生成私聊和群聊记录"} aria-busy={pendingContactId === `generate:${owner.id}`} onClick={() => void generateCharacterWechat()}><Sparkles size={20} /></button>
                 </>}
                 {!activeContact && tab !== "discover" && <button type="button" onClick={() => editGroup()} aria-label="发起群聊" title="发起群聊"><Users size={20} /></button>}
                 {(activeContact || tab !== "discover") && <button type="button" onClick={() => activeContact ? isPocketGroup(activeContact) ? editGroup(activeContact) : editContact(activeContact) : addContact()} disabled={!!activeContact && !isPocketGroup(activeContact) && !!activeContact.syncedOwnerId} title={activeContact && !isPocketGroup(activeContact) && activeContact.syncedOwnerId ? "用户资料与聊天跟随你的手机同步" : undefined} aria-label={activeContact ? isPocketGroup(activeContact) ? "群聊设置" : "编辑联系人" : "添加联系人"}>{activeContact ? <MoreHorizontal size={22} /> : <Plus size={22} />}</button>}

@@ -1,4 +1,5 @@
-import { emptyPocketState, makePocketContact, pocketDisplayName, pocketId, POCKET_AVATARS, type PocketContact, type PocketMessage, type PocketState } from "./pocketPhoneState.ts";
+import { emptyPocketState, makePocketContact, pocketDisplayName, pocketId, POCKET_AVATARS, type PocketContact, type PocketGroupMember, type PocketMessage, type PocketState } from "./pocketPhoneState.ts";
+import { makePocketGroup, pocketGroupMember } from "./pocketPhoneGroup.ts";
 import { pocketAttachmentContent, type PocketWalletEntry } from "./pocketWechatMedia.ts";
 
 export type PocketPhoneUser = { nickname: string; bio: string; avatarImage: string };
@@ -101,27 +102,33 @@ export function syncCharacterPhoneWallets(previous: PocketState, next: PocketSta
 
 export function characterPhoneGenerationPrompt(owner: PocketContact, view: PocketState, user: PocketPhoneUser, contactsOnly = false) {
   return `【ta 的手机生成任务：应用指令，不是聊天消息】
-你正在生成「${owner.name}」的微信${contactsOnly ? "通讯录" : "联系人及与其他人的聊天记录"}。手机主人资料：${owner.personality}
+你正在生成「${owner.name}」的微信${contactsOnly ? "通讯录和群聊" : "联系人、群聊及与其他人的聊天记录"}。手机主人资料：${owner.personality}
 真实用户姓名/昵称：${JSON.stringify([user.nickname, ...view.contacts.filter(contact => contact.syncedOwnerId).map(contact => contact.name)])}。
 与你的聊天已双向同步，绝对不要生成用户、用户别名或手机主人本人为联系人，也不要生成角色与用户的对话。
 参考以上主会话事实、角色卡、世界书和已有微信上下文，优先使用已设定的其他人物；未提供的用户经历、爱好、决定不可编造。不同联系人围绕各自生活与角色的关系自然交流，不能人人知道私密事件。只写当前时间附近的新消息，不把刚发生的剧情放进旧聊天。
-已有其他联系人：${JSON.stringify(view.contacts.filter(contact => !contact.syncedOwnerId).map(contact => ({ name: contact.name, personality: contact.personality, recent: contact.messages.slice(-8) })))}。
-${contactsOnly ? "添加2至5个合理的新联系人，messages必须为空数组。" : "已有联系人时优先续写，保留其名字与人设；没有时生成2至5个合理联系人，每人2至6条来回消息。"}
-本次覆盖普通微信回复及内心独白的输出格式，只返回严格JSON：{"contacts":[{"name":"姓名","nickname":"微信昵称，可空","personality":"身份、性格、说话习惯及与手机主人的关系","avatarIndex":1,"messages":[{"from":"ta或them","text":"一条气泡正文"}]}]}。
-from为ta表示「${owner.name}」发出（显示在右侧），them表示该联系人发出。avatarIndex为1至${POCKET_AVATARS.length}。只输出真实气泡文字，不含旁白、姓名前缀和用户发言。不能清空或改写已有记录。`;
+已有其他联系人：${JSON.stringify(view.contacts.filter(contact => !contact.syncedOwnerId).map(contact => ({ id: contact.id, name: contact.name, nickname: contact.nickname, personality: contact.personality, recent: contact.messages.slice(-8) })))}。
+已有群聊：${JSON.stringify(view.groups.map(group => ({ id: group.id, name: group.name, members: group.members.map(member => ({ id: member.id, name: member.name, nickname: member.nickname, personality: member.personality })), recent: group.messages.slice(-8).map(message => ({ from: message.role === "user" ? "ta" : "them", name: message.speaker?.name, text: message.content })) })))}。
+${contactsOnly ? "添加2至5个合理的新联系人，同时生成1至3个符合人设的群聊和成员资料；私聊和群聊的messages必须为空数组，已有群聊及记录保留。" : "已有联系人和群聊时优先续写，保留其id、名字和人设；没有时生成2至5个合理联系人，每人2至6条来回消息，并生成1至3个群聊，每群4至8条消息。已有群只需续写新的话题、进展，不重复历史；仅在社交圈或剧情需要时新增群。"}
+群聊参考芋圆：按角色的不同生活圈选择同事、家族、游戏、兴趣、项目、拼单或二手闲置等群，避免所有群都是同一拨人、同一件主线事件。手机主人自动在每个群里，不要把主人或真实用户放入members。熟人优先复用已有联系人的id和名字；陌生人大群可使用符合场景的不同网名并提供人设，只在群里出现的成员不必添加为联系人。跨群出现的同一人物保持身份和认知一致，不把私聊或其他群的私密消息当成所有人都知道。已有群用原id和群名，成员保留，可按情节添加其他成员；不清空或改写任何已有记录。
+本次覆盖普通微信回复及内心独白的输出格式，只返回严格JSON：{"contacts":[{"name":"姓名","nickname":"微信昵称，可空","personality":"身份、性格、说话习惯及与手机主人的关系","avatarIndex":1,"messages":[{"from":"ta或them","text":"一条气泡正文"}]}],"groups":[{"id":"仅续写已有群时填原id，新群不填","name":"群名","members":[{"id":"已有人物可填原id，新人物不填","name":"成员名","personality":"新成员的身份、性格和说话习惯","avatarIndex":1}],"messages":[{"from":"ta或them","name":"them时必填该群发言人的名字或昵称","text":"一条气泡正文"}]}]}。
+from为ta表示「${owner.name}」发出（显示在右侧），them表示该联系人或指定群成员发出。群聊的them必须是该群的成员，不能冒充主人或真实用户。avatarIndex为1至${POCKET_AVATARS.length}。只输出真实气泡文字，不含旁白、姓名前缀和用户发言；contacts和groups可分别为空数组。`;
 }
 
 export function applyCharacterPhoneGeneration(view: PocketState, raw: string, userNames: string[], owner: PocketContact, contactsOnly = false): PocketState {
   let parsed: unknown;
   try { parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")); }
   catch { throw new Error("联系人生成格式有误，请重试。"); }
-  const data = parsed as { contacts?: unknown } | null;
-  if (!data || !Array.isArray(data.contacts) || !data.contacts.length || data.contacts.length > 10) throw new Error("没有生成有效联系人，请重试。");
-  const excluded = new Set([...userNames, "我", "用户", "user", "{{user}}", owner.name, owner.nickname || "", ...view.contacts.filter(contact => contact.syncedOwnerId).map(contact => contact.name)].filter(Boolean).map(identity));
+  const data = parsed as { contacts?: unknown; groups?: unknown } | null;
+  if (!data || typeof data !== "object" || Array.isArray(data) || data.contacts !== undefined && !Array.isArray(data.contacts) || data.groups !== undefined && !Array.isArray(data.groups)) throw new Error("联系人和群聊生成格式有误，请重试。");
+  const entries = (data.contacts || []) as unknown[]; const groupEntries = (data.groups || []) as unknown[];
+  if ((!entries.length && !groupEntries.length) || entries.length > 10 || groupEntries.length > 5) throw new Error("没有生成有效联系人或群聊，请重试。");
+  const excludedUsers = new Set([...userNames, "我", "用户", "user", "{{user}}", ...view.contacts.filter(contact => contact.syncedOwnerId).flatMap(contact => [contact.name, contact.nickname || ""])].filter(Boolean).map(identity));
+  const ownerNames = new Set([owner.name, owner.nickname || "", "{{char}}"].filter(Boolean).map(identity));
+  const excluded = new Set([...excludedUsers, ...ownerNames]);
   const contacts = [...view.contacts];
   const seen = new Set<string>();
   const createdAt = new Date().toISOString();
-  for (const value of data.contacts) {
+  for (const value of entries) {
     if (!value || typeof value !== "object") throw new Error("联系人资料不完整，请重试。");
     const entry = value as Record<string, unknown>;
     if (typeof entry.name !== "string" || !entry.name.trim() || entry.name.trim().length > 30 || typeof entry.personality !== "string" || !entry.personality.trim() || !Array.isArray(entry.messages)) throw new Error("联系人资料不完整，请重试。");
@@ -144,6 +151,63 @@ export function applyCharacterPhoneGeneration(view: PocketState, raw: string, us
       contacts.push({ ...contact, phoneOwner: owner, messages });
     }
   }
-  if (!seen.size) throw new Error("生成结果只有同步联系人，请重试生成其他人。");
-  return { ...view, contacts };
+  const groups = [...view.groups]; const seenGroups = new Set<string>();
+  for (const value of groupEntries) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("群聊资料不完整，请重试。");
+    const entry = value as Record<string, unknown>;
+    if (typeof entry.name !== "string" || !entry.name.trim() || entry.name.trim().length > 30 || !Array.isArray(entry.messages) || entry.messages.length > 30) throw new Error("群聊资料或记录格式有误，请重试。");
+    const name = entry.name.trim();
+    const index = typeof entry.id === "string" && entry.id ? groups.findIndex(group => group.id === entry.id) : groups.findIndex(group => identity(group.name) === identity(name));
+    if (entry.id !== undefined && (typeof entry.id !== "string" || entry.id && index < 0)) throw new Error("生成了未知群聊，请重试。");
+    const existing = index >= 0 ? groups[index] : undefined;
+    const groupKeys = [`name:${identity(existing?.name || name)}`, ...(existing ? [`id:${existing.id}`] : [])];
+    if (groupKeys.some(key => seenGroups.has(key))) throw new Error("生成了重复群聊，请重试。");
+    groupKeys.forEach(key => seenGroups.add(key));
+    const members = [...existing?.members || []];
+    if (members.some(member => excludedUsers.has(identity(member.name)) || member.nickname && excludedUsers.has(identity(member.nickname)) || view.contacts.some(contact => contact.syncedOwnerId && contact.id === member.id))) throw new Error("生成的群聊不能包含真实用户。");
+    if (entry.members !== undefined && (!Array.isArray(entry.members) || entry.members.length > 12) || !existing && !Array.isArray(entry.members)) throw new Error("群成员资料不完整，请重试。");
+    const memberIds = new Set<string>();
+    for (const value of Array.isArray(entry.members) ? entry.members : []) {
+      const member = typeof value === "string" ? { name: value } : value as Record<string, unknown> | null;
+      if (!member || typeof member !== "object" || typeof member.name !== "string" || !member.name.trim() || member.name.trim().length > 30) throw new Error("群成员资料不完整，请重试。");
+      const memberName = member.name.trim(); const nickname = typeof member.nickname === "string" ? member.nickname.trim().slice(0, 30) : "";
+      if (excludedUsers.has(identity(memberName)) || nickname && excludedUsers.has(identity(nickname))) throw new Error("生成的群聊不能包含真实用户。");
+      if (ownerNames.has(identity(memberName)) || nickname && ownerNames.has(identity(nickname))) continue;
+      const people = [...contacts, ...groups.flatMap(group => group.members), ...members];
+      const known = typeof member.id === "string" && member.id ? people.find(person => person.id === member.id) : people.find(person => [person.name, person.nickname || ""].some(name => identity(name) === identity(memberName)));
+      if (member.id !== undefined && (typeof member.id !== "string" || member.id && !known)) throw new Error("生成了未知群成员，请重试。");
+      if (known && (excluded.has(identity(known.name)) || known.nickname && excluded.has(identity(known.nickname)))) throw new Error("生成的群成员身份不正确，请重试。");
+      let profile: PocketGroupMember;
+      if (known) profile = pocketGroupMember(known);
+      else {
+        if (typeof member.personality !== "string" || !member.personality.trim()) throw new Error("新群成员需要完整人设，请重试。");
+        const avatarIndex = typeof member.avatarIndex === "number" && Number.isInteger(member.avatarIndex) ? member.avatarIndex - 1 : 0;
+        profile = { id: pocketId(), name: memberName, ...(nickname ? { nickname } : {}), personality: member.personality.trim(), avatar: POCKET_AVATARS[avatarIndex] || POCKET_AVATARS[0] };
+      }
+      if (memberIds.has(profile.id)) throw new Error("生成了重复群成员，请重试。");
+      memberIds.add(profile.id);
+      if (!members.some(member => member.id === profile.id)) members.push(profile);
+    }
+    if (!members.length || members.length > 12) throw new Error("群聊需要 1 至 12 位其他成员。");
+    const messages: PocketMessage[] = contactsOnly ? [] : entry.messages.map((value: unknown) => {
+      const message = value as { from?: string; name?: string; text?: string } | null;
+      if (!message || !["ta", "them"].includes(message.from || "") || typeof message.text !== "string" || !message.text.trim() || message.text.length > 2000) throw new Error("群聊记录格式有误，请重试。");
+      const speakers = message.from === "them" && typeof message.name === "string" ? members.filter(member => [member.name, member.nickname || ""].some(name => identity(name) === identity(message.name!))) : [];
+      if (message.from === "them" && speakers.length !== 1) throw new Error("群聊发言人不在成员名单中或身份不明确，请重试。");
+      const speaker = speakers[0];
+      return { id: pocketId(), role: message.from === "ta" ? "user" : "assistant", content: message.text.trim(), createdAt, generated: true,
+        ...(speaker ? { speaker: { id: speaker.id, name: pocketDisplayName(speaker), avatar: speaker.avatar } } : {}) };
+    });
+    const messageKey = (message: PocketMessage) => JSON.stringify([message.role, message.speaker?.id || "", message.content]);
+    const previousKeys = new Set(existing?.messages.map(messageKey) || []);
+    const added = messages.filter(message => { const key = messageKey(message); if (previousKeys.has(key)) return false; previousKeys.add(key); return true; });
+    const groupMessages = [...existing?.messages || [], ...added];
+    const lastIncoming = groupMessages.map(message => message.role).lastIndexOf("assistant");
+    const answeredId = (lastIncoming >= 0 ? groupMessages.slice(0, lastIncoming).reverse().find(message => message.role === "user")?.id : undefined) || existing?.replyContextMessageId;
+    const group = { ...(existing || makePocketGroup(name, members, owner.name)), members, messages: groupMessages, phoneOwner: owner,
+      ...(added.length ? { replyContextMessageId: answeredId || "" } : {}) };
+    if (existing) groups[index] = group; else groups.push(group);
+  }
+  if (!seen.size && !seenGroups.size) throw new Error("生成结果只有同步联系人，请重试生成其他人。");
+  return { ...view, contacts, groups };
 }
