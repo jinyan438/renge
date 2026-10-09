@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Sparkles, Trash2 } from "lucide-react";
 import type { CharacterCard } from "./characterCardUtils";
 import type { PocketProvider } from "./pocketPhoneChat";
-import { availablePocketFriends, mergePocketFriends, pocketFriendBatches, pocketFriendName, type PocketFriendContextBuilder, type PocketFriendProfile } from "./pocketFriendGeneration";
+import { availablePocketFriends, pocketFriendBatches, pocketFriendName, type PocketFriendContextBuilder, type PocketFriendProfile } from "./pocketFriendGeneration";
 import { requestPocketFriends } from "./pocketFriendRequest";
 import type { PocketFriendLibrary, PocketLibraryCharacter } from "./pocketFriendLibrary";
 
@@ -47,9 +47,9 @@ export function PocketFriendPicker(props: Props) {
       for (const [index, batch] of batches.entries()) {
         setProgress(`正在识别 ${index + 1}/${batches.length}…`);
         timeout = setTimeout(() => controller.abort(new Error("角色识别超时，请重新识别。")), 120000);
-        const roles = await requestPocketFriends(props.provider, props.modelId, batch, context, props.existing, props.excludedNames, controller.signal, () => setProgress(`正在补全 ${index + 1}/${batches.length} 的人物资料…`));
+        const roles = await requestPocketFriends(props.provider, props.modelId, batch, context, [...props.existing, ...found], props.excludedNames, controller.signal, () => setProgress(`正在补全 ${index + 1}/${batches.length} 的人物资料…`));
         clearTimeout(timeout); controller.signal.throwIfAborted();
-        found = mergePocketFriends([...found, ...roles]);
+        found = [...found, ...availablePocketFriends(roles, [...props.existing, ...found], props.excludedNames)];
       }
       if (controllerRef.current !== controller) return;
       const fresh = availablePocketFriends(found, props.existing, props.excludedNames);
@@ -66,7 +66,7 @@ export function PocketFriendPicker(props: Props) {
   return <div className="pocket-friend-picker">
     <div className="pocket-friend-modes" aria-label="添加朋友方式">{([ ["manual", "手动创建"], ["context", "上下文识别"], ["card", "角色卡识别"], ["library", "角色库"] ] as const).map(([mode, label]) => <button key={mode} type="button" aria-pressed={props.mode === mode} onClick={() => switchMode(mode)}>{label}</button>)}</div>
     {props.mode !== "manual" && <>
-      <p className="pocket-friend-hint">{props.mode === "library" ? "已添加联系人会自动保存到全局角色库，可在其他会话导入。删除库中角色会保留各会话已有联系人和聊天。" : props.mode === "card" ? "读取所选角色卡的基本信息、问候语和启用的世界书，分别整理每位人物的设定。" : "读取当前会话上下文和启用的角色资料，识别已经出场的可对话人物。已添加的同名角色会自动忽略。"}</p>
+      <p className="pocket-friend-hint">{props.mode === "library" ? "已添加联系人会自动保存到全局角色库，可在其他会话导入。删除库中角色会保留各会话已有联系人和聊天。" : props.mode === "card" ? "从角色卡、问候语和启用的世界书识别人物，快速生成简短设定。" : "根据当前会话上下文识别出场人物，快速生成简短设定，自动忽略已添加的同名角色。"}</p>
       {props.mode === "card" && <label className="pocket-field">选择角色卡<select aria-label="选择角色卡" value={cardId} onChange={event => { cancel(); setCardId(event.target.value); setCandidates([]); setSelected([]); setNotice(""); setError(""); }}><option value="">请选择角色卡</option>{props.cards.map(card => <option key={card.id} value={card.id}>{card.name}</option>)}</select></label>}
       {props.mode !== "library" && <div className="pocket-friend-tools"><button type="button" className="pocket-primary" disabled={!canGenerate || props.mode === "card" && !cardId || !!progress} onClick={() => void generate()}><Sparkles size={14} />{progress || "识别并生成人设"}</button>{progress && <button type="button" onClick={cancel}>停止识别</button>}</div>}
       {!canGenerate && props.mode !== "library" && <p className="pocket-friend-hint">请先在手机设置中配置模型。</p>}

@@ -26,7 +26,7 @@ const upstream = createServer(async (request, response) => {
   for await (const chunk of request) chunks.push(chunk);
   const body = JSON.parse(Buffer.concat(chunks).toString());
   requests.push({ path: request.url, body });
-  if (JSON.stringify(body).includes("你是角色资料整理助手")) {
+  if (JSON.stringify(body).includes("快速识别资料中的可对话人物")) {
     const output = JSON.stringify({ characters: [{ name: "月岛", personality: "{{char}}是{{user}}的青梅竹马。耐心、可爱，记得对方的喜好。", greeting: "{{user}}，今天也想和你一起回家。" }] });
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify(request.url.endsWith("responses") ? { output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: output }] }] } : { choices: [{ message: { role: "assistant", content: output } }] }));
