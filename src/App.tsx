@@ -127,6 +127,7 @@ import {
 } from "./presetUtils";
 import { buildPocketHistoryMessage, buildSharedPocketConversation, formatPocketContextMessage, getPocketMessageIdentity, pocketContextRevision, syncPocketContext, type PocketContextSync, type PocketConversationBuilder } from "./pocketPhoneContext";
 import { isPocketGroup } from "./pocketPhoneState";
+import { pocketCardSources, pocketWorldBookSources, type PocketFriendContextBuilder } from "./pocketFriendGeneration";
 import { pocketMomentContextAllowed, pocketMomentViewerIds } from "./pocketMomentsState";
 import { reversePocketMessage } from "./pocketCharacterPhone";
 import { syncPocketPhoneFromContext } from "./pocketPhoneSync";
@@ -13607,6 +13608,24 @@ export function App() {
       setChatMessages(messages);
     }
     if (calendarJump) return saveCalendar();
+  };
+
+  const buildPhoneFriendContext: PocketFriendContextBuilder = (sessionId, cardId) => {
+    const session = chatSessionsRef.current.find(candidate => candidate.id === sessionId);
+    const roleplayCardId = session?.mode === "roleplay" ? session.roleplayCharacterCardId : undefined;
+    const card = characterCards.find(candidate => candidate.id === (cardId || roleplayCardId));
+    if (cardId && !card) throw new Error("所选角色卡已不存在，请重新选择。");
+    const book = card ? resolveSessionCharacterWorldBook(cardId && cardId !== roleplayCardId ? undefined : session, card, worldBooks) : null;
+    const sources = card ? pocketCardSources(card, book) : [];
+    if (!cardId) {
+      sources.push(...pocketWorldBookSources(filterPromptTemplateSpecialEntries(worldBooks.filter(candidate => activeWorldBookIds.includes(candidate.id) && candidate.id !== book?.id), promptTemplateEnabled)));
+      sources.push(...getMessagesForSession(sessionId).filter(message => !isTavernHiddenMessage(message) && message.content.trim()).map(message => {
+        const content = getPocketMessageIdentity(message) ? formatPocketContextMessage(message) : getChatApiMessageText(buildChatMessageForApi(message, personas, userProfile, undefined));
+        const speaker = getTavernMessageName(message) || (message.role === "user" ? getChatSenderName(message.sender, personas, userProfile) : getChatSenderPersona(message.sender, personas)?.name || card?.name || getAiChatMessageName(message, "助手"));
+        return `【当前会话 · ${speaker}】\n${content}`;
+      }));
+    }
+    return { sources, sourceCharacterCardId: card?.id };
   };
 
   const buildPhoneConversation: PocketConversationBuilder = (sessionId, contact, user, mode, speaker, excludedMessageIds = [], prompts) => {
@@ -39224,6 +39243,7 @@ export function App() {
           phoneActiveProviderId={activeProviderId}
           onPhoneSyncContext={syncPhoneContext}
           onPhoneBuildConversation={buildPhoneConversation}
+          onPhoneBuildFriendContext={buildPhoneFriendContext}
           userProfile={userProfile}
           chatSessionId={activeChatSessionId}
           heartbeat={activeHeartbeat}

@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { ArrowLeft, BatteryFull, CalendarDays, Check, ChevronRight, Compass, Heart, Image as ImageIcon, MapPin, MessageCircle, Mic, MoreHorizontal, Plus, Search, Send, Settings, Signal, Sparkles, Square, UserRound, UserRoundPlus, Users, Wallet, Wifi, X } from "lucide-react";
 import type { CharacterCard } from "./characterCardUtils";
+import { PocketFriendPicker, type PocketFriendMode } from "./PocketFriendPicker";
+import { availablePocketFriends, pocketFriendName, type PocketFriendContextBuilder, type PocketFriendProfile } from "./pocketFriendGeneration";
+import { changedPocketLibraryContacts, changePocketFriendLibrary, loadPocketFriendLibrary, mergePocketLibraryContacts, subscribePocketFriendLibrary } from "./pocketFriendLibrary";
 import type { AgentPersona } from "./types";
 import { DEFAULT_POCKET_AVATAR, DEFAULT_POCKET_USER_AVATAR, emptyPocketState, getPocketConversations, getPocketGenerationMode, getPocketConversationBubbles, isPocketGroup, makePocketContact, normalizePocketState, pocketDisplayName, pocketId, pocketSpeakerName, pocketStorageKey, POCKET_AVATARS, POCKET_THEMES, resetPocketContactChat, safePocketAvatar, type PocketContact, type PocketConversation, type PocketGroup, type PocketGroupMember, type PocketMessage, type PocketSettings, type PocketState } from "./pocketPhoneState";
 import { makePocketGroup, pocketGroupMember, resetPocketGroupChat, resolvePocketGroup } from "./pocketPhoneGroup";
@@ -37,6 +40,7 @@ type PocketPhoneProps = {
   providers: PocketProvider[]; activeProviderId: string;
   userProfile: { nickname: string; bio: string; avatarImage: string };
   onSyncContext: PocketContextSync; onBuildConversation: PocketConversationBuilder;
+  onBuildFriendContext: PocketFriendContextBuilder;
   onBack: () => void; onClose: () => void;
 };
 type PhoneApp = "home" | "wechat" | "xiaohongshu" | "settings" | "character" | "calendar" | "notes" | "moments";
@@ -93,6 +97,8 @@ export function PocketPhone(props: PocketPhoneProps) {
   const [query, setQuery] = useState("");
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [editor, setEditor] = useState<{ id?: string; draft: ContactDraft } | null>(null);
+  const [friendMode, setFriendMode] = useState<PocketFriendMode>("manual");
+  const [friendLibrary, setFriendLibrary] = useState(() => loadPocketFriendLibrary(storageKey));
   const [groupEditor, setGroupEditor] = useState<{ id?: string; name: string; memberIds: string[]; members: PocketGroupMember[] } | null>(null);
   const [editorError, setEditorError] = useState("");
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
@@ -132,6 +138,8 @@ export function PocketPhone(props: PocketPhoneProps) {
     setNow(new Date());
     try { localStorage.setItem(storageKey, JSON.stringify(next)); setStorageWarning(""); }
     catch { setStorageWarning("手机存储空间不足或不可用，这次改动暂未保存。请保留当前页面。"); }
+    const changedContacts = changedPocketLibraryContacts(previous, next);
+    if (changedContacts.length) setFriendLibrary(changePocketFriendLibrary(storageKey, characters => mergePocketLibraryContacts(characters, changedContacts)));
     return props.onSyncContext(props.sessionId, getPocketConversations(previous), getPocketConversations(next), next.settings.nickname.trim() || props.userProfile.nickname.trim() || "小小的我", next.deletedContextMessages, calendarJump);
   }
   function jumpCalendar(time: string) {
@@ -184,7 +192,7 @@ export function PocketPhone(props: PocketPhoneProps) {
     if (result.state !== stateRef.current) updateState(() => result.state);
     openContact(result.contact);
   }
-  function addContact() { setEditorError(""); setEditor({ draft: { name: "", avatar: DEFAULT_POCKET_AVATAR, personality: "", greeting: "", sourceLabel: "自定义角色" } }); }
+  function addContact() { setEditorError(""); setFriendMode("manual"); setEditor({ draft: { name: "", avatar: DEFAULT_POCKET_AVATAR, personality: "", greeting: "", sourceLabel: "自定义角色" } }); }
   function editContact(contact: PocketContact) { setEditorError(""); setEditor({ id: contact.id, draft: { name: contact.name, nickname: contact.nickname, avatar: contact.avatar, personality: contact.personality, greeting: contact.greeting, sourceLabel: contact.sourceLabel, sourceCharacterCardId: contact.sourceCharacterCardId } }); }
   function editGroup(group?: PocketGroup) {
     setEditorError(""); setEditor(null);
@@ -193,6 +201,7 @@ export function PocketPhone(props: PocketPhoneProps) {
 
   useEffect(() => { setAttachOpen(false); setAttachmentKind(null); }, [contactId, app]);
   useEffect(() => { const timer = setInterval(() => setNow(new Date()), 15000); return () => clearInterval(timer); }, []);
+  useEffect(() => subscribePocketFriendLibrary(setFriendLibrary), []);
   useEffect(() => subscribeGlobalPocketPrompts(settings => {
     controllerRef.current?.abort();
     promptsRef.current = settings.prompts;
@@ -251,17 +260,27 @@ export function PocketPhone(props: PocketPhoneProps) {
 
   function importCharacter(value: string) {
     if (!editor || !value) return;
-    const card = props.characterCards.find(item => `card:${item.id}` === value);
+    const libraryCharacter = friendLibrary.characters.find(item => `library:${item.id}` === value);
     const persona = props.personas.find(item => `persona:${item.id}` === value);
-    const draft = card ? {
-      name: card.name, nickname: card.nickname, avatar: safePocketAvatar(card.avatarDataUrl), sourceLabel: "来自角色卡", sourceCharacterCardId: card.id,
-      personality: [card.description, card.personality, card.scenario && `场景：${card.scenario}`, card.systemPrompt, card.messageExample && `对话示例：${card.messageExample}`, card.postHistoryInstructions].filter(Boolean).join("\n\n"),
-      greeting: card.firstMessage,
+    const draft = libraryCharacter ? {
+      name: libraryCharacter.name, nickname: libraryCharacter.nickname, avatar: libraryCharacter.avatar, sourceLabel: "来自角色库", sourceCharacterCardId: libraryCharacter.sourceCharacterCardId,
+      personality: libraryCharacter.personality, greeting: libraryCharacter.greeting,
     } : persona ? {
       name: persona.name, avatar: safePocketAvatar(persona.avatarImage), sourceLabel: "来自人格", sourceCharacterCardId: undefined,
       personality: [persona.description, ...persona.entryTypes.flatMap(type => type.entries.filter(entry => entry.enabled).map(entry => `${type.name} · ${entry.key}：${entry.value}`))].filter(Boolean).join("\n"), greeting: "",
     } : null;
     if (draft) setEditor({ ...editor, draft });
+  }
+
+  function addSelectedFriends(profiles: PocketFriendProfile[]) {
+    try {
+      const fresh = availablePocketFriends(profiles, stateRef.current.contacts, [nickname, props.userProfile.nickname]);
+      if (!fresh.length) throw new Error("所选角色已经添加，请选择其他朋友。");
+      const contacts = fresh.map(profile => resetPocketContactChat(makePocketContact(profile), nickname));
+      updateState(previous => ({ ...previous, contacts: [...previous.contacts, ...contacts] }));
+      setEditor(null); setEditorError("");
+      if (contacts.length === 1) openContact(contacts[0]); else { setContactId(""); setTab("contacts"); }
+    } catch (error) { setEditorError(error instanceof Error ? error.message : "联系人没有保存成功。"); }
   }
 
   function saveContact(event: FormEvent) {
@@ -279,6 +298,7 @@ export function PocketPhone(props: PocketPhoneProps) {
         updateContact(editor.id, contact => ({ ...contact, ...editor.draft, name: validated.name, nickname: validated.nickname, personality: validated.personality, avatar: validated.avatar, greeting: validated.greeting }));
       }
       else {
+        if (stateRef.current.contacts.some(person => pocketFriendName(person.name) === pocketFriendName(validated.name))) throw new Error("这位同名朋友已经在通讯录里了。");
         const contact = resetPocketContactChat(validated, nickname);
         updateState(previous => ({ ...previous, contacts: [...previous.contacts, contact] }));
         openContact(contact);
@@ -499,7 +519,7 @@ export function PocketPhone(props: PocketPhoneProps) {
         <div className="pocket-side-button" aria-hidden="true" />
         <div className={`pocket-screen app-${app}`}>
           <div className="pocket-status"><span>{formatTime(wechatNow.toISOString())}</span><div className="pocket-island" aria-hidden="true"><i /></div><span aria-label="信号良好，电量充足"><Signal size={12} /><Wifi size={12} /><BatteryFull size={17} /></span></div>
-          {(storageWarning || promptSettings.storageWarning) && <div className="pocket-storage-warning" role="alert">{[storageWarning, promptSettings.storageWarning].filter(Boolean).join(" ")}</div>}
+          {(storageWarning || promptSettings.storageWarning || friendLibrary.storageWarning) && <div className="pocket-storage-warning" role="alert">{[storageWarning, promptSettings.storageWarning, friendLibrary.storageWarning].filter(Boolean).join(" ")}</div>}
           <div className="pocket-content" key={app} inert={editor || groupEditor || confirmation || innerPerson || attachmentKind ? true : undefined}>
             {app === "home" ? <div className="pocket-home">
               {owner && <button className="pocket-owner-back" type="button" onClick={() => switchOwner("")}><ArrowLeft size={16} />选择其他角色</button>}
@@ -565,13 +585,17 @@ export function PocketPhone(props: PocketPhoneProps) {
           </div>
           <button type="button" className="pocket-home-indicator" inert={editor || groupEditor || confirmation || attachmentKind ? true : undefined} onClick={() => setApp("home")} aria-label="回到手机桌面"><span /></button>
           {editor && <div className="pocket-sheet-backdrop"><form ref={editorRef} className="pocket-sheet pocket-scroll" inert={confirmation ? true : undefined} role="dialog" aria-modal="true" aria-labelledby="pocket-editor-title" onSubmit={saveContact}><header><div><small>A NEW LITTLE STORY</small><h3 id="pocket-editor-title">{editor.id ? "朋友的小档案" : "认识一位新朋友"}</h3></div><button type="button" aria-label="关闭联系人编辑" onClick={() => setEditor(null)}><X size={18} /></button></header>
-            {!editor.id && <label className="pocket-field">从已有角色导入<select defaultValue="" onChange={event => importCharacter(event.target.value)}><option value="">自己创建一个角色</option><optgroup label="角色卡">{props.characterCards.map(card => <option key={card.id} value={`card:${card.id}`}>{card.name}</option>)}</optgroup><optgroup label="人格">{props.personas.map(persona => <option key={persona.id} value={`persona:${persona.id}`}>{persona.name}</option>)}</optgroup></select></label>}
+            {!editor.id && <PocketFriendPicker mode={friendMode} onMode={mode => { setFriendMode(mode); setEditorError(""); }} sessionId={props.sessionId} cards={props.characterCards} existing={state.contacts} excludedNames={[nickname, props.userProfile.nickname]} provider={selection.provider} modelId={selection.modelId} buildContext={props.onBuildFriendContext} library={friendLibrary} onAdd={addSelectedFriends} onDelete={character => setConfirmation({ title: `从角色库删除${character.name}？`, description: "各会话已有的联系人和聊天会保留，删除后不能再从角色库导入这份人设。", action: () => setFriendLibrary(changePocketFriendLibrary(storageKey, characters => characters.filter(person => person.id !== character.id))) })} />}
+            {(editor.id || friendMode === "manual") && <>
+            {!editor.id && <label className="pocket-field">从已有角色导入<select defaultValue="" onChange={event => importCharacter(event.target.value)}><option value="">自己创建一个角色</option><optgroup label="角色库">{friendLibrary.characters.map(person => <option key={person.id} value={`library:${person.id}`} disabled={state.contacts.some(contact => pocketFriendName(contact.name) === pocketFriendName(person.name))}>{person.name}</option>)}</optgroup><optgroup label="人格">{props.personas.map(persona => <option key={persona.id} value={`persona:${persona.id}`}>{persona.name}</option>)}</optgroup></select></label>}
             <div className="pocket-editor-avatar"><Avatar avatar={editor.draft.avatar} name={editor.draft.name} /><span>选一枚可爱的头像</span></div><div className="pocket-avatar-picker">{POCKET_AVATARS.map((avatar, index) => <button type="button" key={avatar} aria-label={`选择头像${index + 1}`} aria-pressed={editor.draft.avatar === avatar} className={editor.draft.avatar === avatar ? "is-selected" : ""} onClick={() => patchDraft({ avatar })}><img src={avatar} alt="" loading="lazy" decoding="async" /></button>)}</div>
             <label className="pocket-field">朋友的名字<input autoFocus required maxLength={30} placeholder="比如：奶糖、月岛、你的专属角色" value={editor.draft.name} onChange={event => patchDraft({ name: event.target.value })} /></label>
             <label className="pocket-field">昵称<input maxLength={30} value={editor.draft.nickname || ""} onChange={event => patchDraft({ nickname: event.target.value })} /></label>
             <label className="pocket-field">角色设定 <span>性格、身份，以及你们的关系</span><textarea required rows={4} placeholder="TA 是谁？说话是什么语气？和你有什么关系？越具体，聊天就越有角色的感觉。" value={editor.draft.personality} onChange={event => patchDraft({ personality: event.target.value })} /></label>
-            <label className="pocket-field">第一句招呼 <span>可选</span><textarea rows={2} placeholder="嗨，今天有没有想我呀？" value={editor.draft.greeting} onChange={event => patchDraft({ greeting: event.target.value })} /></label>{editorError && <p className="pocket-editor-error" role="alert">{editorError}</p>}
+            <label className="pocket-field">第一句招呼 <span>可选</span><textarea rows={2} placeholder="嗨，今天有没有想我呀？" value={editor.draft.greeting} onChange={event => patchDraft({ greeting: event.target.value })} /></label>
             <button type="submit" className="pocket-primary"><Heart size={16} />{editor.id ? "保存小档案" : "添加到通讯录"}</button>
+            </>}
+            {editorError && <p className="pocket-editor-error" role="alert">{editorError}</p>}
             {editor.id && <div className="pocket-contact-actions"><button type="button" disabled={pendingContactId === editor.id} onClick={() => { const id = editor.id!; setConfirmation({ title: "清空这段聊天？", description: "联系人会保留，微信及当前会话中的对应记录将清空，无法恢复。", action: () => { updateContact(id, contact => resetPocketContactChat(contact, nickname)); setErrors(previous => ({ ...previous, [id]: "" })); setEditor(null); } }); }}>清空聊天</button><button type="button" disabled={pendingContactId === editor.id} onClick={() => { const id = editor.id!; setConfirmation({ title: "删除这位联系人？", description: "这位朋友和你们的聊天记录将从手机及当前会话中删除。", action: () => { updateState(previous => ({ ...previous, contacts: previous.contacts.filter(contact => contact.id !== id) })); setContactId(""); setEditor(null); } }); }}>删除联系人</button></div>}
           </form></div>}
           {groupEditor && <div className="pocket-sheet-backdrop"><form ref={editorRef} className="pocket-sheet pocket-scroll" inert={confirmation ? true : undefined} role="dialog" aria-modal="true" aria-labelledby="pocket-group-title" onSubmit={saveGroup}>

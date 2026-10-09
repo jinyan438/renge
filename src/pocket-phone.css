@@ -331,6 +331,24 @@
 .pocket-field { display: block; font-size: 11px; font-weight: 700; margin-bottom: 16px; }
 .pocket-field > span { display: inline; font-size: 9px; opacity: .6; font-weight: 400; }
 .pocket-field > input, .pocket-field > textarea, .pocket-field > select { margin-top: 7px; font-weight: 400; }
+.pocket-friend-picker { margin-bottom: 17px; }
+.pocket-friend-modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.pocket-friend-modes button { padding: 9px 6px; border: 1px solid var(--pocket-pale); border-radius: 10px; font-size: 11px; }
+.pocket-friend-modes button[aria-pressed="true"] { background: var(--pocket-pale); color: var(--pocket-text); font-weight: 700; }
+.pocket-friend-hint { font-size: 11px; line-height: 1.7; opacity: .75; }
+.pocket-friend-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 10px 0; font-size: 11px; }
+.pocket-friend-tools > button:not(.pocket-primary) { padding: 6px; color: var(--pocket-accent); }
+.pocket-friend-candidates { display: grid; gap: 8px; margin-bottom: 14px; }
+.pocket-friend-candidate { position: relative; padding: 11px; border: 1px solid var(--pocket-pale); border-radius: 13px; background: #fff; }
+.pocket-friend-candidate > label { display: flex; gap: 9px; align-items: center; padding-right: 24px; }
+.pocket-friend-candidate label > img { width: 34px; height: 34px; border-radius: 11px; object-fit: cover; }
+.pocket-friend-candidate label > span { display: grid; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
+.pocket-friend-candidate strong { font-size: 12px; }
+.pocket-friend-candidate small { font-size: 10px; opacity: .65; }
+.pocket-friend-candidate details { margin-top: 8px; font-size: 11px; line-height: 1.7; }
+.pocket-friend-candidate details p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.pocket-friend-delete { position: absolute; top: 13px; right: 8px; padding: 6px; color: #ad6464; }
+.pocket-friend-picker > .pocket-primary { width: 100%; }
 .pocket-editor-avatar { display: flex; align-items: center; gap: 10px; margin-top: 19px; }
 .pocket-editor-avatar > span:nth-child(2) { display: grid; gap: 5px; font-size: 11px; }
 .pocket-avatar-picker { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; margin: 12px 0 19px; }

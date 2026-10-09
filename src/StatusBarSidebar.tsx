@@ -21,6 +21,7 @@ import {
   X,
 } from "lucide-react";
 import type { PocketContextSync, PocketConversationBuilder } from "./pocketPhoneContext";
+import type { PocketFriendContextBuilder } from "./pocketFriendGeneration";
 import {
   Suspense,
   type CSSProperties,
@@ -148,6 +149,7 @@ export type StatusBarSidebarProps = {
   phoneActiveProviderId: string;
   onPhoneSyncContext: PocketContextSync;
   onPhoneBuildConversation: PocketConversationBuilder;
+  onPhoneBuildFriendContext: PocketFriendContextBuilder;
   userProfile: {
     nickname: string;
     bio: string;
@@ -857,6 +859,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   phoneActiveProviderId,
   onPhoneSyncContext,
   onPhoneBuildConversation,
+  onPhoneBuildFriendContext,
   userProfile,
   chatSessionId,
   heartbeat,
@@ -2348,6 +2351,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
               activeProviderId={phoneActiveProviderId}
               onSyncContext={onPhoneSyncContext}
               onBuildConversation={onPhoneBuildConversation}
+              onBuildFriendContext={onPhoneBuildFriendContext}
               sessionId={chatSessionId}
               userProfile={userProfile}
             />
@@ -2824,6 +2828,7 @@ export function StatusBarSidebar(props: StatusBarSidebarProps) {
   const onManualUpdate = useLatestCallback(() => props.onManualUpdate());
   const onPhoneSyncContext = useLatestCallback<PocketContextSync>((...args) => props.onPhoneSyncContext(...args));
   const onPhoneBuildConversation = useLatestCallback<PocketConversationBuilder>((...args) => props.onPhoneBuildConversation(...args));
+  const onPhoneBuildFriendContext = useLatestCallback<PocketFriendContextBuilder>((...args) => props.onPhoneBuildFriendContext(...args));
   const onPresetsChange = useLatestCallback((presets: StatusBarPreset[]) =>
     props.onPresetsChange(presets));
   const onChooseWorkspace = useLatestCallback(() => props.onChooseWorkspace?.());
@@ -2877,6 +2882,7 @@ export function StatusBarSidebar(props: StatusBarSidebarProps) {
       onManualUpdate={onManualUpdate}
       onPhoneSyncContext={onPhoneSyncContext}
       onPhoneBuildConversation={onPhoneBuildConversation}
+      onPhoneBuildFriendContext={onPhoneBuildFriendContext}
       onPresetsChange={onPresetsChange}
       onChooseWorkspace={props.onChooseWorkspace ? onChooseWorkspace : undefined}
       onBrowserComment={props.onBrowserComment ? onBrowserComment : undefined}

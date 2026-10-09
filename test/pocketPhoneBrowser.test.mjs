@@ -26,6 +26,12 @@ const upstream = createServer(async (request, response) => {
   for await (const chunk of request) chunks.push(chunk);
   const body = JSON.parse(Buffer.concat(chunks).toString());
   requests.push({ path: request.url, body });
+  if (JSON.stringify(body).includes("你是角色资料整理助手")) {
+    const output = JSON.stringify({ characters: [{ name: "月岛", personality: "{{char}}是{{user}}的青梅竹马。耐心、可爱，记得对方的喜好。", greeting: "{{user}}，今天也想和你一起回家。" }] });
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify(request.url.endsWith("responses") ? { output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: output }] }] } : { choices: [{ message: { role: "assistant", content: output } }] }));
+    return;
+  }
   if (mode === "fail") {
     mode = "success";
     response.writeHead(503, { "Content-Type": "application/json" });
@@ -293,8 +299,11 @@ try {
   await phone.getByRole("button", { name: "打开微信", exact: true }).click();
   await phone.getByRole("button", { name: "添加联系人", exact: true }).click();
   editor = phone.getByRole("dialog");
-  await editor.getByLabel("从已有角色导入").selectOption("card:fixture-card");
-  await editor.getByRole("button", { name: "添加到通讯录", exact: true }).click();
+  await editor.getByRole("button", { name: "角色卡识别", exact: true }).click();
+  await editor.getByLabel("选择角色卡", { exact: true }).selectOption("fixture-card");
+  await editor.getByRole("button", { name: "识别并生成人设", exact: true }).click();
+  await editor.getByRole("checkbox", { name: "添加月岛", exact: true }).check();
+  await editor.getByRole("button", { name: "添加所选朋友（1）", exact: true }).click();
   await phone.getByText("小月，今天也想和你一起回家。", { exact: true }).waitFor();
   await send("一起走吧");
   await waitForReply();
@@ -497,7 +506,8 @@ try {
   await phone.getByRole("button", { name: "返回微信列表", exact: true }).click();
   await phone.getByRole("button", { name: "添加联系人", exact: true }).click();
   editor = phone.getByRole("dialog");
-  await editor.getByLabel("从已有角色导入").selectOption("card:fixture-card");
+  const libraryCardValue = await editor.getByLabel("从已有角色导入").locator("option").filter({ hasText: "月岛" }).getAttribute("value");
+  await editor.getByLabel("从已有角色导入").selectOption(libraryCardValue);
   await editor.getByRole("button", { name: "添加到通讯录", exact: true }).click();
   await phone.getByRole("button", { name: "返回微信列表", exact: true }).click();
   await phone.getByRole("button", { name: "发起群聊", exact: true }).click();
