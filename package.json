@@ -48,7 +48,7 @@
     "pi-mcp-adapter": "https://github.com/nicobailon/pi-mcp-adapter/archive/e194276b2cfc5aa644d0446b54a44d0560dfbf27.tar.gz",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "tsx": "4.23.12",
+    "tsx": "4.23.15",
     "typebox": "1.3.7",
     "undici": "^7.28.0",
     "typescript": "^5.8.3",

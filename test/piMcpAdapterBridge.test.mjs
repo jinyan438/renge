@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
 import {
   callPiMcpTool,
@@ -10,6 +12,23 @@ import {
   discoverPiMcpTools,
   normalizePiMcpConfig,
 } from "../pi/pi-mcp-adapter-bridge.mjs";
+
+test("loads and calls native MCP tools in the Windows Electron runtime", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const { default: electronPath } = await import("electron");
+  const { stdout } = await promisify(execFile)(electronPath, [
+    join(process.cwd(), "test", "fixtures", "mcp-electron-runtime.mjs"),
+  ], {
+    cwd: process.cwd(),
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    timeout: 30_000,
+    windowsHide: true,
+  });
+  const report = JSON.parse(stdout.trim());
+  assert.ok(report.electronVersion);
+  assert.equal(report.text, "Electron native MCP");
+});
 
 test("uses the Pi 0.87-compatible MCP adapter package", async () => {
   const packageJson = JSON.parse(
