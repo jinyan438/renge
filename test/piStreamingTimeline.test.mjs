@@ -1,11 +1,35 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import vm from "node:vm";
+import ts from "typescript";
 import {
   createPiStreamRenderQueue,
   createPiStreamEventQueue,
-  splitLargePiToolCallDelta,
 } from "../src/piStreamEventQueue.ts";
 import { createPiStreamingTimeline } from "../src/piStreamingTimeline.ts";
+import { getFirstReasoningText, mergeReasoningStreamChunk, splitSseFrames } from "../src/reasoningUtils.ts";
+import { extractResponsesApiStreamEvent, getResponsesApiErrorMessage } from "../src/responsesApiUtils.mjs";
+
+const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+function loadStreamReader(waitForToolProgressPaint) {
+  const helpers = appSource.slice(appSource.indexOf("function getChatApiErrorMessage("), appSource.indexOf("function isTruncatedChatFinishReason("));
+  const reader = appSource.slice(appSource.indexOf("async function readChatStream("), appSource.indexOf("function piToolCallFromEvent("));
+  const code = ts.transpileModule(`${helpers}\n${reader}`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  return vm.runInNewContext(`${code}\nreadChatStream`, {
+    createPiStreamRenderQueue, waitForToolProgressPaint, TextDecoder,
+    getFirstReasoningText, mergeReasoningStreamChunk, splitSseFrames,
+    extractResponsesApiStreamEvent, getResponsesApiErrorMessage,
+    isObjectRecord: (value) => Boolean(value && typeof value === "object" && !Array.isArray(value)),
+    throwIfChatAborted: (signal) => signal?.throwIfAborted(),
+  });
+}
+
+function sse(payload) {
+  return `data: ${JSON.stringify(payload)}\n\n`;
+}
 
 function createTimelineFixture(sender = "main") {
   const rendered = [];
@@ -169,7 +193,7 @@ test("does not let final text overtake a queued Pi tool event", async () => {
   );
 });
 
-test("serializes Pi events and paints coalesced tool deltas before execution", async () => {
+test("drains buffered Pi events in order without delaying execution for argument paints", async () => {
   const applied = [];
   const queue = createPiStreamEventQueue({
     async dispatch(event) {
@@ -177,8 +201,6 @@ test("serializes Pi events and paints coalesced tool deltas before execution", a
       await Promise.resolve();
     },
     shouldPaintAfter: (event) => event.type === "tool_call_delta",
-    paintWeight: () => 1,
-    maxPaintWeight: 2,
     async waitForPaint() {
       applied.push("paint");
     },
@@ -195,85 +217,257 @@ test("serializes Pi events and paints coalesced tool deltas before execution", a
     "tool_call_start",
     "tool_call_delta",
     "tool_call_delta",
-    "paint",
     "tool_call_end",
     "tool_request",
   ]);
 });
 
-test("paints newly arrived Pi deltas on the next drain frame", async () => {
+test("paints live output and catches up to completion after a slow frame", async () => {
   const applied = [];
   let releaseFirstPaint;
+  let notifyFirstPaint;
+  const firstPaintStarted = new Promise((resolve) => { notifyFirstPaint = resolve; });
   const firstPaint = new Promise((resolve) => {
     releaseFirstPaint = resolve;
   });
   let paintCount = 0;
-  const queue = createPiStreamEventQueue({
-    dispatch(event) {
-      applied.push(event.value);
+  const queue = createPiStreamRenderQueue({
+    dispatchPiEvent(event) {
+      applied.push(event.delta ?? event.type);
     },
-    shouldPaintAfter: (event) => event.type === "tool_call_delta",
-    paintWeight: () => 1,
-    maxPaintWeight: 1,
+    dispatchContent: (delta) => applied.push(delta),
+    dispatchReasoning() {},
     async waitForPaint() {
       paintCount += 1;
       applied.push(`paint-${paintCount}`);
-      if (paintCount === 1) await firstPaint;
+      notifyFirstPaint();
+      await firstPaint;
     },
   });
 
-  queue.enqueue({ type: "tool_call_delta", value: "a" });
-  await Promise.resolve();
-  queue.enqueue({ type: "tool_call_delta", value: "b" });
-  queue.enqueue({ type: "tool_call_end", value: "end" });
+  queue.enqueuePiEvent({ type: "tool_call_delta", toolCallId: "write-1", delta: "a" });
+  await firstPaintStarted;
+  for (let index = 0; index < 1000; index += 1) {
+    queue.enqueuePiEvent({ type: "tool_call_delta", toolCallId: "write-1", delta: "b" });
+  }
+  queue.enqueuePiEvent({ type: "tool_call_end", toolCallId: "write-1" });
+  queue.enqueuePiEvent({ type: "tool_start", toolCallId: "write-1" });
+  queue.enqueuePiEvent({ type: "tool_end", toolCallId: "write-1" });
+  queue.enqueueContent("final");
   releaseFirstPaint();
   await queue.waitForIdle();
 
-  assert.deepEqual(applied, ["a", "paint-1", "b", "paint-2", "end"]);
+  assert.deepEqual(applied, ["a", "paint-1", "b".repeat(1000), "tool_call_end", "tool_start", "tool_end", "final"]);
+  assert.equal(paintCount, 1);
 });
 
-test("splits one buffered Pi tool delta into bounded Unicode-safe visual chunks", () => {
-  const source = `${"a".repeat(250)}\u{1f680}${"b".repeat(250)}`;
-  const chunks = splitLargePiToolCallDelta({
-    type: "tool_call_delta",
-    toolCallId: "call-1",
-    delta: source,
-    argumentsText: source,
-  }, 96, 120);
-
-  assert.equal(chunks.length, 6);
-  assert.equal(chunks.map((event) => event.delta).join(""), source);
-  assert.equal(chunks.every((event) => !("argumentsText" in event)), true);
-  assert.equal(chunks.every((event) => event.toolCallId === "call-1"), true);
-  assert.equal(chunks.some((event) => event.delta.includes("\ud83d") && !event.delta.includes("\ude80")), false);
-});
-
-test("renders a buffered write across frames before processing tool end", async () => {
+function createRenderFixture(options = {}) {
   const applied = [];
-  let partial = "";
-  const queue = createPiStreamEventQueue({
-    dispatch(event) {
-      if (event.type === "tool_call_delta") partial += event.delta;
-      applied.push({ type: event.type, length: partial.length });
-    },
-    shouldPaintAfter: (event) => event.type === "tool_call_delta",
-    paintWeight: (event) => event.delta?.length ?? 0,
-    maxPaintWeight: 48,
-    async waitForPaint() {
-      applied.push({ type: "paint", length: partial.length });
+  let paints = 0;
+  const queue = createPiStreamRenderQueue({
+    dispatchPiEvent: (event) => applied.push(event),
+    dispatchContent: (delta) => applied.push({ type: "content", delta }),
+    dispatchReasoning: (delta) => applied.push({ type: "reasoning", delta }),
+    async waitForPaint() { paints += 1; },
+    ...options,
+  });
+  return { applied, queue, get paints() { return paints; } };
+}
+
+test("renders large buffered writes without creating an animation backlog", async () => {
+  const fixture = createRenderFixture();
+  const argumentsText = JSON.stringify({ path: "index.html", content: "内容🚀".repeat(100000) });
+  const event = { type: "tool_call_delta", toolCallId: "call-1", delta: argumentsText, argumentsText };
+  fixture.queue.enqueuePiEvent({ type: "tool_call_start", toolCallId: "call-1" });
+  fixture.queue.enqueuePiEvent(event);
+  fixture.queue.enqueuePiEvent({ type: "tool_call_end", toolCallId: "call-1" });
+  fixture.queue.enqueuePiEvent({ type: "tool_start", toolCallId: "call-1" });
+  fixture.queue.enqueuePiEvent({ type: "tool_end", toolCallId: "call-1", result: "written" });
+  fixture.queue.enqueueContent("done");
+  await fixture.queue.waitForIdle();
+
+  assert.equal(fixture.applied[1], event);
+  assert.deepEqual(JSON.parse(fixture.applied[1].argumentsText), JSON.parse(argumentsText));
+  assert.equal(fixture.paints, 0);
+  assert.deepEqual(fixture.applied.map(({ type }) => type), [
+    "tool_call_start", "tool_call_delta", "tool_call_end", "tool_start", "tool_end", "content",
+  ]);
+});
+
+test("coalesces provider fragments while preserving authoritative argument snapshots", async () => {
+  const fixture = createRenderFixture();
+  fixture.queue.enqueuePiEvent({ type: "tool_call_delta", toolCallId: "a", delta: "old", argumentsText: "旧" });
+  fixture.queue.enqueuePiEvent({ type: "tool_call_delta", toolCallId: "a", delta: "delta", argumentsText: "新" });
+  fixture.queue.enqueuePiEvent({ type: "tool_call_delta", toolCallId: "a", delta: "🚀" });
+  fixture.queue.enqueuePiEvent({ type: "tool_call_delta", toolCallId: "b", delta: "另一调用" });
+  fixture.queue.enqueuePiEvent({ type: "tool_call_delta", toolCallId: "a", delta: "后续" });
+  await fixture.queue.waitForIdle();
+
+  assert.deepEqual(fixture.applied.map(({ toolCallId, delta, argumentsText }) => ({ toolCallId, delta, argumentsText })), [
+    { toolCallId: "a", delta: "olddelta🚀", argumentsText: "新🚀" },
+    { toolCallId: "b", delta: "另一调用", argumentsText: undefined },
+    { toolCallId: "a", delta: "后续", argumentsText: undefined },
+  ]);
+  assert.equal(fixture.paints, 1);
+});
+
+test("does not accumulate paint delays as the number of tools increases", async () => {
+  const fixture = createRenderFixture();
+  for (let tool = 0; tool < 100; tool += 1) {
+    const toolCallId = `write-${tool}`;
+    fixture.queue.enqueuePiEvent({ type: "tool_call_start", toolCallId });
+    for (let fragment = 0; fragment < 200; fragment += 1) {
+      fixture.queue.enqueuePiEvent({ type: "tool_call_delta", toolCallId, delta: "内容🚀" });
+    }
+    fixture.queue.enqueuePiEvent({ type: "tool_call_end", toolCallId });
+    fixture.queue.enqueuePiEvent({ type: "tool_start", toolCallId });
+    fixture.queue.enqueuePiEvent({ type: "tool_end", toolCallId });
+    fixture.queue.enqueueContent(`结果 ${tool}`);
+  }
+  await fixture.queue.waitForIdle();
+
+  assert.equal(fixture.applied.length, 600);
+  assert.equal(fixture.paints, 0);
+  assert.deepEqual(fixture.applied.filter(({ type }) => type === "tool_call_delta").map(({ delta }) => delta),
+    Array(100).fill("内容🚀".repeat(200)));
+  assert.equal(fixture.applied.at(-1).delta, "结果 99");
+});
+
+test("keeps incremental paints for normally paced live tool output", async () => {
+  const fixture = createRenderFixture();
+  fixture.queue.enqueuePiEvent({ type: "tool_call_start", toolCallId: "a" });
+  await fixture.queue.waitForIdle();
+  for (const delta of ["a", "b", "c"]) {
+    fixture.queue.enqueuePiEvent({ type: "tool_call_delta", toolCallId: "a", delta });
+    await fixture.queue.waitForIdle();
+  }
+  assert.equal(fixture.paints, 4);
+  assert.deepEqual(fixture.applied.slice(1).map(({ delta }) => delta), ["a", "b", "c"]);
+});
+
+test("merges text fragments without crossing reasoning or tool boundaries", async () => {
+  const fixture = createRenderFixture();
+  fixture.queue.enqueueContent("前");
+  fixture.queue.enqueueContent("文");
+  fixture.queue.enqueueReasoning("分");
+  fixture.queue.enqueueReasoning("析");
+  fixture.queue.enqueuePiEvent({ type: "tool_call_start", toolCallId: "a" });
+  fixture.queue.enqueueContent("后文");
+  await fixture.queue.waitForIdle();
+  assert.deepEqual(fixture.applied, [
+    { type: "content", delta: "前文" },
+    { type: "reasoning", delta: "分析" },
+    { type: "tool_call_start", toolCallId: "a" },
+    { type: "content", delta: "后文" },
+  ]);
+});
+
+test("does not merge argument fragments without a tool identity", async () => {
+  const fixture = createRenderFixture();
+  fixture.queue.enqueuePiEvent({ type: "tool_call_delta", delta: "a" });
+  fixture.queue.enqueuePiEvent({ type: "tool_call_delta", delta: "b" });
+  await fixture.queue.waitForIdle();
+  assert.deepEqual(fixture.applied.map(({ delta }) => delta), ["a", "b"]);
+});
+
+test("aborting a stream drops queued output behind active tool work", async () => {
+  const controller = new AbortController();
+  let release;
+  let started;
+  const work = new Promise((resolve) => { release = resolve; });
+  const working = new Promise((resolve) => { started = resolve; });
+  const applied = [];
+  const fixture = createRenderFixture({
+    signal: controller.signal,
+    async dispatchPiEvent(event) {
+      applied.push(event.type);
+      started();
+      await work;
     },
   });
-  const argumentsText = JSON.stringify({ path: "index.html", content: "x".repeat(420) });
+  fixture.queue.enqueuePiEvent({ type: "tool_request" });
+  fixture.queue.enqueuePiEvent({ type: "tool_end" });
+  await working;
+  controller.abort();
+  release();
+  await fixture.queue.waitForIdle();
+  fixture.queue.enqueuePiEvent({ type: "tool_call_start" });
+  fixture.queue.enqueueContent("stale text");
+  await fixture.queue.waitForIdle();
+  assert.deepEqual(applied, ["tool_request"]);
+  assert.deepEqual(fixture.applied, []);
+  assert.equal(fixture.paints, 0);
+});
 
-  queue.enqueue({ type: "tool_call_start" });
-  splitLargePiToolCallDelta({ type: "tool_call_delta", delta: argumentsText })
-    .forEach(queue.enqueue);
-  queue.enqueue({ type: "tool_call_end" });
-  queue.enqueue({ type: "tool_request" });
-  await queue.waitForIdle();
+test("reports dispatch failures and discards later queued events", async () => {
+  const failure = new Error("tool failed");
+  const fixture = createRenderFixture({ dispatchPiEvent() { throw failure; } });
+  fixture.queue.enqueuePiEvent({ type: "tool_request" });
+  fixture.queue.enqueueContent("stale");
+  await assert.rejects(fixture.queue.waitForIdle(), (error) => error === failure);
+  assert.deepEqual(fixture.applied, []);
+});
 
-  const paints = applied.filter((event) => event.type === "paint");
-  assert.equal(paints.length > 5, true);
-  assert.equal(paints.at(-1).length, argumentsText.length);
-  assert.deepEqual(applied.slice(-2).map((event) => event.type), ["tool_call_end", "tool_request"]);
+test("an already aborted stream never dispatches output", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const fixture = createRenderFixture({ signal: controller.signal });
+  fixture.queue.enqueueContent("stale");
+  fixture.queue.enqueuePiEvent({ type: "tool_request" });
+  await fixture.queue.waitForIdle();
+  assert.deepEqual(fixture.applied, []);
+});
+
+test("the SSE reader forwards large tool output intact and finishes in wire order", async () => {
+  let paints = 0;
+  const readChatStream = loadStreamReader(async () => { paints += 1; });
+  const delta = JSON.stringify({ path: "index.html", content: "内容🚀".repeat(100000) });
+  const events = [
+    { type: "tool_call_start", toolCallId: "a", toolName: "write" },
+    { type: "tool_call_delta", toolCallId: "a", delta },
+    { type: "tool_call_end", toolCallId: "a" },
+    { type: "tool_start", toolCallId: "a" },
+    { type: "tool_end", toolCallId: "a", result: "written" },
+  ];
+  const response = new Response([
+    ...events.map((pi) => sse({ pi })),
+    sse({ choices: [{ delta: { content: "完成" }, finish_reason: "stop" }] }),
+    "data: [DONE]\n\n",
+  ].join(""), { headers: { "content-type": "text/event-stream" } });
+  const applied = [];
+  const result = await readChatStream(response, (text) => applied.push(text), undefined, undefined,
+    (event) => { applied.push(event.type === "tool_call_delta" ? event.delta : event.type); });
+
+  assert.deepEqual(applied, ["tool_call_start", delta, "tool_call_end", "tool_start", "tool_end", "完成"]);
+  assert.equal(result.content, "完成");
+  assert.equal(result.finishReason, "stop");
+  assert.equal(paints, 0);
+  assert.equal(response.body.locked, false);
+});
+
+test("an SSE failure discards pending animation updates and releases the stream reader", async () => {
+  let source;
+  let releasePaint;
+  let notifyPaint;
+  const painting = new Promise((resolve) => { notifyPaint = resolve; });
+  const paint = new Promise((resolve) => { releasePaint = resolve; });
+  const readChatStream = loadStreamReader(() => { notifyPaint(); return paint; });
+  const response = new Response(new ReadableStream({ start(controller) { source = controller; } }),
+    { headers: { "content-type": "text/event-stream" } });
+  const encoder = new TextEncoder();
+  const applied = [];
+  const reading = readChatStream(response, (text) => applied.push(text), undefined, undefined,
+    (event) => { applied.push(event.type); });
+  source.enqueue(encoder.encode(sse({ pi: { type: "tool_call_start", toolCallId: "a" } })));
+  await painting;
+  source.enqueue(encoder.encode(
+    sse({ pi: { type: "tool_call_delta", toolCallId: "a", delta: "stale" } }) +
+    sse({ error: { message: "connection failed" } }),
+  ));
+  source.close();
+  await assert.rejects(reading, /connection failed/);
+  releasePaint();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(applied, ["tool_call_start"]);
+  assert.equal(response.body.locked, false);
 });

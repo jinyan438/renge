@@ -307,10 +307,7 @@ import {
   shouldAutoExpandChatReasoning,
   type ChatBubbleStatus,
 } from "./chatBubbleStatusUtils";
-import {
-  createPiStreamRenderQueue,
-  splitLargePiToolCallDelta,
-} from "./piStreamEventQueue";
+import { createPiStreamRenderQueue } from "./piStreamEventQueue";
 import {
   ensureProviderModelMaxOutputTokens,
   ensureProviderModelInputModes,
@@ -11258,6 +11255,7 @@ async function readChatStream(
     dispatchContent: onDelta,
     dispatchReasoning: onReasoningDelta,
     waitForPaint: waitForToolProgressPaint,
+    signal,
   });
 
   const applyToolCallDeltas = (deltas: ChatToolCallDelta[]) => {
@@ -11318,7 +11316,7 @@ async function readChatStream(
 
     if (isObjectRecord(payload) && isObjectRecord(payload.pi)) {
       const event = payload.pi as unknown as PiStreamEvent;
-      splitLargePiToolCallDelta(event).forEach(renderQueue.enqueuePiEvent);
+      renderQueue.enqueuePiEvent(event);
       return true;
     }
 
@@ -11378,21 +11376,27 @@ async function readChatStream(
     dataLines.forEach((data) => applyStreamPayload(data));
   };
 
-  while (true) {
-    throwIfChatAborted(signal);
-    const { done, value } = await reader.read();
-    throwIfChatAborted(signal);
-    if (done) break;
+  try {
+    while (true) {
+      throwIfChatAborted(signal);
+      const { done, value } = await reader.read();
+      throwIfChatAborted(signal);
+      if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
-    const parsed = splitSseFrames(buffer);
-    buffer = parsed.rest;
-    parsed.frames.forEach(applySseFrame);
+      buffer += decoder.decode(value, { stream: true });
+      const parsed = splitSseFrames(buffer);
+      buffer = parsed.rest;
+      parsed.frames.forEach(applySseFrame);
+    }
+
+    buffer += decoder.decode();
+    splitSseFrames(buffer, true).frames.forEach(applySseFrame);
+    await renderQueue.waitForIdle();
+    throwIfChatAborted(signal);
+  } finally {
+    renderQueue.cancel();
+    reader.releaseLock();
   }
-
-  buffer += decoder.decode();
-  splitSseFrames(buffer, true).frames.forEach(applySseFrame);
-  await renderQueue.waitForIdle();
 
   return {
     content: fullContent,
@@ -25667,7 +25671,6 @@ export function App() {
               assistantSender,
               visualization,
             );
-            await waitForToolProgressPaint();
             return;
           }
           if (event.type === "tool_call_delta") {
@@ -25746,7 +25749,6 @@ export function App() {
             if (event.toolCallId) piToolVisualizations.set(event.toolCallId, visualization);
             if (event.toolCallId && previous) {
               updateAssistantToolVisualization(commitChatMessages, event.toolCallId, () => visualization);
-              await waitForToolProgressPaint();
               return;
             }
             upsertAssistantToolVisualization(commitChatMessages, {
@@ -25763,7 +25765,6 @@ export function App() {
                   visualization,
                 ),
             });
-            await waitForToolProgressPaint();
             return;
           }
           if (event.type === "tool_end") {
@@ -26312,7 +26313,6 @@ export function App() {
                 "",
                 subAgentSender,
               );
-              await waitForToolProgressPaint();
               return;
             }
             if (event.type === "tool_end") {
@@ -28982,7 +28982,6 @@ export function App() {
               ? formatToolActionMessage(toolCall, localWorkspaceHandle, requestMcpTools)
               : formatPiNativeToolAction({ ...event, toolCallId, arguments: {} });
             appendAssistantTimelineMessage(commitChatMessages, action, [], "", undefined, visualization);
-            await waitForToolProgressPaint();
             return;
           }
           if (event.type === "tool_call_delta") {
@@ -29068,7 +29067,6 @@ export function App() {
                   appendAssistantTimelineMessage(commitChatMessages, formatPiNativeToolAction(event), [], "", undefined, visualization),
               });
             }
-            await waitForToolProgressPaint();
             return;
           }
           if (event.type === "tool_end") {
