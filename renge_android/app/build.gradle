@@ -42,6 +42,8 @@ android {
 dependencies {
     implementation "org.yaml:snakeyaml:2.4"
     implementation "com.github.termux.termux-app:terminal-emulator:0.118.3"
+    testImplementation "junit:junit:4.13.2"
+    testImplementation "org.json:json:20240303"
 }
 
 tasks.named("preBuild") {

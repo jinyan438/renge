@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { applyChatSessionPatch, getChatSessionVersions } from "./app-data-session-patch.mjs";
 import { createReadStream, createWriteStream } from "node:fs";
 import { copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
@@ -3154,10 +3155,12 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
 
     if (pathname === "/api/app-data") {
       if (request.method === "GET") {
+        const data = await readAppData(dataFilePath);
         sendJson(response, 200, {
           dataDir: dirname(dataFilePath),
           dataFile: dataFilePath,
-          data: await readAppData(dataFilePath),
+          data,
+          sessionVersions: getChatSessionVersions(data.chatSessions),
         });
         return;
       }
@@ -3165,19 +3168,29 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
       if (request.method === "PUT" || request.method === "POST" || request.method === "PATCH") {
         const body = await readJsonBody(request);
         const payload = body && typeof body === "object" && "data" in body ? body.data : body;
-        if (request.method === "PATCH") {
+        let sessionVersions;
+        if (request.method === "PATCH" || body.sessionPatch) {
           const patch = payload && typeof payload === "object" && !Array.isArray(payload)
             ? payload
             : {};
-          await writeAppData(dataFilePath, (currentData) => ({
-            ...currentData,
-            ...patch,
-          }));
+          if (Object.hasOwn(patch, "chatSessions")) {
+            throw Object.assign(new Error("请使用带版本校验的会话增量保存，刷新页面后重试。"), { status: 409 });
+          }
+          await writeAppData(dataFilePath, (currentData) => {
+            const sessions = body.sessionPatch
+              ? applyChatSessionPatch(currentData.chatSessions, body.sessionPatch)
+              : undefined;
+            const next = { ...currentData, ...patch, ...(sessions ? { chatSessions: sessions } : {}) };
+            sessionVersions = getChatSessionVersions(next.chatSessions);
+            return next;
+          });
         } else {
           await writeAppData(dataFilePath, payload ?? {});
+          sessionVersions = getChatSessionVersions(payload?.chatSessions);
         }
         sendJson(response, 200, {
           ok: true,
+          sessionVersions,
           dataDir: dirname(dataFilePath),
           dataFile: dataFilePath,
         });
@@ -3676,7 +3689,7 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
       if (!response.writableEnded) response.end();
       return;
     }
-    sendJson(response, 500, {
+    sendJson(response, error?.status === 409 ? 409 : 500, {
       error: error instanceof Error ? error.message : "Internal server error",
     });
   }
@@ -3836,7 +3849,7 @@ export function startRengeServer(options = {}) {
     ? resolve(options.temporaryFilesRoot)
     : "";
   const piAgentDir = resolve(options.piAgentDir ?? join(dataDir, ".pi", "agent"));
-  const piHost = createRengePiHost({ defaultCwd: __dirname, dataDir, agentDir: piAgentDir });
+  const piHost = createRengePiHost({ defaultCwd: __dirname, dataDir, agentDir: piAgentDir, authorizeTool: options.authorizePiTool });
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     const isHtmlPreviewOrigin = url.hostname.toLowerCase() === "preview.localhost";

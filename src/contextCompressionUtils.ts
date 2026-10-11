@@ -683,7 +683,7 @@ export function createContextCompressionPlan<T extends ContextCompressionMessage
   messages: T[],
   settings: ContextCompressionSettings,
   modelId: string,
-  options: { additionalTokens?: number; requestedOutputTokens?: number } = {},
+  options: { additionalTokens?: number; requestedOutputTokens?: number; force?: boolean } = {},
 ): ContextCompressionPlan<T> | null {
   const tokenBudget = getContextCompressionTokenBudget(
     settings,
@@ -695,7 +695,7 @@ export function createContextCompressionPlan<T extends ContextCompressionMessage
   const additionalTokens = Math.max(0, Math.floor(options.additionalTokens ?? 0));
   const { inputBudgetTokens, maxContextTokens, safetyThresholdTokens } = tokenBudget;
   const estimatedInputTokens = estimateContextMessagesTokens(messages) + additionalTokens;
-  if (estimatedInputTokens <= safetyThresholdTokens) return null;
+  if (!options.force && estimatedInputTokens <= safetyThresholdTokens) return null;
 
   const systemIndexes = new Set<number>();
   const protectedIndexes = new Set<number>();
@@ -719,7 +719,7 @@ export function createContextCompressionPlan<T extends ContextCompressionMessage
   );
   const targetMessageTokens = Math.max(
     256,
-    Math.floor(inputBudgetTokens * INPUT_TARGET_RATIO) - additionalTokens,
+    Math.floor((options.force ? Math.min(inputBudgetTokens, estimatedInputTokens * 0.65) : inputBudgetTokens) * INPUT_TARGET_RATIO) - additionalTokens,
   );
   const keepIndexes = new Set<number>(fixedIndexes);
   let keptTokens = fixedTokens;
@@ -764,6 +764,7 @@ export function createContextCompressionPlan<T extends ContextCompressionMessage
   const summaryTokenBudget = Math.min(
     2_048,
     Math.max(256, Math.floor(inputBudgetTokens * 0.12)),
+    ...(options.force ? [Math.max(1, Math.floor(estimateContextMessagesTokens(removedMessages) * 0.35))] : []),
   );
 
   return {

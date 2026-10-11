@@ -283,6 +283,7 @@ import {
   canPreservePersistentCharacterCards,
   compactCharacterCardsForPersistentStore,
   createPersistentReferenceBaseline,
+  createChatSessionPatch,
   createShallowReferencePatch,
   hasMeaningfulPatchChanges,
 } from "./appDataPersistenceUtils";
@@ -1145,6 +1146,7 @@ type RengeCompleteBackup = {
 type PersistentAppDataLoadResult = {
   available: boolean;
   data: RengeAppData | null;
+  sessionVersions?: Record<string, string>;
 };
 
 type LocalFileHandle = {
@@ -3221,10 +3223,11 @@ async function loadPersistentAppData(): Promise<PersistentAppDataLoadResult> {
     });
     if (!response.ok) return { available: false, data: null };
 
-    const payload = (await response.json()) as { data?: RengeAppData };
+    const payload = (await response.json()) as { data?: RengeAppData; sessionVersions?: Record<string, string> };
     return {
       available: true,
       data: payload.data && typeof payload.data === "object" ? payload.data : null,
+      sessionVersions: payload.sessionVersions,
     };
   } catch {
     return { available: false, data: null };
@@ -3234,6 +3237,12 @@ async function loadPersistentAppData(): Promise<PersistentAppDataLoadResult> {
 let persistentAppDataSaveQueue: Promise<void> = Promise.resolve();
 let lastCharacterCardsForPersistentStore: CharacterCard[] | null = null;
 let lastAppDataForPersistentStore: RengeAppData | null = null;
+let lastChatSessionsForPersistentStore: ChatSession[] = [];
+let persistentChatSessionVersions: Record<string, string> = {};
+
+function reportAppDataSaveError(message: string) {
+  window.dispatchEvent(new CustomEvent("renge-app-data-save-error", { detail: message }));
+}
 
 function compactAppDataForPersistentStore(
   data: RengeAppData,
@@ -3277,11 +3286,14 @@ async function savePersistentAppData(
               ? new Set<keyof RengeAppData>(["characterCards"])
               : undefined,
           );
-      const patchExistingData = !replaceExistingData && Boolean(
-        lastAppDataForPersistentStore || preserveStoredCharacterCards,
-      );
+      const patchExistingData = !replaceExistingData;
+      const sessionPatch = patchExistingData ? createChatSessionPatch(
+        data.chatSessions ?? [], lastChatSessionsForPersistentStore, persistentChatSessionVersions,
+      ) : undefined;
+      if (patchExistingData) delete requestData.chatSessions;
       if (
         patchExistingData &&
+        !sessionPatch?.upserts.length && !sessionPatch?.deletes.length &&
         !hasMeaningfulPatchChanges(
           requestData,
           new Set<keyof RengeAppData>(["updatedAt"]),
@@ -3289,28 +3301,38 @@ async function savePersistentAppData(
       ) {
         lastCharacterCardsForPersistentStore = characterCards;
         lastAppDataForPersistentStore = data;
+        lastChatSessionsForPersistentStore = data.chatSessions ?? [];
         return true;
       }
-      let response = await fetch("/api/app-data", {
+      const response = await fetch("/api/app-data", {
         method: patchExistingData ? "PATCH" : "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data: requestData }),
+        body: JSON.stringify({ data: requestData, ...(sessionPatch ? { sessionPatch } : {}) }),
       });
-      if (patchExistingData && response.status === 405) {
-        if (omitCharacterCards) return false;
-        response = await fetch("/api/app-data", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ data: persistentData }),
-        });
-      }
+      const payload = await response.json().catch(() => ({})) as {
+        error?: string; sessionVersions?: Record<string, string>;
+      };
       if (response.ok) {
         lastCharacterCardsForPersistentStore = characterCards;
         lastAppDataForPersistentStore = data;
+        lastChatSessionsForPersistentStore = data.chatSessions ?? [];
+        if (replaceExistingData) persistentChatSessionVersions = payload.sessionVersions ?? {};
+        // Unchanged local sessions retain their original versions: adopting a
+        // remote version without its content would hide a later stale edit.
+        for (const { session } of sessionPatch?.upserts ?? []) {
+          if (payload.sessionVersions?.[session.id]) {
+            persistentChatSessionVersions[session.id] = payload.sessionVersions[session.id];
+          }
+        }
+        for (const { id } of sessionPatch?.deletes ?? []) delete persistentChatSessionVersions[id];
+        reportAppDataSaveError("");
+      } else {
+        reportAppDataSaveError(payload.error || `应用数据保存失败（${response.status}），请先导出本页备份。`);
       }
       return response.ok;
-    } catch {
+    } catch (error) {
       // The app can still run with localStorage when the persistence API is unavailable.
+      reportAppDataSaveError(error instanceof Error ? `应用数据保存失败：${error.message}` : "应用数据保存失败，请先导出本页备份。");
       return false;
     }
   });
@@ -3328,6 +3350,8 @@ async function clearPersistentAppData(): Promise<boolean> {
       if (response.ok) {
         lastCharacterCardsForPersistentStore = null;
         lastAppDataForPersistentStore = null;
+        lastChatSessionsForPersistentStore = [];
+        persistentChatSessionVersions = {};
       }
       return response.ok;
     } catch {
@@ -12890,6 +12914,10 @@ export function App() {
   const [contextCompressionSettings, setContextCompressionSettings] =
     useState<ContextCompressionSettings>(loadContextCompressionSettings);
   const contextSummaryCacheRef = useRef(new Map<string, string>());
+  const androidPiContextRequestsRef = useRef(new Map<string, {
+    messages: ChatApiMessage[]; provider: ModelProviderChannel; modelId: string;
+    tools: unknown[]; requestedOutputTokens: number;
+  }>());
   const [contextRuntimeUsageByKey, setContextRuntimeUsageByKey] = useState<
     Record<string, ContextRuntimeUsage>
   >({});
@@ -13044,6 +13072,12 @@ export function App() {
   const skillZipInputRef = useRef<HTMLInputElement>(null);
   const completeBackupImportInputRef = useRef<HTMLInputElement>(null);
   const persistentStoreReadyRef = useRef(false);
+  const [appDataSaveError, setAppDataSaveError] = useState("");
+  useEffect(() => {
+    const listener = (event: Event) => setAppDataSaveError((event as CustomEvent<string>).detail);
+    window.addEventListener("renge-app-data-save-error", listener);
+    return () => window.removeEventListener("renge-app-data-save-error", listener);
+  }, []);
   const pendingPersistentStoreBaselineRef = useRef<{
     persistedData: RengeAppData;
     dirtyKeys: ReadonlySet<keyof RengeAppData>;
@@ -13223,6 +13257,7 @@ export function App() {
   }>({ context: null, entries: new Map() });
   const resetPiSession = (sessionId: string) => {
     if (!sessionId) return Promise.resolve();
+    androidPiContextRequestsRef.current.delete(sessionId);
     const existing = piSessionResetPromisesRef.current.get(sessionId);
     if (existing) return existing;
     const pending = fetch("/api/pi/session", {
@@ -13324,6 +13359,21 @@ export function App() {
     setPiCompactionPending(true);
     setChatStatus({ status: "loading", message: "Pi 正在压缩会话上下文..." });
     try {
+      let androidCompaction: { originalMessages: ChatApiMessage[]; compactedMessages: ChatApiMessage[] } | undefined;
+      if (window.RengeAndroidNative) {
+        const previous = androidPiContextRequestsRef.current.get(sessionId);
+        if (!previous || previous.modelId !== selectedModelValue) {
+          throw new Error("请先使用当前模型发送一轮消息，再压缩上下文。");
+        }
+        const compactedMessages = await prepareContextCompressedMessages({
+          ...previous, sessionId, kernel: "pi", force: true, quiet: true,
+        });
+        if (JSON.stringify(compactedMessages).length >= JSON.stringify(previous.messages).length) {
+          setChatStatus({ status: "warning", message: "当前没有可安全压缩的较早消息，最近消息和源代码已保留。" });
+          return;
+        }
+        androidCompaction = { originalMessages: previous.messages, compactedMessages };
+      }
       const response = await fetch("/api/pi/compact", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -13336,6 +13386,7 @@ export function App() {
             keepRecentTokens: 20_000,
           },
           workspace: getPiWorkspacePayload(sessionId),
+          ...androidCompaction,
         }),
       });
       const payload = (await response.json().catch(() => ({}))) as {
@@ -14700,6 +14751,8 @@ export function App() {
       ]);
       if (cancelled) return;
       const persistentData = persistentResult.data;
+      lastChatSessionsForPersistentStore = persistentData?.chatSessions ?? [];
+      persistentChatSessionVersions = persistentResult.sessionVersions ?? {};
       let pendingPersistentStoreBaseline: {
         persistedData: RengeAppData;
         dirtyKeys: ReadonlySet<keyof RengeAppData>;
@@ -17254,6 +17307,7 @@ export function App() {
     trackUsage = false,
     mutableChatMessageId,
     kernel = "renge",
+    force = false,
   }: {
     messages: ChatApiMessage[];
     provider: ModelProviderChannel;
@@ -17266,13 +17320,28 @@ export function App() {
     trackUsage?: boolean;
     mutableChatMessageId?: string;
     kernel?: "pi" | "renge";
+    force?: boolean;
   }): Promise<ChatApiMessage[]> => {
     const allowImages =
       isImageGenerationModelId(modelId) || canProviderReceiveImageUrl(provider, modelId);
     const imageSafeMessages = stripUnsupportedImageInputs(messages, allowImages);
-    // Pi owns session history and auto-compaction for Pi-backed requests. Keep
-    // Renge's compression path only for legacy/image requests.
-    if (kernel === "pi") return imageSafeMessages;
+    // Native Pi owns compaction; Android's proxy uses the summary pipeline below.
+    const androidPi = kernel === "pi" && Boolean(window.RengeAndroidNative);
+    if (kernel === "pi" && !androidPi) return imageSafeMessages;
+    if (androidPi && !force) {
+      androidPiContextRequestsRef.current.set(sessionId, {
+        messages: imageSafeMessages, provider, modelId, tools, requestedOutputTokens,
+      });
+    }
+    // Android has a streaming proxy rather than a native Pi compactor. Apply
+    // the existing summary pipeline, with the same default window as its API.
+    const compressionSettings = (androidPi || force) ? {
+      ...contextCompressionSettings,
+      enabled: force || contextCompressionSettings.enabled,
+      modelLimits: resolveContextCompressionLimit({ ...contextCompressionSettings, enabled: true }, modelId)
+        ? contextCompressionSettings.modelLimits
+        : [...contextCompressionSettings.modelLimits, { id: "android-default", modelId, maxContextTokens: activeChatPreset?.maxContext ?? 128_000 }],
+    } : contextCompressionSettings;
     const additionalTokens = estimateContextValueTokens(tools);
     const recordPreparedContextUsage = (
       preparedMessages: ChatApiMessage[],
@@ -17333,12 +17402,12 @@ export function App() {
       assistantWindowedMessageCount: 0,
     };
     const tokenBudget = getContextCompressionTokenBudget(
-      contextCompressionSettings,
+      compressionSettings,
       modelId,
       requestedOutputTokens,
     );
     const safetyTokenBudget = getContextCompressionTokenBudget(
-      { ...contextCompressionSettings, enabled: true },
+      { ...compressionSettings, enabled: true },
       modelId,
       requestedOutputTokens,
     );
@@ -17387,11 +17456,12 @@ export function App() {
       ?? null;
     const plan = createContextCompressionPlan(
       preparedMessages,
-      contextCompressionSettings,
+      compressionSettings,
       modelId,
       {
         additionalTokens,
         requestedOutputTokens,
+        force,
       },
     );
     if (!plan) {
@@ -25986,6 +26056,9 @@ export function App() {
                   piSessionScope: getMainPiSessionScope(requestSessionId, requestProvider, requestModelId, messagesForApi),
                   piLastUserPromptFallback:
                     !isContinuation && !isDialogueRewrite && !isLocalRewrite,
+                  ...((isContinuation || isDialogueRewrite || isLocalRewrite)
+                    ? { piHistoryMode: "replace" }
+                    : {}),
                   piSkillPaths: requestPiSkillPaths,
                   mcpConfig: {
                     mcpServers: requestContextSettings.mcpTools
@@ -39863,6 +39936,12 @@ export function App() {
 
   return (
     <>
+      {appDataSaveError && (
+        <div role="alert" className="app-data-save-error">
+          <span>{appDataSaveError}</span>
+          <button type="button" onClick={() => void exportCompleteAppData()}>导出本页备份</button>
+        </div>
+      )}
       {desktopHome}
       {extensionsWindow}
       {charactersWindow}

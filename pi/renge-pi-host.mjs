@@ -15,7 +15,7 @@ import { Type } from "typebox";
 import { createPiMcpAdapter, normalizePiMcpConfig } from "./pi-mcp-adapter-bridge.mjs";
 import { createPiPackageManager } from "./pi-package-manager.mjs";
 import { installContinuousPiRetry } from "./continuous-retry.mjs";
-import { createResumableWriteTool } from "./resumable-write-tool.mjs";
+import { createPermissionCheckedPiTools } from "./permission-tools.mjs";
 import {
   convertOpenAiMessagesToPi,
   filterPiCustomToolDefinitions,
@@ -293,6 +293,7 @@ export function createRengePiHost({
   defaultCwd = process.cwd(),
   dataDir = process.cwd(),
   agentDir = getAgentDir(),
+  authorizeTool,
 } = {}) {
   const runs = new Map();
   // Keep the last idle AgentSession available for PiDeck-compatible manual
@@ -391,6 +392,7 @@ export function createRengePiHost({
       parameters: safeSchema(definition?.function?.parameters),
       executionMode: "sequential",
       execute: async (toolCallId, params, signal) => {
+        if (run.cancelled || signal?.aborted) throw new Error("工具调用已中止");
         const result = await new Promise((resolveResult, rejectResult) => {
           const timeout = setTimeout(() => {
             run.pendingTools.delete(toolCallId);
@@ -452,7 +454,9 @@ export function createRengePiHost({
     const piSessionId = normalizeSessionId(
       requestedSessionId || (sessionScope === "main" ? ownerSessionId : `${ownerSessionId}-${sessionScope}`),
     );
-    const sessionKey = sessionFilePath(sessionDir, ownerSessionId, sessionScope, cwd);
+    // Rewrites use the supplied transcript without changing the normal Pi tree.
+    const replaceHistory = body?.piHistoryMode === "replace";
+    const sessionKey = replaceHistory ? "" : sessionFilePath(sessionDir, ownerSessionId, sessionScope, cwd);
     const previousIdleSession = idleSessions.get(sessionKey);
     if (previousIdleSession) {
       idleSessions.delete(sessionKey);
@@ -502,8 +506,21 @@ export function createRengePiHost({
       allowImageInputs: provider.allowImageInputs,
       lastAssistantStopReason: "",
       completed: false,
+      cancelled: false,
     };
     runs.set(runId, run);
+    const abortRun = () => {
+      if (run.completed) return;
+      run.cancelled = true;
+      void run.session?.abort();
+      settlePendingTools(run, new Error("Pi 会话连接已关闭"));
+    };
+    const checkCancelled = () => {
+      if (run.cancelled || response.destroyed || response.writableEnded) {
+        throw Object.assign(new Error("Pi 会话已中止"), { name: "AbortError" });
+      }
+    };
+    response.once("close", abortRun);
     writeSse(response, piEvent("run_start", {
       runId,
       sessionId: piSessionId,
@@ -514,23 +531,18 @@ export function createRengePiHost({
       mcp: hasMcpServers ? { engine: "pi-mcp-adapter", mode: "native" } : { enabled: false },
     }));
 
-    const abortRun = () => {
-      if (run.completed) return;
-      void run.session?.abort();
-      settlePendingTools(run, new Error("Pi 会话连接已关闭"));
-    };
-    response.once("close", abortRun);
-
     let unsubscribe = () => {};
     let providerId = "";
     let modelRuntime;
     let effectiveContextWindow = 0;
     try {
+      checkCancelled();
       const contextWindow = resolveContextWindow(body, provider);
       effectiveContextWindow = contextWindow;
       providerId = stableProviderId({ ...provider, apiKey: provider.apiKey });
       modelRuntime = await getModelRuntime();
       providerUsers.set(providerId, (providerUsers.get(providerId) ?? 0) + 1);
+      checkCancelled();
       const samplingParams = getPiSamplingParams(requestBody);
       const reasoningConfig = getPiReasoningModelConfig(requestBody);
       const configuredMaxOutputTokens = Number(body?.modelMaxOutputTokens);
@@ -600,6 +612,7 @@ export function createRengePiHost({
         ],
       });
       await resourceLoader.reload();
+      checkCancelled();
       const extensionToolNames = resourceLoader
         .getExtensions()
         .extensions
@@ -615,9 +628,9 @@ export function createRengePiHost({
       // Override Pi's whole-file write with a bounded, offset-checked version.
       // A local gateway that cuts a long stream can no longer leave a giant
       // write call perpetually "running" or duplicate an already-applied chunk.
-      const localCustomTools = nativeTools.includes("write")
-        ? [createResumableWriteTool(cwd)]
-        : [];
+      const localCustomTools = createPermissionCheckedPiTools({
+        cwd, nativeTools, sessionId: ownerSessionId, authorizeTool, checkCancelled,
+      });
       const customTools = [...bridgedCustomTools, ...localCustomTools];
       const initialActiveToolNames = toolsEnabled
         ? [
@@ -631,8 +644,11 @@ export function createRengePiHost({
       // events. The local resumable write tool must still paint start/end.
       customToolNames = new Set(bridgedCustomTools.map((tool) => tool.name));
       const sessionFile = sessionKey;
-      await ensureSessionFile(sessionFile, piSessionId, cwd);
-      const sessionManager = SessionManager.open(sessionFile, sessionDir, cwd);
+      if (!replaceHistory) await ensureSessionFile(sessionFile, piSessionId, cwd);
+      checkCancelled();
+      const sessionManager = replaceHistory
+        ? SessionManager.inMemory(cwd)
+        : SessionManager.open(sessionFile, sessionDir, cwd);
       const isNewSession = sessionManager.buildSessionContext().messages.length === 0;
       if (isNewSession) {
         if (converted.history.length > 0) {
@@ -654,6 +670,7 @@ export function createRengePiHost({
         sessionManager,
       });
       run.session = session;
+      checkCancelled();
       if (allowDynamicExtensionTools) {
         session.setActiveToolsByName(initialActiveToolNames);
       }
@@ -812,17 +829,20 @@ export function createRengePiHost({
       const prompt = resolvePrompt(
         converted.promptMessage ?? converted.fallbackPromptMessage,
       );
+      checkCancelled();
       const pendingPromptTokens = estimatePendingPromptTokens(prompt);
       // PiDeck performs native auto-compaction before a prompt when the
       // context is over the reserve threshold. Keep that behavior even when
       // a local OpenAI-compatible gateway omits usage metadata.
       await maybeAutoCompact(session, compaction, pendingPromptTokens);
+      checkCancelled();
       const promptOptions = prompt.images.length > 0 ? { images: prompt.images } : undefined;
       try {
         await session.prompt(prompt.text, promptOptions);
         const errorMessage = session.agent.state.errorMessage;
         if (errorMessage) throw new Error(errorMessage);
       } catch (promptError) {
+        checkCancelled();
         const discoveredWindow = extractContextWindowFromError(promptError);
         if (!discoveredWindow) throw promptError;
         rememberContextWindow(provider, discoveredWindow);
@@ -855,6 +875,7 @@ export function createRengePiHost({
           }
         }
         if (!recovered) throw promptError;
+        checkCancelled();
         await session.prompt(prompt.text, promptOptions);
         const retryError = session.agent.state.errorMessage;
         if (retryError) throw new Error(retryError);
@@ -863,7 +884,7 @@ export function createRengePiHost({
       flushIncompleteStreamingToolCalls(run, { finishReason, willRetry: false });
       // Some local gateways report zero usage, so the SDK cannot run its
       // post-turn threshold check. Re-check Pi's own message estimator here.
-      await maybeAutoCompact(session, compaction);
+      if (!run.cancelled) await maybeAutoCompact(session, compaction);
       writeSse(response, piEvent("context_usage", {
         runId,
         usage: getReliableContextUsage(session),
@@ -878,6 +899,7 @@ export function createRengePiHost({
     } finally {
       run.completed = true;
       response.off("close", abortRun);
+      if (run.cancelled) await run.session?.abort();
       unsubscribe();
       settlePendingTools(run, new Error("Pi 会话已结束"));
       if (run.session && run.sessionKey) {
@@ -974,6 +996,7 @@ export function createRengePiHost({
     const runId = String(body?.runId ?? "");
     const run = runs.get(runId);
     if (!run) return { ok: true, aborted: false };
+    run.cancelled = true;
     settlePendingTools(run, new Error("Pi 会话已由用户中止"));
     await run.session?.abort();
     return { ok: true, aborted: true };
@@ -1020,6 +1043,7 @@ export function createRengePiHost({
 
   const dispose = async () => {
     await Promise.all(Array.from(runs.values()).map(async (run) => {
+      run.cancelled = true;
       settlePendingTools(run, new Error("Pi Host 已关闭"));
       await run.session?.abort();
       run.session?.dispose();

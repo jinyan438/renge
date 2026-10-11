@@ -84,6 +84,26 @@ export function hasMeaningfulPatchChanges<T extends object>(
   return (Object.keys(patch) as Array<keyof T>).some((key) => !ignoredKeys.has(key));
 }
 
+export type ChatSessionPatch<T> = {
+  upserts: Array<{ session: T; expectedVersion: string | null }>;
+  deletes: Array<{ id: string; expectedVersion: string | null }>;
+};
+
+export function createChatSessionPatch<T extends { id: string }>(
+  current: readonly T[],
+  previous: readonly T[],
+  versions: Readonly<Record<string, string>>,
+): ChatSessionPatch<T> {
+  const oldById = new Map(previous.map((session) => [session.id, session]));
+  const currentIds = new Set(current.map((session) => session.id));
+  return {
+    upserts: current.filter((session) => !areJsonValuesEqual(session, oldById.get(session.id)))
+      .map((session) => ({ session, expectedVersion: versions[session.id] ?? null })),
+    deletes: previous.filter((session) => !currentIds.has(session.id))
+      .map((session) => ({ id: session.id, expectedVersion: versions[session.id] ?? null })),
+  };
+}
+
 export function canPreservePersistentCharacterCards(
   cards: ReadonlyArray<{ avatarDataUrl?: unknown }>,
 ) {

@@ -63,7 +63,7 @@ test("Android local server exposes the complete Pi session HTTP contract", async
   }
   assert.match(source, /"DELETE"\.equals\(request\.method\)/);
   assert.match(source, /"PATCH"\.equals\(request\.method\)/);
-  assert.match(source, /patchAppData\(data\)/);
+  assert.match(source, /patchAppData\(data, body\.optJSONObject\("sessionPatch"\)\)/);
   assert.match(source, /kernelMode", "android-compatible"/);
   assert.equal(
     source.match(/PI_KERNEL_ID = "([^"]+)"/)?.[1],

@@ -28,6 +28,7 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.PushbackInputStream;
+import java.io.StringWriter;
 import java.io.Writer;
 import java.math.BigDecimal;
 import java.net.HttpURLConnection;
@@ -542,7 +543,7 @@ public class LocalWebServer {
                 return;
             case STRING:
                 String value = reader.nextString();
-                if (value.startsWith(COMPLETE_BACKUP_ASSET_PREFIX)) {
+                if (stagedAssets != null && value.startsWith(COMPLETE_BACKUP_ASSET_PREFIX)) {
                     String archivePath = value.substring(COMPLETE_BACKUP_ASSET_PREFIX.length())
                             .replace('\\', '/');
                     if (!archivePath.startsWith("assets/")) {
@@ -1206,10 +1207,15 @@ public class LocalWebServer {
 
         if ("/api/pi/compact".equals(request.path)) {
             PiSessionState state = getPiSessionState(body);
+            PiContextSnapshot snapshot = new PiContextSnapshot(
+                    body.optJSONArray("originalMessages"), body.optJSONArray("compactedMessages")
+            );
+            state.compactedContext = snapshot;
+            state.estimatedTokens = snapshot.estimatedTokens();
             state.compactionCount += 1;
             JSONObject payload = new JSONObject();
             payload.put("ok", true);
-            payload.put("result", "Android Pi 兼容会话已标记为压缩；下一轮将以客户端整理后的完整上下文继续。");
+            payload.put("result", "Android 会话摘要已保存，后续请求将复用压缩后的上下文。");
             payload.put("contextUsage", state.contextUsage());
             sendJson(output, 200, payload);
             return;
@@ -1270,14 +1276,23 @@ public class LocalWebServer {
                 || "PATCH".equals(request.method)) {
             JSONObject body = parseJson(request.body);
             Object data = body.has("data") ? body.get("data") : body;
-            if ("PATCH".equals(request.method)) {
-                patchAppData(data);
+            JSONObject sessionVersions = null;
+            if ("PATCH".equals(request.method) || body.has("sessionPatch")) {
+                try {
+                    sessionVersions = patchAppData(data, body.optJSONObject("sessionPatch"));
+                } catch (AppDataSessionPatch.ConflictException error) {
+                    sendJson(output, 409, jsonError(error.getMessage()));
+                    return;
+                }
             } else {
                 writeAppData(data);
+                sessionVersions = AppDataSessionPatch.versions(data instanceof JSONObject
+                        ? ((JSONObject) data).optJSONArray("chatSessions") : null);
             }
 
             JSONObject payload = new JSONObject();
             payload.put("ok", true);
+            if (sessionVersions != null) payload.put("sessionVersions", sessionVersions);
             payload.put("dataDir", context.getFilesDir().getAbsolutePath());
             payload.put("dataFile", appDataFile.getAbsolutePath());
             sendJson(output, 200, payload);
@@ -1357,7 +1372,7 @@ public class LocalWebServer {
         }
     }
 
-    private synchronized void sendAppData(OutputStream output) throws IOException {
+    private synchronized void sendAppData(OutputStream output) throws IOException, JSONException {
         File source = null;
         if (appDataFile.isFile() && appDataFile.length() > 0) {
             source = appDataFile;
@@ -1390,7 +1405,8 @@ public class LocalWebServer {
                 + ",\"data\":";
         byte[] prefixBytes = prefix.getBytes(StandardCharsets.UTF_8);
         byte[] emptyDataBytes = "{}".getBytes(StandardCharsets.UTF_8);
-        byte[] suffixBytes = "}".getBytes(StandardCharsets.UTF_8);
+        JSONObject sessionVersions = source == null ? new JSONObject() : readAppDataSessionVersions(source);
+        byte[] suffixBytes = (",\"sessionVersions\":" + sessionVersions.toString() + "}").getBytes(StandardCharsets.UTF_8);
         long dataLength = source == null ? emptyDataBytes.length : source.length();
         writeHead(
                 output,
@@ -1413,6 +1429,36 @@ public class LocalWebServer {
         output.write(suffixBytes);
     }
 
+    private JSONObject readAppDataSessionVersions(File source) throws IOException, JSONException {
+        JSONObject versions = new JSONObject();
+        // Keep large cards/assets out of memory; only one session is parsed at a time.
+        try (JsonReader reader = new JsonReader(new InputStreamReader(
+                new BufferedInputStream(new FileInputStream(source)), StandardCharsets.UTF_8))) {
+            reader.beginObject();
+            while (reader.hasNext()) {
+                String key = reader.nextName();
+                if (!"chatSessions".equals(key) || reader.peek() == JsonToken.NULL) {
+                    reader.skipValue();
+                    continue;
+                }
+                reader.beginArray();
+                while (reader.hasNext()) {
+                    StringWriter buffer = new StringWriter();
+                    try (JsonWriter writer = new JsonWriter(buffer)) {
+                        copyImportedJsonValue(reader, writer, null);
+                    }
+                    JSONObject session = new JSONObject(buffer.toString());
+                    String id = session.getString("id");
+                    JSONObject version = AppDataSessionPatch.versions(new JSONArray().put(session));
+                    versions.put(id, version.get(id));
+                }
+                reader.endArray();
+            }
+            reader.endObject();
+        }
+        return versions;
+    }
+
     private synchronized void writeAppData(Object data) throws IOException {
         try {
             JSONObject normalized = data instanceof JSONObject
@@ -1429,11 +1475,12 @@ public class LocalWebServer {
         }
     }
 
-    private synchronized void patchAppData(Object data) throws IOException {
+    private synchronized JSONObject patchAppData(Object data, JSONObject sessionPatch) throws IOException {
         try {
             JSONObject patch = data instanceof JSONObject
                     ? (JSONObject) data
                     : new JSONObject(String.valueOf(data));
+            if (patch.has("chatSessions")) throw new AppDataSessionPatch.ConflictException();
             JSONObject current = new JSONObject();
             File source = appDataFile.isFile() && appDataFile.length() > 0
                     ? appDataFile
@@ -1448,7 +1495,11 @@ public class LocalWebServer {
                 String key = keys.next();
                 current.put(key, patch.get(key));
             }
+            if (sessionPatch != null) {
+                current.put("chatSessions", AppDataSessionPatch.apply(current.optJSONArray("chatSessions"), sessionPatch));
+            }
             writeAppData(current);
+            return AppDataSessionPatch.versions(current.optJSONArray("chatSessions"));
         } catch (JSONException error) {
             throw new IOException(error);
         }
@@ -1870,6 +1921,10 @@ public class LocalWebServer {
         String runId = body.optString("runId", "").trim();
         if (runId.isEmpty()) runId = "android-pi-" + System.nanoTime();
         JSONObject streamingRequest = new JSONObject(requestBody.toString());
+        PiSessionState state = getPiSessionState(body);
+        if (state.compactedContext != null) {
+            streamingRequest.put("messages", state.compactedContext.apply(streamingRequest.optJSONArray("messages")));
+        }
         streamingRequest.put("stream", true);
         JSONObject providerRequest = "responses".equals(target.apiType)
                 ? buildResponsesApiRequest(streamingRequest)
@@ -1905,8 +1960,7 @@ public class LocalWebServer {
                 return;
             }
 
-            PiSessionState state = getPiSessionState(body);
-            state.estimatedTokens = Math.max(1, requestBody.toString().length() / 4L);
+            state.estimatedTokens = Math.max(1, streamingRequest.toString().length() / 4L);
             long requestedContextWindow = body.optLong("contextWindow", 128000L);
             state.contextWindow = requestedContextWindow > 0 ? requestedContextWindow : 128000L;
 
@@ -2242,6 +2296,7 @@ public class LocalWebServer {
         volatile long estimatedTokens;
         volatile long contextWindow = 128000L;
         volatile int compactionCount;
+        volatile PiContextSnapshot compactedContext;
 
         JSONObject contextUsage() throws JSONException {
             JSONObject usage = new JSONObject();

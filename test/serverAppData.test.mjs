@@ -443,7 +443,8 @@ test("PATCH app-data preserves stored character cards", async (t) => {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      data: { version: 1, chatSessions: [{ id: "session-1" }] },
+      data: { version: 1 },
+      sessionPatch: { upserts: [{ session: { id: "session-1" }, expectedVersion: null }], deletes: [] },
     }),
   });
   assert.equal(patchResponse.status, 200);

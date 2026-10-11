@@ -15,7 +15,7 @@ async function withWriteQueue(path, operation) {
   }
 }
 
-function resolveWorkspaceWritePath(cwd, requestedPath) {
+function resolveWorkspaceWritePath(cwd, requestedPath, allowExternal = false) {
   const workspaceRoot = resolve(cwd);
   const rawPath = String(requestedPath ?? "").trim();
   if (!rawPath) throw new Error("write.path 不能为空");
@@ -23,11 +23,11 @@ function resolveWorkspaceWritePath(cwd, requestedPath) {
     ? resolve(rawPath)
     : resolve(workspaceRoot, rawPath);
   const workspaceRelative = relative(workspaceRoot, absolutePath);
-  if (
+  if (!allowExternal && (
     workspaceRelative === ".." ||
     workspaceRelative.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) ||
     isAbsolute(workspaceRelative)
-  ) {
+  )) {
     throw new Error(`write 只能写入当前工作区：${workspaceRoot}`);
   }
   return { absolutePath, workspaceRelative: workspaceRelative || rawPath };
@@ -96,7 +96,7 @@ function writeResult(path, operation, bytesWritten, totalBytes, alreadyApplied =
  * written in one call, while optional append calls remain resumable and
  * idempotent so a response loss cannot duplicate content on disk.
  */
-export function createResumableWriteTool(cwd) {
+export function createResumableWriteTool(cwd, { authorizePath } = {}) {
   const initializedPaths = new Set();
   return {
     name: "write",
@@ -148,9 +148,11 @@ export function createResumableWriteTool(cwd) {
       }
       if (!content) throw new Error("write.content 不能为空");
 
-      const { absolutePath, workspaceRelative } = resolveWorkspaceWritePath(cwd, path);
+      const { absolutePath, workspaceRelative } = resolveWorkspaceWritePath(cwd, path, Boolean(authorizePath));
       const contentBuffer = Buffer.from(content, "utf8");
       return withWriteQueue(absolutePath, async () => {
+        await authorizePath?.(absolutePath, signal);
+        if (signal?.aborted) throw new Error("Operation aborted");
         const existingSize = await fileSize(absolutePath);
 
         if (operation === "overwrite") {

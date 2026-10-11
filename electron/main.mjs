@@ -842,8 +842,9 @@ async function gitDiff({ path = "", staged = false } = {}) {
   return { ok: true, staged: Boolean(staged), path: normalizedPath, stdout, stderr };
 }
 
-async function confirmHighRiskGitCommand(command, args) {
+async function confirmHighRiskGitCommand(command, args, cwd = workspaceRoot, signal) {
   const result = await dialog.showMessageBox(mainWindow, {
+    ...(signal ? { signal } : {}),
     type: "warning",
     buttons: ["授权执行", "取消"],
     defaultId: 1,
@@ -852,7 +853,7 @@ async function confirmHighRiskGitCommand(command, args) {
     title: "授权高风险 Git 命令",
     message: "AI 请求执行高风险 Git 命令",
     detail: [
-      `工作区：${workspaceRoot}`,
+      `工作区：${cwd}`,
       "",
       `命令：${[command, ...args].join(" ")}`,
       "",
@@ -863,8 +864,9 @@ async function confirmHighRiskGitCommand(command, args) {
   return result.response === 0;
 }
 
-async function confirmExternalWorkspaceMutation(operation, targetPaths) {
+async function confirmExternalWorkspaceMutation(operation, targetPaths, cwd = workspaceRoot, signal) {
   const result = await dialog.showMessageBox(mainWindow, {
+    ...(signal ? { signal } : {}),
     type: "warning",
     buttons: ["授权本次操作", "取消"],
     defaultId: 1,
@@ -873,7 +875,7 @@ async function confirmExternalWorkspaceMutation(operation, targetPaths) {
     title: "授权非工作区文件操作",
     message: `AI 请求在工作区外${operation}`,
     detail: [
-      `当前工作区：${workspaceRoot || "未选择"}`,
+      `当前工作区：${cwd || "未选择"}`,
       "",
       "目标路径：",
       ...targetPaths.map((targetPath) => `- ${targetPath}`),
@@ -885,10 +887,10 @@ async function confirmExternalWorkspaceMutation(operation, targetPaths) {
   return result.response === 0;
 }
 
-async function authorizeWorkspaceMutation(operation, inputPaths) {
+async function authorizeWorkspaceMutation(operation, inputPaths, authorizedRoot = workspaceRoot, signal) {
   const targetPaths = inputPaths.map((inputPath) => resolveReadablePath(inputPath));
-  const canonicalWorkspaceRoot = workspaceRoot
-    ? await realpath(workspaceRoot).catch(() => workspaceRoot)
+  const canonicalWorkspaceRoot = authorizedRoot
+    ? await realpath(authorizedRoot).catch(() => authorizedRoot)
     : null;
   const canonicalTargetPaths = await Promise.all(
     targetPaths.map(async (targetPath) => {
@@ -915,16 +917,17 @@ async function authorizeWorkspaceMutation(operation, inputPaths) {
   );
 
   if (!workspaceFullAccessEnabled && externalPaths.length > 0) {
-    const authorized = await confirmExternalWorkspaceMutation(operation, externalPaths);
+    const authorized = await confirmExternalWorkspaceMutation(operation, externalPaths, authorizedRoot, signal);
     if (!authorized) throw new Error(`用户取消授权在工作区外${operation}`);
   }
 
   return targetPaths;
 }
 
-async function confirmUnlistedWorkspaceCommand(commandLine, sessionId) {
+async function confirmUnlistedWorkspaceCommand(commandLine, sessionId, cwd = workspaceRoot, signal) {
   const hasSessionId = Boolean(String(sessionId ?? "").trim());
   const result = await dialog.showMessageBox(mainWindow, {
+    ...(signal ? { signal } : {}),
     type: "warning",
     buttons: [hasSessionId ? "授权当前会话" : "允许本次运行", "取消"],
     defaultId: 1,
@@ -933,7 +936,7 @@ async function confirmUnlistedWorkspaceCommand(commandLine, sessionId) {
     title: "批准非白名单命令",
     message: "AI 请求运行非白名单命令",
     detail: [
-      `工作目录：${workspaceRoot}`,
+      `工作目录：${cwd}`,
       ...(hasSessionId ? [`会话：${sessionId}`] : []),
       "",
       `命令：${commandLine}`,
@@ -947,13 +950,13 @@ async function confirmUnlistedWorkspaceCommand(commandLine, sessionId) {
   return result.response === 0;
 }
 
-async function validateWorkspaceCommand(command, args, alreadyAuthorized = false) {
+async function validateWorkspaceCommand(command, args, alreadyAuthorized = false, { cwd = workspaceRoot, signal } = {}) {
   const normalizedCommand = String(command ?? "").trim().toLowerCase();
   const firstArg = String(args[0] ?? "").toLowerCase();
 
   if (!workspaceFullAccessEnabled && !alreadyAuthorized && normalizedCommand === "git") {
     if (highRiskGitCommands.has(firstArg)) {
-      const authorized = await confirmHighRiskGitCommand(normalizedCommand, args);
+      const authorized = await confirmHighRiskGitCommand(normalizedCommand, args, cwd, signal);
       if (!authorized) {
         return {
           ok: false,
@@ -983,6 +986,32 @@ async function validateWorkspaceCommand(command, args, alreadyAuthorized = false
   }
 
   return { ok: true };
+}
+
+async function authorizePiTool({ toolName, args, cwd, signal }) {
+  if (signal?.aborted) throw new Error("操作已中止");
+  if (toolName === "write" || toolName === "edit") {
+    await authorizeWorkspaceMutation(toolName === "write" ? "写入文件" : "编辑文件", [args.path], cwd, signal);
+    return;
+  }
+  if (workspaceFullAccessEnabled) return;
+  const commandLine = String(args.command ?? "").trim();
+  const tokens = splitCommandLine(commandLine);
+  const command = tokens.shift();
+  const commandName = command?.toLowerCase();
+  const hasExecutableOptions = (commandName === "git" || commandName === "node") && tokens[0]?.startsWith("-");
+  // Only plain executable invocations qualify for the whitelist. Shell code,
+  // substitutions and pipelines require approval of the complete command.
+  if (command && whitelistedCommandNames.includes(commandName) && !hasExecutableOptions && !/[\r\n;&|<>`$(){}]/.test(commandLine)) {
+    if (commandName === "node" && tokens[0]) {
+      await authorizeWorkspaceMutation("运行 Node 脚本", [resolve(cwd, tokens[0])], cwd, signal);
+      return;
+    }
+    const result = await validateWorkspaceCommand(command, tokens, false, { cwd, signal });
+    if (!result.ok) throw new Error(result.stderr || "用户取消命令授权");
+  } else if (!await confirmUnlistedWorkspaceCommand(commandLine, "", cwd, signal)) {
+    throw new Error("用户取消运行 Shell 命令");
+  }
 }
 
 async function runWorkspaceCommand({ command, args = [], timeoutMs = 60000, sessionId = "" }) {
@@ -1710,6 +1739,7 @@ async function createMainWindow() {
     host: "127.0.0.1",
     dataDir: getPersistentDataDir(),
     temporaryFilesRoot: getTemporaryFilesRoot(),
+    authorizePiTool,
   };
   try {
     serverController = await startRengeServer({

@@ -26,6 +26,20 @@ function settings(modelId = "demo/model", maxContextTokens = 2_048) {
   };
 }
 
+test("manual compression reduces history below the automatic threshold and preserves the latest exchange", () => {
+  const messages = [{ role: "system", content: "Keep the project constraints." },
+    ...Array.from({ length: 12 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: `turn-${index}: ${"historical facts ".repeat(30)}` })),
+  ];
+  const config = settings("demo/model", 128_000);
+  assert.equal(createContextCompressionPlan(messages, config, "demo/model"), null);
+  const plan = createContextCompressionPlan(messages, config, "demo/model", { force: true });
+  assert.ok(plan.removedMessages.length > 0);
+  const compacted = applyContextCompressionSummary(plan, "Project facts, constraints and pending actions.");
+  assert.ok(estimateContextMessagesTokens(compacted) < estimateContextMessagesTokens(messages));
+  assert.deepEqual(compacted.at(-1), messages.at(-1));
+  assert.deepEqual(compacted.at(-2), messages.at(-2));
+});
+
 test("normalizes limits, removes duplicate model IDs, and matches IDs case-insensitively", () => {
   const normalized = normalizeContextCompressionSettings({
     enabled: true,
