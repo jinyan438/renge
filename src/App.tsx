@@ -80,6 +80,8 @@ import {
 import { createTavernSettingsStore } from "./tavernPersistenceUtils";
 import { createPortal } from "react-dom";
 import { ChatToolDiffPreview } from "./ChatToolDiffPreview";
+import { ChatComposerStatus } from "./ChatComposerStatus";
+import { createChatProgressTracker } from "./chatComposerStatusUtils";
 import { strToU8, zip } from "fflate";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
@@ -11192,6 +11194,7 @@ async function readChatStream(
   onReasoningDelta: (delta: string) => void = () => undefined,
   signal?: AbortSignal,
   onPiEvent: (event: PiStreamEvent) => void | Promise<void> = () => undefined,
+  progress?: ReturnType<typeof createChatProgressTracker>,
 ) {
   throwIfChatAborted(signal);
 
@@ -11228,8 +11231,14 @@ async function readChatStream(
       );
     }
     const streamContent = extractStreamContent(payload);
-    if (streamContent.content) onDelta(streamContent.content);
-    if (streamContent.reasoning) onReasoningDelta(streamContent.reasoning);
+    if (streamContent.reasoning) {
+      progress?.reasoning(streamContent.reasoning);
+      onReasoningDelta(streamContent.reasoning);
+    }
+    if (streamContent.content) {
+      progress?.content(streamContent.content);
+      onDelta(streamContent.content);
+    }
     return {
       content: streamContent.content,
       reasoning: streamContent.reasoning,
@@ -11251,9 +11260,21 @@ async function readChatStream(
   const toolCallsByIndex = new Map<number, ChatToolCall>();
   const responsesReasoningItemsById = new Map<string, unknown>();
   const renderQueue = createPiStreamRenderQueue<PiStreamEvent>({
-    dispatchPiEvent: onPiEvent,
-    dispatchContent: onDelta,
-    dispatchReasoning: onReasoningDelta,
+    dispatchPiEvent: async (event) => {
+      progress?.piEvent(event);
+      await onPiEvent(event);
+      // Frontend tools finish inside this callback; Pi only emits tool_end for
+      // native tools. Release their activity before the next model delta.
+      if (event.type === "tool_request") progress?.piEvent({ ...event, type: "tool_end" });
+    },
+    dispatchContent: (delta) => {
+      progress?.content(delta);
+      onDelta(delta);
+    },
+    dispatchReasoning: (delta) => {
+      progress?.reasoning(delta);
+      onReasoningDelta(delta);
+    },
     waitForPaint: waitForToolProgressPaint,
     signal,
   });
@@ -11325,6 +11346,9 @@ async function readChatStream(
       if (streamContent.finishReason) finishReason = streamContent.finishReason;
       if (streamContent.toolCallDeltas) {
         applyToolCallDeltas(streamContent.toolCallDeltas);
+        if (streamContent.toolCallDeltas.length > 0) {
+          progress?.preparingTool(Array.from(toolCallsByIndex.values()).at(-1)?.function.name);
+        }
       }
       if (streamContent.toolCalls) {
         applyCompleteToolCalls(streamContent.toolCalls);
@@ -12954,6 +12978,18 @@ export function App() {
     status: ChatStatusState;
     message: string;
   }>({ status: "idle", message: "" });
+  const dismissChatStatus = useCallback(() => {
+    setChatStatus((current) => current.status === "loading" ? current : { status: "idle", message: "" });
+  }, []);
+  const trackChatProgress = (signal?: AbortSignal, actor?: string) => createChatProgressTracker(
+    (message) => setChatStatus((current) =>
+      current.status === "loading" && current.message === message
+        ? current
+        : { status: "loading", message },
+    ),
+    signal,
+    actor,
+  );
   const [chatGenerationState, setChatGenerationState] =
     useState<ChatGenerationState>("idle");
   const [manualStatusBarUpdateRunning, setManualStatusBarUpdateRunning] = useState(false);
@@ -25602,6 +25638,7 @@ export function App() {
       }) => {
         throwIfChatAborted(abortSignal);
         const usePiKernel = !isImageGenerationRequest;
+        const progress = usePiKernel ? trackChatProgress(abortSignal, responseMode === "persona" ? responderPersona?.name : undefined) : undefined;
         const chatToolsForRequest = options.includeTools
           ? availableChatTools.filter(
               (tool) =>
@@ -25923,6 +25960,7 @@ export function App() {
           }
         };
         if (usePiKernel) await waitForPiSessionReset(requestSessionId);
+        progress?.waiting();
         const response = await fetch(usePiKernel ? "/api/pi/chat" : "/api/chat/completions", {
           method: "POST",
           headers: {
@@ -26003,6 +26041,7 @@ export function App() {
               options.onReasoningDelta ?? (() => undefined),
               abortSignal,
               handlePiEvent,
+              progress,
             );
             const payload: {
               error?: string | { message?: string };
@@ -26047,6 +26086,8 @@ export function App() {
             options.onDelta ?? (() => undefined),
             options.onReasoningDelta ?? (() => undefined),
             abortSignal,
+            undefined,
+            progress,
           );
           assistantOutputStatus = getChatCompletionStatus(streamResult.finishReason);
           return {
@@ -26289,6 +26330,7 @@ export function App() {
             kernel: "pi",
           });
           const subPiRunId = crypto.randomUUID();
+          const subProgress = trackChatProgress(abortSignal, subAgent.name);
           const subAgentSender: ChatSenderIdentity = {
             kind: "persona",
             personaId: subAgent.id,
@@ -26374,6 +26416,7 @@ export function App() {
             }
           };
           await waitForPiSessionReset(requestSessionId);
+          subProgress.waiting();
           const response = await fetch("/api/pi/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -26447,6 +26490,7 @@ export function App() {
               subStreamingTimeline.pushReasoning,
               abortSignal,
               handleSubAgentPiEvent,
+              subProgress,
             );
             await subStreamingTimeline.finish();
             subStreamingTimeline.complete(streamResult.content, streamResult.reasoning, getChatCompletionStatus(streamResult.finishReason));
@@ -26855,7 +26899,7 @@ export function App() {
         for (let toolRound = 0; ; toolRound += 1) {
           setChatStatus({
             status: "loading",
-            message: `正在推进工具任务，第 ${toolRound + 1} 轮...`,
+            message: toolRound === 0 ? "正在准备请求…" : "正在继续处理工具结果…",
           });
           if (pendingMcpObservationPrompt && !pendingMcpObservationPromptSent) {
             apiMessages.push({
@@ -28924,6 +28968,7 @@ export function App() {
       }) => {
         throwIfChatAborted(abortSignal);
         const usePiKernel = !isImageGenerationRequest;
+        const progress = usePiKernel ? trackChatProgress(abortSignal, chatMode === "persona" ? activePersona?.name : undefined) : undefined;
         const requestTools = options.includeTools
           ? availableChatTools.filter((tool) => !usePiKernel || !isMcpToolName(tool.function.name))
           : [];
@@ -29196,6 +29241,7 @@ export function App() {
           }
         };
         if (usePiKernel) await waitForPiSessionReset(requestSessionId);
+        progress?.waiting();
         const response = await fetch(usePiKernel ? "/api/pi/chat" : "/api/chat/completions", {
           method: "POST",
           headers: {
@@ -29275,6 +29321,7 @@ export function App() {
               options.onReasoningDelta ?? (() => undefined),
               abortSignal,
               handlePiEvent,
+              progress,
             );
             const payload: {
               error?: string | { message?: string };
@@ -29319,6 +29366,8 @@ export function App() {
             options.onDelta ?? (() => undefined),
             options.onReasoningDelta ?? (() => undefined),
             abortSignal,
+            undefined,
+            progress,
           );
           assistantOutputStatus = getChatCompletionStatus(streamResult.finishReason);
           return {
@@ -29463,7 +29512,7 @@ export function App() {
         for (let toolRound = 0; ; toolRound += 1) {
           setChatStatus({
             status: "loading",
-            message: `正在推进工具任务，第 ${toolRound + 1} 轮...`,
+            message: toolRound === 0 ? "正在准备请求…" : "正在继续处理工具结果…",
           });
           if (pendingMcpObservationPrompt && !pendingMcpObservationPromptSent) {
             apiMessages.push({
@@ -38342,7 +38391,12 @@ export function App() {
             }}
           >
             {chatStatus.message && (
-              <p className={`chat-status ${chatStatus.status}`}>{chatStatus.message}</p>
+              <ChatComposerStatus
+                status={chatStatus.status}
+                message={chatStatus.message}
+                persistent={Boolean(chatMessages.at(-1)?.choiceRequest && !chatMessages.at(-1)?.choiceRequest?.response)}
+                onDismiss={dismissChatStatus}
+              />
             )}
             <div className="chat-composer-box">
               {isChatComposerDragActive && (

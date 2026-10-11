@@ -7779,17 +7779,64 @@ html.renge-html-fullscreen body {
 }
 
 .chat-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   min-height: 30px;
   padding: 6px 9px;
   border-radius: 8px;
   font-size: 12px;
   font-weight: 600;
+  line-height: 1.5;
+}
+
+.chat-status > svg {
+  flex-shrink: 0;
+}
+
+.chat-status-message {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-status-elapsed {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  font-weight: 500;
+  opacity: 0.75;
+}
+
+.chat-status-dismiss {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.chat-status-dismiss:hover {
+  background: rgb(0 0 0 / 6%);
+}
+
+.chat-status-dismiss:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 1px;
 }
 
 .chat-status.loading {
-  color: #059B4D;
-  background: #E6F8EF;
+  color: #175cd3;
+  background: #eff8ff;
 }
+
+.chat-status.idle { color: #475467; background: #f2f4f7; }
 
 .chat-status.success {
   color: #067647;
