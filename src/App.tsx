@@ -1,4 +1,5 @@
 import { createChatSessionRuntime, type ChatInputMode, type SessionRunStatus } from "./chatSessionRuntime";
+import { ChatCodeContent } from "./ChatCodeContent";
 import {
   ArrowLeft,
   Bot,
@@ -7630,13 +7631,17 @@ function renderMarkdownList(
     return { content, checked };
   });
   const Tag = ordered ? "ol" : "ul";
+  const start = ordered ? Number(/^\s*(\d+)\./.exec(lines[0])?.[1] ?? 1) : undefined;
 
   return (
-    <Tag className="chat-markdown-list" key={key}>
+    <Tag className="chat-markdown-list" key={key} start={start}>
       {listItems.map((item, index) => (
-        <li key={`${key}-item-${index}`}>
+        <li
+          className={item.checked !== null ? `chat-markdown-task${item.checked ? " complete" : ""}` : undefined}
+          key={`${key}-item-${index}`}
+        >
           {item.checked !== null && (
-            <input checked={item.checked} readOnly tabIndex={-1} type="checkbox" />
+            <input aria-label={item.content} checked={item.checked} disabled tabIndex={-1} type="checkbox" />
           )}
           <span>{renderInlineText(item.content)}</span>
         </li>
@@ -7648,14 +7653,17 @@ function renderMarkdownList(
 function renderMarkdownTable(lines: string[], key: string) {
   const headerCells = splitMarkdownTableRow(lines[0]);
   const bodyRows = lines.slice(2).map(splitMarkdownTableRow);
+  const alignments = splitMarkdownTableRow(lines[1]).map((cell): CSSProperties["textAlign"] =>
+    cell.endsWith(":") ? (cell.startsWith(":") ? "center" : "right") : "left",
+  );
 
   return (
-    <div className="chat-markdown-table-wrap" key={key}>
+    <div className="chat-markdown-table-wrap" key={key} tabIndex={0} role="region" aria-label="表格，可横向滚动">
       <table className="chat-markdown-table">
         <thead>
           <tr>
             {headerCells.map((cell, index) => (
-              <th key={`${key}-head-${index}`}>{renderInlineText(cell)}</th>
+              <th scope="col" style={{ textAlign: alignments[index] }} key={`${key}-head-${index}`}>{renderInlineText(cell)}</th>
             ))}
           </tr>
         </thead>
@@ -7663,7 +7671,7 @@ function renderMarkdownTable(lines: string[], key: string) {
           {bodyRows.map((row, rowIndex) => (
             <tr key={`${key}-row-${rowIndex}`}>
               {headerCells.map((_, cellIndex) => (
-                <td key={`${key}-cell-${rowIndex}-${cellIndex}`}>
+                <td style={{ textAlign: alignments[cellIndex] }} key={`${key}-cell-${rowIndex}-${cellIndex}`}>
                   {renderInlineText(row[cellIndex] ?? "")}
                 </td>
               ))}
@@ -7859,19 +7867,21 @@ function serializeRenderedEditorBlock(element: HTMLElement): string {
       .join("\n");
   }
   if (tagName === "ul" || tagName === "ol") {
+    const start = Number(element.getAttribute("start") ?? 1);
     return Array.from(element.children)
       .filter((child) => child.tagName.toLowerCase() === "li")
       .map((child, index) => {
         const listItem = child as HTMLElement;
         const checkbox = listItem.querySelector<HTMLInputElement>('input[type="checkbox"]');
         const contentElement = listItem.querySelector<HTMLElement>(":scope > span") ?? listItem;
-        const marker = tagName === "ol" ? `${index + 1}.` : "-";
+        const marker = tagName === "ol" ? `${index + start}.` : "-";
         const taskMarker = checkbox ? ` [${checkbox.checked ? "x" : " "}]` : "";
         return `${marker}${taskMarker} ${serializeRenderedEditorInline(contentElement).trim()}`;
       })
       .join("\n");
   }
   if (element.classList.contains("chat-markdown-table-wrap")) {
+    const headers = Array.from(element.querySelectorAll<HTMLElement>("th"));
     const rows = Array.from(element.querySelectorAll("tr")).map((row) =>
       Array.from(row.querySelectorAll("th, td")).map((cell) =>
         serializeRenderedEditorInline(cell).trim(),
@@ -7885,7 +7895,10 @@ function serializeRenderedEditorBlock(element: HTMLElement): string {
     ]);
     return [
       `| ${normalizedRows[0].join(" | ")} |`,
-      `| ${Array.from({ length: columnCount }, () => "---").join(" | ")} |`,
+      `| ${Array.from({ length: columnCount }, (_, index) => {
+        const align = headers[index]?.style.textAlign;
+        return align === "center" ? ":---:" : align === "right" ? "---:" : "---";
+      }).join(" | ")} |`,
       ...normalizedRows.slice(1).map((row) => `| ${row.join(" | ")} |`),
     ].join("\n");
   }
@@ -24658,7 +24671,7 @@ export function App() {
                   </button>
                 </div>
               </div>
-              <pre><code>{part.content}</code></pre>
+              <ChatCodeContent content={part.content} language={part.language} />
             </div>
           );
         })}

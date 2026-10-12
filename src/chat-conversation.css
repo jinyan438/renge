@@ -288,6 +288,16 @@
   line-height: 1.6;
 }
 
+.chat-thread .chat-reasoning-body .chat-markdown {
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.chat-thread .chat-reasoning-body .chat-markdown-list {
+  font-size: 1em;
+  line-height: inherit;
+}
+
 .chat-thread .chat-reasoning + .mes_text:not(:has(.chat-rendered-content:empty)) {
   margin-top: 6px;
 }

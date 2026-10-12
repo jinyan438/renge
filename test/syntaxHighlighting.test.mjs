@@ -4,6 +4,10 @@ import test from "node:test";
 import {
   getSyntaxHighlightLanguage,
   highlightSourceCode,
+  highlightMarkdownCode,
+  MARKDOWN_HIGHLIGHT_MAX_LENGTH,
+  MARKDOWN_HIGHLIGHT_MAX_LINE_LENGTH,
+  MARKDOWN_HIGHLIGHT_MAX_LINES,
 } from "../src/syntaxHighlighting.ts";
 
 test("maps common source extensions to syntax languages", () => {
@@ -40,4 +44,35 @@ test("always escapes source HTML before rendering", () => {
   const highlighted = highlightSourceCode('<script>alert("unsafe")</script>', "page.unknown");
   assert.doesNotMatch(highlighted.html, /<script>/);
   assert.match(highlighted.html, /&lt;script&gt;/);
+});
+
+test("Markdown fences use explicit languages and common aliases", () => {
+  for (const label of ["ts", "typescript", " TSX "]) {
+    const result = highlightMarkdownCode('const name: string = "Renge";', label);
+    assert.equal(result.language, "typescript");
+    assert.match(result.html, /hljs-keyword/);
+  }
+  assert.equal(highlightMarkdownCode("echo hello", "shell").language, "bash");
+  assert.equal(highlightMarkdownCode("Write-Host hello", "pwsh").language, "powershell");
+  for (const label of ["", "text", "unknown", "__proto__", "constructor"]) {
+    assert.equal(highlightMarkdownCode("const name = 'Renge'", label), null);
+  }
+});
+
+test("large Markdown code skips tokenization without truncation", () => {
+  const code = `${"x".repeat(99)}\n`.repeat(MARKDOWN_HIGHLIGHT_MAX_LENGTH / 100);
+  assert.ok(highlightMarkdownCode(code, "js"));
+  assert.equal(highlightMarkdownCode(`${code}x`, "js"), null);
+});
+
+test("minified lines and excessive line counts skip Markdown highlighting", () => {
+  assert.equal(highlightMarkdownCode("x".repeat(MARKDOWN_HIGHLIGHT_MAX_LINE_LENGTH + 1), "js"), null);
+  assert.equal(highlightMarkdownCode("x\n".repeat(MARKDOWN_HIGHLIGHT_MAX_LINES + 1), "js"), null);
+});
+
+test("Markdown HTML code is escaped before insertion into the DOM", () => {
+  const result = highlightMarkdownCode('<script>alert("unsafe")</script>', "html");
+  assert.doesNotMatch(result.html, /<script>/);
+  assert.match(result.html, /&lt;/);
+  assert.match(result.html, /hljs-tag/);
 });

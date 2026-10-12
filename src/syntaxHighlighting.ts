@@ -144,3 +144,49 @@ export function highlightSourceCode(content: string, path: string): HighlightedS
     return { html: escapeSourceHtml(content), language: "plaintext" };
   }
 }
+
+export const MARKDOWN_HIGHLIGHT_MAX_LENGTH = 20_000;
+export const MARKDOWN_HIGHLIGHT_MAX_LINE_LENGTH = 1_000;
+export const MARKDOWN_HIGHLIGHT_MAX_LINES = 400;
+
+const MARKDOWN_LANGUAGE_ALIASES: Record<string, keyof typeof LANGUAGE_DEFINITIONS> = {
+  ...EXTENSION_LANGUAGES,
+  shell: "bash",
+  shellscript: "bash",
+  console: "bash",
+  csharp: "csharp",
+  "c++": "cpp",
+  "c#": "csharp",
+  pwsh: "powershell",
+};
+
+export function highlightMarkdownCode(content: string, label: string): HighlightedSource | null {
+  // No language detection or token expansion for very large blocks. React renders
+  // the original text in these cases, keeping source and copy contents exact.
+  if (content.length > MARKDOWN_HIGHLIGHT_MAX_LENGTH) return null;
+  const normalized = label.trim().toLowerCase();
+  const language = Object.hasOwn(LANGUAGE_DEFINITIONS, normalized)
+    ? normalized
+    : Object.hasOwn(MARKDOWN_LANGUAGE_ALIASES, normalized)
+      ? MARKDOWN_LANGUAGE_ALIASES[normalized]
+      : "";
+  if (!language) return null;
+  let lineStart = 0;
+  let lineCount = 0;
+  while (lineStart < content.length) {
+    const newline = content.indexOf("\n", lineStart);
+    const lineEnd = newline === -1 ? content.length : newline;
+    if (lineEnd - lineStart > MARKDOWN_HIGHLIGHT_MAX_LINE_LENGTH || ++lineCount > MARKDOWN_HIGHLIGHT_MAX_LINES) {
+      return null;
+    }
+    lineStart = lineEnd + 1;
+  }
+  try {
+    return {
+      html: highlightJs.highlight(content, { language, ignoreIllegals: true }).value,
+      language,
+    };
+  } catch {
+    return null;
+  }
+}
