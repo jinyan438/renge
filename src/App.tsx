@@ -46,6 +46,7 @@ import {
   Puzzle,
   RefreshCw,
   Save,
+  ScanText,
   Search,
   Server,
   Settings2,
@@ -84,6 +85,7 @@ import { createTavernSettingsStore } from "./tavernPersistenceUtils";
 import { createPortal } from "react-dom";
 import { ChatToolDiffPreview } from "./ChatToolDiffPreview";
 import { ChatComposerStatus } from "./ChatComposerStatus";
+import { getPastedTextPreview, resizeChatComposerInput, shouldAttachPastedText } from "./chatComposerInputUtils";
 import { ChatPreviewImage } from "./ChatPreviewImage";
 import { createChatProgressTracker } from "./chatComposerStatusUtils";
 import { strToU8, zip } from "fflate";
@@ -13012,7 +13014,11 @@ export function App() {
     [chatAttachments],
   );
   const regularChatAttachments = useMemo(
-    () => chatAttachments.filter((attachment) => attachment.type !== BROWSER_COMMENT_MIME_TYPE),
+    () => chatAttachments.filter((attachment) => attachment.type !== BROWSER_COMMENT_MIME_TYPE && !attachment.id.startsWith("pasted-text-")),
+    [chatAttachments],
+  );
+  const pastedTextAttachments = useMemo(
+    () => chatAttachments.filter((attachment) => attachment.id.startsWith("pasted-text-")),
     [chatAttachments],
   );
   const [chatMessageMenu, setChatMessageMenu] = useState<{
@@ -13156,6 +13162,7 @@ export function App() {
   const characterCardsPersistenceBlockedRef = useRef(false);
   const appDataPersistenceSuspendedRef = useRef(false);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
+  const chatInputResizeObserverRef = useRef<ResizeObserver | null>(null);
   const chatSendButtonRef = useRef<HTMLButtonElement>(null);
   const chatSendAvailabilityRef = useRef({
     attachmentCount: 0,
@@ -13240,6 +13247,7 @@ export function App() {
 
     const input = chatInputRef.current;
     if (input && input.value !== next) input.value = next;
+    if (input) resizeChatComposerInput(input);
 
     const hasContent = Boolean(next.trim());
     if (hasContent !== chatInputHasContentRef.current) {
@@ -13265,8 +13273,20 @@ export function App() {
     }
   }, [flushChatInputContext]);
   const setChatInputElementRef = useCallback((element: HTMLTextAreaElement | null) => {
+    chatInputResizeObserverRef.current?.disconnect();
+    chatInputResizeObserverRef.current = null;
     chatInputRef.current = element;
     if (!element) return;
+    resizeChatComposerInput(element);
+    let previousWidth = -1;
+    const observer = new ResizeObserver(([entry]) => {
+      // Height changes are caused by autosizing; only width changes need a reflow.
+      if (entry.contentRect.width === previousWidth) return;
+      previousWidth = entry.contentRect.width;
+      resizeChatComposerInput(element);
+    });
+    observer.observe(element);
+    chatInputResizeObserverRef.current = observer;
     const syncScriptedInput = () => setChatInput(element.value);
     // jQuery's .trigger("input") calls DOM event properties but does not reach
     // React's delegated onChange listener. Tavern scripts rely on that pattern.
@@ -38924,18 +38944,55 @@ export function App() {
                   ))}
                 </div>
               )}
+              {pastedTextAttachments.length > 0 && (
+                <div className="chat-pasted-text-attachments" aria-label="待发送粘贴文本">
+                  {pastedTextAttachments.map((attachment) => (
+                    <div className="chat-pasted-text-attachment" key={attachment.id}>
+                      <span className="chat-pasted-text-icon"><ScanText size={28} /></span>
+                      <div className="chat-pasted-text-copy">
+                        <strong title={getPastedTextPreview(attachment.textContent ?? "")}>{getPastedTextPreview(attachment.textContent ?? "")}</strong>
+                        <span>粘贴的文本</span>
+                      </div>
+                      <button
+                        type="button"
+                        aria-label="移除粘贴的文本"
+                        title="移除粘贴的文本"
+                        onClick={() => removeChatAttachment(attachment.id)}
+                      ><X size={14} /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <textarea
                 id="send_textarea"
                 ref={setChatInputElementRef}
                 defaultValue={chatInputValueRef.current}
                 placeholder="输入消息，可粘贴图片"
-                rows={3}
+                rows={1}
                 onChange={(event) => setChatInput(event.target.value)}
                 onPaste={(event) => {
+                  const pastedText = event.clipboardData.getData("text/plain");
+                  const attachText = shouldAttachPastedText(pastedText);
                   const pastedImages = getClipboardImageFiles(event.clipboardData);
-                  if (pastedImages.length === 0) return;
-                  if (!event.clipboardData.getData("text/plain")) event.preventDefault();
-                  void handleChatAttachmentChange(pastedImages);
+                  if (attachText) {
+                    event.preventDefault();
+                    const file = new File([pastedText], "粘贴的文本.txt", { type: "text/plain" });
+                    const attachment: ChatAttachment = {
+                      id: `pasted-text-${crypto.randomUUID()}`,
+                      name: file.name,
+                      type: file.type,
+                      size: file.size,
+                      textContent: pastedText,
+                      createdAt: new Date().toISOString(),
+                    };
+                    chatAttachmentFilesRef.current.set(attachment.id, file);
+                    chatAttachmentMetadataRef.current.set(attachment.id, attachment);
+                    setChatAttachments((current) => [...current, attachment]);
+                  }
+                  if (pastedImages.length > 0) {
+                    if (!pastedText) event.preventDefault();
+                    void handleChatAttachmentChange(pastedImages);
+                  }
                 }}
                 onBlur={handleChatInputBlur}
                 onContextMenu={(event) => {

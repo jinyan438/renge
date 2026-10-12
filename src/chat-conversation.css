@@ -845,3 +845,77 @@
 .chat-running-input-menu > button:focus-visible { background: #f1f5f9; }
 .chat-running-input-menu strong { font-size: 13px; }
 .chat-running-input-menu span { color: #64748b; font-size: 11px; }
+.chat-pasted-text-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  max-height: 176px;
+  overflow-y: auto;
+}
+
+.chat-pasted-text-attachment {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  box-sizing: border-box;
+  width: min(338px, 100%);
+  min-width: 0;
+  padding: 10px 32px 10px 10px;
+  border: 1px solid #e6e6e8;
+  border-radius: 14px;
+  color: #252629;
+  background: #fafafa;
+}
+
+.chat-pasted-text-icon {
+  display: grid;
+  flex: 0 0 58px;
+  place-items: center;
+  height: 58px;
+  border-radius: 12px;
+  color: #68696b;
+  background: #f4f4f4;
+}
+
+.chat-pasted-text-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.chat-pasted-text-copy strong {
+  overflow: hidden;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-pasted-text-copy span {
+  color: #77787a;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.chat-pasted-text-attachment button {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: #fff;
+  background: #202123;
+  cursor: pointer;
+}
+
+.chat-pasted-text-attachment button:hover {
+  background: #454649;
+}

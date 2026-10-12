@@ -8027,13 +8027,14 @@ html.renge-html-fullscreen body {
   width: 100%;
   height: 44px;
   min-height: 44px;
-  max-height: 160px;
+  max-height: 180px;
   padding: 0;
   border: 0;
   color: #172033;
   background: transparent;
   outline: 0;
-  resize: vertical;
+  resize: none;
+  overflow-y: hidden;
   line-height: 1.5;
 }
 
@@ -10688,7 +10689,7 @@ input[type="range"] {
   .chat-composer-box textarea {
     height: 34px;
     min-height: 34px;
-    max-height: 78px;
+    max-height: 140px;
     font-size: 13px;
     line-height: 1.35;
   }
