@@ -13052,11 +13052,8 @@ export function App() {
     chatRuntimesRef.current.get(activeChatSessionIdRef.current).generationState = state;
     chatRuntimesRef.current.onChange();
   };
-  const chatInputMode = activeChatRuntime.inputMode;
-  const setChatInputMode = (mode: ChatInputMode) => {
-    chatRuntimesRef.current.get(activeChatSessionIdRef.current).inputMode = mode;
-    chatRuntimesRef.current.onChange();
-  };
+  const [chatRunningInputMenuSessionId, setChatRunningInputMenuSessionId] = useState<string | null>(null);
+  const chatRunningInputMenuRef = useRef<HTMLDivElement>(null);
   const chatDraftsRef = useRef(new Map<string, { text: string; attachments: ChatAttachment[] }>());
   const chatAttachmentsLiveRef = useRef(chatAttachments);
   chatAttachmentsLiveRef.current = chatAttachments;
@@ -13189,6 +13186,7 @@ export function App() {
   const htmlPreviewFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const chatInputValueRef = useRef("");
   const chatInputHasContentRef = useRef(false);
+  const [chatInputHasContent, setChatInputHasContent] = useState(false);
   const chatInputContextDirtyRef = useRef(false);
   const chatInputContextTimerRef = useRef<number | null>(null);
   const flushChatInputContext = useCallback((force = false) => {
@@ -13225,11 +13223,13 @@ export function App() {
     const hasContent = Boolean(next.trim());
     if (hasContent !== chatInputHasContentRef.current) {
       chatInputHasContentRef.current = hasContent;
+      setChatInputHasContent(hasContent);
       const availability = chatSendAvailabilityRef.current;
       if (chatSendButtonRef.current) {
         chatSendButtonRef.current.disabled =
-          availability.generationState === "idle" &&
-          ((!hasContent && availability.attachmentCount === 0) || availability.sendBlocked);
+          availability.generationState === "stopping" ||
+          (availability.generationState === "idle" &&
+            ((!hasContent && availability.attachmentCount === 0) || availability.sendBlocked));
       }
     }
 
@@ -14659,10 +14659,10 @@ export function App() {
     }
   };
 
-  const appendRunningInput = async (sessionId: string, content: string, attachments: ChatAttachment[]) => {
+  const appendRunningInput = async (sessionId: string, content: string, attachments: ChatAttachment[], mode?: ChatInputMode) => {
     const runtime = chatRuntimesRef.current.get(sessionId);
     const input: PendingChatInput = {
-      id: crypto.randomUUID(), content, attachments, mode: chatInputMode,
+      id: crypto.randomUUID(), content, attachments, mode: mode ?? runtime.inputMode,
       sender: currentChatSender, createdAt: new Date().toISOString(),
     };
     input.execute = () => sendChatMessage(input.content, input.attachments, sessionId);
@@ -28932,6 +28932,7 @@ export function App() {
     contentOverride?: string,
     attachmentsOverride?: ChatAttachment[],
     sessionOverride?: string,
+    runningInputMode?: ChatInputMode,
   ) => {
     const hasContentOverride = contentOverride !== undefined;
     const content = (
@@ -28946,7 +28947,7 @@ export function App() {
     if (!content && attachmentsToSend.length === 0) return;
     const runtime = chatRuntimesRef.current.get(requestSessionId);
     if (runtime.controller) {
-      await appendRunningInput(requestSessionId, content, attachmentsToSend);
+      await appendRunningInput(requestSessionId, content, attachmentsToSend, runningInputMode);
       return;
     }
     runtime.continueWith = (input) => sendChatMessage(input.content, input.attachments, requestSessionId);
@@ -30322,6 +30323,64 @@ export function App() {
   };
   sendChatMessageRef.current = sendChatMessage;
 
+  const chatComposerHasInput = chatInputHasContent || chatAttachments.length > 0;
+  const chatComposerShowsStop = chatGenerationState !== "idle" && !chatComposerHasInput;
+  const chatComposerButtonDisabled = chatGenerationState === "stopping" || (!chatComposerShowsStop &&
+    (!chatComposerHasInput || (chatGenerationState === "idle" && chatStatus.status === "loading") ||
+      (chatMode === "roleplay" && !activeSessionRoleplayCard)));
+  useLayoutEffect(() => {
+    // Tavern scripts can synchronously change disabled through setChatInput.
+    // Reconcile it even when React's previous and next disabled props match.
+    const button = chatSendButtonRef.current;
+    if (button && button.disabled !== chatComposerButtonDisabled) button.disabled = chatComposerButtonDisabled;
+  });
+  const requestChatComposerSend = () => {
+    const sessionId = activeChatSessionIdRef.current;
+    if (!chatInputHasContentRef.current && chatAttachmentsLiveRef.current.length === 0) return;
+    const runtime = chatRuntimesRef.current.get(sessionId);
+    if (runtime.generationState === "stopping") return;
+    if (runtime.controller) {
+      setChatRunningInputMenuSessionId((current) => current === sessionId ? null : sessionId);
+      return;
+    }
+    void sendChatMessage();
+  };
+  const sendRunningComposerInput = (mode: ChatInputMode) => {
+    const sessionId = chatRunningInputMenuSessionId;
+    setChatRunningInputMenuSessionId(null);
+    if (!sessionId || sessionId !== activeChatSessionIdRef.current) return;
+    if (chatRuntimesRef.current.get(sessionId).generationState === "stopping") return;
+    void sendChatMessage(undefined, undefined, sessionId, mode);
+    chatInputRef.current?.focus({ preventScroll: true });
+  };
+  useEffect(() => {
+    if (chatRunningInputMenuSessionId !== activeChatSessionId ||
+      (!chatInputHasContent && chatAttachments.length === 0) || chatGenerationState === "stopping") {
+      setChatRunningInputMenuSessionId(null);
+    }
+  }, [activeChatSessionId, chatInputHasContent, chatAttachments.length, chatGenerationState, chatRunningInputMenuSessionId]);
+  useEffect(() => {
+    if (!chatRunningInputMenuSessionId) return;
+    const closeOutside = (event: PointerEvent | FocusEvent) => {
+      if (event.target instanceof Node && !chatRunningInputMenuRef.current?.contains(event.target)) {
+        setChatRunningInputMenuSessionId(null);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setChatRunningInputMenuSessionId(null);
+      chatSendButtonRef.current?.focus({ preventScroll: true });
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("focusin", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("focusin", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [chatRunningInputMenuSessionId]);
 
   const respondToChatChoice = (
     messageId: string,
@@ -38782,16 +38841,6 @@ export function App() {
                   ))}
                 </div>
               )}
-              {chatGenerationState !== "idle" && (
-                <div className="chat-running-input-mode">
-                  <label>运行中追加消息
-                    <select aria-label="运行中消息方式" value={chatInputMode} onChange={(event) => setChatInputMode(event.target.value as ChatInputMode)}>
-                      <option value="queue">排队：本轮结束后执行</option>
-                      <option value="steer">立即纠偏：尽快调整当前任务</option>
-                    </select>
-                  </label>
-                </div>
-              )}
               <textarea
                 id="send_textarea"
                 ref={setChatInputElementRef}
@@ -38819,7 +38868,7 @@ export function App() {
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
-                    void sendChatMessage();
+                    requestChatComposerSend();
                   }
                 }}
               />
@@ -39611,24 +39660,34 @@ export function App() {
                     </div>
                   </details>
                 </div>
-                <div className="composer-send-actions">
-                {chatGenerationState !== "idle" && (
-                  <button type="button" className="send-button stop" onClick={stopChatGeneration}
-                    disabled={chatGenerationState === "stopping"} title="停止当前会话" aria-label="停止输出">
-                    <Square size={15} fill="currentColor" strokeWidth={0} />
+                <div className="composer-send-actions" ref={chatRunningInputMenuRef}>
+                  {chatRunningInputMenuSessionId === activeChatSessionId && (
+                    <div className="chat-running-input-menu" id="chat-running-input-menu" role="dialog" aria-label="选择发送方式">
+                      <button type="button" autoFocus onClick={() => sendRunningComposerInput("queue")}>
+                        <strong>排队</strong>
+                        <span>本轮结束后执行</span>
+                      </button>
+                      <button type="button" onClick={() => sendRunningComposerInput("steer")}>
+                        <strong>立即纠偏</strong>
+                        <span>尽快调整当前任务</span>
+                      </button>
+                    </div>
+                  )}
+                  <button
+                    id="send_but" ref={chatSendButtonRef} type="button" className={`send-button${chatComposerShowsStop ? " stop" : ""}`}
+                    disabled={chatComposerButtonDisabled}
+                    onClick={() => {
+                      if (chatGenerationState !== "idle" && !chatInputHasContentRef.current && chatAttachmentsLiveRef.current.length === 0) stopChatGeneration();
+                      else requestChatComposerSend();
+                    }}
+                    title={chatComposerShowsStop ? "停止当前会话" : "发送"}
+                    aria-label={chatComposerShowsStop ? "停止输出" : "发送"}
+                    aria-haspopup={!chatComposerShowsStop && chatGenerationState !== "idle" ? "dialog" : undefined}
+                    aria-expanded={chatRunningInputMenuSessionId === activeChatSessionId}
+                    aria-controls={chatRunningInputMenuSessionId === activeChatSessionId ? "chat-running-input-menu" : undefined}
+                  >
+                    {chatComposerShowsStop ? <Square size={15} fill="currentColor" strokeWidth={0} /> : <Send size={18} />}
                   </button>
-                )}
-                <button
-                  id="send_but" ref={chatSendButtonRef} type="button" className="send-button"
-                  disabled={(!chatInputHasContentRef.current && chatAttachments.length === 0) || chatGenerationState === "stopping" ||
-                    (chatGenerationState === "idle" && chatStatus.status === "loading") ||
-                    (chatMode === "roleplay" && !activeSessionRoleplayCard)}
-                  onClick={() => void sendChatMessage()}
-                  title={chatGenerationState === "idle" ? "发送" : chatInputMode === "queue" ? "加入队列" : "立即纠偏"}
-                  aria-label={chatGenerationState === "idle" ? "发送" : chatInputMode === "queue" ? "加入队列" : "立即纠偏"}
-                >
-                  <Send size={18} />
-                </button>
                 </div>
               </div>
             </div>
