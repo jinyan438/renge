@@ -37952,27 +37952,31 @@ export function App() {
                 </button>
               </header>
               <div className="chat-workspace-list">
-                {workspaceGroups.map((group) => (
-                  <button
-                    type="button"
-                    className={`chat-workspace-item ${
-                      group.key === selectedWorkspaceGroup?.key ? "active" : ""
-                    }`}
-                    key={group.key}
-                    title={`${group.name} · ${group.sessions.length} 个会话`}
-                    onClick={() => selectChatWorkspace(group)}
-                    onContextMenu={(event) => {
-                      event.preventDefault();
-                      deleteWorkspaceSessions(group.key, group.name);
-                    }}
-                  >
-                    <FolderOpen size={17} />
-                    <span>{group.name}</span>
-                    {group.key === activeChatSession?.workspaceKey && (
-                      <i aria-label="当前工作区" />
-                    )}
-                  </button>
-                ))}
+                {workspaceGroups.map((group) => {
+                  const hasBackgroundRun = group.sessions.some((session) =>
+                    session.id !== activeChatSessionId && Boolean(chatRuntimesRef.current.get(session.id).controller));
+                  return (
+                    <button
+                      type="button"
+                      className={`chat-workspace-item ${
+                        group.key === selectedWorkspaceGroup?.key ? "active" : ""
+                      }${hasBackgroundRun ? " has-background-run" : ""}`}
+                      key={group.key}
+                      title={`${group.name} · ${group.sessions.length} 个会话${hasBackgroundRun ? " · 有后台会话正在运行" : ""}`}
+                      onClick={() => selectChatWorkspace(group)}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        deleteWorkspaceSessions(group.key, group.name);
+                      }}
+                    >
+                      <FolderOpen size={17} />
+                      <span>{group.name}</span>
+                      {hasBackgroundRun ? (
+                        <LoaderCircle size={14} className="chat-status-spinner chat-workspace-running" role="img" aria-label="有后台会话正在运行" />
+                      ) : group.key === activeChatSession?.workspaceKey ? <i aria-label="当前工作区" /> : null}
+                    </button>
+                  );
+                })}
               </div>
             </section>
 

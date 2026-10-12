@@ -814,6 +814,8 @@
 .chat-pending-input > span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-pending-input button { flex: none; }
 .chat-session-running { flex: none; font-size: 10px; opacity: .7; }
+.chat-workspace-item.has-background-run { grid-template-columns: 20px minmax(0, 1fr) 14px; }
+.chat-workspace-running { justify-self: end; }
 .composer-send-actions { position: relative; }
 .chat-running-input-menu {
   position: absolute;
