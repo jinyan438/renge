@@ -39,7 +39,19 @@ try {
   await selectSession("A");
   const input = page.getByPlaceholder("输入消息，可粘贴图片");
   const cards = page.locator(".chat-pasted-text-attachment");
+  const attachmentRow = page.getByLabel("待发送附件", { exact: true });
   const height = () => input.evaluate(element => element.getBoundingClientRect().height);
+  async function expectAttachmentsAboveInput() {
+    const layout = await attachmentRow.evaluate(element => ({
+      bottom: element.getBoundingClientRect().bottom,
+      centers: Array.from(element.children, child => {
+        const bounds = child.getBoundingClientRect();
+        return bounds.y + bounds.height / 2;
+      }),
+    }));
+    assert.ok(layout.bottom <= (await input.boundingBox()).y, "all attachments sit above the input");
+    assert.ok(layout.centers.every(center => Math.abs(center - layout.centers[0]) < 1), "text cards and regular attachments share one row");
+  }
   async function paste(text) {
     await page.evaluate(text => navigator.clipboard.writeText(text), text);
     await input.focus();
@@ -104,6 +116,7 @@ try {
   await page.locator(".chat-attachment-input").setInputFiles({ name: "普通附件.txt", mimeType: "text/plain", buffer: Buffer.from("普通附件内容") });
   await page.locator(".chat-pending-attachment").waitFor();
   assert.equal(await cards.count(), 1, "pasted text coexists with normal attachments");
+  await expectAttachmentsAboveInput();
   await page.locator(".chat-composer").screenshot({ path: ".runtime/composer-input-desktop.png" });
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -117,6 +130,16 @@ try {
   const bounds = await cards.boundingBox();
   assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 391, "pasted card fits a narrow screen");
   assert.ok(bounds.height >= 40 && bounds.height <= 41, "mobile attachment retains its compact height");
+  await expectAttachmentsAboveInput();
+  const extraFiles = ["横向滚动附件一.txt", "横向滚动附件二.txt", "横向滚动附件三.txt"];
+  await page.locator(".chat-attachment-input").setInputFiles(extraFiles.map(name => ({ name, mimeType: "text/plain", buffer: Buffer.from("布局测试") })));
+  await page.waitForFunction(() => document.querySelectorAll(".chat-pending-attachment").length === 4);
+  await expectAttachmentsAboveInput();
+  assert.ok(await attachmentRow.evaluate(element => element.scrollWidth > element.clientWidth), "overflowing attachments scroll horizontally on a narrow screen");
+  for (const name of extraFiles) {
+    await attachmentRow.locator(".chat-pending-attachment").filter({ hasText: name }).getByRole("button", { name: "移除附件", exact: true }).click();
+  }
+  assert.equal(await attachmentRow.locator(".chat-pending-attachment").count(), 1, "scrolled attachments can be removed individually");
   await input.fill("请阅读下面的配置：");
   await page.locator(".chat-composer").screenshot({ path: ".runtime/composer-input-mobile.png" });
   await page.getByRole("button", { name: "发送", exact: true }).click();

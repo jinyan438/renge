@@ -13014,11 +13014,7 @@ export function App() {
     [chatAttachments],
   );
   const regularChatAttachments = useMemo(
-    () => chatAttachments.filter((attachment) => attachment.type !== BROWSER_COMMENT_MIME_TYPE && !attachment.id.startsWith("pasted-text-")),
-    [chatAttachments],
-  );
-  const pastedTextAttachments = useMemo(
-    () => chatAttachments.filter((attachment) => attachment.id.startsWith("pasted-text-")),
+    () => chatAttachments.filter((attachment) => attachment.type !== BROWSER_COMMENT_MIME_TYPE),
     [chatAttachments],
   );
   const [chatMessageMenu, setChatMessageMenu] = useState<{
@@ -38944,9 +38940,9 @@ export function App() {
                   ))}
                 </div>
               )}
-              {pastedTextAttachments.length > 0 && (
-                <div className="chat-pasted-text-attachments" aria-label="待发送粘贴文本">
-                  {pastedTextAttachments.map((attachment) => (
+              {regularChatAttachments.length > 0 && (
+                <div className="chat-pending-attachments chat-composer-attachments" aria-label="待发送附件">
+                  {regularChatAttachments.map((attachment) => attachment.id.startsWith("pasted-text-") ? (
                     <div className="chat-pasted-text-attachment" key={attachment.id}>
                       <span className="chat-pasted-text-icon"><ScanText size={14} /></span>
                       <div className="chat-pasted-text-copy">
@@ -38959,6 +38955,23 @@ export function App() {
                         title="移除粘贴的文本"
                         onClick={() => removeChatAttachment(attachment.id)}
                       ><X size={7} /></button>
+                    </div>
+                  ) : (
+                    <div className="chat-pending-attachment" key={attachment.id}>
+                      {attachment.type.startsWith("image/") && attachment.dataUrl ? (
+                        <ChatPreviewImage src={attachment.dataUrl} alt={attachment.name} />
+                      ) : (
+                        <FileJson size={14} />
+                      )}
+                      <span title={attachment.name}>{attachment.name}</span>
+                      <small>{formatFileSize(attachment.size)}</small>
+                      <button
+                        type="button"
+                        title="移除附件"
+                        onClick={() => removeChatAttachment(attachment.id)}
+                      >
+                        <X size={12} />
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -39044,28 +39057,6 @@ export function App() {
                       <X size={12} />
                     </button>
                   </div>
-                </div>
-              )}
-              {regularChatAttachments.length > 0 && (
-                <div className="chat-pending-attachments">
-                  {regularChatAttachments.map((attachment) => (
-                    <div className="chat-pending-attachment" key={attachment.id}>
-                      {attachment.type.startsWith("image/") && attachment.dataUrl ? (
-                        <ChatPreviewImage src={attachment.dataUrl} alt={attachment.name} />
-                      ) : (
-                        <FileJson size={14} />
-                      )}
-                      <span title={attachment.name}>{attachment.name}</span>
-                      <small>{formatFileSize(attachment.size)}</small>
-                      <button
-                        type="button"
-                        title="移除附件"
-                        onClick={() => removeChatAttachment(attachment.id)}
-                      >
-                        <X size={12} />
-                      </button>
-                    </div>
-                  ))}
                 </div>
               )}
               <div className="chat-composer-footer">

@@ -845,13 +845,17 @@
 .chat-running-input-menu > button:focus-visible { background: #f1f5f9; }
 .chat-running-input-menu strong { font-size: 13px; }
 .chat-running-input-menu span { color: #64748b; font-size: 11px; }
-.chat-pasted-text-attachments {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+.chat-pending-attachments.chat-composer-attachments {
+  flex-wrap: nowrap;
+  align-items: center;
   min-width: 0;
-  max-height: 88px;
-  overflow-y: auto;
+  max-height: none;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.chat-composer-attachments > * {
+  flex-shrink: 0;
 }
 
 .chat-pasted-text-attachment {
