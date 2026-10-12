@@ -41,6 +41,7 @@ import {
 import { createPortal } from "react-dom";
 import type { BrowserPageComment } from "./browserSidebarComments";
 import type { FileBrowserSource } from "./FilesSidebarPanel";
+import type { CodeReviewPanelProps } from "./CodeReviewPanel";
 import type { PcConnectionSidebarControl } from "./PcConnectionSidebarPanel";
 import { registerTerminalSidebarOpener } from "./terminalSidebarRuntime";
 import { registerBrowserSidebarOpener } from "./browserSidebarRuntime";
@@ -103,6 +104,9 @@ const TerminalSidebarPanel = memo(lazy(() =>
     default: module.TerminalSidebarPanel,
   })),
 ));
+const CodeReviewPanel = memo(lazy(() =>
+  import("./CodeReviewPanel").then((module) => ({ default: module.CodeReviewPanel })),
+));
 
 type StatusBarItem = StatusBarState["items"][number];
 type StatusBarItemType = StatusBarItem["type"];
@@ -143,6 +147,10 @@ export type StatusBarSidebarProps = {
   onBrowserComment?: (comment: BrowserPageComment) => void;
   terminalWorkspaceKey?: string;
   terminalWorkspacePath?: string;
+  reviewSource?: CodeReviewPanelProps["source"];
+  onAiCodeReview?: CodeReviewPanelProps["onAiReview"];
+  onSendReviewToChat?: CodeReviewPanelProps["onSendToChat"];
+  reviewModelLabel?: string;
   personas: AgentPersona[];
   characterCards: CharacterCard[];
   phoneProviders: PocketProvider[];
@@ -223,7 +231,7 @@ const RIGHT_SIDEBAR_TOOLS = [
     label: "审阅",
     description: "查看与审阅代码变更",
     icon: ClipboardCheck,
-    available: false,
+    available: true,
   },
   {
     id: "terminal",
@@ -853,6 +861,10 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   onBrowserComment,
   terminalWorkspaceKey = "default",
   terminalWorkspacePath = "",
+  reviewSource = null,
+  onAiCodeReview,
+  onSendReviewToChat,
+  reviewModelLabel,
   personas,
   characterCards,
   phoneProviders,
@@ -2356,6 +2368,13 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
               userProfile={userProfile}
             />
           </Suspense>
+        ) : activeToolId === "review" ? (
+          <Suspense fallback={<SidebarToolLoading label="代码审阅" />}>
+            <CodeReviewPanel key={`${chatSessionId}:${reviewSource?.id ?? "none"}`}
+              source={reviewSource} onBack={handleToolBack} onClose={handleToolClose}
+              onChooseWorkspace={onChooseWorkspace} onAiReview={onAiCodeReview}
+              onSendToChat={onSendReviewToChat} modelLabel={reviewModelLabel} />
+          </Suspense>
         ) : activeToolId === "terminal" ? (
           <Suspense fallback={<SidebarToolLoading label="终端" />}>
             <TerminalSidebarPanel
@@ -2834,6 +2853,9 @@ export function StatusBarSidebar(props: StatusBarSidebarProps) {
   const onChooseWorkspace = useLatestCallback(() => props.onChooseWorkspace?.());
   const onBrowserComment = useLatestCallback((comment: BrowserPageComment) =>
     props.onBrowserComment?.(comment));
+  const onAiCodeReview = useLatestCallback((request: Parameters<NonNullable<CodeReviewPanelProps["onAiReview"]>>[0], signal: AbortSignal) =>
+    props.onAiCodeReview ? props.onAiCodeReview(request, signal) : Promise.reject(new Error("当前模型不可用。")));
+  const onSendReviewToChat = useLatestCallback((content: string) => props.onSendReviewToChat?.(content));
   const onHeartbeatChange = useLatestCallback(
     (patch: Parameters<StatusBarSidebarProps["onHeartbeatChange"]>[0]) =>
       props.onHeartbeatChange(patch),
@@ -2886,6 +2908,8 @@ export function StatusBarSidebar(props: StatusBarSidebarProps) {
       onPresetsChange={onPresetsChange}
       onChooseWorkspace={props.onChooseWorkspace ? onChooseWorkspace : undefined}
       onBrowserComment={props.onBrowserComment ? onBrowserComment : undefined}
+      onAiCodeReview={props.onAiCodeReview ? onAiCodeReview : undefined}
+      onSendReviewToChat={props.onSendReviewToChat ? onSendReviewToChat : undefined}
       pcConnection={pcConnection}
       onHeartbeatChange={onHeartbeatChange}
       onHeartbeatReminderVisibleChange={onHeartbeatReminderVisibleChange}

@@ -233,6 +233,8 @@ try {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.evaluate(() => { delete window.RengeAndroidNative; });
   const more = page.locator(".chat-message.assistant").filter({ hasText: "Android纠偏完成" }).last().locator(".chat-message-more");
+  await more.scrollIntoViewIfNeeded();
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
   await more.click();
   await page.locator(".chat-message-menu").getByRole("button", { name: "续写", exact: true }).click();
   await waitFor(() => streams.length === 8, "A continuation started");

@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { getCodeReviewSnapshot, getCodeReviewFile } from "./code-review.mjs";
 import { applyChatSessionPatch, getChatSessionVersions } from "./app-data-session-patch.mjs";
 import { createReadStream, createWriteStream } from "node:fs";
 import { copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -2803,6 +2804,24 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
   try {
     if (request.method === "OPTIONS") {
       sendOptions(response);
+      return;
+    }
+
+    if (pathname === "/api/review/snapshot" || pathname === "/api/review/file") {
+      if (request.method !== "POST") { sendJson(response, 405, { error: "Method not allowed" }); return; }
+      assertPcFileAccessEnabled();
+      const controller = new AbortController();
+      const cancel = () => { if (!response.writableEnded) controller.abort(); };
+      request.once("aborted", cancel); response.once("close", cancel);
+      try {
+        const body = await readJsonBody(request);
+        const result = await (pathname.endsWith("/snapshot") ? getCodeReviewSnapshot(body, controller.signal) : getCodeReviewFile(body, controller.signal));
+        sendJson(response, 200, result);
+      } catch (error) {
+        if (!controller.signal.aborted && !response.destroyed) sendJson(response, error.status || 500, { error: error.message || "读取代码变更失败。" });
+      } finally {
+        request.off("aborted", cancel); response.off("close", cancel);
+      }
       return;
     }
 
