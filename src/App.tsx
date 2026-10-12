@@ -83,6 +83,7 @@ import { createTavernSettingsStore } from "./tavernPersistenceUtils";
 import { createPortal } from "react-dom";
 import { ChatToolDiffPreview } from "./ChatToolDiffPreview";
 import { ChatComposerStatus } from "./ChatComposerStatus";
+import { ChatPreviewImage } from "./ChatPreviewImage";
 import { createChatProgressTracker } from "./chatComposerStatusUtils";
 import { strToU8, zip } from "fflate";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
@@ -7529,7 +7530,7 @@ function renderInlineText(content: string): ReactNode[] {
     } else if (groups.bareImage !== undefined) {
       // 裸图片 URL（http(s) 直链或 data:image/...）
       nodes.push(
-        <img
+        <ChatPreviewImage
           key={`bare-img-${match.index}`}
           src={groups.bareImage}
           alt="生成的图片"
@@ -7539,7 +7540,7 @@ function renderInlineText(content: string): ReactNode[] {
       );
     } else if (groups.imageAlt !== undefined && groups.imageUrl !== undefined) {
       nodes.push(
-        <img
+        <ChatPreviewImage
           key={`img-${match.index}`}
           src={groups.imageUrl}
           alt={groups.imageAlt || "生成的图片"}
@@ -24698,7 +24699,7 @@ export function App() {
             return (
               <div className="chat-browser-comment-sent" key={attachment.id}>
                 {browserComment.screenshotDataUrl ? (
-                  <img src={browserComment.screenshotDataUrl} alt={`网页元素 ${browserComment.tagName}`} />
+                  <ChatPreviewImage src={browserComment.screenshotDataUrl} alt={`网页元素 ${browserComment.tagName}`} />
                 ) : (
                   <Globe size={18} />
                 )}
@@ -24712,7 +24713,7 @@ export function App() {
           return (
             <div className="chat-attachment-card" key={attachment.id}>
               {attachment.type.startsWith("image/") && attachment.dataUrl ? (
-                <img src={attachment.dataUrl} alt={attachment.name} />
+                <ChatPreviewImage src={attachment.dataUrl} alt={attachment.name} />
               ) : (
                 <FileJson size={16} />
               )}
@@ -38897,7 +38898,7 @@ export function App() {
                     <div className="chat-browser-comment-preview" key={attachment.id}>
                       <header>
                         {comment.screenshotDataUrl ? (
-                          <img src={comment.screenshotDataUrl} alt={`网页元素 ${comment.tagName}`} />
+                          <ChatPreviewImage src={comment.screenshotDataUrl} alt={`网页元素 ${comment.tagName}`} />
                         ) : (
                           <span><Globe size={16} /></span>
                         )}
@@ -38930,7 +38931,7 @@ export function App() {
                   {regularChatAttachments.map((attachment) => (
                     <div className="chat-pending-attachment" key={attachment.id}>
                       {attachment.type.startsWith("image/") && attachment.dataUrl ? (
-                        <img src={attachment.dataUrl} alt={attachment.name} />
+                        <ChatPreviewImage src={attachment.dataUrl} alt={attachment.name} />
                       ) : (
                         <FileJson size={14} />
                       )}

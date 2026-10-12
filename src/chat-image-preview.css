@@ -1,0 +1,139 @@
+.chat-image-preview-trigger,
+.chat-pending-attachment button.chat-image-preview-trigger {
+  display: inline-flex;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  vertical-align: middle;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.chat-image-preview-trigger:focus-visible {
+  outline: 2px solid #059b4d;
+  outline-offset: 3px;
+}
+
+.chat-browser-comment-preview > header > .chat-image-preview-trigger img {
+  width: 38px;
+  height: 27px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.chat-browser-comment-sent > .chat-image-preview-trigger img {
+  width: 44px;
+  height: 34px;
+  border-radius: 7px;
+  object-fit: cover;
+}
+
+.chat-image-preview-dialog {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  padding: 16px;
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  overflow: hidden;
+  border: 0;
+  color: #f8fafc;
+  background: rgba(10, 15, 24, 0.96);
+}
+
+.chat-image-preview-dialog[open] {
+  display: grid;
+}
+
+.chat-image-preview-dialog::backdrop {
+  background: #0a0f18;
+}
+
+.chat-image-preview-toolbar,
+.chat-image-preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-image-preview-toolbar > strong {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-image-preview-controls {
+  flex: none;
+  gap: 4px;
+}
+
+.chat-image-preview-controls > span {
+  min-width: 36px;
+  text-align: center;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-image-preview-controls button {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  color: inherit;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.chat-image-preview-controls button:hover:not(:disabled),
+.chat-image-preview-controls button:focus-visible {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.chat-image-preview-controls button:disabled {
+  opacity: 0.35;
+}
+
+.chat-image-preview-stage {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.chat-image-preview-canvas {
+  display: flex;
+  width: max-content;
+  height: max-content;
+  min-width: 100%;
+  min-height: 100%;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-image-preview-canvas img {
+  display: block;
+  flex: none;
+  max-width: none;
+  object-fit: contain;
+  cursor: zoom-in;
+  user-select: none;
+}
+
+.chat-image-preview-canvas img.zoomed {
+  cursor: zoom-out;
+}
