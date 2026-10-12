@@ -38948,7 +38948,7 @@ export function App() {
                 <div className="chat-pasted-text-attachments" aria-label="待发送粘贴文本">
                   {pastedTextAttachments.map((attachment) => (
                     <div className="chat-pasted-text-attachment" key={attachment.id}>
-                      <span className="chat-pasted-text-icon"><ScanText size={28} /></span>
+                      <span className="chat-pasted-text-icon"><ScanText size={14} /></span>
                       <div className="chat-pasted-text-copy">
                         <strong title={getPastedTextPreview(attachment.textContent ?? "")}>{getPastedTextPreview(attachment.textContent ?? "")}</strong>
                         <span>粘贴的文本</span>
@@ -38958,7 +38958,7 @@ export function App() {
                         aria-label="移除粘贴的文本"
                         title="移除粘贴的文本"
                         onClick={() => removeChatAttachment(attachment.id)}
-                      ><X size={14} /></button>
+                      ><X size={7} /></button>
                     </div>
                   ))}
                 </div>

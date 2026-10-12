@@ -848,9 +848,9 @@
 .chat-pasted-text-attachments {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 4px;
   min-width: 0;
-  max-height: 176px;
+  max-height: 88px;
   overflow-y: auto;
 }
 
@@ -858,36 +858,36 @@
   position: relative;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 7px;
   box-sizing: border-box;
-  width: min(338px, 100%);
+  width: min(169px, 100%);
   min-width: 0;
-  padding: 10px 32px 10px 10px;
-  border: 1px solid #e6e6e8;
-  border-radius: 14px;
+  padding: 5px 16px 5px 5px;
+  border: 0.5px solid #e6e6e8;
+  border-radius: 7px;
   color: #252629;
   background: #fafafa;
 }
 
 .chat-pasted-text-icon {
   display: grid;
-  flex: 0 0 58px;
+  flex: 0 0 29px;
   place-items: center;
-  height: 58px;
-  border-radius: 12px;
+  height: 29px;
+  border-radius: 6px;
   color: #68696b;
   background: #f4f4f4;
 }
 
 .chat-pasted-text-copy {
   display: grid;
-  gap: 3px;
+  gap: 1.5px;
   min-width: 0;
 }
 
 .chat-pasted-text-copy strong {
   overflow: hidden;
-  font-size: 16px;
+  font-size: 8px;
   font-weight: 600;
   line-height: 1.4;
   text-overflow: ellipsis;
@@ -896,18 +896,18 @@
 
 .chat-pasted-text-copy span {
   color: #77787a;
-  font-size: 14px;
+  font-size: 7px;
   line-height: 1.4;
 }
 
 .chat-pasted-text-attachment button {
   position: absolute;
-  top: 6px;
-  right: 6px;
+  top: 3px;
+  right: 3px;
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: 12px;
+  height: 12px;
   padding: 0;
   border: 0;
   border-radius: 50%;

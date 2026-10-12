@@ -1,5 +1,5 @@
 export function shouldAttachPastedText(text: string) {
-  return Boolean(text.trim()) && (text.length > 2_000 || text.split(/\r\n|\r|\n/).length > 20);
+  return Boolean(text.trim()) && (text.length > 4_000 || text.split(/\r\n|\r|\n/).length > 40);
 }
 
 export function getPastedTextPreview(text: string) {
