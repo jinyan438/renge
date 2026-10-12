@@ -6621,7 +6621,7 @@ summary:focus-visible {
 }
 
 .chat-markdown strong {
-  font-weight: 700;
+  font-weight: inherit;
 }
 
 .chat-message.assistant .chat-markdown {
