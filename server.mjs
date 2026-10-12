@@ -3267,6 +3267,12 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
       return;
     }
 
+    if (pathname === "/api/pi/input") {
+      const result = await piHost.handleInput(body);
+      sendJson(response, result.status, result.ok ? result : { error: result.error });
+      return;
+    }
+
     if (pathname === "/api/skills/import-folder") {
       const skill = await importSkillDirectory(dataFilePath, body.path);
       sendJson(response, 200, { skill });

@@ -2,10 +2,11 @@ import { CircleCheck, CircleAlert, Info, LoaderCircle, TriangleAlert, X } from "
 import { useEffect, useRef, useState } from "react";
 import { formatComposerElapsed } from "./chatComposerStatusUtils";
 
-export function ChatComposerStatus({ status, message, persistent = false, onDismiss }: {
+export function ChatComposerStatus({ status, message, persistent = false, runStartedAt, onDismiss }: {
   status: "idle" | "loading" | "success" | "error" | "info" | "warning";
   message: string;
   persistent?: boolean;
+  runStartedAt?: number;
   onDismiss: () => void;
 }) {
   const loading = status === "loading";
@@ -13,14 +14,14 @@ export function ChatComposerStatus({ status, message, persistent = false, onDism
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
-    setElapsed(0);
+    setElapsed(loading && runStartedAt ? Math.floor((Date.now() - runStartedAt) / 1_000) : 0);
     if (!loading) return;
-    startedAt.current = Date.now();
+    startedAt.current = runStartedAt || Date.now();
     const timer = window.setInterval(() => {
       setElapsed(Math.floor((Date.now() - startedAt.current) / 1_000));
     }, 1_000);
     return () => window.clearInterval(timer);
-  }, [loading]);
+  }, [loading, runStartedAt]);
 
   useEffect(() => {
     if (persistent || (status !== "success" && status !== "idle" && status !== "info")) return;

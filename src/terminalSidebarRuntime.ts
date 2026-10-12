@@ -412,15 +412,17 @@ export async function executeTerminalTool(
   toolName: string,
   rawArguments: string,
   signal?: AbortSignal,
+  workspace?: TerminalWorkspaceContext,
+  openSidebar = true,
 ) {
   if (!isTerminalToolName(toolName)) throw new Error(`未知终端工具：${toolName}`);
   if (signal?.aborted) throw new DOMException("操作已停止", "AbortError");
   const api = getTerminalSidebarApi();
   if (!api) throw new Error("当前平台未提供右侧栏交互式终端");
-  const terminalContext = getTerminalWorkspaceContext();
+  const terminalContext = workspace ?? getTerminalWorkspaceContext();
   const { workspaceKey } = terminalContext;
   const args = parseTerminalToolArguments(rawArguments);
-  terminalSidebarOpener?.(
+  if (openSidebar) terminalSidebarOpener?.(
     typeof args.id === "string" && args.id ? args.id : undefined,
   );
 

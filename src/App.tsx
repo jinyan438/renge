@@ -1,3 +1,4 @@
+import { createChatSessionRuntime, type ChatInputMode, type SessionRunStatus } from "./chatSessionRuntime";
 import {
   ArrowLeft,
   Bot,
@@ -901,6 +902,7 @@ type ChatSession = {
   workspacePath?: string;
   title: string;
   messages: ChatMessage[];
+  pendingInputs?: PendingChatInput[];
   mode: ChatMode;
   heartbeat: ChatHeartbeatConfig;
   memoryPersonaIds: string[];
@@ -1548,9 +1550,17 @@ type ChatApiMessage = {
   responses_reasoning_items?: unknown[];
 };
 
+type PendingChatInput = {
+  id: string; content: string; attachments: ChatAttachment[]; mode: ChatInputMode;
+  sender: ChatSenderIdentity; createdAt: string; submitted?: boolean;
+  execute?: () => Promise<void>;
+};
+
 type PiStreamEvent = {
   type:
     | "run_start"
+    | "run_ready"
+    | "input_delivered"
     | "tool_request"
     | "tool_start"
     | "tool_end"
@@ -1564,6 +1574,7 @@ type PiStreamEvent = {
     | "auto_retry_start"
     | "auto_retry_end";
   runId?: string;
+  inputId?: string;
   kernel?: string;
   nativeTools?: string[];
   toolCallId?: string;
@@ -3011,6 +3022,14 @@ function normalizeChatSession(rawValue: unknown, fallbackMode: ChatMode = loadCh
       : {}),
     title,
     messages,
+    pendingInputs: Array.isArray(rawSession.pendingInputs) ? rawSession.pendingInputs.flatMap((raw) => {
+      if (!isObjectRecord(raw)) return [];
+      const message = normalizeChatMessage({ ...raw, role: "user" });
+      if (!message || (!message.content.trim() && !message.attachments?.length)) return [];
+      return [{ id: message.id, content: message.content, attachments: message.attachments ?? [],
+        sender: message.sender ?? { kind: "user" as const }, createdAt: message.createdAt,
+        mode: raw.mode === "steer" ? "steer" as const : "queue" as const }];
+    }) : [],
     mode,
     heartbeat: normalizeHeartbeatConfig(
       isObjectRecord(rawSession.heartbeat)
@@ -13002,10 +13021,20 @@ export function App() {
   const [activeChatSessionId, setActiveChatSessionId] = useState("");
   const [selectedChatWorkspaceKey, setSelectedChatWorkspaceKey] = useState("");
   const [appDataLoaded, setAppDataLoaded] = useState(false);
-  const [chatStatus, setChatStatus] = useState<{
-    status: ChatStatusState;
-    message: string;
-  }>({ status: "idle", message: "" });
+  const [, refreshChatRuntimes] = useState(0);
+  const chatRuntimesRef = useRef(createChatSessionRuntime<PendingChatInput>());
+  chatRuntimesRef.current.onChange = () => refreshChatRuntimes((version) => version + 1);
+  const activeChatRuntime = chatRuntimesRef.current.get(activeChatSessionId);
+  const chatStatus = activeChatRuntime.status;
+  const setSessionChatStatus = (sessionId: string, update: SetStateAction<SessionRunStatus>) => {
+    const runtime = chatRuntimesRef.current.get(sessionId);
+    runtime.status = typeof update === "function" ? update(runtime.status) : update;
+    chatRuntimesRef.current.onChange();
+  };
+  const setChatStatus: Dispatch<SetStateAction<SessionRunStatus>> = (update) => {
+    if (chatRuntimesRef.current.get(activeChatSessionIdRef.current).controller) return;
+    setSessionChatStatus(activeChatSessionIdRef.current, update);
+  };
   const dismissChatStatus = useCallback(() => {
     setChatStatus((current) => current.status === "loading" ? current : { status: "idle", message: "" });
   }, []);
@@ -13018,9 +13047,33 @@ export function App() {
     signal,
     actor,
   );
-  const [chatGenerationState, setChatGenerationState] =
-    useState<ChatGenerationState>("idle");
-  const [manualStatusBarUpdateRunning, setManualStatusBarUpdateRunning] = useState(false);
+  const chatGenerationState: ChatGenerationState = activeChatRuntime.generationState;
+  const setChatGenerationState = (state: ChatGenerationState) => {
+    chatRuntimesRef.current.get(activeChatSessionIdRef.current).generationState = state;
+    chatRuntimesRef.current.onChange();
+  };
+  const chatInputMode = activeChatRuntime.inputMode;
+  const setChatInputMode = (mode: ChatInputMode) => {
+    chatRuntimesRef.current.get(activeChatSessionIdRef.current).inputMode = mode;
+    chatRuntimesRef.current.onChange();
+  };
+  const chatDraftsRef = useRef(new Map<string, { text: string; attachments: ChatAttachment[] }>());
+  const chatAttachmentsLiveRef = useRef(chatAttachments);
+  chatAttachmentsLiveRef.current = chatAttachments;
+  const sessionRunDataRef = useRef(new Map<string, {
+    latestUser: string; identity: AiChatMessageIdentity | null;
+    pendingEnd: { reason: string; evidence: string } | null;
+    manualStatusBar: boolean;
+  }>());
+  const getSessionRunData = (sessionId: string) => {
+    let data = sessionRunDataRef.current.get(sessionId);
+    if (!data) {
+      data = { latestUser: "", identity: null, pendingEnd: null, manualStatusBar: false };
+      sessionRunDataRef.current.set(sessionId, data);
+    }
+    return data;
+  };
+  const manualStatusBarUpdateRunning = getSessionRunData(activeChatSessionId).manualStatusBar;
   const [pcServerUrl, setPcServerUrl] = useState(
     () => localStorage.getItem(PC_SERVER_URL_STORAGE_KEY) ?? "",
   );
@@ -13108,7 +13161,7 @@ export function App() {
     windowScrollY: number;
   } | null>(null);
   const sendChatMessageRef = useRef<
-    (contentOverride?: string, attachmentsOverride?: ChatAttachment[]) => Promise<void>
+    (contentOverride?: string, attachmentsOverride?: ChatAttachment[], sessionOverride?: string) => Promise<void>
   >(async () => {});
   const openChatSessionRef = useRef<(sessionId: string) => Promise<void>>(async () => {});
   const generateHtmlPreviewTextRef = useRef<
@@ -13210,8 +13263,14 @@ export function App() {
       flushChatInputContext(true);
     }, 0);
   }, [flushChatInputContext]);
-  const activeUserRequestTextRef = useRef("");
-  const activeChatAbortControllerRef = useRef<AbortController | null>(null);
+  const activeUserRequestTextRef = {
+    get current() { return getSessionRunData(activeChatSessionIdRef.current).latestUser; },
+    set current(text: string) { getSessionRunData(activeChatSessionIdRef.current).latestUser = text; },
+  };
+  const activeChatAbortControllerRef = {
+    get current() { return chatRuntimesRef.current.get(activeChatSessionIdRef.current).controller; },
+    set current(controller: AbortController | null) { chatRuntimesRef.current.get(activeChatSessionIdRef.current).controller = controller; },
+  };
   const piSessionResetPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
   const restoredWorkspacePathRef = useRef("");
   const restoredPcWorkspaceRef = useRef(false);
@@ -13231,7 +13290,10 @@ export function App() {
   const llmPushNotificationsEnabledRef = useRef(llmPushNotificationsEnabled);
   const tavernScriptRuntimeRef = useRef<TavernScriptRuntime | null>(null);
   const chatMessagesRef = useRef<ChatMessage[]>([]);
-  const activeAiMessageIdentityRef = useRef<AiChatMessageIdentity | null>(null);
+  const activeAiMessageIdentityRef = {
+    get current() { return getSessionRunData(activeChatSessionIdRef.current).identity; },
+    set current(identity: AiChatMessageIdentity | null) { getSessionRunData(activeChatSessionIdRef.current).identity = identity; },
+  };
   const htmlPreviewMessagesCacheRef = useRef<{
     sources: ChatMessage[];
     values: HtmlPreviewContext["messages"];
@@ -13510,6 +13572,51 @@ export function App() {
     setChatMessages(syncedMessages);
   };
 
+  const commitMessagesForSession = (sessionId: string, update: SetStateAction<ChatMessage[]>) => {
+    const session = chatSessionsRef.current.find((candidate) => candidate.id === sessionId);
+    if (!session) return;
+    const current = getMessagesForSession(sessionId);
+    const next = typeof update === "function" ? update(current) : update;
+    const decorated = attachAiIdentityToNewAssistantMessages(current, next, getSessionRunData(sessionId).identity);
+    const messages = syncPocketPhoneFromContext(sessionId, current, decorated);
+    const title = session.roleplayCharacterCardId ? session.title : inferChatSessionTitle(messages);
+    const sessions = chatSessionsRef.current.map((candidate) => candidate.id === sessionId
+      ? { ...candidate, messages, title, updatedAt: new Date().toISOString() } : candidate);
+    chatSessionsRef.current = sessions;
+    setChatSessions(sessions);
+    if (activeChatSessionIdRef.current === sessionId) {
+      chatMessagesRef.current = messages;
+      setChatMessages(messages);
+    }
+  };
+  const createSessionBindings = (sessionId: string) => ({
+    commitChatMessages: (update: SetStateAction<ChatMessage[]>) => commitMessagesForSession(sessionId, update),
+    setChatStatus: (update: SetStateAction<SessionRunStatus>) => setSessionChatStatus(sessionId, update),
+    chatMessagesRef: {
+      get current() { return getMessagesForSession(sessionId); },
+      set current(messages: ChatMessage[]) { commitMessagesForSession(sessionId, messages); },
+    },
+    activeUserRequestTextRef: {
+      get current() { return getSessionRunData(sessionId).latestUser; },
+      set current(text: string) { getSessionRunData(sessionId).latestUser = text; },
+    },
+    activeAiMessageIdentityRef: {
+      get current() { return getSessionRunData(sessionId).identity; },
+      set current(identity: AiChatMessageIdentity | null) { getSessionRunData(sessionId).identity = identity; },
+    },
+    pendingMultiAgentEndRef: {
+      get current() { return getSessionRunData(sessionId).pendingEnd; },
+      set current(value: { reason: string; evidence: string } | null) { getSessionRunData(sessionId).pendingEnd = value; },
+    },
+    trackChatProgress: (signal?: AbortSignal, actor?: string) => createChatProgressTracker(
+      (message) => setSessionChatStatus(sessionId, { status: "loading", message }), signal, actor,
+    ),
+    emitTavernEvent: (eventName: unknown, ...args: unknown[]) => activeChatSessionIdRef.current === sessionId
+      ? emitTavernEvent(eventName, ...args) : Promise.resolve(),
+    emitTavernMessageEventNow: (eventName: typeof TAVERN_EVENTS.MESSAGE_SENT | typeof TAVERN_EVENTS.MESSAGE_RECEIVED, messageId: string) =>
+      activeChatSessionIdRef.current === sessionId ? emitTavernMessageEventNow(eventName, messageId) : Promise.resolve(-1),
+  });
+
   const getSessionStatusBarState = (sessionId = activeChatSessionIdRef.current) => {
     const session = chatSessionsRef.current.find((candidate) => candidate.id === sessionId);
     return normalizeStatusBarState(session?.statusBar);
@@ -13539,8 +13646,8 @@ export function App() {
     nextMessages: ChatMessage[],
     updater: (current: StatusBarState) => StatusBarState,
   ) => {
-    if (!sessionId || activeChatSessionIdRef.current !== sessionId) return false;
-    nextMessages = syncPocketPhoneFromContext(sessionId, chatMessagesRef.current, nextMessages);
+    if (!sessionId || !chatSessionsRef.current.some((session) => session.id === sessionId)) return false;
+    nextMessages = syncPocketPhoneFromContext(sessionId, getMessagesForSession(sessionId), nextMessages);
     const timestamp = new Date().toISOString();
     const nextSessions = chatSessionsRef.current.map((session) =>
       session.id === sessionId
@@ -13554,9 +13661,11 @@ export function App() {
           }
         : session,
     );
-    chatMessagesRef.current = nextMessages;
     chatSessionsRef.current = nextSessions;
-    setChatMessages(nextMessages);
+    if (activeChatSessionIdRef.current === sessionId) {
+      chatMessagesRef.current = nextMessages;
+      setChatMessages(nextMessages);
+    }
     setChatSessions(nextSessions);
     return true;
   };
@@ -13778,6 +13887,7 @@ export function App() {
   }, [llmPushNotificationsEnabled]);
 
   const setChatModeForActiveSession = (nextMode: ChatMode) => {
+    if (chatRuntimesRef.current.get(activeChatSessionIdRef.current).controller) return;
     const normalizedMode = normalizeChatMode(nextMode);
     chatModeRef.current = normalizedMode;
     setChatMode(normalizedMode);
@@ -14477,12 +14587,109 @@ export function App() {
     if (mobileSidebarOpenRef.current) syncMobileSidebarDomState(true);
   }, [openWindows]);
 
-  const beginChatGeneration = () => {
-    const controller = new AbortController();
-    activeChatAbortControllerRef.current = controller;
+  const savePendingInputs = (sessionId: string) => {
+    const runtime = chatRuntimesRef.current.get(sessionId);
+    const pendingInputs = [...runtime.steering.values(), ...runtime.queued].map(({ id, content, attachments, mode, sender, createdAt }) =>
+      ({ id, content, attachments, mode, sender, createdAt }));
+    const sessions = chatSessionsRef.current.map((session) => session.id === sessionId
+      ? { ...session, pendingInputs, updatedAt: new Date().toISOString() } : session);
+    chatSessionsRef.current = sessions;
+    setChatSessions(sessions);
+  };
+  const restoredPendingInputsRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (!appDataLoaded) return;
+    for (const session of chatSessions) {
+      if (restoredPendingInputsRef.current.has(session.id)) continue;
+      restoredPendingInputsRef.current.add(session.id);
+      if (!session.pendingInputs?.length) continue;
+      const runtime = chatRuntimesRef.current.get(session.id);
+      runtime.queued = session.pendingInputs.map((input) => ({ ...input, mode: "queue" }));
+      runtime.queuePaused = true;
+      runtime.continueWith = (input) => sendChatMessageRef.current(input.content, input.attachments, session.id);
+      chatRuntimesRef.current.onChange();
+    }
+  }, [appDataLoaded, chatSessions]);
+
+  const runNextQueuedInput = async (sessionId: string) => {
+    const runtime = chatRuntimesRef.current.get(sessionId);
+    if (!runtime.continueWith || !chatSessionsRef.current.some((session) => session.id === sessionId)) return;
+    const input = !runtime.controller && runtime.queuePaused && !runtime.stopRequested && runtime.status.status !== "error" && runtime.queued[0]?.mode === "steer"
+      ? runtime.queued.shift() : chatRuntimesRef.current.takeNext(sessionId);
+    if (input) { savePendingInputs(sessionId); await (input.execute?.() ?? runtime.continueWith(input)); }
+  };
+
+  const deliverSteeringInput = (sessionId: string, inputId?: string) => {
+    if (!inputId) return;
+    const runtime = chatRuntimesRef.current.get(sessionId);
+    const input = runtime.steering.get(inputId);
+    if (!input) return;
+    runtime.steering.delete(inputId);
+    savePendingInputs(sessionId);
+    getSessionRunData(sessionId).latestUser = input.content;
+    commitMessagesForSession(sessionId, (messages) => messages.some((message) => message.id === input.id)
+      ? messages : [...messages, { ...input, role: "user" as const }]);
+    chatRuntimesRef.current.onChange();
+  };
+
+  const flushSteeringInputs = async (sessionId: string) => {
+    const runtime = chatRuntimesRef.current.get(sessionId);
+    if (!runtime.piReady || !runtime.controller || runtime.controller.signal.aborted) return;
+    const controller = runtime.controller;
+    const runId = runtime.piRunId;
+    for (const input of runtime.steering.values()) {
+      if (input.submitted) continue;
+      input.submitted = true;
+      chatRuntimesRef.current.onChange();
+      try {
+        const response = await fetch("/api/pi/input", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId, runId, inputId: input.id, content: input.content, mode: "steer" }),
+        });
+        if (!response.ok) throw new Error("本轮已结束，纠偏将在下一轮执行。");
+      } catch {
+        // Preserve the input if the run ended while it was being submitted.
+        if (!runtime.steering.delete(input.id)) continue;
+        runtime.queued.unshift({ ...input, mode: "steer", submitted: false });
+        savePendingInputs(sessionId);
+        if (runtime.controller === controller) controller.abort(createChatAbortError());
+        else void runNextQueuedInput(sessionId);
+        chatRuntimesRef.current.onChange();
+      }
+    }
+  };
+
+  const appendRunningInput = async (sessionId: string, content: string, attachments: ChatAttachment[]) => {
+    const runtime = chatRuntimesRef.current.get(sessionId);
+    const input: PendingChatInput = {
+      id: crypto.randomUUID(), content, attachments, mode: chatInputMode,
+      sender: currentChatSender, createdAt: new Date().toISOString(),
+    };
+    input.execute = () => sendChatMessage(input.content, input.attachments, sessionId);
+    if (input.mode === "queue") runtime.queued.push(input);
+    else if (!runtime.supportsSteering || attachments.length > 0) {
+      // Platforms without native steering resume from the preserved transcript.
+      runtime.queued.unshift(input);
+      runtime.controller?.abort(createChatAbortError());
+    } else {
+      runtime.steering.set(input.id, input);
+      void flushSteeringInputs(sessionId);
+    }
+    savePendingInputs(sessionId);
+    if (activeChatSessionIdRef.current === sessionId) { setChatInput(""); setChatAttachments([]); }
+    chatRuntimesRef.current.onChange();
+  };
+
+  useEffect(() => () => {
+    chatRuntimesRef.current.onChange = () => {};
+    chatRuntimesRef.current.dispose();
+  }, []);
+
+  const beginChatGeneration = (sessionId = activeChatSessionIdRef.current) => {
+    const controller = chatRuntimesRef.current.begin(sessionId);
+    chatRuntimesRef.current.get(sessionId).continueWith ??= (input) => sendChatMessage(input.content, input.attachments, sessionId);
     chatReadingFocusRef.current = false;
     chatScrollFollowLatestRef.current = true;
-    setChatGenerationState("running");
     return controller;
   };
 
@@ -14526,7 +14733,9 @@ export function App() {
     messageId?: string,
     options: { emitTavernLifecycleEvents?: boolean } = {},
   ) => {
-    if (activeChatAbortControllerRef.current !== controller) return;
+    const sessionId = chatRuntimesRef.current.owner(controller);
+    if (sessionId === undefined || chatRuntimesRef.current.get(sessionId).controller !== controller) return;
+    const { commitChatMessages, chatMessagesRef, emitTavernEvent } = createSessionBindings(sessionId);
     commitChatMessages((current) => current.map((message) => {
       if (message.outputStatus === "running") {
         return {
@@ -14543,8 +14752,13 @@ export function App() {
       }
       return message;
     }));
-    activeChatAbortControllerRef.current = null;
-    setChatGenerationState("idle");
+    const runtime = chatRuntimesRef.current.get(sessionId);
+    for (const input of [...runtime.steering.values()].reverse()) runtime.queued.unshift({ ...input, mode: runtime.stopRequested ? "queue" : "steer", submitted: false });
+    runtime.steering.clear();
+    if (runtime.stopRequested) runtime.queued = runtime.queued.map((input) => ({ ...input, mode: "queue" }));
+    savePendingInputs(sessionId);
+    if (runtime.status.status === "loading") runtime.status = { status: "success", message: "回复已生成。" };
+    chatRuntimesRef.current.finish(controller);
     const messageIndex = messageId
       ? chatMessagesRef.current.findIndex((message) => message.id === messageId)
       : chatMessagesRef.current.length - 1;
@@ -14554,34 +14768,21 @@ export function App() {
       }
       await emitTavernEvent(TAVERN_EVENTS.GENERATION_ENDED, messageIndex);
     }
+    if (runtime.status.status === "error") runtime.queuePaused = true;
+    window.setTimeout(() => void runNextQueuedInput(sessionId), 0);
   };
 
   const stopChatGeneration = () => {
-    const controller = activeChatAbortControllerRef.current;
-    if (!controller) return;
-
-    setChatGenerationState("stopping");
-    setChatStatus({ status: "loading", message: "正在停止输出..." });
-    if (!controller.signal.aborted) {
-      controller.abort(createChatAbortError());
-    }
-  };
-
-  const activeSessionChangeIsBlocked = (allowExistingLoading = false) => {
-    if (
-      !activeChatAbortControllerRef.current &&
-      (allowExistingLoading || chatStatus.status !== "loading")
-    ) {
-      return false;
-    }
-    setChatStatus({
-      status: "loading",
-      message: "当前回复或状态更新完成后才能切换会话。",
-    });
-    return true;
+    const sessionId = activeChatSessionIdRef.current;
+    chatRuntimesRef.current.stop(sessionId, createChatAbortError());
+    setSessionChatStatus(sessionId, { status: "loading", message: "正在停止输出…" });
   };
 
   const showChatSession = (session: Pick<ChatSession, "id" | "messages" | "mode">) => {
+    chatDraftsRef.current.set(activeChatSessionIdRef.current, { text: chatInputValueRef.current, attachments: chatAttachmentsLiveRef.current });
+    const draft = chatDraftsRef.current.get(session.id);
+    setChatInput(draft?.text ?? "");
+    setChatAttachments(draft?.attachments ?? []);
     pendingSessionSelectionRef.current = session.id;
     activeChatSessionIdRef.current = session.id;
     chatMessagesRef.current = session.messages;
@@ -20120,7 +20321,11 @@ export function App() {
   const runTavernPreSendHooks = async (
     userMessage: ChatMessage,
     originalContent: string,
+    requestSessionId = activeChatSessionIdRef.current,
   ) => {
+    const { commitChatMessages, setChatStatus, chatMessagesRef, activeUserRequestTextRef,
+      activeAiMessageIdentityRef, pendingMultiAgentEndRef, trackChatProgress,
+      emitTavernEvent, emitTavernMessageEventNow } = createSessionBindings(requestSessionId);
     await emitTavernMessageEventNow(TAVERN_EVENTS.MESSAGE_SENT, userMessage.id);
 
     const messageAfterSent = chatMessagesRef.current.find(
@@ -20308,7 +20513,6 @@ export function App() {
     }, 0);
   };
   const activateRoleplaySession = (session: ChatSession) => {
-    if (activeSessionChangeIsBlocked()) return;
     setActiveCharacterCardId(session.roleplayCharacterCardId ?? "");
     showChatSession(session);
     setEditingChatMessage(null);
@@ -20321,7 +20525,6 @@ export function App() {
     if (card) processRoleplayGreeting(session, card);
   };
   const startRoleplayInCurrentWorkspace = (card: CharacterCard, greetingIndex = 0) => {
-    if (activeSessionChangeIsBlocked()) return;
     const canBindCurrentSession = Boolean(
       activeChatSession &&
       activeChatSession.id === activeChatSessionId &&
@@ -20355,7 +20558,6 @@ export function App() {
     activateRoleplaySession(session);
   };
   const openOrCreateCharacterRoleplay = (card: CharacterCard) => {
-    if (activeSessionChangeIsBlocked()) return;
     const existingSession = chatSessions
       .filter((session) => session.roleplayCharacterCardId === card.id)
       .sort(
@@ -20733,7 +20935,6 @@ export function App() {
   }, [activeChatSession?.workspaceKey, selectedChatWorkspaceKey, workspaceGroups]);
 
   const selectChatWorkspace = (group: (typeof workspaceGroups)[number]) => {
-    if (activeSessionChangeIsBlocked()) return;
     setSelectedChatWorkspaceKey(group.key);
     const nextSession = group.sessions[0];
     if (nextSession && nextSession.id !== activeChatSessionId) {
@@ -21431,6 +21632,7 @@ export function App() {
     if (!session.workspacePath || !window.rengeDesktop?.isElectron) return false;
 
     const handle = await window.rengeDesktop.restoreWorkspace({ path: session.workspacePath });
+    if (activeChatSessionIdRef.current !== session.id) return false;
     workspaceAutoRestoreDisabledRef.current = false;
     setLocalWorkspaceHandle(handle);
     setLocalToolsEnabled(true);
@@ -21488,9 +21690,9 @@ export function App() {
   };
 
   const openChatSession = async (sessionId: string) => {
-    if (activeSessionChangeIsBlocked()) return;
-    const session = chatSessions.find((item) => item.id === sessionId);
+    const session = chatSessionsRef.current.find((item) => item.id === sessionId);
     if (!session) return;
+    const { setChatStatus } = createSessionBindings(sessionId);
 
     workspaceAutoRestoreDisabledRef.current = false;
     showChatSession(session);
@@ -21671,7 +21873,6 @@ export function App() {
     workspaceKey = workspaceInfo.key,
     workspaceName = workspaceInfo.name,
   ) => {
-    if (activeSessionChangeIsBlocked()) return;
     const knownWorkspacePath = chatSessions.find(
       (session) => session.workspaceKey === workspaceKey && session.workspacePath,
     )?.workspacePath;
@@ -21688,7 +21889,10 @@ export function App() {
   };
 
   const deleteChatSession = (sessionId: string) => {
-    if (activeSessionChangeIsBlocked()) return;
+    if (chatRuntimesRef.current.get(sessionId).controller) {
+      setSessionChatStatus(sessionId, { status: "loading", message: "请先停止此会话的任务，再删除会话。" });
+      return;
+    }
     const deletedSession = chatSessions.find((session) => session.id === sessionId);
     // 后端清理该会话目录下持久化的生成图片，fire-and-forget
     void fetch(`/api/session-images/${encodeURIComponent(sessionId)}`, { method: "DELETE" }).catch(() => undefined);
@@ -21721,6 +21925,7 @@ export function App() {
       safeRemaining.push(createChatSession(undefined, undefined, undefined, undefined, chatMode));
     }
 
+    chatSessionsRef.current = safeRemaining;
     setChatSessions(safeRemaining);
 
     if (sessionId === activeChatSessionId) {
@@ -21733,7 +21938,10 @@ export function App() {
   };
 
   const deleteWorkspaceSessions = (workspaceKey: string, workspaceName: string) => {
-    if (activeSessionChangeIsBlocked()) return;
+    if (chatSessionsRef.current.some((session) => session.workspaceKey === workspaceKey && chatRuntimesRef.current.get(session.id).controller)) {
+      setChatStatus({ status: "warning", message: "此工作区还有任务正在运行，请先停止任务再删除会话。" });
+      return;
+    }
     const workspaceSessionCount = chatSessions.filter(
       (session) => session.workspaceKey === workspaceKey,
     ).length;
@@ -21786,7 +21994,6 @@ export function App() {
   const activateWorkspaceSessions = (
     handle: LocalDirectoryHandle | ElectronWorkspaceHandle | AndroidWorkspaceHandle | PcWorkspaceHandle,
   ) => {
-    if (activeSessionChangeIsBlocked(true)) return;
     const nextWorkspaceInfo = getWorkspaceInfo(handle);
     const existingSession = chatSessions.find(
       (session) => session.workspaceKey === nextWorkspaceInfo.key,
@@ -23046,7 +23253,7 @@ export function App() {
     return payload;
   };
 
-  const executeHeartbeatTool = async (rawArguments: string) => {
+  const executeHeartbeatTool = async (rawArguments: string, sessionId = activeChatSessionIdRef.current) => {
     const args = parseToolArguments(rawArguments);
     const shouldResetRunCount =
       args.resetRunCount === undefined
@@ -23073,7 +23280,6 @@ export function App() {
         : {}),
       resetRunCount: shouldResetRunCount,
     };
-    const sessionId = activeChatSession?.id ?? activeChatSessionIdRef.current;
 
     if (heartbeatRunningRef.current && sessionId) {
       const targetSession = chatSessions.find((session) => session.id === sessionId);
@@ -23090,7 +23296,7 @@ export function App() {
       };
     }
 
-    const nextConfig = updateActiveHeartbeat(patch);
+    const nextConfig = updateHeartbeatForSession(sessionId, patch);
 
     if (!nextConfig) {
       throw new Error("没有可更新的当前会话。");
@@ -23099,7 +23305,8 @@ export function App() {
     return nextConfig;
   };
 
-  const executeMultiAgentEndTool = async (rawArguments: string) => {
+  const executeMultiAgentEndTool = async (rawArguments: string, requestSessionId = activeChatSessionIdRef.current) => {
+    const { pendingMultiAgentEndRef } = createSessionBindings(requestSessionId);
     if (chatMode !== "multi" || !multiAgentAutoStopEnabled) {
       throw new Error("当前没有授予 Agent 提前结束多 Agent 轮次的权限。");
     }
@@ -23129,11 +23336,14 @@ export function App() {
     } else if (isBrowserToolName(toolName)) {
       result = await executeBrowserTool(toolName, rawArguments, signal);
     } else if (isTerminalToolName(toolName)) {
-      result = await executeTerminalTool(toolName, rawArguments, signal);
+      const session = chatSessionsRef.current.find((candidate) => candidate.id === requestSessionId);
+      result = await executeTerminalTool(toolName, rawArguments, signal, {
+        workspaceKey: session?.workspaceKey ?? "default", ...(session?.workspacePath ? { cwd: session.workspacePath } : {}),
+      }, activeChatSessionIdRef.current === requestSessionId);
     } else if (toolName === "chat_update_heartbeat") {
-      result = await executeHeartbeatTool(rawArguments);
+      result = await executeHeartbeatTool(rawArguments, requestSessionId);
     } else if (toolName === "multi_agent_end_rounds") {
-      result = await executeMultiAgentEndTool(rawArguments);
+      result = await executeMultiAgentEndTool(rawArguments, requestSessionId);
     } else {
       result = await executeLocalFileTool(toolName, rawArguments);
     }
@@ -23226,7 +23436,11 @@ export function App() {
     attachments: ChatAttachment[],
     prompt: string,
     signal?: AbortSignal,
+    requestSessionId = activeChatSessionIdRef.current,
   ) => {
+    const { commitChatMessages, setChatStatus, chatMessagesRef, activeUserRequestTextRef,
+      activeAiMessageIdentityRef, pendingMultiAgentEndRef, trackChatProgress,
+      emitTavernEvent, emitTavernMessageEventNow } = createSessionBindings(requestSessionId);
     const imageAttachments = attachments.filter((attachment) =>
       attachment.type.startsWith("image/") && attachment.dataUrl,
     );
@@ -25017,31 +25231,32 @@ export function App() {
   const runCancellableStatusBarUpdate = async (
     options: Omit<Parameters<typeof updateStatusBarAfterAssistant>[0], "signal">,
   ) => {
-    if (activeChatAbortControllerRef.current) {
+    const runtime = chatRuntimesRef.current.get(options.sessionId);
+    if (runtime.controller) {
       return {
         attempted: true,
         updated: 0,
         error: "另一个生成或状态更新任务仍在运行。",
       } as const;
     }
-    const reducerController = new AbortController();
-    activeChatAbortControllerRef.current = reducerController;
-    setChatGenerationState("running");
+    const reducerController = beginChatGeneration(options.sessionId);
     try {
       return await updateStatusBarAfterAssistant({
         ...options,
         signal: reducerController.signal,
       });
     } finally {
-      if (activeChatAbortControllerRef.current === reducerController) {
-        activeChatAbortControllerRef.current = null;
-        setChatGenerationState("idle");
-      }
+      await finishChatGeneration(reducerController, undefined, { emitTavernLifecycleEvents: false });
     }
   };
 
   const manuallyUpdateActiveStatusBar = async () => {
     const sessionId = activeChatSessionIdRef.current;
+    const { setChatStatus } = createSessionBindings(sessionId);
+    const setManualStatusBarUpdateRunning = (running: boolean) => {
+      getSessionRunData(sessionId).manualStatusBar = running;
+      chatRuntimesRef.current.onChange();
+    };
     const statusBar = getSessionStatusBarState(sessionId);
     if (!statusBar.enabled) {
       setChatStatus({ status: "warning", message: "请先启用状态栏，再手动更新。" });
@@ -25185,6 +25400,11 @@ export function App() {
       localRewriteMessageId?: string;
     } = {},
   ) => {
+    const requestSessionId = options.requestSessionId || activeChatSessionIdRef.current;
+    const { commitChatMessages, setChatStatus, chatMessagesRef, activeUserRequestTextRef,
+      activeAiMessageIdentityRef, pendingMultiAgentEndRef, trackChatProgress,
+      emitTavernEvent, emitTavernMessageEventNow } = createSessionBindings(requestSessionId);
+
     if (
       [
         options.continuationMessageId,
@@ -25195,7 +25415,6 @@ export function App() {
       setChatStatus({ status: "error", message: "续写、重写对话和局部重写不能同时执行。" });
       return null;
     }
-    const requestSessionId = options.requestSessionId || activeChatSessionIdRef.current;
     const continuationTargetMessage = options.continuationMessageId
       ? nextMessages.find(
           (message) =>
@@ -25306,7 +25525,9 @@ export function App() {
             getAiModeAvatarId(chatPersonalization.aiAvatarSettings, requestModelId),
           )
         : undefined;
-    const abortController = beginChatGeneration();
+    const ownsController = !chatRuntimesRef.current.get(requestSessionId).controller;
+    const abortController = chatRuntimesRef.current.get(requestSessionId).controller ?? beginChatGeneration(requestSessionId);
+    if (ownsController) chatRuntimesRef.current.get(requestSessionId).supportsSteering = !isImageGenerationRequest && !Boolean(window.RengeAndroidNative);
     activeAiMessageIdentityRef.current = aiMessageIdentity ?? null;
     const abortSignal = abortController.signal;
     let assistantMessageId = "";
@@ -25729,6 +25950,9 @@ export function App() {
           kernel: usePiKernel ? "pi" : "renge",
         });
         const piRunId = usePiKernel ? crypto.randomUUID() : "";
+        const runtime = chatRuntimesRef.current.get(requestSessionId);
+        runtime.piRunId = piRunId;
+        runtime.piReady = false;
         const effectiveToolCount =
           chatToolsForRequest.length +
           (usePiKernel && options.includeTools && requestContextSettings.workspaceTools &&
@@ -25740,6 +25964,16 @@ export function App() {
         const piIncompleteToolCalls = new Map<string, ChatToolCall>();
         const piToolVisualizations = new Map<string, ToolVisualization>();
         const handlePiEvent = async (event: PiStreamEvent) => {
+          if (event.type === "run_ready") {
+            runtime.piReady = true;
+            void flushSteeringInputs(requestSessionId);
+            return;
+          }
+          if (event.type === "input_delivered") {
+            options.beforePiToolMessage?.();
+            deliverSteeringInput(requestSessionId, event.inputId);
+            return;
+          }
           const runtimeStatus = formatPiRuntimeStatus(event);
           if (runtimeStatus) {
             setChatStatus({ status: "loading", message: runtimeStatus });
@@ -27641,8 +27875,7 @@ export function App() {
             signal: abortSignal,
           });
           if (
-            statusBarResult.attempted &&
-            activeChatSessionIdRef.current === requestSessionId
+            statusBarResult.attempted
           ) {
             setChatStatus({
               status: statusBarResult.error ? "warning" : "success",
@@ -27726,7 +27959,7 @@ export function App() {
       return null;
     } finally {
       streamingMessageUpdates?.cancel();
-      await finishChatGeneration(abortController, assistantMessageId);
+      if (ownsController) await finishChatGeneration(abortController, assistantMessageId);
       activeAiMessageIdentityRef.current = null;
     }
   };
@@ -27791,6 +28024,10 @@ export function App() {
   };
 
   const handleChatAttachmentChange = async (files: FileList | File[] | null) => {
+    const sessionId = activeChatSessionIdRef.current;
+    const setChatStatus = (status: SessionRunStatus) => {
+      if (!chatRuntimesRef.current.get(sessionId).controller) setSessionChatStatus(sessionId, status);
+    };
     const selectedFiles = Array.from(files ?? []);
     if (chatAttachmentInputRef.current) {
       chatAttachmentInputRef.current.value = "";
@@ -27807,7 +28044,11 @@ export function App() {
         if (file) chatAttachmentFilesRef.current.set(attachment.id, file);
         chatAttachmentMetadataRef.current.set(attachment.id, attachment);
       });
-      setChatAttachments((current) => [...current, ...nextAttachments]);
+      if (activeChatSessionIdRef.current === sessionId) setChatAttachments((current) => [...current, ...nextAttachments]);
+      else {
+        const draft = chatDraftsRef.current.get(sessionId) ?? { text: "", attachments: [] };
+        chatDraftsRef.current.set(sessionId, { ...draft, attachments: [...draft.attachments, ...nextAttachments] });
+      }
       setChatStatus({
         status: "success",
         message: `已添加 ${selectedFiles.length} 个附件。`,
@@ -27903,6 +28144,9 @@ export function App() {
     triggerContent: string,
     requestSessionId: string,
   ): Promise<MultiAgentResponseResult | null> => {
+    const { commitChatMessages, setChatStatus, chatMessagesRef, activeUserRequestTextRef,
+      activeAiMessageIdentityRef, pendingMultiAgentEndRef, trackChatProgress,
+      emitTavernEvent, emitTavernMessageEventNow } = createSessionBindings(requestSessionId);
     const configurationError = getMultiAgentConfigurationError();
     if (configurationError) {
       setChatStatus({ status: "error", message: configurationError });
@@ -28098,14 +28342,18 @@ export function App() {
   const sendMultiAgentMessage = async (
     content: string,
     attachmentsToSend: ChatAttachment[],
+    requestSessionId = activeChatSessionIdRef.current,
   ) => {
+    const { commitChatMessages, setChatStatus, chatMessagesRef, activeUserRequestTextRef,
+      activeAiMessageIdentityRef, pendingMultiAgentEndRef, trackChatProgress,
+      emitTavernEvent, emitTavernMessageEventNow } = createSessionBindings(requestSessionId);
     const configurationError = getMultiAgentConfigurationError();
     if (configurationError) {
       setChatStatus({ status: "error", message: configurationError });
       return;
     }
-    const requestSessionId = activeChatSessionIdRef.current;
 
+    const controller = beginChatGeneration(requestSessionId);
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -28119,12 +28367,11 @@ export function App() {
     let accumulatedMessages = [...chatMessagesRef.current, userMessage];
 
     chatMessagesRef.current = accumulatedMessages;
-    setChatMessages(accumulatedMessages);
-    setChatInput("");
-    setChatAttachments([]);
+    commitChatMessages(accumulatedMessages);
+    if (activeChatSessionIdRef.current === requestSessionId) { setChatInput(""); setChatAttachments([]); }
     try {
       setChatStatus({ status: "loading", message: "正在运行发送前酒馆脚本..." });
-      const prepared = await runTavernPreSendHooks(userMessage, content);
+      const prepared = await runTavernPreSendHooks(userMessage, content, requestSessionId);
       accumulatedMessages = prepared.messages;
       activeUserRequestTextRef.current = prepared.content;
       const result = await runMultiAgentResponses(
@@ -28141,8 +28388,7 @@ export function App() {
         result,
       );
       if (
-        statusBarResult.attempted &&
-        activeChatSessionIdRef.current === requestSessionId
+        statusBarResult.attempted
       ) {
         const completionLabel = result.completed
           ? "多 Agent 回复已完成"
@@ -28166,6 +28412,8 @@ export function App() {
       }
       const message = error instanceof Error ? error.message : "发送前酒馆脚本执行失败。";
       setChatStatus({ status: "error", message });
+    } finally {
+      await finishChatGeneration(controller);
     }
   };
 
@@ -28194,6 +28442,8 @@ export function App() {
     config?: unknown,
     sourceFrame?: HTMLIFrameElement,
   ) => {
+    const requestSessionId = activeChatSessionIdRef.current;
+    const { setChatStatus, chatMessagesRef, emitTavernEvent } = createSessionBindings(requestSessionId);
     const normalizedConfig = isObjectRecord(config) ? config : { user_input: config };
     const customApi = isObjectRecord(normalizedConfig.custom_api)
       ? normalizedConfig.custom_api
@@ -28280,7 +28530,7 @@ export function App() {
       typeof normalizedConfig.on_stream === "function"
         ? (normalizedConfig.on_stream as (delta: string, fullText: string) => unknown)
         : null;
-    const abortController = beginChatGeneration();
+    const abortController = beginChatGeneration(requestSessionId);
     const abortSignal = abortController.signal;
     const rawSourceMessages: ChatMessage[] = [
       {
@@ -28681,17 +28931,27 @@ export function App() {
   const sendChatMessage = async (
     contentOverride?: string,
     attachmentsOverride?: ChatAttachment[],
+    sessionOverride?: string,
   ) => {
     const hasContentOverride = contentOverride !== undefined;
     const content = (
       hasContentOverride ? contentOverride : chatInputValueRef.current
     ).trim();
-    const requestSessionId = activeChatSessionIdRef.current;
+    const requestSessionId = sessionOverride ?? activeChatSessionIdRef.current;
+    const { commitChatMessages, setChatStatus, chatMessagesRef, activeUserRequestTextRef,
+      activeAiMessageIdentityRef, pendingMultiAgentEndRef, trackChatProgress,
+      emitTavernEvent, emitTavernMessageEventNow } = createSessionBindings(requestSessionId);
     const attachmentsToSend =
       attachmentsOverride ?? (hasContentOverride ? [] : chatAttachments);
-    if ((!content && attachmentsToSend.length === 0) || chatStatus.status === "loading") return;
+    if (!content && attachmentsToSend.length === 0) return;
+    const runtime = chatRuntimesRef.current.get(requestSessionId);
+    if (runtime.controller) {
+      await appendRunningInput(requestSessionId, content, attachmentsToSend);
+      return;
+    }
+    runtime.continueWith = (input) => sendChatMessage(input.content, input.attachments, requestSessionId);
     if (chatMode === "multi") {
-      await sendMultiAgentMessage(content, attachmentsToSend);
+      await sendMultiAgentMessage(content, attachmentsToSend, requestSessionId);
       return;
     }
     if (chatMode === "roleplay" && !activeSessionRoleplayCard) {
@@ -28730,12 +28990,11 @@ export function App() {
     chatScrollFollowLatestRef.current = true;
     const initialMessages = [...chatMessagesRef.current, userMessage];
 
-    chatMessagesRef.current = initialMessages;
-    setChatMessages(initialMessages);
-    setChatInput("");
-    setChatAttachments([]);
-    let abortController: AbortController | null = null;
-    let abortSignal: AbortSignal | undefined;
+    commitChatMessages(initialMessages);
+    if (activeChatSessionIdRef.current === requestSessionId) { setChatInput(""); setChatAttachments([]); }
+    let abortController: AbortController | null = beginChatGeneration(requestSessionId);
+    runtime.supportsSteering = !isImageGenerationRequest && !Boolean(window.RengeAndroidNative);
+    let abortSignal: AbortSignal | undefined = abortController.signal;
     let assistantMessageId = "";
     let assistantOutputStatus: ChatBubbleStatus = "complete";
     let streamingAssistantInserted = false;
@@ -28746,7 +29005,7 @@ export function App() {
 
     try {
       setChatStatus({ status: "loading", message: "正在运行发送前酒馆脚本..." });
-      const prepared = await runTavernPreSendHooks(userMessage, content);
+      const prepared = await runTavernPreSendHooks(userMessage, content, requestSessionId);
       effectiveContent = prepared.content;
       nextMessages = prepared.messages;
       activeUserRequestTextRef.current = effectiveContent;
@@ -28759,7 +29018,7 @@ export function App() {
         await resetPiSession(requestSessionId);
       }
 
-      abortController = beginChatGeneration();
+      // The session controller is reserved before asynchronous send hooks.
       activeAiMessageIdentityRef.current = aiMessageIdentity ?? null;
       abortSignal = abortController.signal;
       await emitTavernEvent(
@@ -28800,6 +29059,7 @@ export function App() {
           attachmentsToSend,
           effectiveContent,
           abortSignal,
+          requestSessionId,
         );
         throwIfChatAborted(abortSignal);
         if (imageRecognitionContext) {
@@ -29058,6 +29318,9 @@ export function App() {
           kernel: usePiKernel ? "pi" : "renge",
         });
         const piRunId = usePiKernel ? crypto.randomUUID() : "";
+        const runtime = chatRuntimesRef.current.get(requestSessionId);
+        runtime.piRunId = piRunId;
+        runtime.piReady = false;
         const effectiveToolCount =
           requestTools.length +
           (usePiKernel && options.includeTools && activeLlmContextSettings.workspaceTools &&
@@ -29069,6 +29332,16 @@ export function App() {
         const piIncompleteToolCalls = new Map<string, ChatToolCall>();
         const piToolVisualizations = new Map<string, ToolVisualization>();
         const handlePiEvent = async (event: PiStreamEvent) => {
+          if (event.type === "run_ready") {
+            runtime.piReady = true;
+            void flushSteeringInputs(requestSessionId);
+            return;
+          }
+          if (event.type === "input_delivered") {
+            options.beforePiToolMessage?.();
+            deliverSteeringInput(requestSessionId, event.inputId);
+            return;
+          }
           const runtimeStatus = formatPiRuntimeStatus(event);
           if (runtimeStatus) {
             setChatStatus({ status: "loading", message: runtimeStatus });
@@ -29989,7 +30262,7 @@ export function App() {
           : finalAssistantForStatus,
         signal: abortSignal,
       });
-      if (activeChatSessionIdRef.current === requestSessionId) {
+      {
         setChatStatus({
           status: statusBarResult.error ? "warning" : "success",
           message: statusBarResult.error
@@ -30213,8 +30486,9 @@ export function App() {
   };
 
   const runHeartbeatForSession = async (sessionId: string) => {
-    const session = chatSessions.find((item) => item.id === sessionId);
-    if (!session || heartbeatRunningRef.current || chatStatus.status === "loading") return;
+    const { commitChatMessages, setChatStatus } = createSessionBindings(sessionId);
+    const session = chatSessionsRef.current.find((item) => item.id === sessionId);
+    if (!session || heartbeatRunningRef.current || chatRuntimesRef.current.get(sessionId).controller) return;
 
     const heartbeat = normalizeHeartbeatConfig(session.heartbeat);
     if (!heartbeat.enabled || !heartbeat.event.trim()) return;
@@ -30236,7 +30510,7 @@ export function App() {
         "请先检查并完成本轮任务，再总结结果。只有在本轮任务完成后，才调用 chat_update_heartbeat 修改或关闭心跳设置。",
       ].join("\n"),
     };
-    const nextMessages = [...chatMessages, heartbeatMessage];
+    const nextMessages = [...getMessagesForSession(sessionId), heartbeatMessage];
 
     commitChatMessages(nextMessages);
 
@@ -30264,8 +30538,7 @@ export function App() {
           requestModelId: getEffectiveProviderModelId(chatProvider),
         });
         if (
-          statusBarResult.attempted &&
-          activeChatSessionIdRef.current === sessionId
+          statusBarResult.attempted
         ) {
           setChatStatus({
             status: statusBarResult.error ? "warning" : "success",
@@ -37645,13 +37918,15 @@ export function App() {
                           closeMobileSidebar();
                         }}
                       >
-                        <MessageSquare size={14} />
+                        {chatRuntimesRef.current.get(session.id).controller ? <LoaderCircle size={14} className="chat-status-spinner" /> : <MessageSquare size={14} />}
                         <span>{session.title}</span>
+                        {chatRuntimesRef.current.get(session.id).controller && <small className="chat-session-running">运行中</small>}
                       </button>
                       <button
                         type="button"
                         className="session-icon-button danger"
                         title="删除会话"
+                        disabled={Boolean(chatRuntimesRef.current.get(session.id).controller)}
                         onClick={() => deleteChatSession(session.id)}
                       >
                         <Trash2 size={13} />
@@ -38465,6 +38740,8 @@ export function App() {
           >
             {chatStatus.message && (
               <ChatComposerStatus
+                key={activeChatSessionId}
+                runStartedAt={activeChatRuntime.controller ? activeChatRuntime.startedAt : undefined}
                 status={chatStatus.status}
                 message={chatStatus.message}
                 persistent={Boolean(chatMessages.at(-1)?.choiceRequest && !chatMessages.at(-1)?.choiceRequest?.response)}
@@ -38486,6 +38763,35 @@ export function App() {
                 multiple
                 onChange={(event) => void handleChatAttachmentChange(event.target.files)}
               />
+              {(activeChatRuntime.queued.length > 0 || activeChatRuntime.steering.size > 0) && (
+                <div className="chat-pending-inputs" aria-label="待处理消息">
+                  {activeChatRuntime.queuePaused && activeChatRuntime.queued.length > 0 && (
+                    <button type="button" onClick={() => { activeChatRuntime.queuePaused = false; void runNextQueuedInput(activeChatSessionId); }}>继续排队</button>
+                  )}
+                  {[...activeChatRuntime.steering.values(), ...activeChatRuntime.queued].map((input) => (
+                    <div className="chat-pending-input" key={input.id}>
+                      <small>{activeChatRuntime.queuePaused ? "已暂停" : input.mode === "steer" ? "等待纠偏" : "排队中"}</small>
+                      <span title={input.content}>{input.content || `附件 ${input.attachments.length} 个`}</span>
+                      {!input.submitted && <button type="button" aria-label="取消待处理消息" onClick={() => {
+                        activeChatRuntime.queued = activeChatRuntime.queued.filter((candidate) => candidate.id !== input.id);
+                        activeChatRuntime.steering.delete(input.id);
+                        savePendingInputs(activeChatSessionId);
+                        chatRuntimesRef.current.onChange();
+                      }}><X size={13} /></button>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {chatGenerationState !== "idle" && (
+                <div className="chat-running-input-mode">
+                  <label>运行中追加消息
+                    <select aria-label="运行中消息方式" value={chatInputMode} onChange={(event) => setChatInputMode(event.target.value as ChatInputMode)}>
+                      <option value="queue">排队：本轮结束后执行</option>
+                      <option value="steer">立即纠偏：尽快调整当前任务</option>
+                    </select>
+                  </label>
+                </div>
+              )}
               <textarea
                 id="send_textarea"
                 ref={setChatInputElementRef}
@@ -39305,31 +39611,25 @@ export function App() {
                     </div>
                   </details>
                 </div>
-                <button
-                  id="send_but"
-                  ref={chatSendButtonRef}
-                  type="button"
-                  className={`send-button ${chatGenerationState !== "idle" ? "stop" : ""}`}
-                  disabled={
-                    chatGenerationState === "idle" &&
-                    ((!chatInputHasContentRef.current && chatAttachments.length === 0) ||
-                      chatStatus.status === "loading" ||
-                      (chatMode === "roleplay" && !activeSessionRoleplayCard))
-                  }
-                  onClick={() =>
-                    chatGenerationState === "idle"
-                      ? void sendChatMessage()
-                      : stopChatGeneration()
-                  }
-                  title={chatGenerationState === "idle" ? "发送" : "停止输出"}
-                  aria-label={chatGenerationState === "idle" ? "发送" : "停止输出"}
-                >
-                  {chatGenerationState === "idle" ? (
-                    <Send size={18} />
-                  ) : (
+                <div className="composer-send-actions">
+                {chatGenerationState !== "idle" && (
+                  <button type="button" className="send-button stop" onClick={stopChatGeneration}
+                    disabled={chatGenerationState === "stopping"} title="停止当前会话" aria-label="停止输出">
                     <Square size={15} fill="currentColor" strokeWidth={0} />
-                  )}
+                  </button>
+                )}
+                <button
+                  id="send_but" ref={chatSendButtonRef} type="button" className="send-button"
+                  disabled={(!chatInputHasContentRef.current && chatAttachments.length === 0) || chatGenerationState === "stopping" ||
+                    (chatGenerationState === "idle" && chatStatus.status === "loading") ||
+                    (chatMode === "roleplay" && !activeSessionRoleplayCard)}
+                  onClick={() => void sendChatMessage()}
+                  title={chatGenerationState === "idle" ? "发送" : chatInputMode === "queue" ? "加入队列" : "立即纠偏"}
+                  aria-label={chatGenerationState === "idle" ? "发送" : chatInputMode === "queue" ? "加入队列" : "立即纠偏"}
+                >
+                  <Send size={18} />
                 </button>
+                </div>
               </div>
             </div>
           </section>

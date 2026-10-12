@@ -457,6 +457,11 @@ export function createRengePiHost({
     // Rewrites use the supplied transcript without changing the normal Pi tree.
     const replaceHistory = body?.piHistoryMode === "replace";
     const sessionKey = replaceHistory ? "" : sessionFilePath(sessionDir, ownerSessionId, sessionScope, cwd);
+    if ([...runs.values()].some((run) => sessionKey && run.sessionKey === sessionKey && !run.completed)) {
+      response.writeHead(409, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: "此会话已有任务正在运行，请追加消息或等待完成。" }));
+      return;
+    }
     const previousIdleSession = idleSessions.get(sessionKey);
     if (previousIdleSession) {
       idleSessions.delete(sessionKey);
@@ -507,6 +512,9 @@ export function createRengePiHost({
       lastAssistantStopReason: "",
       completed: false,
       cancelled: false,
+      ownerSessionId,
+      acceptingInput: false,
+      inputs: new Map(),
     };
     runs.set(runId, run);
     const abortRun = () => {
@@ -702,6 +710,13 @@ export function createRengePiHost({
       });
 
       unsubscribe = session.subscribe((event) => {
+        if (event.type === "message_start" && event.message?.role === "user") {
+          const input = run.inputs.get(event.message.rengeInputId);
+          if (input && !input.delivered) {
+            input.delivered = true;
+            writeSse(response, piEvent("input_delivered", { runId, inputId: input.id, mode: input.mode }));
+          }
+        }
         if (event.type === "message_end" && event.message?.role === "assistant") {
           run.lastAssistantStopReason = String(event.message.stopReason ?? "");
         }
@@ -837,6 +852,8 @@ export function createRengePiHost({
       await maybeAutoCompact(session, compaction, pendingPromptTokens);
       checkCancelled();
       const promptOptions = prompt.images.length > 0 ? { images: prompt.images } : undefined;
+      run.acceptingInput = true;
+      writeSse(response, piEvent("run_ready", { runId, sessionId: ownerSessionId }));
       try {
         await session.prompt(prompt.text, promptOptions);
         const errorMessage = session.agent.state.errorMessage;
@@ -881,6 +898,7 @@ export function createRengePiHost({
         if (retryError) throw new Error(retryError);
       }
       const finishReason = getSessionFinishReason(session, run.lastAssistantStopReason);
+      run.acceptingInput = false;
       flushIncompleteStreamingToolCalls(run, { finishReason, willRetry: false });
       // Some local gateways report zero usage, so the SDK cannot run its
       // post-turn threshold check. Re-check Pi's own message estimator here.
@@ -897,6 +915,7 @@ export function createRengePiHost({
         writeSse(response, "[DONE]");
       }
     } finally {
+      run.acceptingInput = false;
       run.completed = true;
       response.off("close", abortRun);
       if (run.cancelled) await run.session?.abort();
@@ -1002,6 +1021,39 @@ export function createRengePiHost({
     return { ok: true, aborted: true };
   };
 
+  const handleInput = async (body) => {
+    const run = runs.get(String(body?.runId ?? ""));
+    if (!run || run.completed || run.cancelled || !run.acceptingInput || !run.session) {
+      return { ok: false, status: 409, error: "本轮任务尚未准备好或已经结束。" };
+    }
+    if (normalizeSessionId(body?.sessionId) !== run.ownerSessionId) {
+      return { ok: false, status: 403, error: "追加消息不属于当前运行会话。" };
+    }
+    const id = String(body?.inputId ?? "").trim();
+    const text = String(body?.content ?? "").trim();
+    const mode = body?.mode;
+    if (!id || !text || !["queue", "steer"].includes(mode)) {
+      return { ok: false, status: 400, error: "缺少追加消息或发送方式。" };
+    }
+    const existing = run.inputs.get(id);
+    if (existing) return existing.text === text && existing.mode === mode
+      ? { ok: true, status: 200, inputId: id }
+      : { ok: false, status: 409, error: "追加消息编号已被其他内容使用。" };
+    // Register before queueing: a running tool can settle during this await.
+    run.inputs.set(id, { id, text, mode, delivered: false });
+    try {
+      // The public core queue preserves correlation metadata without exposing
+      // it in the model prompt or relying on matching duplicate user text.
+      run.session.agent[mode === "steer" ? "steer" : "followUp"]({
+        role: "user", content: [{ type: "text", text }], timestamp: Date.now(), rengeInputId: id,
+      });
+      return { ok: true, status: 200, inputId: id };
+    } catch (error) {
+      run.inputs.delete(id);
+      return { ok: false, status: 409, error: error instanceof Error ? error.message : String(error) };
+    }
+  };
+
   const handleDeleteSession = async (body) => {
     const requestedSessionId = String(body?.sessionId ?? "").trim();
     if (!requestedSessionId) return { ok: false, status: 400, error: "缺少 sessionId" };
@@ -1058,6 +1110,7 @@ export function createRengePiHost({
     handleChat,
     handleToolResult,
     handleAbort,
+    handleInput,
     handleCompact,
     handleSetAutoCompaction,
     handleDeleteSession,
