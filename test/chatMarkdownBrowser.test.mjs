@@ -11,7 +11,7 @@ const source = 'const greeting = (name: string) => `你好，${name}`;\nconsole.
 const largeCode = "const value = 1; ".repeat(2000);
 const tableText = "长文字自然换行，表格不会撑开整个聊天窗口。".repeat(8);
 const prose = [
-  "# 阅读测试", "", "正文包含 **重点**、`行内代码`、*斜体* 和 [链接](https://example.com)。",
+  "# 阅读测试", "", "正文包含 **重点**、`行内代码`、*斜体* 和 [链接](https://example.com)，校验值 `E1C4E9A5…168F40DC7`。",
   "", "## 清晰的层次", "", "> 引用内容", "", "### 待办", "",
   "- [x] 已完成", "- [ ] 待完成", "", "3. 第三步", "4. 第四步", "",
   "| 内容 | 说明 | 数值 |", "| :--- | :---: | ---: |", `| 排版 | ${tableText} | 12 |`,
@@ -29,6 +29,7 @@ try {
     body: JSON.stringify({ data: {
       version: 1, chatMode: "ai", activeProviderId: provider.id, providers: [provider],
       chatRenderedEditingEnabled: true, chatMultiBubbleEnabled: false,
+      chatPersonalization: { messageFontFamily: "lxgw-wenkai-screen", messageFontSize: 18 },
       llmContextSettings: { skills: false, mcpTools: false, workspaceTools: false },
       chatSessions: [{ id: "markdown-test", title: "Markdown 测试", mode: "ai", workspaceKey: "default", workspaceName: "默认工作区", messages: [
         { id: "user", role: "user", content: "Markdown 测试", createdAt: now },
@@ -68,6 +69,13 @@ try {
   const tableCell = proseMessage.locator("td").nth(1);
   assert.equal(await tableCell.textContent(), tableText);
   assert.equal(await tableCell.evaluate(cell => getComputedStyle(cell).whiteSpace), "normal");
+  const font = await proseMessage.locator(".mes_text").evaluate(el => ({
+    family: getComputedStyle(el).fontFamily,
+    size: getComputedStyle(el).fontSize,
+  }));
+  assert.match(font.family, /LXGW WenKai Screen/, "the chosen message font is preserved");
+  assert.equal(font.size, "18px", "the chosen message size is preserved");
+  assert.equal(await proseMessage.locator("code.chat-inline-code-digest").textContent(), "E1C4E9A5…168F40DC7");
 
   // Rendering edits must preserve numbering, table alignment, and task state.
   const more = proseMessage.locator(".chat-message-more");

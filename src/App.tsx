@@ -1750,7 +1750,7 @@ const CHAT_MESSAGE_FONT_OPTIONS: Array<{
   { value: "lxgw-wenkai-screen", label: "LXGW WenKai Screen" },
 ];
 const CHAT_ASSISTANT_BUBBLE_OPACITY_STYLE: CSSProperties = {
-  backgroundColor: "rgba(255, 255, 255, var(--chat-bubble-opacity, 1))",
+  backgroundColor: "rgba(255, 254, 252, var(--chat-bubble-opacity, 1))",
 };
 const CHAT_USER_BUBBLE_OPACITY_STYLE: CSSProperties = {
   backgroundColor: "rgba(149, 236, 105, var(--chat-bubble-opacity, 1))",
@@ -7519,7 +7519,13 @@ function renderInlineText(content: string): ReactNode[] {
     const groups = match.groups ?? {};
 
     if (groups.code !== undefined) {
-      nodes.push(<code key={`code-${match.index}`}>{groups.code}</code>);
+      const isDigest = groups.code.length <= 256 &&
+        /^(?:[a-f\d]{8,}|[a-f\d]{6,}(?:…|\.{3})[a-f\d]{6,})$/i.test(groups.code);
+      nodes.push(
+        <code className={isDigest ? "chat-inline-code-digest" : undefined} key={`code-${match.index}`}>
+          {groups.code}
+        </code>,
+      );
     } else if (groups.bareImage !== undefined) {
       // 裸图片 URL（http(s) 直链或 data:image/...）
       nodes.push(
