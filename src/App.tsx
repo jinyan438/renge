@@ -21671,9 +21671,10 @@ export function App() {
     };
   };
 
-  const restoreAndroidWorkspace = async () => {
+  const restoreAndroidWorkspace = async (sessionId?: string) => {
     const handle = await getSavedAndroidWorkspace();
     if (!handle) return null;
+    if (sessionId && activeChatSessionIdRef.current !== sessionId) return null;
     workspaceAutoRestoreDisabledRef.current = false;
     setLocalWorkspaceHandle(handle);
     setLocalToolsEnabled(true);
@@ -21690,9 +21691,10 @@ export function App() {
     return handle;
   };
 
-  const restoreAndroidWorkspaceByUri = async (uri: string, name?: string) => {
+  const restoreAndroidWorkspaceByUri = async (uri: string, name?: string, sessionId?: string) => {
     if (!window.rengeAndroid?.isAndroid || !uri) return null;
     const handle = await window.rengeAndroid.restoreWorkspace({ uri, name });
+    if (sessionId && activeChatSessionIdRef.current !== sessionId) return null;
     workspaceAutoRestoreDisabledRef.current = false;
     setLocalWorkspaceHandle(handle);
     setLocalToolsEnabled(true);
@@ -21712,7 +21714,14 @@ export function App() {
   const openChatSession = async (sessionId: string) => {
     const session = chatSessionsRef.current.find((item) => item.id === sessionId);
     if (!session) return;
-    const { setChatStatus } = createSessionBindings(sessionId);
+    const runtime = chatRuntimesRef.current.get(sessionId);
+    const wasRunning = Boolean(runtime.controller);
+    const previousRunStartedAt = runtime.startedAt;
+    const setChatStatus = (status: SessionRunStatus) => {
+      if (activeChatSessionIdRef.current !== sessionId || wasRunning || runtime.controller ||
+        runtime.startedAt !== previousRunStartedAt) return;
+      setSessionChatStatus(sessionId, status);
+    };
 
     workspaceAutoRestoreDisabledRef.current = false;
     showChatSession(session);
@@ -21726,7 +21735,6 @@ export function App() {
       setLocalWorkspaceHandle(null);
       setLocalToolsEnabled(false);
       restoredWorkspacePathRef.current = "";
-      setChatStatus({ status: "idle", message: "" });
       return;
     }
 
@@ -21734,6 +21742,7 @@ export function App() {
       setChatStatus({ status: "loading", message: `正在恢复工作区：${session.workspaceName}` });
       try {
         const restored = await restoreElectronWorkspaceFromSession(session);
+        if (activeChatSessionIdRef.current !== sessionId) return;
         setChatStatus({
           status: restored ? "success" : "error",
           message: restored
@@ -21741,6 +21750,7 @@ export function App() {
             : "无法恢复工作区，请重新选择文件夹。",
         });
       } catch (error) {
+        if (activeChatSessionIdRef.current !== sessionId) return;
         setLocalWorkspaceHandle(null);
         setLocalToolsEnabled(false);
         restoredWorkspacePathRef.current = "";
@@ -21753,7 +21763,6 @@ export function App() {
     }
 
     if (workspaceInfo.key === session.workspaceKey) {
-      setChatStatus({ status: "idle", message: "" });
       return;
     }
 
@@ -21766,7 +21775,6 @@ export function App() {
         setLocalWorkspaceHandle(pcWorkspace);
         setLocalToolsEnabled(true);
         restoredWorkspacePathRef.current = pcWorkspace.path;
-        setChatStatus({ status: "idle", message: "" });
         return;
       }
 
@@ -21787,8 +21795,9 @@ export function App() {
           ? session.workspacePath ?? session.workspaceKey.replace(/^android:/, "")
           : "";
         const androidWorkspace = sessionAndroidUri
-          ? await restoreAndroidWorkspaceByUri(sessionAndroidUri, session.workspaceName)
-          : await restoreAndroidWorkspace();
+          ? await restoreAndroidWorkspaceByUri(sessionAndroidUri, session.workspaceName, sessionId)
+          : await restoreAndroidWorkspace(sessionId);
+        if (activeChatSessionIdRef.current !== sessionId) return;
         if (androidWorkspace) {
           const androidWorkspaceInfo = getWorkspaceInfo(androidWorkspace);
           if (session.workspaceKey.startsWith("browser:")) {
@@ -21828,6 +21837,7 @@ export function App() {
           return;
         }
       } catch (error) {
+        if (activeChatSessionIdRef.current !== sessionId) return;
         setLocalWorkspaceHandle(null);
         setLocalToolsEnabled(false);
         restoredWorkspacePathRef.current = "";
@@ -30708,6 +30718,7 @@ export function App() {
 
   const continueAssistantMessage = async (messageId: string) => {
     if (chatStatus.status === "loading") return;
+    const requestSessionId = activeChatSessionIdRef.current;
 
     const messageIndex = chatMessagesRef.current.findIndex(
       (message) => message.id === messageId,
@@ -30738,6 +30749,7 @@ export function App() {
         : undefined;
 
     const result = await generateAssistantForMessages(messagesForContinuation, requestSender, {
+      requestSessionId,
       responseMode,
       ...(responderPersona ? { responderPersona } : {}),
       ...(multiAgentRequestConfig
@@ -30751,11 +30763,12 @@ export function App() {
       streamingStatusMessage: "正在续写当前回复...",
       successMessage: "续写已完成。",
     });
-    if (result) await resetPiSession(activeChatSessionIdRef.current);
+    if (result) await resetPiSession(requestSessionId);
   };
 
   const rewriteAssistantDialogues = async (messageId: string) => {
     if (chatStatus.status === "loading") return;
+    const requestSessionId = activeChatSessionIdRef.current;
 
     const messageIndex = chatMessagesRef.current.findIndex(
       (message) => message.id === messageId,
@@ -30793,6 +30806,7 @@ export function App() {
         : undefined;
 
     const result = await generateAssistantForMessages(messagesForRewrite, requestSender, {
+      requestSessionId,
       responseMode,
       ...(responderPersona ? { responderPersona } : {}),
       ...(multiAgentRequestConfig
@@ -30806,11 +30820,12 @@ export function App() {
       streamingStatusMessage: "正在根据上下文重写对白...",
       successMessage: "对白重写已完成。",
     });
-    if (result) await resetPiSession(activeChatSessionIdRef.current);
+    if (result) await resetPiSession(requestSessionId);
   };
 
   const rewriteAssistantLocally = async (messageId: string) => {
     if (chatStatus.status === "loading") return;
+    const requestSessionId = activeChatSessionIdRef.current;
 
     const messageIndex = chatMessagesRef.current.findIndex(
       (message) => message.id === messageId,
@@ -30848,6 +30863,7 @@ export function App() {
         : undefined;
 
     const result = await generateAssistantForMessages(messagesForRewrite, requestSender, {
+      requestSessionId,
       responseMode,
       ...(responderPersona ? { responderPersona } : {}),
       ...(multiAgentRequestConfig
@@ -30861,7 +30877,7 @@ export function App() {
       streamingStatusMessage: "正在根据上下文局部重写...",
       successMessage: "局部重写已完成。",
     });
-    if (result) await resetPiSession(activeChatSessionIdRef.current);
+    if (result) await resetPiSession(requestSessionId);
   };
 
   const saveEditedAssistantMessage = () => {

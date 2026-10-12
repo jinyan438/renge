@@ -47,12 +47,17 @@ try {
   browser = await chromium.launch({ headless: true });
   page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   page.setDefaultTimeout(15_000);
-  const errors = [], aborted = [], steering = [];
+  const errors = [], aborted = [], steering = [], resets = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.route("**/api/pi/chat", (route) => route.continue({ url: `http://127.0.0.1:${fixture.address().port}/chat` }));
   await page.route("**/api/pi/abort", async (route) => {
     const body = route.request().postDataJSON(); aborted.push(body.runId);
     streams.find((stream) => stream.runId === body.runId)?.response.end();
+    await route.fulfill({ json: { ok: true } });
+  });
+  await page.route("**/api/pi/session", async (route) => {
+    if (route.request().method() !== "DELETE") return route.continue();
+    resets.push(route.request().postDataJSON());
     await route.fulfill({ json: { ok: true } });
   });
   await page.route("**/api/pi/input", async (route) => {
@@ -66,6 +71,7 @@ try {
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
   await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   const input = page.getByPlaceholder("输入消息，可粘贴图片");
+  const status = page.locator(".chat-composer .chat-status");
   const selectSession = (id) => page.locator(".chat-session-item").filter({ hasText: `会话${id}` }).locator("button").first().click();
   const inputMenu = page.getByRole("dialog", { name: "选择发送方式" });
   async function send(content, mode) {
@@ -108,9 +114,13 @@ try {
   assert.equal(await input.inputValue(), "A未提交草稿", "outside click preserves the draft");
   await input.press("Enter");
   await inputMenu.waitFor();
+  const aStatusBeforeSwitch = await status.locator(".chat-status-message").textContent();
   await selectSession("B");
   await inputMenu.waitFor({ state: "hidden" });
+  assert.equal(await status.count(), 0, "an idle conversation does not inherit another run's progress");
   await selectSession("A");
+  assert.equal(await status.locator(".chat-status-message").textContent(), aStatusBeforeSwitch, "switching back preserves the running conversation's status");
+  assert.equal(await status.locator(".chat-status-elapsed").count(), 1, "switching back preserves the run timer");
   assert.equal(await input.inputValue(), "A未提交草稿", "switching conversations closes the chooser without losing its draft");
   await input.fill("");
   await page.getByRole("button", { name: "停止输出", exact: true }).waitFor();
@@ -131,11 +141,13 @@ try {
   assert.equal(await page.getByRole("button", { name: "停止输出", exact: true }).isEnabled(), true, "scripted input keeps stopping available after sending");
   text(streams[1], "B的部分回复");
   await page.locator(".chat-message.assistant").filter({ hasText: "B的部分回复" }).waitFor();
+  const bStatusBeforeSwitch = await status.locator(".chat-status-message").textContent();
   await input.fill("B草稿");
   await selectSession("A");
   assert.equal(await input.inputValue(), "A草稿");
   assert.equal(await page.locator(".chat-message").filter({ hasText: "B的部分回复" }).count(), 0);
   await selectSession("B");
+  assert.equal(await status.locator(".chat-status-message").textContent(), bStatusBeforeSwitch, "concurrent conversations keep independent progress");
   assert.equal(await input.inputValue(), "B草稿");
   finish(streams[0]);
   await waitFor(() => streams.length === 3, "A queued input starts in the background");
@@ -215,8 +227,56 @@ try {
   assert.match(fallbackMessages, /Android纠偏指令/);
   text(streams[6], "Android纠偏完成"); finish(streams[6]);
   await page.locator(".chat-message.assistant").filter({ hasText: "Android纠偏完成" }).waitFor();
+  await status.getByText("回复已生成。", { exact: true }).waitFor();
+
+  // Completion of a background continuation must reconcile its own Pi history.
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.evaluate(() => { delete window.RengeAndroidNative; });
+  const more = page.locator(".chat-message.assistant").filter({ hasText: "Android纠偏完成" }).last().locator(".chat-message-more");
+  await more.click();
+  await page.locator(".chat-message-menu").getByRole("button", { name: "续写", exact: true }).click();
+  await waitFor(() => streams.length === 8, "A continuation started");
+  await selectSession("B");
+  await send("B继续并行运行");
+  await waitFor(() => streams.length === 9, "B runs while A continues");
+  text(streams[8], "B仍在运行的部分回复");
+  await page.locator(".chat-message.assistant").filter({ hasText: "B仍在运行的部分回复" }).waitFor();
+  text(streams[7], "A后台完成的续写"); finish(streams[7]);
+  await waitFor(() => resets.length === 1, "background continuation reconciled its own history");
+  assert.equal(resets[0].sessionId, "A", "continuation must not reset the newly selected conversation");
+  assert.equal(streams[8].response.writableEnded, false, "A completion does not end B's stream");
+  const runningBStatus = await status.locator(".chat-status-message").textContent();
+  await selectSession("A");
+  await page.locator(".chat-message.assistant").filter({ hasText: "A后台完成的续写" }).waitFor();
+  assert.equal(await status.locator(".chat-status-message").textContent(), "续写已完成。", "background completion status belongs to A");
+  assert.equal(await status.locator(".chat-status-elapsed").count(), 0);
+  await send("A与B同时继续运行");
+  await waitFor(() => streams.length === 10, "A starts another independent run");
+
+  // New conversations can join two existing runs; stopping B leaves A and C live.
+  await page.getByRole("button", { name: "新建会话", exact: true }).click();
+  await send("新会话C的任务");
+  await waitFor(() => streams.length === 11, "a newly created conversation starts while A and B run");
+  const newSessionId = streams[10].body.sessionId;
+  assert.ok(newSessionId && newSessionId !== "A" && newSessionId !== "B");
+  assert.equal(await page.locator(".chat-session-running").count(), 3, "all three running sessions are visible in the sidebar");
+  await selectSession("B");
+  assert.equal(await status.locator(".chat-status-message").textContent(), runningBStatus);
+  await page.getByRole("button", { name: "停止输出", exact: true }).click();
+  await status.getByText("已停止输出。", { exact: true }).waitFor();
+  assert.equal(aborted.at(-1), streams[8].runId, "stop targets B's run");
+  assert.equal(streams[9].response.writableEnded, false, "stopping B leaves A running");
+  assert.equal(streams[10].response.writableEnded, false, "stopping B leaves the new conversation running");
+  text(streams[9], "A没有被停止"); finish(streams[9]);
+  text(streams[10], "新会话C独立完成"); finish(streams[10]);
+  await selectSession("A");
+  await page.locator(".chat-message.assistant").filter({ hasText: "A没有被停止" }).waitFor();
+  assert.equal(await page.locator(".chat-message").filter({ hasText: "新会话C独立完成" }).count(), 0);
+  await page.locator(".chat-session-item").filter({ hasText: "新会话C的任务" }).locator("button").first().click();
+  await page.locator(".chat-message.assistant").filter({ hasText: "新会话C独立完成" }).waitFor();
+  assert.equal(await page.locator(".chat-message").filter({ hasText: "A没有被停止" }).count(), 0);
   assert.deepEqual(errors, []);
-  console.log("Session runtime browser regression passed: single action button, input chooser, cancellation, keyboard send, concurrent runs, drafts, FIFO queue, steering, scoped stop, pause/resume, queue recovery, Android fallback, persistence, narrow layout.");
+  console.log("Session runtime browser regression passed: three concurrent conversations, new conversation during generation, scoped stop, background continuation, independent progress/timers, drafts, queue, steering, recovery, Android fallback, persistence, narrow layout, single action button.");
 } catch (error) {
   if (page && !page.isClosed()) {
     console.error("Visible statuses:", await page.locator(".chat-status").allTextContents());
