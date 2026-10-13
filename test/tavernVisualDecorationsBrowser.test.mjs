@@ -17,6 +17,9 @@ const scriptContent = `
   const host = parent.document;
   const style = host.createElement('style');
   style.textContent = '.visual-avatar{width:40px;height:40px;vertical-align:middle;margin-right:8px}.visual-illustration{display:block;width:180px;max-width:100%;height:auto}.visual-hud{position:fixed;right:12px;top:12px;z-index:2147483000;background:#172033;color:white;border-radius:8px;padding:12px}';
+  // Many card decorators assume a dark host and replace its prose typography.
+  style.textContent += '.visual-prose{font-family:monospace;font-size:30px;color:#e8eef6}.visual-dialogue,.visual-narrative{font-family:serif;font-size:26px;color:#eef5fb}';
+  style.textContent += '.visual-panel{background:#172033;color:#eef5fb;font-family:serif}.visual-caption{color:#ffffff;font-family:serif;font-size:12px}';
   host.head.appendChild(style);
   const hud = host.createElement('aside');
   hud.className = 'visual-hud';
@@ -40,7 +43,11 @@ const scriptContent = `
         art.className = 'visual-illustration';
         art.alt = '风景插画';
         art.src = ${JSON.stringify(image)};
-        paragraph.replaceChildren(art);
+        const panel = host.createElement('details');
+        panel.className = 'visual-panel';
+        panel.open = true;
+        panel.innerHTML = '<summary>插画说明</summary><span class="visual-caption">独立面板文字</span>';
+        paragraph.replaceChildren(art, panel);
       } else {
         if (!paragraph.textContent.includes(source)) continue;
         if (source.startsWith('旅人〔')) {
@@ -49,10 +56,17 @@ const scriptContent = `
           avatar.alt = '角色对话头像';
           avatar.src = ${JSON.stringify(image)};
           const dialogue = host.createElement('span');
+          dialogue.className = 'visual-dialogue';
           dialogue.textContent = source.replace(/〔[^〕]*〕/, '');
           paragraph.replaceChildren(avatar, dialogue);
+        } else {
+          const narrative = host.createElement('span');
+          narrative.className = 'visual-narrative';
+          narrative.textContent = source;
+          paragraph.replaceChildren(narrative);
         }
       }
+      paragraph.classList.add('visual-prose');
       paragraph.dataset.visualDone = 'true';
       index++;
     }
@@ -87,6 +101,7 @@ try {
   };
   const seed = {
     version: 1, chatMode: "roleplay", chatHtmlRenderEnabled: true, chatMultiBubbleEnabled: false,
+    chatPersonalization: {messageFontFamily:"lxgw-wenkai-screen", messageFontSize:18, quoteStyleEnabled:true, quoteStyleColor:"#bb6600", italicStyleEnabled:true, italicStyleColor:"#665599"},
     activeCharacterCardId: card.id, characterCards: [card],
     chatSessions: [{id:"visual-chat", title:"视觉渲染测试", mode:"roleplay", roleplayCharacterCardId:card.id, roleplayGreetingIndex:0,
       messages:[{id:"greeting", role:"assistant", source:"roleplay-greeting", content:chooser, createdAt:now}], createdAt:now, updatedAt:now}],
@@ -111,6 +126,25 @@ try {
     assert.equal(await message.locator(".visual-avatar").count(), 2,
       "dialogue avatars render both before and after the illustration slot");
     assert.equal(await message.locator(".visual-illustration").count(), 1);
+    const typography = await message.locator(".mes_text").evaluate(box => {
+      const properties = element => {
+        const style = getComputedStyle(element);
+        return {family:style.fontFamily, size:style.fontSize, color:style.color};
+      };
+      return {base:properties(box), decorated:[...box.querySelectorAll('.visual-prose, .visual-dialogue, .visual-narrative')].map(properties)};
+    });
+    assert.match(typography.base.family, /LXGW WenKai Screen/);
+    assert.equal(typography.base.size, "18px");
+    assert.equal(typography.base.color, "rgb(32, 42, 51)");
+    assert.deepEqual(typography.decorated, typography.decorated.map(() => typography.base),
+      "card prose and dialogue retain the host font, size and readable text color");
+    assert.equal(await page.getByLabel("角色浮动状态").evaluate(panel => getComputedStyle(panel).color), "rgb(255, 255, 255)",
+      "the card's independent dark HUD retains its own text color");
+    assert.deepEqual(await message.locator('.visual-caption').evaluate(element => {
+      const style = getComputedStyle(element);
+      return {color:style.color, family:style.fontFamily, size:style.fontSize};
+    }), {color:"rgb(255, 255, 255)", family:"serif", size:"12px"},
+      "embedded card panels retain their typography");
     await message.locator("img").evaluateAll(images => Promise.all(images.map(image => image.decode())));
     assert.ok(await message.locator("img").evaluateAll(images => images.every(image => image.naturalWidth > 0)));
     assert.ok(await message.locator(".chat-bubble").evaluate(bubble => bubble.scrollWidth <= bubble.clientWidth + 1));
@@ -143,6 +177,15 @@ try {
   await openChat();
   await assertVisuals("清晨", "07:20 · 旅店");
   assert.equal(await page.getByLabel("角色浮动状态").count(), 1, "reload keeps a single floating status panel");
+  await page.evaluate(async () => {
+    await window.TavernHelper.createChatMessages([{role:'assistant', message:'正文「引用文字」和 *斜体文字*，以及 `inlineCode`。'}]);
+  });
+  const plainMessage = page.locator('#chat .mes[mesid="1"]');
+  await plainMessage.locator('.chat-personalized-quote').waitFor();
+  assert.equal(await plainMessage.locator('.chat-personalized-quote').evaluate(element => getComputedStyle(element).color), "rgb(187, 102, 0)");
+  assert.equal(await plainMessage.locator('.chat-personalized-italic').evaluate(element => getComputedStyle(element).color), "rgb(102, 85, 153)");
+  assert.match(await plainMessage.locator('code').evaluate(element => getComputedStyle(element).fontFamily), /mono/i,
+    "inline code keeps its monospace font");
   assert.deepEqual(errors, []);
   console.log("PASS: card-scoped scripts render decoded dialogue avatars, illustrations and floating status across opening selection, variable updates, swipes, mobile layout and reload");
 } catch (error) {

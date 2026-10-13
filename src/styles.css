@@ -6527,6 +6527,25 @@ summary:focus-visible {
   color: #202a33;
 }
 
+/* Tavern decorators rewrite these host paragraphs in place. Their dark-theme
+   prose rules must not replace the conversation's font or readable text color.
+   Embedded controls/panels and independent HTML frames keep their own styles. */
+.chat-message.assistant .mes_text.chat-markdown > p,
+.chat-message.assistant .mes_text.chat-markdown > p
+  :where(span, strong, b, em, i, del, s, u, small):not(:where(p :is([role], button, details, summary, figure, pre, code, svg), p :is([role], button, details, summary, figure, pre, code, svg) *)) {
+  color: inherit !important;
+  font-family: inherit !important;
+  font-size: inherit !important;
+}
+
+.quote-style-enabled .mes_text.chat-markdown > p .chat-personalized-quote {
+  color: var(--chat-quote-color, #E18A24) !important;
+}
+
+.italic-style-enabled .mes_text.chat-markdown > p .chat-personalized-italic {
+  color: var(--chat-italic-color, #808080) !important;
+}
+
 .chat-markdown-heading {
   margin: 0;
   color: inherit;
