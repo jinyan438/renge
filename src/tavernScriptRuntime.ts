@@ -405,8 +405,7 @@ function installParentSideEffectTracker(
   };
 
   const isProtectedTree = (node: Node | null) =>
-    // Third-party scripts may own siblings of #root, never #root itself or any
-    // React-managed descendant/ancestor whose removal would blank the whole app.
+    // Lifecycle cleanup must never claim or remove the app's React tree.
     Boolean(
       protectedAppRoot &&
         node &&
@@ -414,6 +413,36 @@ function installParentSideEffectTracker(
           protectedAppRoot.contains(node) ||
           (node instanceof hostGlobal.Element && node.contains(protectedAppRoot))),
     );
+
+  const isMessageContentTarget = (node: Node, replaceContents: boolean) => {
+    const element = node instanceof hostGlobal.Element ? node : node.parentElement;
+    const messageText = element?.closest(".mes_text");
+    return Boolean(
+      messageText &&
+      protectedAppRoot?.contains(messageText) &&
+      messageText.closest("#chat .chat-message.mes") &&
+      !messageText.closest(".chat-inline-editor") &&
+      (replaceContents || node !== messageText),
+    );
+  };
+
+  const assertTavernMutationAllowed = (
+    node: Node,
+    operation: string,
+    replaceContents = false,
+  ) => {
+    // Card decorators legitimately clear and rebuild paragraph children. The
+    // message renderer remounts that DOM when its content changes. Protect the
+    // message container and app chrome, while allowing edits inside the body.
+    if (!isProtectedTree(node) || isMessageContentTarget(node, replaceContents)) return;
+    // A successful-looking no-op traps `while (node.firstChild) removeChild(...)`
+    // in an infinite loop. Report rejected mutations instead of pretending that
+    // the requested removal/replacement happened.
+    throw new hostGlobal.DOMException(
+      `Tavern scripts cannot ${operation} protected app UI outside message content.`,
+      "NoModificationAllowedError",
+    );
+  };
 
   const isProtectedParent = (node: Node) =>
     Boolean(protectedAppRoot && (node === protectedAppRoot || protectedAppRoot.contains(node)));
@@ -521,7 +550,7 @@ function installParentSideEffectTracker(
 
   const originalRemoveChild = nodePrototype.removeChild;
   const trackedRemoveChild = function <T extends Node>(this: Node, child: T): T {
-    if (active && isTavernCall() && isProtectedTree(child)) return child;
+    if (active && isTavernCall()) assertTavernMutationAllowed(child, "removeChild");
     const removed = originalRemoveChild.call(this, child) as T;
     ownedNodes.delete(child);
     return removed;
@@ -540,7 +569,7 @@ function installParentSideEffectTracker(
     child: T,
   ): T {
     if (active && isTavernCall()) {
-      if (isProtectedTree(child)) return child;
+      assertTavernMutationAllowed(child, "replaceChild");
       if (!isProtectedParent(this) && !hasOwnedAncestor(this)) trackOwnedTree(node);
     }
     const replaced = originalReplaceChild.call(this, node, child) as T;
@@ -557,7 +586,7 @@ function installParentSideEffectTracker(
   const elementPrototype = hostGlobal.Element.prototype;
   const originalRemove = elementPrototype.remove;
   const trackedRemove = function (this: Element) {
-    if (active && isTavernCall() && isProtectedTree(this)) return;
+    if (active && isTavernCall()) assertTavernMutationAllowed(this, "remove");
     const result = originalRemove.call(this);
     ownedNodes.delete(this);
     return result;
@@ -570,7 +599,7 @@ function installParentSideEffectTracker(
   const originalReplaceWith = elementPrototype.replaceWith;
   const trackedReplaceWith = function (this: Element, ...nodes: Array<Node | string>) {
     if (active && isTavernCall()) {
-      if (isProtectedTree(this)) return;
+      assertTavernMutationAllowed(this, "replaceWith");
       if (
         !isProtectedParent(this.parentNode ?? hostDocument) &&
         !hasOwnedAncestor(this.parentNode)
@@ -594,7 +623,7 @@ function installParentSideEffectTracker(
   const originalReplaceChildren = elementPrototype.replaceChildren;
   const trackedReplaceChildren = function (this: Element, ...nodes: Array<Node | string>) {
     if (active && isTavernCall()) {
-      if (isProtectedTree(this)) return;
+      assertTavernMutationAllowed(this, "replaceChildren", true);
       if (!hasOwnedAncestor(this)) {
         nodes.forEach((node) => {
           if (node instanceof hostGlobal.Node) trackOwnedTree(node);
@@ -615,7 +644,9 @@ function installParentSideEffectTracker(
     if (!descriptor?.set) return;
     const originalSetter = descriptor.set;
     const guardedSetter = function (this: Node, value: unknown) {
-      if (active && isTavernCall() && isProtectedTree(this)) return;
+      if (active && isTavernCall()) {
+        assertTavernMutationAllowed(this, property, property !== "outerHTML");
+      }
       originalSetter.call(this, value);
     };
     Object.defineProperty(prototype, property, {
