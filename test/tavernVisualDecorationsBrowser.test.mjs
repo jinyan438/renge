@@ -20,6 +20,7 @@ const scriptContent = `
   // Many card decorators assume a dark host and replace its prose typography.
   style.textContent += '.visual-prose{font-family:monospace;font-size:30px;color:#e8eef6}.visual-dialogue,.visual-narrative{font-family:serif;font-size:26px;color:#eef5fb}';
   style.textContent += '.visual-panel{background:#172033;color:#eef5fb;font-family:serif}.visual-caption{color:#ffffff;font-family:serif;font-size:12px}';
+  style.textContent += '.visual-speaker{color:#ffcf9a;font-family:serif;font-size:22px}.visual-speaker-alt{color:#9fd8ff}';
   host.head.appendChild(style);
   const hud = host.createElement('aside');
   hud.className = 'visual-hud';
@@ -55,10 +56,18 @@ const scriptContent = `
           avatar.className = 'visual-avatar';
           avatar.alt = '角色对话头像';
           avatar.src = ${JSON.stringify(image)};
+          const alternate = source.includes('〔日常〕');
+          const speaker = host.createElement(alternate ? 'strong' : 'b');
+          speaker.className = 'visual-speaker' + (alternate ? ' visual-speaker-alt' : '');
+          if (alternate) {
+            const label = host.createElement('span');
+            label.textContent = '旅人';
+            speaker.appendChild(label);
+          } else speaker.textContent = '旅人';
           const dialogue = host.createElement('span');
           dialogue.className = 'visual-dialogue';
-          dialogue.textContent = source.replace(/〔[^〕]*〕/, '');
-          paragraph.replaceChildren(avatar, dialogue);
+          dialogue.textContent = source.replace(/^旅人〔[^〕]*〕/, '');
+          paragraph.replaceChildren(avatar, speaker, dialogue);
         } else {
           const narrative = host.createElement('span');
           narrative.className = 'visual-narrative';
@@ -138,6 +147,11 @@ try {
     assert.equal(typography.base.color, "rgb(32, 42, 51)");
     assert.deepEqual(typography.decorated, typography.decorated.map(() => typography.base),
       "card prose and dialogue retain the host font, size and readable text color");
+    assert.deepEqual(await message.locator('.visual-speaker').evaluateAll(names => names.map(name => getComputedStyle(name).color)),
+      ["rgb(255, 207, 154)", "rgb(159, 216, 255)"],
+      "bold and strong speaker labels retain their card-defined colors");
+    assert.equal(await message.locator('.visual-speaker-alt > span').evaluate(name => getComputedStyle(name).color), "rgb(159, 216, 255)",
+      "nested speaker text inherits its label color");
     assert.equal(await page.getByLabel("角色浮动状态").evaluate(panel => getComputedStyle(panel).color), "rgb(255, 255, 255)",
       "the card's independent dark HUD retains its own text color");
     assert.deepEqual(await message.locator('.visual-caption').evaluate(element => {
@@ -178,12 +192,14 @@ try {
   await assertVisuals("清晨", "07:20 · 旅店");
   assert.equal(await page.getByLabel("角色浮动状态").count(), 1, "reload keeps a single floating status panel");
   await page.evaluate(async () => {
-    await window.TavernHelper.createChatMessages([{role:'assistant', message:'正文「引用文字」和 *斜体文字*，以及 `inlineCode`。'}]);
+    await window.TavernHelper.createChatMessages([{role:'assistant', message:'正文「引用文字」和 *斜体文字*、**强调文字**，以及 `inlineCode`。'}]);
   });
   const plainMessage = page.locator('#chat .mes[mesid="1"]');
   await plainMessage.locator('.chat-personalized-quote').waitFor();
   assert.equal(await plainMessage.locator('.chat-personalized-quote').evaluate(element => getComputedStyle(element).color), "rgb(187, 102, 0)");
   assert.equal(await plainMessage.locator('.chat-personalized-italic').evaluate(element => getComputedStyle(element).color), "rgb(102, 85, 153)");
+  assert.equal(await plainMessage.locator('.mes_text strong').evaluate(element => getComputedStyle(element).color), "rgb(32, 42, 51)",
+    "ordinary Markdown emphasis still inherits the readable prose color");
   assert.match(await plainMessage.locator('code').evaluate(element => getComputedStyle(element).fontFamily), /mono/i,
     "inline code keeps its monospace font");
   assert.deepEqual(errors, []);

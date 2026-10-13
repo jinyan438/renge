@@ -6529,13 +6529,19 @@ summary:focus-visible {
 
 /* Tavern decorators rewrite these host paragraphs in place. Their dark-theme
    prose rules must not replace the conversation's font or readable text color.
-   Embedded controls/panels and independent HTML frames keep their own styles. */
+   Bold speaker labels keep their accent colors; embedded controls/panels and
+   independent HTML frames keep their own styles. */
 .chat-message.assistant .mes_text.chat-markdown > p,
 .chat-message.assistant .mes_text.chat-markdown > p
   :where(span, strong, b, em, i, del, s, u, small):not(:where(p :is([role], button, details, summary, figure, pre, code, svg), p :is([role], button, details, summary, figure, pre, code, svg) *)) {
-  color: inherit !important;
   font-family: inherit !important;
   font-size: inherit !important;
+}
+
+.chat-message.assistant .mes_text.chat-markdown > p,
+.chat-message.assistant .mes_text.chat-markdown > p
+  :where(span, em, i, del, s, u, small):not(:where(p :is([role], button, details, summary, figure, pre, code, svg), p :is([role], button, details, summary, figure, pre, code, svg) *)) {
+  color: inherit !important;
 }
 
 .quote-style-enabled .mes_text.chat-markdown > p .chat-personalized-quote {
