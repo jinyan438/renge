@@ -3041,7 +3041,7 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
         return;
       }
       if (request.method === "DELETE" && fileParts.length === 0) {
-        try { await rm(dir, { recursive: true, force: true }); } catch (e) { console.log("[session-images] rm fail: " + (e && e.message)); }
+        await rm(dir, { recursive: true, force: true });
         sendJson(response, 200, { ok: true });
         return;
       }

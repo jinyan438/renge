@@ -164,6 +164,7 @@ export type StatusBarSidebarProps = {
     avatarImage: string;
   };
   chatSessionId: string;
+  chatSessionCreatedAt?: string;
   heartbeat: {
     enabled: boolean;
     intervalMinutes: number;
@@ -874,6 +875,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   onPhoneBuildFriendContext,
   userProfile,
   chatSessionId,
+  chatSessionCreatedAt,
   heartbeat,
   chatHeartbeatReminderVisible,
   onHeartbeatChange,
@@ -2354,7 +2356,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
         ) : activeToolId === "phone" ? (
           <Suspense fallback={<SidebarToolLoading label="手机" />}>
             <PocketPhone
-              key={chatSessionId}
+              key={`${chatSessionId}:${chatSessionCreatedAt ?? ""}`}
               onBack={handleToolBack}
               onClose={handleToolClose}
               personas={personas}

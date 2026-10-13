@@ -30,6 +30,34 @@ test("stopping one conversation preserves the other run and pauses only its own 
   assert.equal(runtime.takeNext("a"), "a2");
 });
 
+test("reset discards paused queues, steering and runtime state without affecting another conversation", () => {
+  const runtime = createChatSessionRuntime();
+  const a = runtime.get("a");
+  a.queued.push("old input");
+  a.steering.set("old steer", "old correction");
+  a.queuePaused = true;
+  a.stopRequested = true;
+  a.startedAt = 123;
+  a.status = { status: "error", message: "old error" };
+  a.continueWith = async () => { throw new Error("old continuation must be discarded"); };
+  const b = runtime.begin("b");
+  runtime.get("b").queued.push("keep input");
+  runtime.reset("a");
+  const fresh = runtime.get("a");
+  assert.deepEqual(fresh.queued, []);
+  assert.equal(fresh.steering.size, 0);
+  assert.equal(fresh.continueWith, undefined);
+  assert.equal(fresh.queuePaused, false);
+  assert.equal(fresh.stopRequested, false);
+  assert.equal(fresh.startedAt, 0);
+  assert.equal(fresh.status.status, "idle");
+  assert.equal(runtime.takeNext("a"), undefined);
+  assert.equal(b.signal.aborted, false);
+  assert.deepEqual(runtime.get("b").queued, ["keep input"]);
+  assert.throws(() => runtime.reset("b"), /先停止/);
+  runtime.finish(b);
+});
+
 test("live native Pi inputs are scoped, idempotent, steer before queued follow-ups, and preserve parallel runs", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "renge-runtime-native-"));
   const requests = [];

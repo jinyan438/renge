@@ -134,7 +134,8 @@ import {
   type ChatPresetPrompt,
 } from "./presetUtils";
 import { buildPocketHistoryMessage, buildSharedPocketConversation, formatPocketContextMessage, getPocketMessageIdentity, pocketContextRevision, syncPocketContext, type PocketContextSync, type PocketConversationBuilder } from "./pocketPhoneContext";
-import { isPocketGroup } from "./pocketPhoneState";
+import { isPocketGroup, pocketStorageKey } from "./pocketPhoneState";
+import { redStorageKey } from "./pocketXiaohongshuState";
 import { pocketCardSources, pocketWorldBookSources, type PocketFriendContextBuilder } from "./pocketFriendGeneration";
 import { pocketMomentContextAllowed, pocketMomentViewerIds } from "./pocketMomentsState";
 import { reversePocketMessage } from "./pocketCharacterPhone";
@@ -1615,6 +1616,7 @@ const PROVIDER_STORAGE_KEY = "renge_provider_channels";
 const ACTIVE_PROVIDER_STORAGE_KEY = "renge_active_provider";
 const CHAT_SESSIONS_STORAGE_KEY = "renge_chat_sessions";
 const ACTIVE_CHAT_SESSION_STORAGE_KEY = "renge_active_chat_session";
+const PI_SESSION_RESET_PENDING_STORAGE_PREFIX = "renge_pi_session_reset_pending:";
 const CHAT_MODE_STORAGE_KEY = "renge_chat_mode";
 const MULTI_AGENT_WORKFLOW_STORAGE_KEY = "renge_multi_agent_workflow";
 const MULTI_AGENT_PERSONAS_STORAGE_KEY = "renge_multi_agent_personas";
@@ -12600,9 +12602,7 @@ export function App() {
   const [chatDesktopSidebarCollapsed, setChatDesktopSidebarCollapsed] =
     useState(false);
   const [chatStatusSidebarCollapsed, setChatStatusSidebarCollapsed] = useState(true);
-  const [chatClearConfirmationOpen, setChatClearConfirmationOpen] = useState(false);
-  const [chatClearResetting, setChatClearResetting] = useState(false);
-  const [chatClearResetError, setChatClearResetError] = useState("");
+  const chatSessionResetTasksRef = useRef(new Map<string, Promise<void>>());
   const [mobilePromptPreviewOpen, setMobilePromptPreviewOpen] = useState(false);
 
   useEffect(() => {
@@ -13309,6 +13309,7 @@ export function App() {
     set current(controller: AbortController | null) { chatRuntimesRef.current.get(activeChatSessionIdRef.current).controller = controller; },
   };
   const piSessionResetPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
+  const piSessionResetErrorsRef = useRef(new Map<string, unknown>());
   const restoredWorkspacePathRef = useRef("");
   const restoredPcWorkspaceRef = useRef(false);
   const workspaceAutoRestoreDisabledRef = useRef(false);
@@ -13359,15 +13360,25 @@ export function App() {
     androidPiContextRequestsRef.current.delete(sessionId);
     const existing = piSessionResetPromisesRef.current.get(sessionId);
     if (existing) return existing;
+    piSessionResetErrorsRef.current.delete(sessionId);
+    const pendingStorageKey = `${PI_SESSION_RESET_PENDING_STORAGE_PREFIX}${sessionId}`;
+    setLocalStorageValueSafely(pendingStorageKey, "1");
     const pending = fetch("/api/pi/session", {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sessionId }),
     })
       .then(async (response) => {
-        if (response.ok) return;
+        if (response.ok) {
+          removeLocalStorageValueSafely(pendingStorageKey);
+          return;
+        }
         const payload = (await response.json().catch(() => ({}))) as { error?: string };
         throw new Error(payload.error || `Pi 会话重置失败：${response.status}`);
+      })
+      .catch((error: unknown) => {
+        piSessionResetErrorsRef.current.set(sessionId, error);
+        throw error;
       })
       .finally(() => {
         if (piSessionResetPromisesRef.current.get(sessionId) === pending) {
@@ -13377,8 +13388,19 @@ export function App() {
     piSessionResetPromisesRef.current.set(sessionId, pending);
     return pending;
   };
-  const waitForPiSessionReset = (sessionId: string) =>
-    piSessionResetPromisesRef.current.get(sessionId) ?? Promise.resolve();
+  const waitForPiSessionReset = async (sessionId: string) => {
+    await chatSessionResetTasksRef.current.get(sessionId);
+    if (piSessionResetErrorsRef.current.has(sessionId)) {
+      throw piSessionResetErrorsRef.current.get(sessionId);
+    }
+    let resetPending = false;
+    try {
+      resetPending = localStorage.getItem(`${PI_SESSION_RESET_PENDING_STORAGE_PREFIX}${sessionId}`) === "1";
+    } catch {}
+    // Resume interrupted/failed deletion after a reload before reusing Pi.
+    await (piSessionResetPromisesRef.current.get(sessionId) ??
+      (resetPending ? resetPiSession(sessionId) : undefined));
+  };
   const getPiWorkspacePayload = (sessionId: string) => {
     const session =
       chatSessionsRef.current.find((candidate) => candidate.id === sessionId) ??
@@ -20528,6 +20550,7 @@ export function App() {
     const emitGreetingEvents = () => {
       if (!emitSwipeEvent) return;
       window.setTimeout(() => {
+        if (activeChatSessionIdRef.current !== session.id) return;
         const messageIndex = chatMessagesRef.current.findIndex(
           (message) => message.id === greetingMessageId,
         );
@@ -20545,6 +20568,7 @@ export function App() {
       return;
     }
     window.setTimeout(() => {
+      if (activeChatSessionIdRef.current !== session.id) return;
       const options = createPromptTemplateRuntimeOptions(
         session.messages,
         card,
@@ -20560,7 +20584,8 @@ export function App() {
         greetingIndex,
         options,
       ).then((result) => {
-        const nextMessages = chatMessagesRef.current.map((message) =>
+        if (!getMessagesForSession(session.id).some((message) => message.id === greetingMessageId)) return;
+        commitMessagesForSession(session.id, (messages) => messages.map((message) =>
           message.id === session.messages[greetingIndex].id
             ? {
                 ...message,
@@ -20570,18 +20595,9 @@ export function App() {
                   : {}),
               }
             : message,
-        );
-        chatMessagesRef.current = nextMessages;
-        setChatMessages(nextMessages);
-        setChatSessions((current) =>
-          current.map((candidate) =>
-            candidate.id === session.id
-              ? { ...candidate, messages: nextMessages, updatedAt: new Date().toISOString() }
-              : candidate,
-          ),
-        );
+        ));
       }).catch((error) => {
-        setChatStatus({
+        setSessionChatStatus(session.id, {
           status: "error",
           message:
             error instanceof Error
@@ -37438,242 +37454,123 @@ export function App() {
       chatStatus.status === "loading" ||
       (chatMode === "roleplay" && !activeSessionRoleplayCard),
   };
-  const reloadCharacterCardsForSessionReset = async (session: ChatSession) => {
-    const currentCards = characterCardsRef.current;
-    const requiredCardId = session.roleplayCharacterCardId;
-    const targetCardId = requiredCardId || activeCharacterCardId;
-    const hasTargetCard = (cards: CharacterCard[]) =>
-      !targetCardId || cards.some((card) => card.id === targetCardId);
-
-    try {
-      await flushTavernPersistenceRef.current();
-    } catch {
-      // Try the card database and its fallbacks even if another app-data store
-      // is temporarily unavailable.
-    }
-
-    let reloadedCards: CharacterCard[] | null = null;
-    if (await saveCharacterCardsToDatabase(currentCards)) {
-      reloadedCards = await loadCharacterCardsFromDatabase();
-    }
-
-    if (!reloadedCards || !hasTargetCard(reloadedCards)) {
-      const persistedData = await loadPersistentAppData();
-      const persistedCards = persistedData.data?.characterCards;
-      if (Array.isArray(persistedCards)) {
-        const normalizedCards = persistedCards.map((card, index) =>
-          normalizeStoredCharacterCard(card, index),
-        );
-        if (hasTargetCard(normalizedCards)) reloadedCards = normalizedCards;
-      }
-    }
-
-    if (!reloadedCards || !hasTargetCard(reloadedCards)) {
-      const localCards = loadCharacterCardsFromStorage(CHARACTER_CARDS_STORAGE_KEY);
-      if (hasTargetCard(localCards)) reloadedCards = localCards;
-    }
-
-    if (!reloadedCards || !hasTargetCard(reloadedCards)) {
-      if (requiredCardId && currentCards.some((card) => card.id === requiredCardId)) {
-        throw new Error("无法从已保存数据重新读取当前绑定的角色卡，请检查角色卡存储后重试。");
-      }
-      return reloadedCards ?? currentCards;
-    }
-
-    const currentCardsById = new Map(currentCards.map((card) => [card.id, card]));
-    return reloadedCards.map((card) =>
-      card.avatarDataUrl
-        ? card
-        : {
-            ...card,
-            avatarDataUrl: currentCardsById.get(card.id)?.avatarDataUrl ?? "",
-          },
-    );
-  };
-
-  const confirmClearActiveChatSession = async () => {
-    if (chatClearResetting) return;
+  const clearActiveChatSession = () => {
     const sessionId = activeChatSessionIdRef.current;
     const currentSession = chatSessionsRef.current.find((session) => session.id === sessionId);
-    if (!sessionId || !currentSession) {
-      setChatClearResetError("找不到当前会话，请关闭此窗口后重试。");
-      return;
-    }
-    if (
-      activeChatAbortControllerRef.current ||
-      chatGenerationState !== "idle" ||
-      chatStatus.status === "loading" ||
-      heartbeatRunningRef.current ||
-      pendingHeartbeatUpdateRef.current?.sessionId === sessionId
-    ) {
-      setChatClearResetError("请等当前回复结束后再重置会话。");
+    if (!currentSession || chatSessionResetTasksRef.current.has(sessionId)) return;
+    const runtime = chatRuntimesRef.current.get(sessionId);
+    if (runtime.controller || runtime.generationState !== "idle" ||
+      runtime.status.status === "loading" || getSessionRunData(sessionId).manualStatusBar ||
+      piCompactionPending) {
+      setSessionChatStatus(sessionId, { status: "warning", message: "请等当前任务结束后再重置会话。" });
       return;
     }
 
-    setChatClearResetting(true);
-    setChatClearResetError("");
-    setChatStatus({ status: "loading", message: "正在重置当前会话…" });
-
-    try {
-      const reloadedCards = await reloadCharacterCardsForSessionReset(currentSession);
-      if (activeChatSessionIdRef.current !== sessionId) {
-        throw new Error("当前会话已切换，请重新打开重置确认框。");
+    const roleplayCard = characterCardsRef.current.find(
+      (card) => card.id === currentSession.roleplayCharacterCardId,
+    );
+    const freshSession = createChatSession(
+      currentSession.workspaceKey,
+      currentSession.workspaceName,
+      currentSession.workspacePath,
+      currentSession.roleplayCharacterCardId
+        ? { characterCardId: currentSession.roleplayCharacterCardId, greetingIndex: 0 }
+        : undefined,
+      currentSession.mode,
+    );
+    let resetSession = { ...freshSession, id: sessionId };
+    if (roleplayCard) {
+      resetSession = buildRoleplaySession(resetSession, roleplayCard, 0);
+      if (currentSession.mode !== "roleplay") {
+        resetSession = { ...resetSession, mode: currentSession.mode, messages: [] };
       }
+    }
 
-      // Visible messages and Pi's persisted tree are separate stores. Wait for
-      // Pi to clear successfully before replacing the session state.
-      await resetPiSession(sessionId);
+    // Replace the data immediately; card storage and Pi cleanup must not delay
+    // the visible reset. Fresh construction also drops session-only overrides.
+    const nextSessions = chatSessionsRef.current.map((session) =>
+      session.id === sessionId ? resetSession : session,
+    );
+    chatRuntimesRef.current.reset(sessionId);
+    sessionRunDataRef.current.delete(sessionId);
+    chatDraftsRef.current.delete(sessionId);
+    restoredPendingInputsRef.current.add(sessionId);
+    if (pendingHeartbeatUpdateRef.current?.sessionId === sessionId) {
+      pendingHeartbeatUpdateRef.current = null;
+    }
+    chatSessionsRef.current = nextSessions;
+    chatMessagesRef.current = resetSession.messages;
+    chatInputValueRef.current = "";
+    chatAttachmentsLiveRef.current = [];
+    chatScrollFollowLatestRef.current = true;
+    chatReadingFocusRef.current = false;
+    setChatSessions(nextSessions);
+    setChatMessages(resetSession.messages);
+    setChatInput("");
+    setChatAttachments([]);
+    setChatRunningInputMenuSessionId(null);
+    setEditingChatMessage(null);
+    setChatMessageMenu(null);
+    setChatChoiceDrafts({});
+    setRoleplayGreetingSelectorOpen(false);
+    const withoutSessionUsage = (usage: Record<string, ContextRuntimeUsage>) =>
+      Object.fromEntries(Object.entries(usage).filter(([key]) => !key.startsWith(`${sessionId}\u0000`)));
+    setContextRuntimeUsageByKey(withoutSessionUsage);
+    setPiContextUsageByKey((usage) =>
+      Object.fromEntries(Object.entries(usage).filter(([key]) => !key.startsWith(`${sessionId}\u0000`))),
+    );
+    contextSummaryCacheRef.current.clear();
+    setPiCompactionPending(false);
+    setTavernRuntimeLogs([]);
+    setTavernRuntimeResetRevision((revision) => revision + 1);
+    const localErrors: string[] = [];
+    for (const key of [pocketStorageKey(sessionId), redStorageKey(sessionId)]) {
+      try { localStorage.removeItem(key); }
+      catch { localErrors.push("手机数据清理失败"); }
+    }
+    setSessionChatStatus(sessionId, {
+      status: "success",
+      message: roleplayCard && currentSession.mode === "roleplay"
+        ? "会话已清空，角色已恢复到开场白。"
+        : "会话已清空。",
+    });
 
-      const roleplayCardId = currentSession.roleplayCharacterCardId &&
-        reloadedCards.some((card) => card.id === currentSession.roleplayCharacterCardId)
-        ? currentSession.roleplayCharacterCardId
-        : undefined;
-      const roleplayCard = roleplayCardId
-        ? reloadedCards.find((card) => card.id === roleplayCardId)
-        : undefined;
-      const freshSession = createChatSession(
-        currentSession.workspaceKey,
-        currentSession.workspaceName,
-        currentSession.workspacePath,
-        roleplayCardId ? { characterCardId: roleplayCardId, greetingIndex: 0 } : undefined,
-        currentSession.mode,
-      );
-      let resetSession: ChatSession = {
-        ...freshSession,
-        id: currentSession.id,
-        createdAt: currentSession.createdAt,
-        ...(roleplayCardId && !roleplayCard
-          ? { title: currentSession.title }
-          : {}),
-      };
-      if (roleplayCard) {
-        resetSession = buildRoleplaySession(resetSession, roleplayCard, 0);
-        if (chatModeRef.current !== "roleplay") {
-          resetSession = { ...resetSession, messages: [] };
+    // Register cleanup before greeting scripts can generate. The next Pi run
+    // waits for it and a failed reset cannot reuse the previous persisted tree.
+    const piCleanup = resetPiSession(sessionId);
+    const imageCleanup = fetch(`/api/session-images/${encodeURIComponent(sessionId)}`, { method: "DELETE" })
+      .then((response) => { if (!response.ok) throw new Error(`会话图片清理失败：${response.status}`); });
+    const persistence = new Promise<void>((resolve, reject) => {
+      window.setTimeout(() => {
+        if (!setLocalStorageJsonSafely(CHAT_SESSIONS_STORAGE_KEY, chatSessionsRef.current) &&
+          !persistentStoreReadyRef.current) {
+          reject(new Error("会话保存失败：本地存储不可用"));
+          return;
         }
+        // Save through the existing version-checked queue without rewriting
+        // the character database or waiting for unrelated local stores.
+        if (!persistentStoreReadyRef.current) { resolve(); return; }
+        void savePersistentAppData(buildCurrentAppData(), false, false, true).then((saved) => {
+          if (saved) resolve();
+          else reject(new Error("会话保存失败，请重试重置"));
+        }, reject);
+      }, 0);
+    });
+    const task = Promise.allSettled([piCleanup, imageCleanup, persistence]).then((results) => {
+      const failures = [...localErrors, ...results.flatMap((result) => result.status === "rejected"
+        ? [result.reason instanceof Error ? result.reason.message : String(result.reason)] : [])];
+      if (failures.length) {
+        setSessionChatStatus(sessionId, { status: "warning", message: `会话已清空，但后台清理或保存失败：${failures.join("；")}` });
       }
-
-      const nextSessions = chatSessionsRef.current.map((session) =>
-        session.id === sessionId ? resetSession : session,
-      );
-      characterCardsRef.current = reloadedCards;
-      chatSessionsRef.current = nextSessions;
-      chatMessagesRef.current = resetSession.messages;
-      activeAiMessageIdentityRef.current = null;
-      chatScrollFollowLatestRef.current = true;
-      chatReadingFocusRef.current = false;
-      setCharacterCards(reloadedCards);
-      if (!reloadedCards.some((card) => card.id === activeCharacterCardId)) {
-        setActiveCharacterCardId(reloadedCards[0]?.id ?? "");
-      }
-      setChatSessions(nextSessions);
-      setChatMessages(resetSession.messages);
-      setChatInput("");
-      setChatAttachments([]);
-      setEditingChatMessage(null);
-      setChatMessageMenu(null);
-      setChatChoiceDrafts({});
-      setContextRuntimeUsageByKey((current) => {
-        const usageKeyPrefix = `${sessionId}\u0000`;
-        return Object.fromEntries(
-          Object.entries(current).filter(([key]) => !key.startsWith(usageKeyPrefix)),
-        );
-      });
-      setPiContextUsageByKey((current) => {
-        const usageKeyPrefix = `${sessionId}\u0000`;
-        return Object.fromEntries(
-          Object.entries(current).filter(([key]) => !key.startsWith(usageKeyPrefix)),
-        );
-      });
-      contextSummaryCacheRef.current.clear();
-      setPiCompactionPending(false);
-      setTavernRuntimeLogs([]);
-      setTavernRuntimeResetRevision((revision) => revision + 1);
-
-      if (roleplayCard && chatModeRef.current === "roleplay") {
-        processRoleplayGreeting(resetSession, roleplayCard);
-      }
-
-      let persistenceError = "";
-      try {
-        await flushTavernPersistenceRef.current();
-      } catch (error) {
-        persistenceError = error instanceof Error ? error.message : String(error);
-      }
-
-      setChatClearConfirmationOpen(false);
-      setChatStatus({
-        status: persistenceError ? "warning" : "success",
-        message: persistenceError
-          ? `会话已重置，但保存失败：${persistenceError}`
-          : "会话已重置，角色卡已重新读取。",
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "会话重置失败。";
-      setChatClearResetError(message);
-      setChatStatus({ status: "error", message });
-    } finally {
-      setChatClearResetting(false);
+    }).finally(() => {
+      chatSessionResetTasksRef.current.delete(sessionId);
+      chatRuntimesRef.current.onChange();
+    });
+    chatSessionResetTasksRef.current.set(sessionId, task);
+    if (roleplayCard && currentSession.mode === "roleplay") {
+      processRoleplayGreeting(resetSession, roleplayCard);
     }
   };
-  const chatClearConfirmationModal =
-    chatClearConfirmationOpen && chatWindowState && !chatWindowState.minimized ? (
-      <div
-        className="modal-backdrop chat-clear-confirmation-backdrop"
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby="chat-clear-confirmation-title"
-        aria-describedby="chat-clear-confirmation-description"
-        onKeyDown={(event) => {
-          if (event.key === "Escape" && !chatClearResetting) {
-            event.preventDefault();
-            setChatClearConfirmationOpen(false);
-          }
-        }}
-        onMouseDown={(event) => {
-          if (event.target === event.currentTarget && !chatClearResetting) {
-            setChatClearConfirmationOpen(false);
-          }
-        }}
-      >
-        <section className="chat-clear-confirmation-modal">
-          <span className="chat-clear-confirmation-icon" aria-hidden="true">
-            <Trash2 size={20} />
-          </span>
-          <div className="chat-clear-confirmation-copy">
-            <h2 id="chat-clear-confirmation-title">重置当前会话？</h2>
-            <p id="chat-clear-confirmation-description">
-              消息、脚本变量、元数据、心跳、记忆绑定和状态栏会重置；绑定角色卡将从已保存数据重新读取并重新初始化。此操作无法撤销。
-            </p>
-            {chatClearResetError ? (
-              <p className="chat-clear-confirmation-error" role="alert">
-                {chatClearResetError}
-              </p>
-            ) : null}
-          </div>
-          <div className="chat-clear-confirmation-actions">
-            <button
-              type="button"
-              className="ghost-action"
-              autoFocus
-              disabled={chatClearResetting}
-              onClick={() => setChatClearConfirmationOpen(false)}
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              className="chat-clear-confirm-button"
-              disabled={chatClearResetting}
-              onClick={confirmClearActiveChatSession}
-            >
-              <Trash2 size={15} />
-              {chatClearResetting ? "正在重置…" : "确认重置"}
-            </button>
-          </div>
-        </section>
-      </div>
-    ) : null;
   const roleplayGreetingSelectorModal =
     roleplayGreetingSelectorOpen &&
     chatWindowState &&
@@ -38159,14 +38056,14 @@ export function App() {
                 disabled={
                   !activeChatSession ||
                   chatGenerationState !== "idle" ||
-                  chatStatus.status === "loading"
+                  chatStatus.status === "loading" ||
+                  manualStatusBarUpdateRunning ||
+                  piCompactionPending ||
+                  chatSessionResetTasksRef.current.has(activeChatSessionId)
                 }
-                title="重置当前会话"
+                title="一键清空当前会话并恢复开场白"
                 aria-label="重置当前会话"
-                onClick={() => {
-                  setChatClearResetError("");
-                  setChatClearConfirmationOpen(true);
-                }}
+                onClick={clearActiveChatSession}
               >
                 <X size={16} />
               </button>
@@ -39878,6 +39775,7 @@ export function App() {
           onPhoneBuildFriendContext={buildPhoneFriendContext}
           userProfile={userProfile}
           chatSessionId={activeChatSessionId}
+          chatSessionCreatedAt={activeChatSession?.createdAt}
           heartbeat={activeHeartbeat}
           chatHeartbeatReminderVisible={chatHeartbeatReminderVisible}
           onHeartbeatChange={updateActiveHeartbeat}
@@ -40456,12 +40354,10 @@ export function App() {
       {chatWindow}
       {studioWindow}
       {(avatarCropModal ||
-        chatClearConfirmationModal ||
         roleplayGreetingSelectorModal ||
         dataClearConfirmationModal) && (
         <div className="managed-global-overlays portfolio-desktop-shell">
           {avatarCropModal}
-          {chatClearConfirmationModal}
           {roleplayGreetingSelectorModal}
           {dataClearConfirmationModal}
         </div>

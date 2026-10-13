@@ -81,6 +81,12 @@ export function createChatSessionRuntime<Input>() {
       runtime.onChange();
       return input;
     },
+    reset(sessionId: string) {
+      const session = sessions.get(sessionId);
+      if (session?.controller) throw new Error("请先停止此会话的任务，再重置会话。");
+      sessions.delete(sessionId);
+      runtime.onChange();
+    },
     dispose() {
       for (const session of sessions.values()) session.controller?.abort();
       sessions.clear();
