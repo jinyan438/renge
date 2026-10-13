@@ -15,6 +15,37 @@ const TAVERN_PROSE_WRAPPER_TAG_PATTERN =
 const LOCALIZED_QUOTE_PAIR_PATTERN =
   /(["＂])(“[^”\n]+”|〝[^〞\n]+〞|「[^」\n]+」|｢[^｣\n]+｣|『[^』\n]+』)\1/g;
 
+// These are inert markers for card scripts, not standalone HTML documents.
+// Consume quoted attributes as a unit so a ref containing ">" stays intact.
+export const TAVERN_INLINE_PLACEHOLDER_PATTERN =
+  /<[A-Za-z][\w:-]*(?=[\s/>])(?:[^<>"'\r\n]|"[^"\r\n]*"|'[^'\r\n]*')*>/;
+
+export function isTavernInlinePlaceholder(
+  source: string,
+  standardTags: ReadonlySet<string>,
+) {
+  const match = /^<([A-Za-z][\w:-]*)\b/.exec(source);
+  if (!match || standardTags.has(match[1].toLowerCase())) return false;
+  return /\/\s*>$/.test(source) || /Impl$/i.test(match[1]);
+}
+
+export function isTavernPlaceholderLine(
+  source: string,
+  standardTags: ReadonlySet<string>,
+) {
+  const pattern = new RegExp(TAVERN_INLINE_PLACEHOLDER_PATTERN.source, "g");
+  let cursor = 0;
+  let found = false;
+  for (const match of source.matchAll(pattern)) {
+    if (source.slice(cursor, match.index).trim() || !isTavernInlinePlaceholder(match[0], standardTags)) {
+      return false;
+    }
+    cursor = match.index + match[0].length;
+    found = true;
+  }
+  return found && !source.slice(cursor).trim();
+}
+
 const HTML_PREVIEW_LIGHTWEIGHT_SETTLE_DELAYS = [80, 240, 600] as const;
 const HTML_PREVIEW_HEAVY_SETTLE_DELAYS = [240, 800, 1600] as const;
 

@@ -102,6 +102,34 @@ window.startTavernObserverFixture = () => {
     });
   });
   observer.observe(document.getElementById('chat'), { childList: true, subtree: true });
+  window.fixtureObserver = observer;
+};
+window.decorateTavernSequenceFixture = () => {
+  const box = document.querySelector('#chat .mes[mesid="0"] .mes_text');
+  const lines = getChatMessages(0)[0].message.trim().split(/\\r?\\n\\s*\\r?\\n/);
+  let index = 0;
+  for (const paragraph of box.querySelectorAll(':scope > p')) {
+    const source = lines[index];
+    if (!source) break;
+    if (source.startsWith('<IllustrationImpl')) {
+      // Tavern paragraph decorators reserve empty paragraphs for illustrations.
+      // Literal placeholder text used to stop the sequential cursor here,
+      // leaving every following dialogue/narrative paragraph undecorated.
+      if (paragraph.textContent.trim()) continue;
+      const illustration = document.createElement('span');
+      illustration.className = 'fixture-illustration';
+      illustration.textContent = '风景插画';
+      paragraph.replaceChildren(illustration);
+    } else {
+      if (!paragraph.textContent.includes(source)) continue;
+      const line = document.createElement('span');
+      line.className = 'fixture-sequence-line';
+      line.textContent = source;
+      paragraph.replaceChildren(line);
+    }
+    index += 1;
+  }
+  return index;
 };
 `;
 let server;
@@ -164,6 +192,10 @@ try {
     "morning", "saving a nonzero greeting swipe retains its variables");
   assert.equal(await message.locator(".mes_text > p").count(), 4,
     "paragraph decorators can reach each paragraph and illustration marker directly");
+  assert.equal(await page.evaluate(() => window.decorateTavernSequenceFixture()), 4,
+    "an illustration placeholder must not block decoration of the following paragraphs");
+  assert.equal(await message.locator(".fixture-illustration").count(), 1);
+  await message.locator(".fixture-sequence-line").filter({ hasText: "窗外传来鸟鸣" }).waitFor();
   assert.deepEqual(await page.evaluate(() => window.exerciseTavernFixtureMutations()),
     Array(11).fill("NoModificationAllowedError"),
     "real Tavern scripts can rewrite content but protected UI mutations fail explicitly");
@@ -251,6 +283,38 @@ try {
   await longMessage.locator(".mes_text").waitFor({ state: "visible" });
   assert.equal(await longMessage.locator(".mes_text").textContent(), "ab" + "a".repeat(9998));
 
+  const markerContent = [
+    "通用标记之前。",
+    "<SceneArt ref='window > dawn' />",
+    '<IllustrationImpl ref="landscape#2"/><InlineScene/>',
+    "通用标记之后。",
+    "",
+    '`<IllustrationImpl ref="code" />`',
+    "",
+    "<StatusPlaceHolderImpl>",
+    "",
+    '```text\n<SceneArt ref="fenced-code" />\n```',
+  ].join("\r\n");
+  await page.evaluate(async content => {
+    await window.TavernHelper.createChatMessages([{ role: "assistant", message: content }]);
+  }, markerContent);
+  const markerMessage = page.locator('#chat .mes[mesid="3"]');
+  await markerMessage.getByText("通用标记之后。", { exact: true }).waitFor();
+  assert.equal(await markerMessage.locator(".mes_text > p").count(), 5,
+    "marker-only lines keep their paragraph even without surrounding blank lines");
+  assert.equal(await markerMessage.locator("[data-tavern-placeholder]").count(), 4,
+    "different custom markers, adjacent markers and legacy Impl tags remain inert slots");
+  assert.equal((await markerMessage.locator(".mes_text > p").nth(1).textContent()).trim(), "");
+  assert.equal((await markerMessage.locator(".mes_text > p").nth(4).textContent()).trim(), "");
+  assert.equal(await markerMessage.locator("code").first().textContent(), '<IllustrationImpl ref="code" />',
+    "inline code retains literal placeholder syntax");
+  assert.equal((await markerMessage.locator("pre code").textContent()).trim(), '<SceneArt ref="fenced-code" />',
+    "fenced code retains literal placeholder syntax");
+  assert.equal(await markerMessage.locator(".chat-html-frame").count(), 0,
+    "placeholders do not become isolated HTML frames");
+  assert.equal(await page.evaluate(() => window.TavernHelper.getChatMessages(3)[0].message), markerContent,
+    "display normalization leaves raw card content available to scripts and persistence");
+
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.evaluate(async () => {
     window.startTavernObserverFixture();
@@ -272,16 +336,33 @@ try {
   });
   await message.locator(".fixture-line").filter({ hasText: "桌上摆着一杯茶" }).waitFor();
 
+  // A rendering-mode change also replaces DOM that card decorators own.
+  await page.evaluate(() => {
+    window.fixtureObserver.disconnect();
+    window.decorateTavernFixture(0, true);
+  });
+  const htmlToggle = page.getByLabel("渲染 HTML", { exact: true });
+  await htmlToggle.evaluate(input => input.click());
+  await message.locator(".mes_text").waitFor({ state: "visible" });
+  assert.equal(await markerMessage.locator("[data-tavern-placeholder]").count(), 0,
+    "disabling HTML rendering restores literal marker text in a clean DOM tree");
+  assert.match(await markerMessage.locator(".mes_text").textContent(), /<SceneArt ref='window > dawn' \/>/);
+  await htmlToggle.evaluate(input => input.click());
+  await markerMessage.locator("[data-tavern-placeholder]").first().waitFor({ state: "attached" });
+  assert.equal(await markerMessage.locator("[data-tavern-placeholder]").count(), 4);
+
   await page.reload();
   await page.waitForFunction(() => window.__greetingRuntimeReady, null, { timeout: 90_000 });
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
   await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   await message.getByText("夕阳照亮庭院。", { exact: true }).waitFor();
   await ordinary.getByText("修改后第二段。", { exact: true }).waitFor();
+  assert.equal(await markerMessage.locator("[data-tavern-placeholder]").count(), 4,
+    "placeholder slots survive reload");
   assert.equal(await page.evaluate(async () => (await window.TavernHelper.getChatMessages(0))[0].swipe_id), 3,
     "the selected opening is restored even after the greeting controls are hidden by later messages");
   assert.deepEqual(errors, []);
-  console.log("PASS: real Tavern DOM clearing, protected UI rejection, observer responsiveness, opening selection, decorated DOM replacement, editing, mobile layout and reload");
+  console.log("PASS: Tavern DOM clearing, protected UI rejection, complete decoration across illustration slots, generic/adjacent placeholders, literal code, opening selection, editing, mobile layout and reload");
 } catch (error) {
   await page?.screenshot({ path: ".runtime/greeting-render-failure.png" });
   throw error;

@@ -96,10 +96,13 @@ import {
   collectInheritedHtmlPreviewStyleResources,
   getHtmlPreviewLayoutSettleDelays,
   isHtmlPreviewRootTag,
+  isTavernInlinePlaceholder,
+  isTavernPlaceholderLine,
   mergeWhitespaceSeparatedHtmlPreviewSegments,
   normalizeRedundantTavernQuotePairs,
   stabilizeHtmlPreviewMapViewport,
   stabilizeHtmlPreviewRuntimeCompatibility,
+  TAVERN_INLINE_PLACEHOLDER_PATTERN,
   unwrapTavernProseWrappers,
 } from "./htmlPreviewUtils";
 import {
@@ -7510,7 +7513,7 @@ function resizeHtmlPreviewFrame(event: SyntheticEvent<HTMLIFrameElement>) {
   fitHtmlPreviewFrame(frame);
 }
 
-function renderInlineText(content: string): ReactNode[] {
+function renderInlineText(content: string, tavernPlaceholders = false): ReactNode[] {
   const nodes: ReactNode[] = [];
   const normalizedContent = normalizeRedundantTavernQuotePairs(
     stripHiddenImageAnnotations(content),
@@ -7520,8 +7523,11 @@ function renderInlineText(content: string): ReactNode[] {
     /`(?<code>[^`]+)`|(?<bareImage>https?:\/\/\S+?\.(?:png|jpe?g|webp|gif)(?:\?\S*)?|data:image\/[a-zA-Z+.-]+;base64,[A-Za-z0-9+/=]+)|!\[(?<imageAlt>[^\]]*)\]\s*\(\s*(?<imageUrl>[^)\s]+)\s*\)|\[(?<linkText>[^\]]+)\]\s*\(\s*(?<linkUrl>[^)\s]+)\s*\)|(?<personalizedQuote>"[^"\n]+"|＂[^＂\n]+＂|“[^”\n]+”|〝[^〞\n]+〞|「[^」\n]+」|｢[^｣\n]+｣|『[^』\n]+』)|\*\*(?<doubleAsterisk>[^*]+)\*\*|__(?<doubleUnderscore>[^_]+)__|~~(?<deleted>[^~]+)~~|\*(?<asteriskEm>[^*\n]+)\*|_(?<underscoreEm>[^_\n]+)_/g;
   let cursor = 0;
   let match: RegExpExecArray | null;
+  const tokenPattern = tavernPlaceholders
+    ? new RegExp(`(?<tavernPlaceholder>${TAVERN_INLINE_PLACEHOLDER_PATTERN.source})|${inlinePattern.source}`, "g")
+    : inlinePattern;
 
-  while ((match = inlinePattern.exec(normalizedContent))) {
+  while ((match = tokenPattern.exec(normalizedContent))) {
     if (match.index > cursor) nodes.push(normalizedContent.slice(cursor, match.index));
     const groups = match.groups ?? {};
 
@@ -7533,6 +7539,16 @@ function renderInlineText(content: string): ReactNode[] {
           {groups.code}
         </code>,
       );
+    } else if (groups.tavernPlaceholder !== undefined) {
+      if (isTavernInlinePlaceholder(groups.tavernPlaceholder, htmlStandardTags)) {
+        // Keep an empty DOM slot for sequential paragraph decorators. The raw
+        // marker/ref stays in message storage and in the Tavern message API.
+        nodes.push(
+          <span aria-hidden="true" data-tavern-placeholder={groups.tavernPlaceholder} key={`placeholder-${match.index}`} />,
+        );
+      } else {
+        nodes.push(...renderInlineText(groups.tavernPlaceholder));
+      }
     } else if (groups.bareImage !== undefined) {
       // 裸图片 URL（http(s) 直链或 data:image/...）
       nodes.push(
@@ -7572,20 +7588,20 @@ function renderInlineText(content: string): ReactNode[] {
       nodes.push(
         <span className="chat-personalized-quote" key={`quote-${match.index}`}>
           {quote.slice(0, 1)}
-          {renderInlineText(quote.slice(1, -1))}
+          {renderInlineText(quote.slice(1, -1), tavernPlaceholders)}
           {quote.slice(-1)}
         </span>,
       );
     } else if (groups.doubleAsterisk !== undefined) {
       nodes.push(
         <strong key={`strong-${match.index}`}>
-          {renderInlineText(groups.doubleAsterisk)}
+          {renderInlineText(groups.doubleAsterisk, tavernPlaceholders)}
         </strong>,
       );
     } else if (groups.doubleUnderscore !== undefined) {
       nodes.push(
         <strong key={`strong-${match.index}`}>
-          {renderInlineText(groups.doubleUnderscore)}
+          {renderInlineText(groups.doubleUnderscore, tavernPlaceholders)}
         </strong>,
       );
     } else if (groups.deleted !== undefined) {
@@ -7620,10 +7636,10 @@ function isMarkdownTableSeparator(line: string) {
   return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
 }
 
-function renderMarkdownParagraph(lines: string[], key: string) {
+function renderMarkdownParagraph(lines: string[], key: string, tavernPlaceholders: boolean) {
   return (
     <p className="chat-text-part" key={key}>
-      {renderInlineText(lines.join("\n"))}
+      {renderInlineText(lines.join("\n"), tavernPlaceholders)}
     </p>
   );
 }
@@ -7716,7 +7732,7 @@ function renderMarkdownHeading(level: number, content: string, key: string) {
   }
 }
 
-function renderMarkdownBlocks(content: string, keyPrefix: string) {
+function renderMarkdownBlocks(content: string, keyPrefix: string, tavernPlaceholders = false) {
   const lines = content.replace(/\r\n/g, "\n").split("\n");
   const nodes: ReactNode[] = [];
   let index = 0;
@@ -7728,6 +7744,17 @@ function renderMarkdownBlocks(content: string, keyPrefix: string) {
 
     if (!trimmedLine) {
       index += 1;
+      continue;
+    }
+
+    if (tavernPlaceholders && isTavernPlaceholderLine(line, htmlStandardTags)) {
+      const placeholders = [line];
+      index += 1;
+      while (index < lines.length && isTavernPlaceholderLine(lines[index], htmlStandardTags)) {
+        placeholders.push(lines[index]);
+        index += 1;
+      }
+      nodes.push(renderMarkdownParagraph(placeholders, key, true));
       continue;
     }
 
@@ -7753,7 +7780,7 @@ function renderMarkdownBlocks(content: string, keyPrefix: string) {
       }
       nodes.push(
         <blockquote className="chat-markdown-quote" key={key}>
-          {renderMarkdownBlocks(quoteLines.join("\n"), `${key}-quote`)}
+          {renderMarkdownBlocks(quoteLines.join("\n"), `${key}-quote`, tavernPlaceholders)}
         </blockquote>,
       );
       continue;
@@ -7799,6 +7826,7 @@ function renderMarkdownBlocks(content: string, keyPrefix: string) {
     while (
       index < lines.length &&
       lines[index].trim() &&
+      !(tavernPlaceholders && isTavernPlaceholderLine(lines[index], htmlStandardTags)) &&
       !/^(#{1,6})\s+/.test(lines[index].trim()) &&
       !/^(-{3,}|\*{3,}|_{3,})$/.test(lines[index].trim()) &&
       !lines[index].trim().startsWith(">") &&
@@ -7815,7 +7843,7 @@ function renderMarkdownBlocks(content: string, keyPrefix: string) {
       paragraphLines.push(lines[index]);
       index += 1;
     }
-    nodes.push(renderMarkdownParagraph(paragraphLines, key));
+    nodes.push(renderMarkdownParagraph(paragraphLines, key, tavernPlaceholders));
   }
 
   return nodes;
@@ -7825,15 +7853,17 @@ const ChatMarkdown = memo(function ChatMarkdown({
   content,
   keyPrefix,
   unwrap = false,
+  tavernPlaceholders = false,
 }: {
   content: string;
   keyPrefix: string;
   unwrap?: boolean;
+  tavernPlaceholders?: boolean;
 }) {
-  if (unwrap) return <>{renderMarkdownBlocks(content, keyPrefix)}</>;
+  if (unwrap) return <>{renderMarkdownBlocks(content, keyPrefix, tavernPlaceholders)}</>;
   return (
     <div className="chat-markdown">
-      {renderMarkdownBlocks(content, keyPrefix)}
+      {renderMarkdownBlocks(content, keyPrefix, tavernPlaceholders)}
     </div>
   );
 });
@@ -24658,6 +24688,7 @@ export function App() {
                 key={`${messageId}-text-${partIndex}`}
                 keyPrefix={`${messageId}-text-${partIndex}`}
                 unwrap={tavernCompatible}
+                tavernPlaceholders={tavernCompatible && chatHtmlRenderEnabled}
               />
             );
           }
@@ -38425,7 +38456,7 @@ export function App() {
                 const messageRenderKey = tavernCompatible
                   ? `${id}:${message.renderAsPlainText ? "streaming" : getHtmlPreviewContentRevision(segment, false)}:${
                       message.source === "roleplay-greeting" ? activeRoleplayGreetingIndex : ""
-                    }:${isEditingMessage ? editingChatMessage.mode : "display"}`
+                    }:${chatHtmlRenderEnabled ? "html" : "text"}:${isEditingMessage ? editingChatMessage.mode : "display"}`
                   : id;
 
                 return (

@@ -5,12 +5,40 @@ import {
   collectInheritedHtmlPreviewStyleResources,
   getHtmlPreviewLayoutSettleDelays,
   isHtmlPreviewRootTag,
+  isTavernInlinePlaceholder,
+  isTavernPlaceholderLine,
   mergeWhitespaceSeparatedHtmlPreviewSegments,
   normalizeRedundantTavernQuotePairs,
   stabilizeHtmlPreviewMapViewport,
   stabilizeHtmlPreviewRuntimeCompatibility,
+  TAVERN_INLINE_PLACEHOLDER_PATTERN,
   unwrapTavernProseWrappers,
 } from "../src/htmlPreviewUtils.ts";
+
+test("recognizes inert script placeholders without treating standard HTML as markers", () => {
+  const standardTags = new Set(["img", "br", "script", "input"]);
+  for (const source of [
+    '<IllustrationImpl ref="landscape#1" />',
+    "<StatusPlaceHolderImpl>",
+    "<SceneArt ref='room > window'/>",
+    '<OtherWidget data-ref="first" />',
+  ]) {
+    assert.equal(source.match(TAVERN_INLINE_PLACEHOLDER_PATTERN)?.[0], source);
+    assert.equal(isTavernInlinePlaceholder(source, standardTags), true);
+  }
+  for (const source of ['<img src="photo.png" />', "<br/>", "<script>", "<story>"]) {
+    assert.equal(isTavernInlinePlaceholder(source, standardTags), false);
+  }
+});
+
+test("keeps consecutive placeholder lines separate from surrounding prose and code", () => {
+  const standardTags = new Set(["img", "br", "script"]);
+  assert.equal(isTavernPlaceholderLine('  <IllustrationImpl ref="one"/><SceneArt ref="two" /> ', standardTags), true);
+  assert.equal(isTavernPlaceholderLine("<StatusPlaceHolderImpl>", standardTags), true);
+  for (const source of ['正文 <SceneArt/>', '`<SceneArt/>`', '<img src="test.png"/>', '<story>', '', '<SceneArt ref="unfinished']) {
+    assert.equal(isTavernPlaceholderLine(source, standardTags), false, source);
+  }
+});
 
 test("bounds HTML preview fallback measurements to the startup window", () => {
   assert.deepEqual(getHtmlPreviewLayoutSettleDelays(false), [80, 240, 600]);
