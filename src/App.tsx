@@ -21999,6 +21999,9 @@ export function App() {
       return;
     }
     const deletedSession = chatSessions.find((session) => session.id === sessionId);
+    if (!deletedSession || !window.confirm(
+      `确定删除会话「${deletedSession.title}」？\n\n会话记录、生成图片和相关记忆绑定将被删除。此操作无法撤销。`,
+    )) return;
     // 后端清理该会话目录下持久化的生成图片，fire-and-forget
     void fetch(`/api/session-images/${encodeURIComponent(sessionId)}`, { method: "DELETE" }).catch(() => undefined);
     // Keep Pi's persisted session tree aligned with Renge session deletion.

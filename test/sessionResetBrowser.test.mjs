@@ -202,9 +202,62 @@ try {
   await page.getByRole("button", { name: "发送", exact: true }).click();
   await page.getByText("fresh fixture reply", { exact: true }).waitFor();
   assert.equal(requests.length, requestCount + 1);
+  await page.close();
+
+  await seed(["delete-current", "delete-other"].map(id => ({ ...session(id), pendingInputs: [] })));
+  for (const id of ["delete-current", "delete-other"]) {
+    await mkdir(join(root, "session-images", id), { recursive: true });
+    await writeFile(join(root, "session-images", id, "saved.png"), "saved image");
+  }
+  await openChat("delete-current");
+  const deleteOther = page.locator(".chat-session-item").filter({ hasText: "delete-other" }).getByTitle("删除会话", { exact: true });
+  confirmReset = false;
+  const deletionBaseline = (await read()).chatSessions;
+  const cleanupCount = resets.length;
+  await deleteOther.click();
+  assert.equal(confirmations.at(-1).type, "confirm");
+  assert.match(confirmations.at(-1).message, /确定删除会话「delete-other」/);
+  assert.match(confirmations.at(-1).message, /无法撤销/);
+  assert.equal(resets.length, cleanupCount, "cancel deletion must not clear backend history");
+  assert.deepEqual((await read()).chatSessions, deletionBaseline, "cancel deletion preserves both saved conversations");
+  await access(join(root, "session-images", "delete-other", "saved.png"));
+  confirmReset = true;
+  const otherImageDeletion = page.waitForResponse(response => response.url().endsWith("/api/session-images/delete-other") && response.request().method() === "DELETE");
+  await deleteOther.click();
+  await deleteOther.waitFor({ state: "hidden" });
+  assert.equal((await otherImageDeletion).status(), 200);
+  await assert.rejects(access(join(root, "session-images", "delete-other", "saved.png")));
+  assert.equal(await page.evaluate(() => localStorage.getItem("renge_active_chat_session")), "delete-current", "deleting a background conversation preserves the selected conversation");
+  await access(join(root, "session-images", "delete-current", "saved.png"));
+
+  const deleteCurrent = page.locator(".chat-session-item").filter({ hasText: "delete-current" }).getByTitle("删除会话", { exact: true });
+  const currentTitle = (await page.locator(".chat-session-item").filter({ hasText: "delete-current" }).locator("button").first().textContent()).trim();
+  confirmReset = false;
+  await page.getByPlaceholder("输入消息，可粘贴图片").fill("keep draft when deletion is canceled");
+  await deleteCurrent.click();
+  assert.ok(confirmations.at(-1).message.includes(`确定删除会话「${currentTitle}」`));
+  assert.equal(await page.getByPlaceholder("输入消息，可粘贴图片").inputValue(), "keep draft when deletion is canceled");
+  assert.equal(await page.locator(".chat-session-item").count(), 1);
+  await access(join(root, "session-images", "delete-current", "saved.png"));
+  confirmReset = true;
+  const currentImageDeletion = page.waitForResponse(response => response.url().endsWith("/api/session-images/delete-current") && response.request().method() === "DELETE");
+  await deleteCurrent.click();
+  await deleteCurrent.waitFor({ state: "hidden" });
+  assert.equal((await currentImageDeletion).status(), 200);
+  await assert.rejects(access(join(root, "session-images", "delete-current", "saved.png")));
+  assert.equal(await page.locator(".chat-session-item").count(), 1, "deleting the last conversation creates a usable replacement");
+  assert.notEqual(await page.evaluate(() => localStorage.getItem("renge_active_chat_session")), "delete-current");
+  let savedAfterDeletion;
+  for (let index = 0; index < 100; index++) {
+    savedAfterDeletion = (await read()).chatSessions;
+    if (savedAfterDeletion.every(candidate => !candidate.id.startsWith("delete-"))) break;
+    await delay(50);
+  }
+  assert.equal(savedAfterDeletion.length, 1);
+  assert.ok(savedAfterDeletion.every(candidate => !candidate.id.startsWith("delete-")), "confirmed deletion reaches persistence");
   assert.deepEqual(errors, []);
-  assert.ok(resets.every(reset => ["reset-ai", "reset-role", "reset-failure"].includes(reset.sessionId)));
-  console.log("Session reset browser regression passed: confirmation and cancellation, immediate reset after confirmation, ID preservation, defaults, greeting, queues, drafts, images, phone stores, slow/failed cleanup, scoped generation, retry, persistence and mobile layout.");
+  assert.ok(resets.every(reset => ["reset-ai", "reset-role", "reset-failure", "delete-current", "delete-other"].includes(reset.sessionId)));
+  console.log("Session reset browser regression passed: reset/delete confirmation and cancellation, immediate reset after confirmation, ID preservation, defaults, greeting, queues, drafts, images, phone stores, slow/failed cleanup, scoped generation, retry, persistence, mobile layout and last-conversation replacement.");
 } catch (error) {
   if (page && !page.isClosed()) {
     console.error("Visible statuses:", await page.locator(".chat-status").allTextContents());
