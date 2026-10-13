@@ -73,6 +73,7 @@ import {
   type SetStateAction,
   type SyntheticEvent,
   memo,
+  Fragment,
   startTransition,
   useCallback,
   useEffect,
@@ -6444,12 +6445,12 @@ function shouldRenderHtmlCodePart(part: Extract<ChatContentPart, { type: "code" 
   );
 }
 
-function getHtmlPreviewContentRevision(content: string) {
+function getHtmlPreviewContentRevision(content: string, sampleContent = true) {
   const length = content.length;
   if (length === 0) return "0-0";
 
   let hash = 2166136261;
-  const sampleStep = Math.max(1, Math.floor(length / 4096));
+  const sampleStep = sampleContent ? Math.max(1, Math.floor(length / 4096)) : 1;
   for (let index = 0; index < length; index += sampleStep) {
     hash ^= content.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
@@ -7823,10 +7824,13 @@ function renderMarkdownBlocks(content: string, keyPrefix: string) {
 const ChatMarkdown = memo(function ChatMarkdown({
   content,
   keyPrefix,
+  unwrap = false,
 }: {
   content: string;
   keyPrefix: string;
+  unwrap?: boolean;
 }) {
+  if (unwrap) return <>{renderMarkdownBlocks(content, keyPrefix)}</>;
   return (
     <div className="chat-markdown">
       {renderMarkdownBlocks(content, keyPrefix)}
@@ -24579,6 +24583,7 @@ export function App() {
     messageId: string,
     sourceMessageId = messageId,
     renderAsPlainText = false,
+    tavernCompatible = false,
   ) => {
     const displayContent = substituteUserNicknameMacro(content, userProfile.nickname);
     if (renderAsPlainText) {
@@ -24618,8 +24623,9 @@ export function App() {
       return context;
     };
 
+    const ContentContainer = tavernCompatible ? Fragment : "div";
     return (
-      <div className="chat-rendered-content">
+      <ContentContainer {...(tavernCompatible ? {} : { className: "chat-rendered-content" })}>
         {parts.map((part, partIndex) => {
           if (part.type === "text") {
             if (chatHtmlRenderEnabled && looksLikeStandaloneRenderableHtml(part.content)) {
@@ -24642,6 +24648,7 @@ export function App() {
                 content={part.content}
                 key={`${messageId}-text-${partIndex}`}
                 keyPrefix={`${messageId}-text-${partIndex}`}
+                unwrap={tavernCompatible}
               />
             );
           }
@@ -24770,7 +24777,7 @@ export function App() {
             </div>
           );
         })}
-      </div>
+      </ContentContainer>
     );
   };
 
@@ -38399,13 +38406,25 @@ export function App() {
                   chatHtmlRenderEnabled &&
                   message.renderAsPlainText !== true &&
                   looksLikeRenderableHtml(bubbleContent);
+                const tavernCompatible = message.role === "assistant" &&
+                  activeTavernScripts.some((script) => script.enabled);
+                // Tavern decorators may replace React-owned paragraph children,
+                // hide containers and mark the entire floor as processed. Replace
+                // the floor on content/swipe/edit transitions so none of that DOM
+                // leaks into the next message. Variable and composer updates keep
+                // the same key, as do streaming fragments before decoration.
+                const messageRenderKey = tavernCompatible
+                  ? `${id}:${message.renderAsPlainText ? "streaming" : getHtmlPreviewContentRevision(segment, false)}:${
+                      message.source === "roleplay-greeting" ? activeRoleplayGreetingIndex : ""
+                    }:${isEditingMessage ? editingChatMessage.mode : "display"}`
+                  : id;
 
                 return (
                   <article
                     className={`chat-message mes ${
                       tavernSystemMessage ? "system assistant" : message.role
                     }${tavernHiddenMessage ? " tavern-hidden-message" : ""}`}
-                    key={id}
+                    key={messageRenderKey}
                     {...{
                       mesid: messageIndex,
                       is_user:
@@ -38596,12 +38615,13 @@ export function App() {
                                 {segmentIndex === 0 &&
                                   message.role === "assistant" &&
                                   renderChatReasoning(message, id)}
-                                <div className="mes_text">
+                                <div className={`mes_text${tavernCompatible && message.renderAsPlainText !== true ? " chat-markdown" : ""}`}>
                                   {renderChatContent(
                                     segment,
                                     id,
                                     message.id,
                                     message.renderAsPlainText === true,
+                                    tavernCompatible,
                                   )}
                                 </div>
                                 {segmentIndex === 0 &&
