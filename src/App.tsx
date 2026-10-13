@@ -37465,6 +37465,9 @@ export function App() {
       setSessionChatStatus(sessionId, { status: "warning", message: "请等当前任务结束后再重置会话。" });
       return;
     }
+    if (!window.confirm(
+      "确定重置当前会话？\n\n将清空该会话的所有数据，角色卡恢复到开场白，会话 ID 保持不变。此操作无法撤销。",
+    )) return;
 
     const roleplayCard = characterCardsRef.current.find(
       (card) => card.id === currentSession.roleplayCharacterCardId,
@@ -38061,7 +38064,7 @@ export function App() {
                   piCompactionPending ||
                   chatSessionResetTasksRef.current.has(activeChatSessionId)
                 }
-                title="一键清空当前会话并恢复开场白"
+                title="重置当前会话并恢复开场白"
                 aria-label="重置当前会话"
                 onClick={clearActiveChatSession}
               >

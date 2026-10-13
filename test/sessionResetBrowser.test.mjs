@@ -36,11 +36,17 @@ try {
   };
   const read = async () => (await (await fetch(`${server.url}/api/app-data`)).json()).data;
   const errors = [], requests = [], resets = [];
-  let failReset = false, holdReset = true, databaseReads = 0;
+  let failReset = false, holdReset = true, databaseReads = 0, confirmReset = true;
+  const confirmations = [];
   async function openChat(id) {
     page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     page.setDefaultTimeout(15_000);
     page.on("pageerror", error => errors.push(error.message));
+    page.on("dialog", async dialog => {
+      confirmations.push({ type: dialog.type(), message: dialog.message() });
+      if (confirmReset) await dialog.accept();
+      else await dialog.dismiss();
+    });
     await page.route("**/api/app-data", async route => {
       if (route.request().method() === "GET") databaseReads++;
       await route.continue();
@@ -104,9 +110,23 @@ try {
   await input.fill("old draft");
   await page.locator(".chat-attachment-input").setInputFiles({ name: "old-note.txt", mimeType: "text/plain", buffer: Buffer.from("old attachment") });
   const readsBefore = databaseReads;
+  confirmReset = false;
+  const sessionBeforeCancel = (await read()).chatSessions.find(candidate => candidate.id === "reset-ai");
+  await page.getByRole("button", { name: "重置当前会话", exact: true }).click();
+  assert.equal(confirmations[0].type, "confirm");
+  assert.match(confirmations[0].message, /清空该会话的所有数据/);
+  assert.match(confirmations[0].message, /会话 ID 保持不变/);
+  assert.match(confirmations[0].message, /无法撤销/);
+  assert.equal(resets.length, 0, "cancel must not start backend cleanup");
+  assert.equal(await input.inputValue(), "old draft", "cancel preserves the draft");
+  assert.equal(await page.getByTitle("移除附件", { exact: true }).count(), 1, "cancel preserves attachments");
+  await page.getByLabel("待处理消息", { exact: true }).getByText("old-queued-input", { exact: true }).waitFor();
+  assert.deepEqual((await read()).chatSessions.find(candidate => candidate.id === "reset-ai"), sessionBeforeCancel);
+  await access(imagePath);
+  confirmReset = true;
   await page.getByRole("button", { name: "重置当前会话", exact: true }).click();
   await page.getByText("会话已清空。", { exact: true }).waitFor({ timeout: 2000 });
-  assert.equal(await page.getByRole("alertdialog").count(), 0, "one click needs no confirmation");
+  assert.equal(confirmations.length, 2, "each click must request confirmation");
   assert.equal(await page.locator(".chat-message").count(), 0, "UI resets while Pi deletion is held indefinitely");
   assert.equal(await page.getByLabel("待处理消息").count(), 0);
   assert.equal(await input.inputValue(), "");
@@ -184,7 +204,7 @@ try {
   assert.equal(requests.length, requestCount + 1);
   assert.deepEqual(errors, []);
   assert.ok(resets.every(reset => ["reset-ai", "reset-role", "reset-failure"].includes(reset.sessionId)));
-  console.log("Session reset browser regression passed: immediate one-click reset, ID preservation, defaults, greeting, queues, drafts, images, phone stores, slow/failed cleanup, scoped generation, retry, persistence and mobile layout.");
+  console.log("Session reset browser regression passed: confirmation and cancellation, immediate reset after confirmation, ID preservation, defaults, greeting, queues, drafts, images, phone stores, slow/failed cleanup, scoped generation, retry, persistence and mobile layout.");
 } catch (error) {
   if (page && !page.isClosed()) {
     console.error("Visible statuses:", await page.locator(".chat-status").allTextContents());
