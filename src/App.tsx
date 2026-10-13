@@ -92,9 +92,11 @@ import { createChatProgressTracker } from "./chatComposerStatusUtils";
 import { strToU8, zip } from "fflate";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
+import htmlPreviewDependenciesSource from "virtual:html-preview-dependencies";
 import {
   collectInheritedHtmlPreviewStyleResources,
   getHtmlPreviewLayoutSettleDelays,
+  injectHtmlPreviewHead,
   isHtmlPreviewRootTag,
   isTavernInlinePlaceholder,
   isTavernPlaceholderLine,
@@ -199,6 +201,7 @@ import {
 import { HTML_PREVIEW_STSCRIPT_COMPAT_SOURCE } from "./htmlPreviewStscript";
 import {
   normalizeTavernSetChatMessageUpdate,
+  resolveTavernCreateMessageInsertionIndex,
   parseTavernSlashCommand,
   splitTavernContextHeaders,
 } from "./tavernCompatibilityUtils";
@@ -4330,6 +4333,11 @@ const htmlPreviewJqueryScript = [
   jquerySource.replace(/<\/script/gi, "<\\/script"),
   "</script>",
 ].join("");
+const htmlPreviewDependenciesScript = [
+  '<script data-renge-html-preview-dependencies="true">',
+  htmlPreviewDependenciesSource.replace(/<\/script/gi, "<\\/script"),
+  "</script>",
+].join("");
 const htmlPreviewBootstrapScript = [
   '<script data-renge-html-preview-bootstrap="true">',
   "(() => {",
@@ -4911,9 +4919,12 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  };",
     "  check();",
     "});",
-    "const errorCatched = (callback) => async (...args) => {",
-    "  try { return await callback(...args); }",
-    "  catch (error) { console.error(\"[TavernHelper] HTML 脚本执行失败\", error); return null; }",
+    "const reportCallbackError = (error) => { console.error(\"[TavernHelper] HTML 脚本执行失败\", error); return null; };",
+    "const errorCatched = (callback) => typeof callback !== \"function\" ? callback : function(...args) {",
+    "  try {",
+    "    const result = Reflect.apply(callback, this, args);",
+    "    return result && typeof result.then === \"function\" ? Promise.resolve(result).catch(reportCallbackError) : result;",
+    "  } catch (error) { return reportCallbackError(error); }",
     "};",
     "const getInput = () => String(snapshot.chatInput ?? \"\");",
     "const setInput = async (text) => {",
@@ -4927,6 +4938,12 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "};",
     "const triggerSlash = (command) => requestParentCommand(\"triggerSlash\", { command: String(command ?? \"\") });",
     "const sendMessage = (text = getInput()) => requestParentCommand(\"send\", { text: String(text ?? \"\") });",
+    "const createChatMessages = (values, option = -1) => requestParentCommand(\"createChatMessages\", { updates: clone(values), option: clone(option) });",
+    "const notify = (level, message, title) => {",
+    "  void requestParentCommand(\"notice\", { level, text: String(message ?? \"\"), title: String(title ?? \"\") }).catch(console.error);",
+    "};",
+    "window.toastr = Object.fromEntries([\"success\", \"info\", \"warning\", \"error\"].map(level => [level, (message, title) => notify(level, message, title)]));",
+    "window.toastr.clear = () => undefined;",
     HTML_PREVIEW_STSCRIPT_COMPAT_SOURCE,
     "const generate = (config = {}) => {",
     "  const normalized = isRecord(config) ? config : { user_input: config };",
@@ -4962,7 +4979,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  stopAllGeneration, stopGenerationById: stopAllGeneration,",
     "  getCurrentMessageId: () => snapshot.currentMessageIndex,",
     "  getLastMessageId: () => snapshot.messages.length - 1,",
-    "  getChatMessages, setChatMessages, setChatMessage, getContext, eventOn, eventOnce, eventEmit, eventRemoveListener,",
+    "  getChatMessages, setChatMessages, setChatMessage, createChatMessages, getContext, eventOn, eventOnce, eventEmit, eventRemoveListener,",
     "};",
     "Object.assign(window, api);",
     "const installLegacySendControls = () => {",
@@ -6840,23 +6857,6 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
   ].join("");
 }
 
-function injectHtmlPreviewHead(documentContent: string, headInjection: string) {
-  const normalizedContent = documentContent.replace(
-    /<meta\b(?=[^>]*\bname\s*=\s*["']?viewport\b)[^>]*>/gi,
-    "",
-  );
-  if (/<head[\s>]/i.test(normalizedContent)) {
-    return normalizedContent.replace(/<head([^>]*)>/i, `<head$1>${headInjection}`);
-  }
-  if (/<html[\s>]/i.test(normalizedContent)) {
-    return normalizedContent.replace(
-      /<html([^>]*)>/i,
-      `<html$1><head>${headInjection}</head>`,
-    );
-  }
-  return `<head>${headInjection}</head>${normalizedContent}`;
-}
-
 function getIsolatedHtmlPreviewFrame(previewId: string) {
   if (typeof window === "undefined") return null;
   if (window.RengeAndroidNative) {
@@ -7060,7 +7060,11 @@ function buildHtmlPreviewDocument(
   const inheritedStyleInjection = inheritedStyleResources
     ? `<!-- renge-inherited-html-styles -->${inheritedStyleResources}`
     : "";
-  const headInjection = `${htmlPreviewViewportMeta}${inheritedStyleInjection}${htmlPreviewStyle}${buildHtmlPreviewFullscreenScript(previewId)}${htmlPreviewJqueryScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
+  const iconBaseUrl = !window.RengeAndroidNative
+    ? getIsolatedHtmlPreviewFrame(previewId)?.url ?? window.location.href
+    : window.location.href;
+  const iconStyle = `<style data-renge-html-preview-icons="true">${getTavernFontAwesomeCss(iconBaseUrl)}</style>`;
+  const headInjection = `${htmlPreviewViewportMeta}${inheritedStyleInjection}${htmlPreviewStyle}${iconStyle}${buildHtmlPreviewFullscreenScript(previewId)}${htmlPreviewJqueryScript}${htmlPreviewDependenciesScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
     return injectHtmlPreviewHead(trimmedContent, headInjection);
   }
@@ -14287,6 +14291,8 @@ export function App() {
         shouldStream?: unknown;
         disableExtras?: unknown;
         requestId?: unknown;
+        level?: unknown;
+        title?: unknown;
       };
 
       if (payload.type === HYPNOOS_APPEND_OPERATION_MESSAGE) {
@@ -14370,6 +14376,30 @@ export function App() {
             result = writeChatInput(typeof payload.text === "string" ? payload.text : "", true, false);
           } else if (payload.operation === "send") {
             result = writeChatInput(typeof payload.text === "string" ? payload.text : "", false, true);
+          } else if (payload.operation === "createChatMessages") {
+            if (!Array.isArray(payload.updates)) throw new Error("角色卡消息列表无效。");
+            const messages = [...chatMessagesRef.current];
+            const created = payload.updates.filter(isObjectRecord).map((value): ChatMessage => ({
+              id: crypto.randomUUID(),
+              role: value.role === "assistant" ? "assistant" : "user",
+              content: String(value.message ?? value.content ?? ""),
+              createdAt: new Date().toISOString(),
+              ...(isObjectRecord(value.data) ? { variables: normalizeTavernVariables(value.data) } : {}),
+            }));
+            messages.splice(resolveTavernCreateMessageInsertionIndex(payload.option, messages.length), 0, ...created);
+            chatMessagesRef.current = messages;
+            setChatMessages(messages);
+            await flushTavernPersistenceRef.current();
+            await waitForToolProgressPaint();
+            result = true;
+          } else if (payload.operation === "notice") {
+            const text = String(payload.text ?? "");
+            const title = String(payload.title ?? "");
+            setChatStatus({
+              status: payload.level === "error" || payload.level === "warning" ? "error" : "success",
+              message: title ? `${title}：${text}` : text,
+            });
+            result = true;
           } else if (payload.operation === "generate") {
             result = await generateHtmlPreviewTextRef.current(
               {

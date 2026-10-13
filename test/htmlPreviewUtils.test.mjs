@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   collectInheritedHtmlPreviewStyleResources,
   getHtmlPreviewLayoutSettleDelays,
+  injectHtmlPreviewHead,
   isHtmlPreviewRootTag,
   isTavernInlinePlaceholder,
   isTavernPlaceholderLine,
@@ -14,6 +15,15 @@ import {
   TAVERN_INLINE_PLACEHOLDER_PATTERN,
   unwrapTavernProseWrappers,
 } from "../src/htmlPreviewUtils.ts";
+
+test("injects preview dependencies and card snapshots without expanding replacement tokens", () => {
+  const injection = '<script>const tokens = ["$&", "$1", "$`", "$\'", "$$"];</script>';
+  for (const [source, expected] of [
+    ['<html lang="zh"><head data-card="yes"></head><body>form</body></html>', `<html lang="zh"><head data-card="yes">${injection}</head><body>form</body></html>`],
+    ['<html lang="zh"><body>form</body></html>', `<html lang="zh"><head>${injection}</head><body>form</body></html>`],
+    ['<body>form</body>', `<head>${injection}</head><body>form</body>`],
+  ]) assert.equal(injectHtmlPreviewHead(source, injection), expected);
+});
 
 test("recognizes inert script placeholders without treating standard HTML as markers", () => {
   const standardTags = new Set(["img", "br", "script", "input"]);

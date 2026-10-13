@@ -8,6 +8,24 @@ type HtmlPreviewStyleMessage = {
   content?: string;
 };
 
+export function injectHtmlPreviewHead(documentContent: string, headInjection: string) {
+  const normalizedContent = documentContent.replace(
+    /<meta\b(?=[^>]*\bname\s*=\s*["']?viewport\b)[^>]*>/gi,
+    "",
+  );
+  // A replacement string would expand $&, $1, $` and $' found in bundled
+  // dependencies or serialized card data, corrupting their JavaScript.
+  if (/<head[\s>]/i.test(normalizedContent)) {
+    return normalizedContent.replace(/<head([^>]*)>/i, (_match, attributes: string) =>
+      `<head${attributes}>${headInjection}`);
+  }
+  if (/<html[\s>]/i.test(normalizedContent)) {
+    return normalizedContent.replace(/<html([^>]*)>/i, (_match, attributes: string) =>
+      `<html${attributes}><head>${headInjection}</head>`);
+  }
+  return `<head>${headInjection}</head>${normalizedContent}`;
+}
+
 const TAVERN_PROSE_WRAPPER_PATTERN =
   /<\s*content(?:\s[^<>]*?)?\s*>[\s\S]*?<\s*\/\s*content\s*>/i;
 const TAVERN_PROSE_WRAPPER_TAG_PATTERN =
