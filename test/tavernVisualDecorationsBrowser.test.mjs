@@ -1,0 +1,156 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { chromium } from "playwright";
+import { startRengeServer } from "../server.mjs";
+
+// Exercise card-owned images and a parent-mounted HUD with neutral local assets.
+// Run after npm run build; application data and the browser profile are isolated.
+const root = await mkdtemp(join(tmpdir(), "renge-card-visuals-"));
+const image = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80"><rect width="120" height="80" fill="#597fbc"/><circle cx="30" cy="25" r="12" fill="#ffe09b"/></svg>')}`;
+const opening = (scene, time, location) => `${scene}第一段。\n\n旅人〔开心〕「一起出发吧。」\n\n<IllustrationImpl ref="landscape#1" />\n\n旅人〔日常〕「继续往前走。」\n\n${scene}最后一段。\n\n<initvar>\nenv:\n  time: "${time}"\n  location: ${location}\n</initvar>`;
+const morning = opening("清晨", "07:20", "旅店");
+const evening = opening("傍晚", "18:10", "庭院");
+const chooser = '```html\n<button onclick="setChatMessages([{message_id:0, swipe_id:1}])">进入清晨</button>\n```';
+const scriptContent = `
+  const host = parent.document;
+  const style = host.createElement('style');
+  style.textContent = '.visual-avatar{width:40px;height:40px;vertical-align:middle;margin-right:8px}.visual-illustration{display:block;width:180px;max-width:100%;height:auto}.visual-hud{position:fixed;right:12px;top:12px;z-index:2147483000;background:#172033;color:white;border-radius:8px;padding:12px}';
+  host.head.appendChild(style);
+  const hud = host.createElement('aside');
+  hud.className = 'visual-hud';
+  hud.setAttribute('aria-label', '角色浮动状态');
+  host.body.appendChild(hud);
+  const paint = () => {
+    const message = getChatMessages(0)[0];
+    const box = host.querySelector('#chat .mes[mesid="0"] .mes_text');
+    if (!message || !box) return;
+    const env = getVariables({type:'message', message_id:0}).stat_data?.env;
+    if (env) hud.textContent = env.time + ' · ' + env.location;
+    const lines = message.message.replace(/<initvar>[\\s\\S]*?<\\/initvar>/gi, '').trim().split(/\\n{2,}/);
+    let index = 0;
+    for (const paragraph of box.querySelectorAll(':scope > p')) {
+      if (!lines[index]) break;
+      if (paragraph.dataset.visualDone === 'true') { index++; continue; }
+      const source = lines[index];
+      if (source.startsWith('<IllustrationImpl')) {
+        if (paragraph.textContent.trim()) continue;
+        const art = host.createElement('img');
+        art.className = 'visual-illustration';
+        art.alt = '风景插画';
+        art.src = ${JSON.stringify(image)};
+        paragraph.replaceChildren(art);
+      } else {
+        if (!paragraph.textContent.includes(source)) continue;
+        if (source.startsWith('旅人〔')) {
+          const avatar = host.createElement('img');
+          avatar.className = 'visual-avatar';
+          avatar.alt = '角色对话头像';
+          avatar.src = ${JSON.stringify(image)};
+          const dialogue = host.createElement('span');
+          dialogue.textContent = source.replace(/〔[^〕]*〕/, '');
+          paragraph.replaceChildren(avatar, dialogue);
+        }
+      }
+      paragraph.dataset.visualDone = 'true';
+      index++;
+    }
+  };
+  const schedule = () => setTimeout(paint, 0);
+  ['chat_changed', 'message_swiped', 'character_message_rendered', 'mag_variable_initialized', 'variable_changed'].forEach(event => eventOn(event, schedule));
+  let observedChat;
+  const observer = new parent.MutationObserver(schedule);
+  setInterval(() => {
+    const chat = host.getElementById('chat');
+    if (chat && chat !== observedChat) {
+      observer.disconnect();
+      observer.observe(chat, {childList:true, subtree:true});
+      observedChat = chat;
+      schedule();
+    }
+  }, 100);
+  parent.__visualRuntimeReady = true;
+`;
+let server;
+let browser;
+let page;
+try {
+  await mkdir(".runtime", { recursive: true });
+  server = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir: join(root, "data") });
+  const now = new Date().toISOString();
+  const card = {
+    id: "visual-card", name: "旅人", firstMessage: chooser, alternateGreetings: [morning, evening],
+    tavernScripts: [{id:"visual-script", name:"Card visual fixture", enabled:true, autoRun:true, runOn:"startup", content:scriptContent}],
+    regexScripts: [{id:"hide-init", scriptName:"Hide variable initialization", findRegex:"/<initvar>[\\s\\S]*?<\\/initvar>/gi", replaceString:"", placement:[2], markdownOnly:true, disabled:false}],
+    createdAt: now, updatedAt: now,
+  };
+  const seed = {
+    version: 1, chatMode: "roleplay", chatHtmlRenderEnabled: true, chatMultiBubbleEnabled: false,
+    activeCharacterCardId: card.id, characterCards: [card],
+    chatSessions: [{id:"visual-chat", title:"视觉渲染测试", mode:"roleplay", roleplayCharacterCardId:card.id, roleplayGreetingIndex:0,
+      messages:[{id:"greeting", role:"assistant", source:"roleplay-greeting", content:chooser, createdAt:now}], createdAt:now, updatedAt:now}],
+  };
+  assert.equal((await fetch(`${server.url}/api/app-data`, {method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({data:seed})})).ok, true);
+  browser = await chromium.launch({ headless:true, channel:process.env.PLAYWRIGHT_CHANNEL || undefined });
+  page = await browser.newPage({viewport:{width:1440, height:1000}});
+  page.setDefaultTimeout(15_000);
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.message));
+  const openChat = async () => {
+    await page.waitForFunction(() => window.__visualRuntimeReady, null, {timeout:90_000});
+    await page.getByRole("button", {name:"打开Agent Chat", exact:true}).click();
+    await page.getByRole("button", {name:"开始对话", exact:true}).last().click();
+  };
+  const assertVisuals = async (scene, status) => {
+    const message = page.locator('#chat .mes[mesid="0"]');
+    await message.getByText(`${scene}最后一段。`, {exact:true}).waitFor();
+    await message.getByAltText("角色对话头像").first().waitFor();
+    await message.getByAltText("风景插画").waitFor();
+    await page.getByLabel("角色浮动状态").getByText(status, {exact:true}).waitFor();
+    assert.equal(await message.locator(".visual-avatar").count(), 2,
+      "dialogue avatars render both before and after the illustration slot");
+    assert.equal(await message.locator(".visual-illustration").count(), 1);
+    await message.locator("img").evaluateAll(images => Promise.all(images.map(image => image.decode())));
+    assert.ok(await message.locator("img").evaluateAll(images => images.every(image => image.naturalWidth > 0)));
+    assert.ok(await message.locator(".chat-bubble").evaluate(bubble => bubble.scrollWidth <= bubble.clientWidth + 1));
+    assert.ok(await message.locator("img").evaluateAll(images => images.every(image => {
+      const rect = image.getBoundingClientRect();
+      const bubble = image.closest('.chat-bubble').getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && rect.left >= bubble.left && rect.right <= bubble.right + 1
+        && rect.top >= bubble.top && rect.bottom <= bubble.bottom + 1;
+    })), "avatars and illustrations fit inside their bubble without clipping");
+    assert.ok(await page.getByLabel("角色浮动状态").evaluate(panel => {
+      const rect = panel.getBoundingClientRect();
+      return rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
+    }), "floating status remains inside the desktop and mobile viewport");
+  };
+  await page.goto(server.url);
+  await openChat();
+  await page.frameLocator(".chat-html-frame").getByRole("button", {name:"进入清晨"}).click();
+  await assertVisuals("清晨", "07:20 · 旅店");
+  await page.evaluate(async () => {
+    await window.TavernHelper.insertOrAssignVariables({stat_data:{env:{time:"08:15", location:"街道"}}}, {type:"message", message_id:0});
+  });
+  await assertVisuals("清晨", "08:15 · 街道");
+  await page.locator(".roleplay-greeting-next").click();
+  await assertVisuals("傍晚", "18:10 · 庭院");
+  await page.evaluate(async () => {await window.TavernHelper.setChatMessages([{message_id:0, swipe_id:1}]);});
+  await assertVisuals("清晨", "07:20 · 旅店");
+  await page.setViewportSize({width:390, height:844});
+  await assertVisuals("清晨", "07:20 · 旅店");
+  await page.reload();
+  await openChat();
+  await assertVisuals("清晨", "07:20 · 旅店");
+  assert.equal(await page.getByLabel("角色浮动状态").count(), 1, "reload keeps a single floating status panel");
+  assert.deepEqual(errors, []);
+  console.log("PASS: card-scoped scripts render decoded dialogue avatars, illustrations and floating status across opening selection, variable updates, swipes, mobile layout and reload");
+} catch (error) {
+  await page?.screenshot({path:".runtime/tavern-visuals-failure.png"});
+  throw error;
+} finally {
+  await browser?.close();
+  server?.server.closeAllConnections();
+  if (server) await new Promise(resolve => server.server.close(resolve));
+  await rm(root, {recursive:true, force:true});
+}
