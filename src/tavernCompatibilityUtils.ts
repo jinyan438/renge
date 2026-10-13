@@ -1,5 +1,29 @@
 export type TavernCompatibilityErrorReporter = (error: unknown) => void;
 
+// Self-contained so the HTML-preview bridge can expose the same implementation.
+export function normalizeTavernSetChatMessageUpdate(
+  messageOrId: unknown,
+  idOrContent: unknown,
+  options?: unknown,
+): Record<string, unknown> {
+  const numericString = (value: unknown) =>
+    typeof value === "string" && /^-?\d+$/.test(value.trim());
+  const option = options && typeof options === "object" && !Array.isArray(options)
+    ? options as Record<string, unknown>
+    : {};
+  const idFirst = typeof messageOrId === "number" ||
+    (numericString(messageOrId) && typeof idOrContent !== "number" && !numericString(idOrContent));
+  const update = messageOrId && typeof messageOrId === "object" && !Array.isArray(messageOrId)
+    ? { ...messageOrId, message_id: idOrContent }
+    : idFirst
+      ? { message: String(idOrContent ?? ""), message_id: messageOrId }
+      : { message: String(messageOrId ?? ""), message_id: idOrContent };
+  return {
+    ...update,
+    ...(option.swipe_id != null ? { swipe_id: option.swipe_id } : {}),
+  };
+}
+
 export type ParsedTavernSlashCommand =
   | { type: "set-input"; text: string; append: boolean; submit: boolean }
   | {

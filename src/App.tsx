@@ -195,6 +195,7 @@ import {
 } from "./characterTemplateUtils";
 import { HTML_PREVIEW_STSCRIPT_COMPAT_SOURCE } from "./htmlPreviewStscript";
 import {
+  normalizeTavernSetChatMessageUpdate,
   parseTavernSlashCommand,
   splitTavernContextHeaders,
 } from "./tavernCompatibilityUtils";
@@ -4859,6 +4860,8 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  try { parent.postMessage({ type: updateMessageType, id: previewId, operation: \"setChatMessages\", updates: clone(updates) }, \"*\"); } catch {}",
     "  return true;",
     "};",
+    `const normalizeSetChatMessageUpdate = ${normalizeTavernSetChatMessageUpdate.toString()};`,
+    "const setChatMessage = async (messageOrId, idOrContent, options) => setChatMessages([normalizeSetChatMessageUpdate(messageOrId, idOrContent, options)]);",
     "const sillyTavernChatCache = snapshot.messages.map((message, index) => formatMessage(message, index, true));",
     "const saveSillyTavernChat = async () => {",
     "  const updates = [];",
@@ -4956,7 +4959,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  stopAllGeneration, stopGenerationById: stopAllGeneration,",
     "  getCurrentMessageId: () => snapshot.currentMessageIndex,",
     "  getLastMessageId: () => snapshot.messages.length - 1,",
-    "  getChatMessages, setChatMessages, getContext, eventOn, eventOnce, eventEmit, eventRemoveListener,",
+    "  getChatMessages, setChatMessages, setChatMessage, getContext, eventOn, eventOnce, eventEmit, eventRemoveListener,",
     "};",
     "Object.assign(window, api);",
     "const installLegacySendControls = () => {",
@@ -4997,9 +5000,6 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "if (document.body) installLegacySendControls();",
     "else document.addEventListener(\"DOMContentLoaded\", installLegacySendControls, { once: true });",
     "window.getCurrentMessage = () => getChatMessages(snapshot.currentMessageIndex)[0] || null;",
-    "window.setChatMessage = async (messageOrId, idOrContent) => isRecord(messageOrId)",
-    "  ? setChatMessages([{ ...clone(messageOrId), message_id: idOrContent }])",
-    "  : setChatMessages([{ message_id: messageOrId, message: String(idOrContent ?? \"\") }]);",
     "window.TavernHelper = window.tavernHelper = window.tavernHelperAPI = window.th = api;",
     "const sillyTavern = { version: \"3.5.0\", getContext, getCurrentChatId: () => snapshot.chatId, saveChat: saveSillyTavernChat, reloadCurrentChat: async () => true };",
     "Object.defineProperties(sillyTavern, {",
@@ -14507,22 +14507,25 @@ export function App() {
         if (payload.operation === "setChatMessages" && Array.isArray(payload.updates)) {
           const nextMessages = messages.map((message) => ({ ...message }));
           let requestedGreetingIndex: number | null = null;
+          const currentSession = chatSessionsRef.current.find((session) => session.id === activeChatSessionIdRef.current);
+          const currentCard = characterCardsRef.current.find((card) => card.id === currentSession?.roleplayCharacterCardId);
+          const greetings = currentCard ? getCharacterCardGreetings(currentCard, userProfileRef.current.nickname.trim() || "用户") : [];
           payload.updates.forEach((rawUpdate) => {
             if (!isObjectRecord(rawUpdate)) return;
             const messageIndex = normalizeMessageIndex(rawUpdate.message_id, false);
             const message = nextMessages[messageIndex];
             if (!message) return;
-            if (typeof rawUpdate.message === "string") message.content = rawUpdate.message;
-            else if (typeof rawUpdate.content === "string") message.content = rawUpdate.content;
             const swipeIndex = Number.isInteger(Number(rawUpdate.swipe_id))
               ? Math.max(0, Number(rawUpdate.swipe_id))
               : 0;
-            const greetingSwipeIndex = getTavernGreetingSwipeIndex(message, rawUpdate);
+            const greetingSwipeIndex = getTavernGreetingSwipeIndex(message, rawUpdate, greetings);
             if (greetingSwipeIndex !== null) {
               requestedGreetingIndex = greetingSwipeIndex;
               return;
             }
             if (typeof rawUpdate.mes === "string") message.content = rawUpdate.mes;
+            else if (typeof rawUpdate.message === "string") message.content = rawUpdate.message;
+            else if (typeof rawUpdate.content === "string") message.content = rawUpdate.content;
             if (
               Array.isArray(rawUpdate.swipes) &&
               typeof rawUpdate.swipes[swipeIndex] === "string"
@@ -14557,7 +14560,11 @@ export function App() {
             }
           });
           if (requestedGreetingIndex !== null) {
-            selectRoleplayGreetingRef.current(requestedGreetingIndex);
+            await selectRoleplayGreetingRef.current(requestedGreetingIndex);
+            nextMessages.forEach((message, index) => {
+              if (message.source !== "roleplay-greeting") return;
+              nextMessages[index] = chatMessagesRef.current.find((current) => current.id === message.id) ?? message;
+            });
           }
           if (valuesEqual(messages, nextMessages)) return;
           chatMessagesRef.current = nextMessages;
@@ -20697,15 +20704,17 @@ export function App() {
       0,
       Math.min(Math.floor(requestedIndex), activeRoleplayGreetings.length - 1),
     );
-    if (nextIndex === activeRoleplayGreetingIndex) {
-      await tavernScriptRuntimeRef.current?.initializeGreeting(nextIndex);
-      return true;
-    }
     const greeting = createRoleplayGreetingMessage(
       activeSessionRoleplayCard,
       nextIndex,
     );
     if (!greeting) return false;
+    if (nextIndex === activeRoleplayGreetingIndex && chatMessages.some(
+      (message) => message.source === "roleplay-greeting" && message.content === greeting.content,
+    )) {
+      await tavernScriptRuntimeRef.current?.initializeGreeting(nextIndex);
+      return true;
+    }
     const nextMessages = chatMessages.some((message) => message.source === "roleplay-greeting")
       ? chatMessages.map((message) =>
           message.source === "roleplay-greeting" ? { ...greeting, id: message.id } : message,

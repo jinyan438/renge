@@ -5,6 +5,7 @@ import {
   createTavernErrorCatched,
   installLegacyTavernSendControls,
   installTavernPresetManagerControls,
+  normalizeTavernSetChatMessageUpdate,
   proxyTavernModuleUrl,
   proxyTavernModuleUrls,
   resolveTavernCreateMessageInsertionIndex,
@@ -2391,7 +2392,9 @@ export class TavernScriptRuntime {
         const index = normalizeMessageId(update.message_id, messages);
         const message = messages[index];
         if (!message) continue;
-        const greetingSwipeIndex = getTavernGreetingSwipeIndex(message, update);
+        const greetingSwipeIndex = getTavernGreetingSwipeIndex(
+          message, update, this.adapter.getGreetingState?.()?.greetings,
+        );
         if (greetingSwipeIndex !== null && this.adapter.selectGreeting) {
           if (messagesChanged) {
             this.adapter.setMessages(messages);
@@ -2443,6 +2446,9 @@ export class TavernScriptRuntime {
       if (messagesChanged) await this.adapter.flushPersistence?.();
       return succeeded;
     };
+
+    const setChatMessage = async (messageOrId: unknown, idOrContent: unknown, options?: unknown) =>
+      await setChatMessages([normalizeTavernSetChatMessageUpdate(messageOrId, idOrContent, options)]);
 
     const createChatMessages = async (values: unknown, positionOrOptions: unknown = -1) => {
       if (!Array.isArray(values)) return false;
@@ -3522,6 +3528,7 @@ export class TavernScriptRuntime {
     const api = {
       getChatMessages,
       setChatMessages,
+      setChatMessage,
       createChatMessages,
       deleteChatMessages,
       getLastMessageId: () => this.adapter.getMessages().length - 1,
@@ -3649,19 +3656,6 @@ export class TavernScriptRuntime {
     win.tavernHelper = api;
     win.tavernHelperAPI = api;
     win.th = api;
-    win.setChatMessage = async (messageOrId: unknown, idOrContent: unknown) => {
-      if (isRecord(messageOrId)) {
-        return await setChatMessages([
-          {
-            ...cloneValue(messageOrId),
-            message_id: idOrContent,
-          },
-        ]);
-      }
-      return await setChatMessages([
-        { message_id: messageOrId, message: String(idOrContent ?? "") },
-      ]);
-    };
     win.getvar = (path: unknown, fallback?: unknown) =>
       getPath(getVariables(), String(path), fallback);
     win.setvar = async (path: unknown, value: unknown) => {
@@ -3860,6 +3854,7 @@ export class TavernScriptRuntime {
       messageIndex === index ? { ...message, variables: next } : message,
     );
     this.adapter.setMessages(updated);
+    this.refreshSillyTavernChatCache();
   }
 
   private formatHelperMessage(message: TavernRuntimeMessage, index: number) {
@@ -3906,7 +3901,7 @@ export class TavernScriptRuntime {
       const formatted = this.formatHelperMessage(message, index);
       return {
         ...formatted,
-        variables: [this.localizePlaceholderImages(cloneValue(message.variables ?? {}))],
+        variables: this.localizePlaceholderImages(cloneValue(formatted.swipes_data)),
       };
     });
     this.sillyTavernChatCache.splice(
@@ -4031,6 +4026,7 @@ export class TavernScriptRuntime {
           : undefined;
       return {
         id: previous?.id ?? crypto.randomUUID(),
+        ...(previous?.source ? { source: previous.source } : {}),
         role:
           rawMessage.is_user === true || rawMessage.role === "user"
             ? ("user" as const)

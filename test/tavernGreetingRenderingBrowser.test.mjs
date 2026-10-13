@@ -10,7 +10,17 @@ import { startRengeServer } from "../server.mjs";
 const root = await mkdtemp(join(tmpdir(), "renge-greeting-render-"));
 const morning = "晨光照进房间。\n\n旅人〔日常〕「早上好。」\n\n<IllustrationImpl ref=\"landscape#1\" />\n\n窗外传来鸟鸣。";
 const evening = "夕阳照亮庭院。\n\n旅人〔开心〕「欢迎回来。」\n\n桌上摆着一杯茶。";
-const chooser = '```html\n<button id="opening" onclick="setChatMessages([{message_id:0,swipe_id:1}])">进入清晨开局</button>\n```';
+const chooser = `\`\`\`html
+<button id="opening" onclick="selectOpening()">进入清晨开局</button>
+<script>
+async function selectOpening() {
+  const messages = await getChatMessages('0', { include_swipes: true });
+  await setChatMessage(String(messages[0].swipes[1]), 0, {
+    swipe_id: 1, refresh: 'display_and_render_current',
+  });
+}
+</script>
+\`\`\``;
 const parentDomFixture = `
 window.decorateTavernFixture = (index, hidden = false) => {
   const box = document.querySelector('#chat .mes[mesid="' + index + '"] .mes_text');
@@ -139,15 +149,49 @@ try {
   await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   await page.frameLocator(".chat-html-frame").getByRole("button", { name: "进入清晨开局" }).click();
   const message = page.locator('#chat .mes[mesid="0"]');
+  await page.locator(".chat-html-frame").waitFor({ state: "detached" });
+  assert.equal(await page.evaluate(async () => (await window.TavernHelper.getChatMessages(0))[0].message), morning,
+    "the content-first singular API must not replace the opening with its message id");
   await message.getByText("晨光照进房间。", { exact: true }).waitFor();
   assert.match(await message.innerText(), /窗外传来鸟鸣/);
   assert.equal(await message.locator(".roleplay-greeting-count").textContent(), "2/4");
+  assert.equal(await page.evaluate(async () => {
+    await window.TavernHelper.replaceVariables({ scene: "morning" }, { type: "message", message_id: 0 });
+    await window.SillyTavern.getContext().saveChat();
+    return (await window.TavernHelper.getChatMessages(0))[0].swipes.length;
+  }), 4, "saving script variables must retain the greeting's opening list");
+  assert.equal(await page.evaluate(() => window.TavernHelper.getVariables({ type: "message", message_id: 0 }).scene),
+    "morning", "saving a nonzero greeting swipe retains its variables");
   assert.equal(await message.locator(".mes_text > p").count(), 4,
     "paragraph decorators can reach each paragraph and illustration marker directly");
   assert.deepEqual(await page.evaluate(() => window.exerciseTavernFixtureMutations()),
     Array(11).fill("NoModificationAllowedError"),
     "real Tavern scripts can rewrite content but protected UI mutations fail explicitly");
   assert.equal(await page.locator("#root #chat .mes_text").count(), 1);
+  await page.evaluate(async () => {
+    const greetings = await window.TavernHelper.getChatMessages('0', { include_swipes: true });
+    await window.TavernHelper.setChatMessage(greetings[0].swipes[2], 0, { swipe_id: 2 });
+  });
+  await message.getByText("夕阳照亮庭院。", { exact: true }).waitFor();
+  assert.equal(await message.locator(".roleplay-greeting-count").textContent(), "3/4");
+  await page.evaluate(async () => {
+    const greetings = await window.TavernHelper.getChatMessages('0', { include_swipes: true });
+    await window.TavernHelper.setChatMessage(0, greetings[0].swipes[1], { swipe_id: 1 });
+  });
+  await message.getByText("晨光照进房间。", { exact: true }).waitFor();
+  assert.equal(await message.locator(".roleplay-greeting-count").textContent(), "2/4");
+
+  // Recover a previously corrupted opening without requiring a new conversation.
+  await page.evaluate(async () => {
+    await window.TavernHelper.setChatMessage('0', 0);
+  });
+  await message.getByText("0", { exact: true }).waitFor();
+  await page.evaluate(async () => {
+    const greetings = await window.TavernHelper.getChatMessages(0, { include_swipes: true });
+    await window.TavernHelper.setChatMessage(greetings[0].swipes[1], 0, { swipe_id: 1 });
+  });
+  await message.getByText("晨光照进房间。", { exact: true }).waitFor();
+  assert.equal(await message.locator(".roleplay-greeting-count").textContent(), "2/4");
 
   // Tavern decorators replace paragraph children and add classes/styles directly.
   // React must discard this DOM when the message is replaced, while keeping it

@@ -54,6 +54,7 @@ export function getTavernMessageSwipeState(
 export function getTavernGreetingSwipeIndex(
   message: TavernGreetingMessage,
   update: Record<string, unknown>,
+  greetings: readonly string[] = [],
 ) {
   if (message.source !== "roleplay-greeting" || update.swipe_id == null) return null;
   const swipeIndex = Number(update.swipe_id);
@@ -64,5 +65,11 @@ export function getTavernGreetingSwipeIndex(
     typeof update.message === "string" ||
     typeof update.content === "string" ||
     (Array.isArray(update.swipes) && typeof update.swipes[normalizedIndex] === "string");
-  return hasExplicitSwipeContent ? null : normalizedIndex;
+  if (!hasExplicitSwipeContent) return normalizedIndex;
+  const explicitContent = Array.isArray(update.swipes) && typeof update.swipes[normalizedIndex] === "string"
+    ? update.swipes[normalizedIndex]
+    : update.mes ?? update.message ?? update.content;
+  // Legacy frontends pass the selected greeting text as well as its swipe id.
+  // This still selects an opening; a different text remains an explicit edit.
+  return explicitContent === greetings[normalizedIndex] ? normalizedIndex : null;
 }

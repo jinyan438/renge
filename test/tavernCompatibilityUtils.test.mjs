@@ -8,6 +8,7 @@ import {
   getTavernCallerScriptSource,
   installLegacyTavernSendControls,
   installTavernPresetManagerControls,
+  normalizeTavernSetChatMessageUpdate,
   parseTavernSlashCommand,
   proxyTavernModuleUrl,
   proxyTavernModuleUrls,
@@ -16,6 +17,24 @@ import {
   resolveTavernCallerScriptId,
   splitTavernContextHeaders,
 } from "../src/tavernCompatibilityUtils.ts";
+
+test("content-first setChatMessage keeps text and greeting options in their correct fields", () => {
+  assert.deepEqual(normalizeTavernSetChatMessageUpdate("opening", 0, {
+    swipe_id: 2, refresh: "display_and_render_current",
+  }), { message: "opening", message_id: 0, swipe_id: 2 });
+  assert.deepEqual(normalizeTavernSetChatMessageUpdate("0", 2), { message: "0", message_id: 2 });
+  assert.deepEqual(normalizeTavernSetChatMessageUpdate("123", "2"), { message: "123", message_id: "2" });
+});
+
+test("setChatMessage also accepts id-first and object forms without changing the input", () => {
+  assert.deepEqual(normalizeTavernSetChatMessageUpdate(0, "opening"), { message: "opening", message_id: 0 });
+  assert.deepEqual(normalizeTavernSetChatMessageUpdate("0", "opening"), { message: "opening", message_id: "0" });
+  const update = { message: "opening", data: { ready: true } };
+  assert.deepEqual(normalizeTavernSetChatMessageUpdate(update, 0, { swipe_id: 1 }), {
+    ...update, message_id: 0, swipe_id: 1,
+  });
+  assert.deepEqual(update, { message: "opening", data: { ready: true } });
+});
 
 test("appends createChatMessages when TavernHelper passes refresh options", () => {
   assert.equal(resolveTavernCreateMessageInsertionIndex({ refresh: "affected" }, 3), 3);

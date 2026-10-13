@@ -45,6 +45,16 @@ test("explicit swipe content does not request an opening switch", () => {
   );
 });
 
+test("legacy content-plus-swipe calls select canonical greetings while other text remains an edit", () => {
+  const message = { content: "default", source: "roleplay-greeting" };
+  const greetings = ["default", "spring", "summer"];
+  for (const key of ["mes", "message", "content"]) {
+    assert.equal(getTavernGreetingSwipeIndex(message, { swipe_id: 2, [key]: "summer" }, greetings), 2);
+    assert.equal(getTavernGreetingSwipeIndex(message, { swipe_id: 2, [key]: "edited summer" }, greetings), null);
+  }
+  assert.equal(getTavernGreetingSwipeIndex(message, { swipe_id: 1, swipes: greetings }, greetings), 1);
+});
+
 test("ordinary messages keep a single swipe and never switch greetings", () => {
   const message = { content: "ordinary", variables: { ready: true } };
 
