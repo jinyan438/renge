@@ -7622,6 +7622,12 @@ summary:focus-visible {
   box-shadow: none;
 }
 
+.chat-tavern-inline-html {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
 .chat-html-preview.heavy.pending {
   display: grid;
   min-height: clamp(420px, 78vh, 760px);

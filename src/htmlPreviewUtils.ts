@@ -8,6 +8,37 @@ type HtmlPreviewStyleMessage = {
   content?: string;
 };
 
+export function getHtmlPreviewRootAttributes(content: string, ownerDocument: Document) {
+  const match = /<html\b((?:[^>"']|"[^"]*"|'[^']*')*)>/i.exec(content);
+  if (!match) return {};
+  const template = ownerDocument.createElement("template");
+  template.innerHTML = `<div${match[1]}></div>`;
+  return Object.fromEntries(Array.from(template.content.firstElementChild?.attributes ?? [])
+    .filter(({ name }) => /^(?:data-|id$|class$)/i.test(name))
+    .map(({ name, value }) => [name, value]));
+}
+
+// Tavern Helper only turns full frontend documents into frames. Passive HTML
+// stays in .mes_text so card scripts can find and mount their own UI there.
+export function isTavernInlineHtmlFragment(content: string, ownerDocument: Document) {
+  if (!content.trimStart().startsWith("<") || /<!doctype|<\/?(?:html|head|body)\b/i.test(content)) return false;
+  const template = ownerDocument.createElement("template");
+  template.innerHTML = content;
+  if (!template.content.childElementCount) return false;
+  const allowedTags = new Set(
+    "a b strong i em u s del small sub sup span div p br hr section article aside header footer main nav h1 h2 h3 h4 h5 h6 ul ol li blockquote pre code table thead tbody tfoot tr th td caption colgroup col button label input select option optgroup textarea details summary img".split(" "),
+  );
+  for (const element of template.content.querySelectorAll("*")) {
+    if (!allowedTags.has(element.localName)) return false;
+    for (const attribute of element.attributes) {
+      if (/^on|^(?:is|srcdoc)$/i.test(attribute.name)) return false;
+      if (/^(?:href|src|action|formaction|xlink:href)$/i.test(attribute.name) &&
+          /^(?:javascript|vbscript|data:text\/html):?/i.test(attribute.value.replace(/[\x00-\x20]/g, ""))) return false;
+    }
+  }
+  return true;
+}
+
 export function injectHtmlPreviewHead(documentContent: string, headInjection: string) {
   const normalizedContent = documentContent.replace(
     /<meta\b(?=[^>]*\bname\s*=\s*["']?viewport\b)[^>]*>/gi,

@@ -26,6 +26,25 @@ function matched(entry, messages, options = {}) {
   return getMatchedWorldBookEntries([book], [book.id], messages, options).length > 0;
 }
 
+test("worldbook custom entry metadata survives normalization and character export without sharing objects", () => {
+  const extra = { profile_source: "fixture", nested: { name: "Alex" } };
+  const entry = normalizeWorldBookEntry({ uid: "profile", content: "Profile", extra });
+  extra.nested.name = "changed";
+  assert.equal(entry.extra.nested.name, "Alex");
+  const card = normalizeCharacterCard({ name: "Fixture", characterBook: createBook([entry]) });
+  const exported = JSON.parse(exportCharacterCardJson(card));
+  const restored = normalizeCharacterCard(exported);
+  assert.deepEqual(restored.characterBook.entries[0].extra, entry.extra);
+});
+
+test("scan-only script prompts can trigger lore without consuming chat scan depth", () => {
+  const messages = [{ role: "user", content: "old keyword" }, { role: "user", content: "continue" }];
+  const entry = { keys: ["keyword"], content: "Lore", scanDepth: 1 };
+  assert.equal(matched(entry, messages), false);
+  assert.equal(matched(entry, messages, { additionalScanText: "keyword" }), true);
+  assert.equal(matched({ ...entry, scanDepth: 0 }, messages, { additionalScanText: "keyword" }), false);
+});
+
 test("secondary keyword logic implements any/all/not-any/not-all", () => {
   const messages = [{ role: "user", content: "dragon blue" }];
   const base = {

@@ -93,12 +93,15 @@ import { strToU8, zip } from "fflate";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
 import htmlPreviewDependenciesSource from "virtual:html-preview-dependencies";
+import { HTML_PREVIEW_PARENT_BRIDGE_SOURCE } from "./htmlPreviewParentBridge";
 import {
   collectInheritedHtmlPreviewStyleResources,
   getHtmlPreviewLayoutSettleDelays,
+  getHtmlPreviewRootAttributes,
   injectHtmlPreviewHead,
   isHtmlPreviewRootTag,
   isTavernInlinePlaceholder,
+  isTavernInlineHtmlFragment,
   isTavernPlaceholderLine,
   mergeWhitespaceSeparatedHtmlPreviewSegments,
   normalizeRedundantTavernQuotePairs,
@@ -4183,6 +4186,9 @@ type ChatContentPart =
 
 type HtmlPreviewContext = {
   currentMessageIndex: number;
+  currentHtmlPartIndex?: number;
+  parentMessageFrames?: Array<{ partIndex: number; attributes: Record<string, string> }>;
+  parentGlobals?: Record<string, { get: unknown }>;
   messages: Array<{
     role: ChatRole;
     content: string;
@@ -4702,6 +4708,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  if (event.data.type !== contextUpdateMessageType || event.data.id !== previewId) return;",
     "  if (!isRecord(event.data.context)) return;",
     "  Object.assign(snapshot, clone(event.data.context));",
+    "  refreshSillyTavernChatCache();",
     "  emitVariableUpdate();",
     "  try { window.dispatchEvent(new CustomEvent(\"renge-html-preview-context-updated\", { detail: clone(snapshot) })); } catch {}",
     "});",
@@ -4873,6 +4880,14 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     `const normalizeSetChatMessageUpdate = ${normalizeTavernSetChatMessageUpdate.toString()};`,
     "const setChatMessage = async (messageOrId, idOrContent, options) => setChatMessages([normalizeSetChatMessageUpdate(messageOrId, idOrContent, options)]);",
     "const sillyTavernChatCache = snapshot.messages.map((message, index) => formatMessage(message, index, true));",
+    "let sillyTavernChatSources = clone(snapshot.messages);",
+    "const refreshSillyTavernChatCache = () => {",
+    "  snapshot.messages.forEach((message, index) => {",
+    "    if (JSON.stringify(message) !== JSON.stringify(sillyTavernChatSources[index])) sillyTavernChatCache[index] = formatMessage(message, index, true);",
+    "  });",
+    "  sillyTavernChatCache.length = snapshot.messages.length;",
+    "  sillyTavernChatSources = clone(snapshot.messages);",
+    "};",
     "const saveSillyTavernChat = async () => {",
     "  const updates = [];",
     "  sillyTavernChatCache.forEach((cachedMessage, index) => {",
@@ -5027,6 +5042,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  name2: { get: () => snapshot.characterName, configurable: true },",
     "});",
     "window.SillyTavern = sillyTavern;",
+    HTML_PREVIEW_PARENT_BRIDGE_SOURCE,
     "const mvu = isRecord(window.Mvu) ? window.Mvu : {};",
     "mvu.events = isRecord(mvu.events) ? mvu.events : {};",
     "mvu.events.VARIABLE_INITIALIZED ||= \"mag_variable_initialized\";",
@@ -6904,8 +6920,13 @@ function isolateHtmlPreviewParentReferences(content: string) {
   // real parent because it is the only supported cross-frame transport.
   return content
     .replace(
+      /(\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*)(?:window\s*\.\s*)?(?:parent|top)\b(?!\s*(?:[.\[]|\?\.))/g,
+      "$1window.__rengeTavernParent",
+    )
+    .replace(
       /(?<![\w$.])(?:window\s*\.\s*)?(?:parent|top)\s*(?:\?\.|\.)\s*(?!postMessage\b)([A-Za-z_$][\w$]*)/g,
-      "window.$1",
+      (_match, property: string) => property.startsWith("__")
+        ? `window.__rengeTavernParent.${property}` : `window.${property}`,
     )
     .replace(
       /(?<![\w$.])(?:window\s*\.\s*)?(?:parent|top)\s*(?:\?\.)?\s*\[\s*(["'])(?!postMessage\1)([^"']+)\1\s*\]/g,
@@ -7002,12 +7023,30 @@ function expandEmbeddedHtmlPreviewDocuments(
   );
 }
 
+function getHtmlPreviewParentGlobals(content: string) {
+  const parentGlobals: NonNullable<HtmlPreviewContext["parentGlobals"]> = {};
+  const names = new Set(Array.from(content.matchAll(/(?:parent|top)\s*(?:\?\.|\.)\s*(__[A-Za-z_$][\w$]*)/g), match => match[1]));
+  names.forEach((name) => {
+    const value = (window as unknown as Record<string, unknown>)[name];
+    if (!isObjectRecord(value) || typeof value.get !== "function") return;
+    try {
+      // Card-owned zero-argument getters (for example calendars) can be read
+      // synchronously from a serialized snapshot without exposing host DOM.
+      const result = value.get();
+      if (result && typeof result.then === "function") return;
+      parentGlobals[name] = { get: JSON.parse(JSON.stringify(result)) };
+    } catch { /* Optional card globals may still be initializing. */ }
+  });
+  return parentGlobals;
+}
+
 function buildHtmlPreviewDocument(
   content: string,
   previewId: string,
   context: HtmlPreviewContext,
   embeddedDepth = 0,
 ): string {
+  context = { ...context, parentGlobals: getHtmlPreviewParentGlobals(content) };
   const isolatedContent = isolateHtmlPreviewParentReferences(
     stabilizeHtmlPreviewMapViewport(
       stabilizeHtmlPreviewRuntimeCompatibility(
@@ -7220,15 +7259,16 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
   const sendContextUpdate = useCallback(() => {
     const frameWindow = frameRef.current?.contentWindow;
     if (!frameWindow) return;
+    const parentGlobals = getHtmlPreviewParentGlobals(content);
     frameWindow.postMessage(
       {
         type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
         id: previewId,
-        context,
+        context: { ...context, parentGlobals },
       },
       "*",
     );
-  }, [context, previewId]);
+  }, [content, context, previewId]);
 
   const sendViewportUpdate = useCallback(() => {
     const frame = frameRef.current;
@@ -7817,6 +7857,12 @@ function renderMarkdownBlocks(content: string, keyPrefix: string, tavernPlacehol
 
   return nodes;
 }
+
+const ChatTavernInlineHtml = memo(function ChatTavernInlineHtml({ content }: { content: string }) {
+  // Card scripts own descendants after mounting. Keep their frames and form
+  // state intact when variables, worldbooks or the composer update.
+  return <div className="chat-tavern-inline-html" dangerouslySetInnerHTML={{ __html: content }} />;
+});
 
 const ChatMarkdown = memo(function ChatMarkdown({
   content,
@@ -19314,7 +19360,7 @@ export function App() {
 
   const applyTavernExtensionPromptFilters = async (
     messages: ChatApiMessage[],
-    options: { generationAfterCommands?: boolean } = {},
+    options: { generationAfterCommands?: boolean; sessionId?: string } = {},
   ) => {
     let preparedMessages = messages;
     if (options.generationAfterCommands !== false) {
@@ -19363,6 +19409,20 @@ export function App() {
           );
         }
       }
+    }
+    const injections = options.sessionId && options.sessionId !== activeChatSessionIdRef.current
+      ? [] : await tavernScriptRuntimeRef.current?.getPromptInjections() ?? [];
+    if (injections.length) {
+      const atDepth = new Map<number, ChatApiMessage[]>();
+      injections.forEach(({ role, content, depth }) => {
+        const index = Math.max(0, preparedMessages.length - depth);
+        const entries = atDepth.get(index) ?? [];
+        entries.push({ role, content });
+        atDepth.set(index, entries);
+      });
+      preparedMessages = preparedMessages.flatMap((message, index) => [
+        ...(atDepth.get(index) ?? []), message,
+      ]).concat(atDepth.get(preparedMessages.length) ?? []);
     }
     const filtered = await tavernExtensionHooksRef.current.applyFilters(
       TAVERN_EVENTS.CHAT_COMPLETION_PROMPT_READY,
@@ -24634,16 +24694,38 @@ export function App() {
     );
     const htmlPreviewSessionId =
       (activeChatSession?.id ?? activeChatSessionId) || "no-session";
-    const getHtmlPreviewContext = () => {
-      const cached = htmlPreviewContexts.get(sourceMessageId);
-      if (cached) return cached;
+    const getHtmlPreviewContext = (partIndex: number) => {
+      const contextKey = `${sourceMessageId}:${partIndex}`;
       const currentMessageIndex = chatMessageIndexById.get(sourceMessageId) ?? -1;
+      const currentMessage = chatMessages[currentMessageIndex];
+      const cached = htmlPreviewContexts.get(contextKey);
+      if (cached && cached.messages[currentMessageIndex]?.content === currentMessage?.content) return cached;
+      // History snapshots are throttled during streaming. A newly rendered
+      // frontend must still receive its own raw source at the matching index.
+      const messages = [...htmlPreviewContextBase.messages];
+      const formatPreviewMessage = (message: ChatMessage) => ({
+        role: message.role, content: message.content, source: message.source,
+        variables: message.variables ?? {}, extra: message.extra ?? {},
+        ...(message.source === "roleplay-greeting" ? { tavernSwipeState: getTavernMessageSwipeState(message, {
+          index: activeRoleplayGreetingIndex, greetings: activeRoleplayGreetings,
+        }) } : {}),
+      });
+      chatMessages.slice(messages.length).forEach((message) => messages.push(formatPreviewMessage(message)));
+      if (currentMessage) messages[currentMessageIndex] = formatPreviewMessage(currentMessage);
       const context: HtmlPreviewContext = {
         ...htmlPreviewContextBase,
+        messages,
+        currentHtmlPartIndex: partIndex,
+        parentMessageFrames: parts.flatMap((part, index) =>
+          ((part.type === "text" && looksLikeStandaloneRenderableHtml(part.content)) ||
+            (part.type === "code" && shouldRenderHtmlCodePart(part))) &&
+            !(tavernCompatible && isTavernInlineHtmlFragment(part.content, document))
+            ? [{ partIndex: index, attributes: getHtmlPreviewRootAttributes(part.content, document) }]
+            : []),
         currentMessageIndex:
           currentMessageIndex >= 0 ? currentMessageIndex : Math.max(0, chatMessages.length - 1),
       };
-      htmlPreviewContexts.set(sourceMessageId, context);
+      htmlPreviewContexts.set(contextKey, context);
       return context;
     };
 
@@ -24651,13 +24733,21 @@ export function App() {
     return (
       <ContentContainer {...(tavernCompatible ? {} : { className: "chat-rendered-content" })}>
         {parts.map((part, partIndex) => {
+          if (
+            tavernCompatible && chatHtmlRenderEnabled &&
+            ((part.type === "text" && looksLikeStandaloneRenderableHtml(part.content)) ||
+              (part.type === "code" && shouldRenderHtmlCodePart(part))) &&
+            isTavernInlineHtmlFragment(part.content, document)
+          ) {
+            return <ChatTavernInlineHtml content={part.content} key={`${messageId}-inline-html-${partIndex}`} />;
+          }
           if (part.type === "text") {
             if (chatHtmlRenderEnabled && looksLikeStandaloneRenderableHtml(part.content)) {
               const previewId = `${htmlPreviewSessionId}-${messageId}-html-text-${partIndex}-${getHtmlPreviewContentRevision(part.content)}`;
               return (
                 <ChatHtmlPreview
                   content={part.content}
-                  context={getHtmlPreviewContext()}
+                  context={getHtmlPreviewContext(partIndex)}
                   frameRegistry={htmlPreviewFrameRefs}
                   key={previewId}
                   mountReady={htmlPreviewSessionReady}
@@ -24749,7 +24839,7 @@ export function App() {
             return (
               <ChatHtmlPreview
                 content={part.content}
-                context={getHtmlPreviewContext()}
+                context={getHtmlPreviewContext(partIndex)}
                 frameRegistry={htmlPreviewFrameRefs}
                 key={previewId}
                 mountReady={htmlPreviewSessionReady}
@@ -25822,6 +25912,9 @@ export function App() {
           ? [responderCharacterWorldBook.id]
           : []),
       ];
+      const additionalScanText = requestSessionId === activeChatSessionIdRef.current
+        ? (await tavernScriptRuntimeRef.current?.getPromptInjections("scan") ?? []).map((prompt) => prompt.content).join("\n")
+        : "";
       const worldBookPromptPlacements = buildWorldBookPromptPlacements(
         worldBookPromptBooks,
         worldBookPromptBookIds,
@@ -25829,6 +25922,7 @@ export function App() {
         {
           userName: userProfile.nickname,
           characterName: responderCharacterCard?.name ?? responderName,
+          additionalScanText,
         },
       );
       const roleplaySystemPrompt =
@@ -26014,6 +26108,7 @@ export function App() {
         injectSessionStatusBarConversationContext(
           await applyTavernExtensionPromptFilters(preparedApiMessages, {
             generationAfterCommands: options.generationAfterCommands,
+            sessionId: requestSessionId,
           }),
           requestSessionId,
         ),
@@ -26744,7 +26839,7 @@ export function App() {
         const subAgentApiMessages = injectSessionStatusBarConversationContext(
           await applyTavernExtensionPromptFilters(
             subAgentPreparedMessages,
-            { generationAfterCommands: false },
+            { generationAfterCommands: false, sessionId: requestSessionId },
           ),
           requestSessionId,
         );
@@ -28717,6 +28812,8 @@ export function App() {
           ? buildCharacterCardPrompt(responseCharacter, userProfile.nickname.trim() || "用户")
           : "";
       const promptTriggerMessages = [{ role: "user" as const, content: userInput }];
+      const additionalScanText = (await tavernScriptRuntimeRef.current?.getPromptInjections("scan") ?? [])
+        .map((prompt) => prompt.content).join("\n");
       const worldBookSystemPrompt = buildWorldBookPrompt(
         filterPromptTemplateSpecialEntries(worldBooks, promptTemplateEnabled),
         activeWorldBookIds,
@@ -28724,6 +28821,7 @@ export function App() {
         {
           userName: userProfile.nickname,
           characterName: responseName,
+          additionalScanText,
         },
       );
       const activeCharacterWorldBook = responseCharacter
@@ -28743,6 +28841,7 @@ export function App() {
               {
                 userName: userProfile.nickname,
                 characterName: responseName,
+                additionalScanText,
               },
             )
           : "";
@@ -28843,6 +28942,7 @@ export function App() {
           ? preparedApiMessages
           : await applyTavernExtensionPromptFilters(preparedApiMessages, {
               generationAfterCommands: false,
+              sessionId: activeChatSessionIdRef.current,
             }),
         activeChatSessionIdRef.current,
       );
@@ -29279,6 +29379,9 @@ export function App() {
           ? [activeCharacterWorldBook.id]
           : []),
       ];
+      const additionalScanText = requestSessionId === activeChatSessionIdRef.current
+        ? (await tavernScriptRuntimeRef.current?.getPromptInjections("scan") ?? []).map((prompt) => prompt.content).join("\n")
+        : "";
       const worldBookPromptPlacements = buildWorldBookPromptPlacements(
         worldBookPromptBooks,
         worldBookPromptBookIds,
@@ -29289,6 +29392,7 @@ export function App() {
             chatMode === "roleplay" && activeSessionRoleplayCard
               ? activeSessionRoleplayCard.name
               : chatPersona.name,
+          additionalScanText,
         },
       );
       const roleplaySystemPrompt =
@@ -29404,6 +29508,7 @@ export function App() {
         injectSessionStatusBarConversationContext(
           await applyTavernExtensionPromptFilters(preparedApiMessages, {
             generationAfterCommands: false,
+            sessionId: requestSessionId,
           }),
           requestSessionId,
         ),

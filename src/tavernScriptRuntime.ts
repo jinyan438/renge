@@ -42,6 +42,7 @@ export type TavernRuntimeMessage = {
 };
 
 export type TavernRuntimeWorldBookEntry = {
+  extra?: Record<string, unknown>;
   id: string;
   uid: string;
   comment: string;
@@ -1243,6 +1244,7 @@ function formatTavernWorldBookEntry(entry: TavernRuntimeWorldBookEntry) {
   const keys = cloneValue(entry.keys);
   const secondaryKeys = cloneValue(entry.secondaryKeys);
   return {
+    extra: cloneValue(entry.extra ?? {}),
     id: entry.id,
     uid: entry.uid || entry.id,
     name: entry.comment,
@@ -1303,6 +1305,7 @@ function normalizeTavernWorldBookEntry(
   const rawEnabled = raw.enabled ?? (raw.disabled === undefined ? undefined : !raw.disabled);
   return {
     id,
+    extra: cloneValue(isRecord(raw.extra) ? raw.extra : fallback?.extra ?? {}),
     uid: String(raw.uid ?? raw.id ?? fallback?.uid ?? id),
     comment: String(raw.name ?? raw.comment ?? raw.memo ?? fallback?.comment ?? `条目 ${index + 1}`),
     content: String(raw.content ?? fallback?.content ?? ""),
@@ -1641,6 +1644,8 @@ export class TavernScriptRuntime {
   private chatChangeEmissionQueue: Promise<void> = Promise.resolve();
   private scriptButtons = new Map<string, TavernScriptButton[]>();
   private variableSchemas = new Map<string, unknown>();
+  private promptInjections = new Map<string, { prompt: Record<string, unknown>; once: boolean }>();
+  private promptChatId: string;
   private sillyTavernChatCache: Array<Record<string, unknown>> = [];
   private syncChatMetadata: (() => void) | null = null;
   private parentSideEffectCleanup: (() => void) | null = null;
@@ -1653,6 +1658,7 @@ export class TavernScriptRuntime {
   constructor(scripts: TavernScript[], adapter: TavernScriptRuntimeAdapter) {
     this.scripts = scripts.map((script) => cloneValue(script));
     this.adapter = adapter;
+    this.promptChatId = adapter.getChatId();
     this.scripts.forEach((script) => {
       this.scriptButtons.set(script.id, cloneValue(script.buttons));
     });
@@ -1664,6 +1670,11 @@ export class TavernScriptRuntime {
 
   syncChat() {
     if (this.destroyed) return;
+    const chatId = this.adapter.getChatId();
+    if (chatId !== this.promptChatId) {
+      this.promptInjections.clear();
+      this.promptChatId = chatId;
+    }
     this.refreshSillyTavernChatCache();
     this.syncChatMetadata?.();
   }
@@ -1671,6 +1682,20 @@ export class TavernScriptRuntime {
   syncPresetCompatibility() {
     if (this.destroyed) return;
     this.parentApiBridge?.syncPresetManager();
+  }
+
+  async getPromptInjections(purpose: "prompt" | "scan" = "prompt") {
+    const prompts: Array<{ role: "system" | "user" | "assistant"; content: string; depth: number }> = [];
+    for (const { prompt } of Array.from(this.promptInjections.values())) {
+      if (purpose === "scan" ? prompt.should_scan !== true : prompt.position === "none") continue;
+      if (typeof prompt.filter === "function" && !await prompt.filter()) continue;
+      prompts.push({
+        role: prompt.role === "user" || prompt.role === "assistant" ? prompt.role : "system",
+        content: String(prompt.content ?? ""),
+        depth: Math.max(0, Math.trunc(Number(prompt.depth) || 0)),
+      });
+    }
+    return prompts;
   }
 
   async initializeGreeting(swipeIndex: number) {
@@ -1801,6 +1826,11 @@ export class TavernScriptRuntime {
 
   private async emitNow(eventName: string, ...args: unknown[]) {
     if (this.destroyed) return [];
+    if (eventName === TAVERN_EVENTS.GENERATION_ENDED || eventName === TAVERN_EVENTS.GENERATION_STOPPED) {
+      this.promptInjections.forEach((injection, id) => {
+        if (injection.once) this.promptInjections.delete(id);
+      });
+    }
     if (
       eventName === TAVERN_EVENTS.MESSAGE_SENT ||
       eventName === TAVERN_EVENTS.MESSAGE_RECEIVED
@@ -1865,6 +1895,7 @@ export class TavernScriptRuntime {
     this.scriptSourceOwners.clear();
     this.scriptButtons.clear();
     this.variableSchemas.clear();
+    this.promptInjections.clear();
     this.sillyTavernChatCache.splice(0);
     this.syncChatMetadata = null;
     this.adapter.onButtonsChange?.([]);
@@ -3343,14 +3374,15 @@ export class TavernScriptRuntime {
 
     const waitGlobalInitialized = async (name = "Mvu", timeout = 30000) =>
       await this.waitForGlobal(String(name), Number(timeout) || 30000);
-    const injectedPrompts = new Map<
-      string,
-      { prompt: Record<string, unknown>; once: boolean }
-    >();
+    const injectedPrompts = this.promptInjections;
+    const uninjectPrompts = (ids: unknown) => {
+      if (Array.isArray(ids)) ids.forEach((id) => injectedPrompts.delete(String(id)));
+    };
     const injectPrompts = (prompts: unknown, options: unknown = {}) => {
-      if (!Array.isArray(prompts)) return [];
-      const once = !isRecord(options) || options.once !== false;
       const ids: string[] = [];
+      const handle = { uninject: () => uninjectPrompts(ids) };
+      if (!Array.isArray(prompts)) return handle;
+      const once = isRecord(options) && options.once === true;
       prompts.forEach((value, index) => {
         if (!isRecord(value)) return;
         const content = value.content ?? value.message ?? value.mes;
@@ -3359,12 +3391,12 @@ export class TavernScriptRuntime {
         const role =
           value.role === "assistant" || value.role === "user" ? value.role : "system";
         injectedPrompts.set(id, {
-          prompt: { ...cloneValue(value), id, role, content },
+          prompt: { ...cloneValue(value), id, role, content, filter: value.filter },
           once,
         });
         ids.push(id);
       });
-      return ids;
+      return handle;
     };
     const getModelList = async (config: unknown = {}) => {
       const normalized = isRecord(config) ? config : {};
@@ -3504,17 +3536,12 @@ export class TavernScriptRuntime {
       }
       delete normalizedConfig.custom_include_headers;
       delete normalizedConfig.customIncludeHeaders;
-      const promptInjections = Array.from(injectedPrompts.values());
-      if (promptInjections.length > 0) {
-        const orderedPrompts = Array.isArray(normalizedConfig.ordered_prompts)
-          ? normalizedConfig.ordered_prompts
-          : Array.isArray(normalizedConfig.prompt)
-            ? normalizedConfig.prompt
-            : ["user_input"];
-        normalizedConfig.ordered_prompts = [
-          ...promptInjections.map((injection) => cloneValue(injection.prompt)),
-          ...orderedPrompts,
-        ];
+      if (normalizedConfig.quiet === true) {
+        const prompts = await this.getPromptInjections();
+        const ordered = Array.isArray(normalizedConfig.ordered_prompts)
+          ? normalizedConfig.ordered_prompts : Array.isArray(normalizedConfig.prompt)
+            ? normalizedConfig.prompt : ["user_input"];
+        normalizedConfig.ordered_prompts = [...prompts, ...ordered];
       }
       try {
         return await this.adapter.generate(normalizedConfig);
@@ -3598,6 +3625,7 @@ export class TavernScriptRuntime {
       substitudeMacros,
       registerMacroLike,
       injectPrompts,
+      uninjectPrompts,
       getScriptId,
       getScriptButtons,
       replaceScriptButtons,
@@ -3612,7 +3640,8 @@ export class TavernScriptRuntime {
       getChatCompletionModel,
       getPresetNames,
       loadPreset,
-      getTavernHelperVersion: async () => "3.5.0",
+      getTavernHelperVersion: () => "3.5.0",
+      getTavernVersion: () => "3.5.0",
       getVersion: () => sillyTavern.versionInfo,
       getContext,
       saveChat,

@@ -8,6 +8,7 @@ export type WorldBookPosition =
   | "at_depth";
 
 export type WorldBookEntry = {
+  extra?: Record<string, unknown>;
   id: string;
   uid: string;
   comment: string;
@@ -50,6 +51,7 @@ export type BuildWorldBookPromptOptions = {
   characterName?: string;
   defaultScanDepth?: number;
   probabilitySeed?: string;
+  additionalScanText?: string;
 };
 
 export type WorldBookPromptDepthInsertion = {
@@ -190,6 +192,7 @@ export function normalizeWorldBookEntry(rawValue: unknown, index = 0): WorldBook
   );
   return {
     ...fallback,
+    ...(isRecord(rawEntry.extra) ? { extra: structuredClone(rawEntry.extra) } : {}),
     id: typeof rawEntry.id === "string" && rawEntry.id.trim() ? rawEntry.id : fallback.id,
     uid: String(firstDefined(rawEntry.uid, rawEntry.id, index) ?? index),
     comment: String(firstDefined(rawEntry.comment, rawEntry.name, rawEntry.memo, "") ?? ""),
@@ -590,7 +593,8 @@ export function getMatchedWorldBookEntries(
         .map((entry, entryIndex) => ({ book, bookIndex, entry, entryIndex }))
         .filter(({ entry }) => {
           if (!entry.enabled || !entry.content.trim()) return false;
-          const context = getEntryContext(messages, entry, defaultScanDepth);
+          const context = [getEntryContext(messages, entry, defaultScanDepth), options.additionalScanText]
+            .filter(Boolean).join("\n");
           if (!entry.constant && (entry.scanDepth ?? defaultScanDepth) <= 0) return false;
           return (
             entryMatchesContext(entry, context) &&

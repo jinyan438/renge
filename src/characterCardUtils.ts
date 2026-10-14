@@ -662,6 +662,7 @@ export async function importCharacterCardFile(file: File) {
 
 function exportWorldBookEntry(entry: WorldBookEntry, index: number) {
   return {
+    ...(entry.extra ? { extra: structuredClone(entry.extra) } : {}),
     id: index,
     keys: entry.keys,
     secondary_keys: entry.secondaryKeys,
