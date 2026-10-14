@@ -95,6 +95,7 @@ import lodashSource from "lodash/lodash.min.js?raw";
 import vueSource from "vue/dist/vue.global.prod.js?raw";
 import htmlPreviewDependenciesSource from "virtual:html-preview-dependencies";
 import { HTML_PREVIEW_PARENT_BRIDGE_SOURCE } from "./htmlPreviewParentBridge";
+import { buildHtmlPreviewImagesScript } from "./htmlPreviewImages";
 import {
   collectInheritedHtmlPreviewStyleResources,
   deferHtmlPreviewFontStylesheets,
@@ -7088,7 +7089,8 @@ function buildHtmlPreviewDocument(
     ? getIsolatedHtmlPreviewFrame(previewId)?.url ?? window.location.href
     : window.location.href;
   const iconStyle = `<style data-renge-html-preview-icons="true">${getTavernFontAwesomeCss(iconBaseUrl)}</style>`;
-  const headInjection = `${htmlPreviewViewportMeta}${inheritedStyleInjection}${htmlPreviewStyle}${iconStyle}${buildHtmlPreviewFullscreenScript(previewId)}${htmlPreviewJqueryScript}${htmlPreviewDependenciesScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
+  const imageScript = buildHtmlPreviewImagesScript(new URL("/html-preview-image", window.location.href).href);
+  const headInjection = `${htmlPreviewViewportMeta}${imageScript}${inheritedStyleInjection}${htmlPreviewStyle}${iconStyle}${buildHtmlPreviewFullscreenScript(previewId)}${htmlPreviewJqueryScript}${htmlPreviewDependenciesScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
     return injectHtmlPreviewHead(trimmedContent, headInjection);
   }
@@ -24770,7 +24772,7 @@ export function App() {
                 key={`${messageId}-text-${partIndex}`}
                 keyPrefix={`${messageId}-text-${partIndex}`}
                 unwrap={tavernCompatible}
-                tavernPlaceholders={tavernCompatible && chatHtmlRenderEnabled}
+                tavernPlaceholders={chatHtmlRenderEnabled && (tavernCompatible || chatMode === "roleplay")}
               />
             );
           }

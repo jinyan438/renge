@@ -181,7 +181,9 @@ public class LocalWebServer {
             }
 
             request = request.withBody(readRequestBody(input, request.contentLength));
-            if (isTavernStorageModule(request.path)) {
+            if ("/html-preview-image".equals(request.path)) {
+                serveHtmlPreviewImage(request, output);
+            } else if (isTavernStorageModule(request.path)) {
                 sendAsset(output, "tavern-storage-compat.js");
             } else if (request.path.startsWith("/user/files/")) {
                 serveTavernFile(request, output);
@@ -979,6 +981,88 @@ public class LocalWebServer {
             }
         }
         return isSupportedImageAsset(normalized) ? normalized : null;
+    }
+
+    private void serveHtmlPreviewImage(Request request, OutputStream output) throws IOException {
+        if (!"GET".equals(request.method)) {
+            sendJson(output, 405, jsonError("Method not allowed"));
+            return;
+        }
+        try {
+            URL url = new URL(queryParameter(request.target, "url"));
+            for (int redirects = 0; redirects <= 4; redirects++) {
+                String host = url.getHost().toLowerCase(Locale.US);
+                if (!("http".equals(url.getProtocol()) || "https".equals(url.getProtocol()))
+                        || url.getUserInfo() != null || (url.getPort() != -1 && url.getPort() != 80 && url.getPort() != 443)
+                        || "localhost".equals(host) || host.endsWith(".localhost") || host.endsWith(".local")) {
+                    throw new IOException("Invalid image URL");
+                }
+                for (InetAddress address : InetAddress.getAllByName(host)) {
+                    byte[] raw = address.getAddress();
+                    if (address.isAnyLocalAddress() || address.isLoopbackAddress() || address.isLinkLocalAddress()
+                            || address.isSiteLocalAddress() || address.isMulticastAddress()
+                            || (raw.length == 4 && ((raw[0] & 255) == 0 || (raw[0] & 255) >= 224
+                                || ((raw[0] & 255) == 100 && (raw[1] & 255) >= 64 && (raw[1] & 255) <= 127)
+                                || ((raw[0] & 255) == 198 && ((raw[1] & 255) == 18 || (raw[1] & 255) == 19)
+                                    && host.matches("[0-9.]+"))))
+                            || (raw.length == 16 && (raw[0] & 0xe0) != 0x20)) {
+                        throw new IOException("Image URL points to a local network");
+                    }
+                }
+                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                connection.setConnectTimeout(8000);
+                connection.setReadTimeout(20000);
+                connection.setInstanceFollowRedirects(false);
+                connection.setRequestProperty("Accept", "image/avif,image/webp,image/*,*/*;q=0.8");
+                try {
+                    int status = connection.getResponseCode();
+                    if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+                        url = new URL(url, connection.getHeaderField("Location"));
+                        continue;
+                    }
+                    if (status < 200 || status >= 300 || connection.getContentLengthLong() > 20 * 1024 * 1024) {
+                        throw new IOException("Remote image unavailable");
+                    }
+                    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                    try (InputStream input = connection.getInputStream()) {
+                        byte[] chunk = new byte[8192];
+                        int count;
+                        while ((count = input.read(chunk)) != -1) {
+                            if (bytes.size() + count > 20 * 1024 * 1024) throw new IOException("Image exceeds 20MB");
+                            bytes.write(chunk, 0, count);
+                        }
+                    }
+                    byte[] image = bytes.toByteArray();
+                    String type = htmlPreviewImageType(image);
+                    if (type.isEmpty()) throw new IOException("Remote resource is not an image");
+                    String headers = "HTTP/1.1 200 OK\r\nContent-Type: " + type + "\r\nContent-Length: " + image.length
+                            + "\r\nCache-Control: public, max-age=3600\r\nX-Content-Type-Options: nosniff"
+                            + "\r\nContent-Security-Policy: sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:"
+                            + "\r\nAccess-Control-Allow-Origin: *\r\nCross-Origin-Resource-Policy: cross-origin\r\nConnection: close\r\n\r\n";
+                    output.write(headers.getBytes(StandardCharsets.UTF_8));
+                    output.write(image);
+                    return;
+                } finally { connection.disconnect(); }
+            }
+            throw new IOException("Too many image redirects");
+        } catch (Exception error) {
+            sendJson(output, 502, jsonError("图片加载失败"));
+        }
+    }
+
+    private static String htmlPreviewImageType(byte[] bytes) {
+        if (bytes.length < 12) return "";
+        if (Arrays.equals(Arrays.copyOf(bytes, 8), new byte[]{(byte)137, 80, 78, 71, 13, 10, 26, 10})) return "image/png";
+        if ((bytes[0] & 255) == 255 && (bytes[1] & 255) == 216 && (bytes[2] & 255) == 255) return "image/jpeg";
+        String signature = new String(bytes, 0, 12, StandardCharsets.US_ASCII);
+        if (signature.startsWith("GIF87a") || signature.startsWith("GIF89a")) return "image/gif";
+        if (signature.startsWith("RIFF") && signature.endsWith("WEBP")) return "image/webp";
+        if (signature.substring(4, 8).equals("ftyp") && (signature.endsWith("avif") || signature.endsWith("avis"))) return "image/avif";
+        if (bytes[0] == 66 && bytes[1] == 77) return "image/bmp";
+        if (bytes[0] == 0 && bytes[1] == 0 && bytes[2] == 1 && bytes[3] == 0) return "image/x-icon";
+        String text = new String(bytes, 0, Math.min(bytes.length, 4096), StandardCharsets.UTF_8);
+        if (Pattern.compile("^\\s*(?:<\\?xml[^>]*>\\s*|<!--[\\s\\S]*?-->\\s*)*<svg\\b", Pattern.CASE_INSENSITIVE).matcher(text).find()) return "image/svg+xml";
+        return "";
     }
 
     private String queryParameter(String target, String name) {

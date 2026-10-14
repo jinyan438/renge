@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { EnvHttpProxyAgent } from "undici";
 import { strFromU8, unzipSync } from "fflate";
 import { createUpstreamDispatcherCache, describeUpstreamNetworkError } from "./src/upstreamNetworkUtils.mjs";
+import { createHtmlPreviewImageDispatcher, createHtmlPreviewImageHandler } from "./src/htmlPreviewImageProxy.mjs";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   buildResponsesApiRequest,
@@ -3875,9 +3876,24 @@ export function startRengeServer(options = {}) {
     : "";
   const piAgentDir = resolve(options.piAgentDir ?? join(dataDir, ".pi", "agent"));
   const piHost = createRengePiHost({ defaultCwd: __dirname, dataDir, agentDir: piAgentDir, authorizeTool: options.authorizePiTool });
+  const directImageDispatcher = createHtmlPreviewImageDispatcher();
+  const serveHtmlPreviewImage = createHtmlPreviewImageHandler({ fetchImage: async (url, options) => {
+    // Public image hosts may fail through the system proxy. Try the direct
+    // route first; retain the configured route for networks requiring it.
+    try { return await fetch(url, { ...options, signal: AbortSignal.timeout(8_000), dispatcher: directImageDispatcher }); }
+    catch (error) {
+      if (error?.code === "RENGE_IMAGE_PRIVATE_ADDRESS" || error?.cause?.code === "RENGE_IMAGE_PRIVATE_ADDRESS") throw error;
+      return fetch(url, { ...options, dispatcher: getUpstreamDispatcher() });
+    }
+  } });
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     const isHtmlPreviewOrigin = url.hostname.toLowerCase() === "preview.localhost";
+
+    if (url.pathname === "/html-preview-image") {
+      await serveHtmlPreviewImage(request, response, url);
+      return;
+    }
 
     if (isHtmlPreviewOrigin && url.pathname.startsWith("/temporary-files/")) {
       await serveTemporaryFilePreview(
@@ -3984,6 +4000,7 @@ export function startRengeServer(options = {}) {
   });
   server.once("close", () => {
     void piHost.dispose();
+    void directImageDispatcher.close();
   });
 
   return new Promise((resolveServer, rejectServer) => {
