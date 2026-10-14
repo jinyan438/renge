@@ -11,7 +11,8 @@ import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { EnvHttpProxyAgent } from "undici";
-import { strFromU8, unzipSync } from "fflate";
+import { strFromU8 } from "fflate";
+import { unzipCompleteBackup } from "./src/completeBackupArchive.mjs";
 import { createUpstreamDispatcherCache, describeUpstreamNetworkError } from "./src/upstreamNetworkUtils.mjs";
 import { createHtmlPreviewImageDispatcher, createHtmlPreviewImageHandler } from "./src/htmlPreviewImageProxy.mjs";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -776,18 +777,13 @@ function rewriteCompleteBackupAssetReferences(value, assets, seen = new WeakMap(
   if (!value || typeof value !== "object") return value;
   const existing = seen.get(value);
   if (existing !== undefined) return existing;
-  if (Array.isArray(value)) {
-    const next = [];
-    seen.set(value, next);
-    value.forEach((entry) => next.push(rewriteCompleteBackupAssetReferences(entry, assets, seen)));
-    return next;
+  // This object belongs to the parsed import manifest. Rewrite it in place so
+  // large histories and card libraries do not need a second object tree.
+  seen.set(value, value);
+  for (const key of Object.keys(value)) {
+    value[key] = rewriteCompleteBackupAssetReferences(value[key], assets, seen);
   }
-  const next = {};
-  seen.set(value, next);
-  Object.entries(value).forEach(([key, entry]) => {
-    next[key] = rewriteCompleteBackupAssetReferences(entry, assets, seen);
-  });
-  return next;
+  return value;
 }
 
 function parseCompleteBackupManifest(value) {
@@ -832,9 +828,7 @@ async function forEachWithConcurrency(items, concurrency, visit) {
 }
 
 async function installCompleteBackupZip(dataFilePath, zipBytes) {
-  // Inflate once: the old path unpacked the manifest and then decompressed the
-  // entire archive again after clearing the user's existing data.
-  const archiveEntries = unzipSync(zipBytes);
+  const archiveEntries = await unzipCompleteBackup(zipBytes, completeBackupMaxBytes);
   const manifestBytes = archiveEntries["backup.json"];
   if (!manifestBytes) throw new Error("ZIP 备份缺少 backup.json。");
   const manifest = parseCompleteBackupManifest(
@@ -887,7 +881,8 @@ async function installCompleteBackupZip(dataFilePath, zipBytes) {
 
   // Resolve asset references before clearing the current installation, so a
   // malformed manifest cannot destroy data before reporting the error.
-  const appData = rewriteCompleteBackupAssetReferences(manifest.appData, manifest.assets);
+  const availableAssets = new Set([...manifest.assets.keys()].filter(path => archiveEntries[path]));
+  const appData = rewriteCompleteBackupAssetReferences(manifest.appData, availableAssets);
   const desktopProjectPositionsJson = manifest.desktopProjectPositions === undefined
     ? null
     : JSON.stringify(manifest.desktopProjectPositions);

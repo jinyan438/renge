@@ -544,6 +544,14 @@ test("complete backup export and import include managed application files and im
     "files/tavern-script-assets/yuyuan/yuyuan.readable.js": strToU8("restored script"),
     "unexpected.txt": strToU8("ignored during direct restore"),
   }, { level: 6 });
+  const missingImageArchive = zipSync({ "backup.json": strToU8(JSON.stringify(backup)) });
+  const missingImageResponse = await fetch(`${controller.url}/api/app-data/import-complete`, {
+    method: "PUT",
+    body: Buffer.from(missingImageArchive),
+  });
+  assert.equal(missingImageResponse.status, 400);
+  assert.equal((await missingImageResponse.json()).cleared, false);
+  assert.deepEqual(JSON.parse(await readFile(join(dataDir, "app-data.json"), "utf8")), previousData);
   const importResponse = await fetch(`${controller.url}/api/app-data/import-complete`, {
     method: "PUT",
     headers: { "Content-Type": "application/zip" },
@@ -585,6 +593,38 @@ test("complete backup export and import include managed application files and im
     backup.desktopProjectPositions,
   );
   await assert.rejects(readFile(join(dataDir, "app-data.backup-1.json")));
+});
+
+test("large backup import preserves nested data and encoded image references", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-backup-large-test-"));
+  const controller = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  t.after(async () => {
+    await new Promise(resolve => controller.server.close(resolve));
+    await rm(dataDir, { recursive: true, force: true });
+  });
+  const imagePath = "assets/头像 1.png";
+  const appData = {
+    chatSessions: Array.from({ length: 1500 }, (_, i) => ({
+      id: `session-${i}`,
+      messages: [{ content: '历史记录😀\\"\n'.repeat(300), index: i, nullable: null, enabled: true }],
+      character: { avatar: `renge-backup-asset:${imagePath}` },
+    })),
+    personas: [{ id: "restored-persona", name: "测试人格" }],
+  };
+  const backup = {
+    format: "renge-agent-complete-backup", version: 3, exportedAt: "2026-10-14T00:00:00Z",
+    appData, localStorage: { renge_test: "restored" }, assets: { [imagePath]: { mimeType: "image/png" } },
+  };
+  const archive = zipSync({
+    "backup.json": strToU8(JSON.stringify(backup)),
+    [imagePath]: new Uint8Array([1, 2, 3]),
+  });
+  const response = await fetch(`${controller.url}/api/app-data/import-complete`, { method: "PUT", body: archive });
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.deepEqual((await response.json()).personas, appData.personas);
+  const restored = JSON.parse(await readFile(join(dataDir, "app-data.json"), "utf8"));
+  for (const session of appData.chatSessions) session.character.avatar = "/api/app-data/assets/%E5%A4%B4%E5%83%8F%201.png";
+  assert.deepEqual(restored, appData);
 });
 
 test("rejects app-data payloads that are not JSON objects", async (t) => {

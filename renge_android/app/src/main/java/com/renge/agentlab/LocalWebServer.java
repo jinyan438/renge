@@ -18,6 +18,7 @@ import org.yaml.snakeyaml.constructor.SafeConstructor;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.BufferedWriter;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -27,7 +28,6 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
-import java.io.PushbackInputStream;
 import java.io.StringWriter;
 import java.io.Writer;
 import java.math.BigDecimal;
@@ -42,12 +42,13 @@ import java.net.URL;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -365,14 +366,13 @@ public class LocalWebServer {
     }
 
     private CompleteBackupMetadata installCompleteBackupZip(File completeBackup) throws IOException {
-        File stagedManifest = File.createTempFile("renge-backup-manifest-", ".json", context.getCacheDir());
-        File stagedRawAppData = File.createTempFile("renge-app-data-raw-", ".json", context.getCacheDir());
         File stagedAppData = File.createTempFile("renge-app-data-import-", ".json", context.getCacheDir());
-        File stagedLocalStorage = File.createTempFile("renge-local-storage-import-", ".json", context.getCacheDir());
+        Set<String> referencedAssets = new HashSet<>();
+        Set<String> restoredAssets = new HashSet<>();
         boolean dataCleared = false;
         CompleteBackupMetadata metadata = null;
         try (ZipInputStream zipInput = new ZipInputStream(
-                new BufferedInputStream(new FileInputStream(completeBackup))
+                new BufferedInputStream(new FileInputStream(completeBackup), 64 * 1024)
         )) {
             byte[] buffer = new byte[64 * 1024];
             long extractedBytes = 0;
@@ -389,24 +389,13 @@ public class LocalWebServer {
                     if (!COMPLETE_BACKUP_MANIFEST_FILE.equals(entryName)) {
                         throw new IOException("新版 v3 备份的 backup.json 必须是 ZIP 中的第一个文件。");
                     }
-                    try (OutputStream manifestOutput = new BufferedOutputStream(new FileOutputStream(stagedManifest))) {
-                        extractedBytes = copyCompleteBackupZipEntry(
-                                zipInput,
-                                manifestOutput,
-                                buffer,
-                                extractedBytes
-                        );
-                    }
+                    // Parse and rewrite the manifest directly from this ZIP entry. The
+                    // counting stream keeps the decompression limit without another file pass.
+                    CompleteBackupEntryInputStream manifestInput = new CompleteBackupEntryInputStream(
+                            zipInput, MAX_COMPLETE_BACKUP_BYTES - extractedBytes);
+                    metadata = extractCompleteBackupAppData(manifestInput, stagedAppData, referencedAssets);
+                    extractedBytes += manifestInput.bytesRead;
                     zipInput.closeEntry();
-                    metadata = extractCompleteBackupAppData(
-                            stagedManifest,
-                            stagedRawAppData,
-                            stagedLocalStorage
-                    );
-                    if (metadata.version != 3) {
-                        throw new IOException("仅支持新版 v3 ZIP 完整备份，当前版本：" + metadata.version + "。");
-                    }
-                    if (!stagedManifest.delete()) stagedManifest.deleteOnExit();
                     manifestFound = true;
                     dataCleared = true;
                     clearAppData();
@@ -423,6 +412,7 @@ public class LocalWebServer {
                     if (relativePath == null) throw new IOException("ZIP 图片资源路径非法。");
                     root = appDataAssetsDirectory;
                     target = new File(root, relativePath);
+                    restoredAssets.add(relativePath);
                 } else if (entryName.startsWith("files/")) {
                     String relativePath = normalizeCompleteBackupManagedPath(entryName.substring("files/".length()));
                     if (relativePath == null) throw new IOException("ZIP 应用文件路径非法。");
@@ -456,7 +446,11 @@ public class LocalWebServer {
                     throw new IOException("无法准备应用文件目录：" + root);
                 }
             }
-            rewriteImportedAssetReferences(stagedRawAppData, stagedAppData, appDataAssetsDirectory);
+            for (String asset : referencedAssets) {
+                if (!restoredAssets.contains(asset)) {
+                    throw new IOException("备份缺少图片资源：assets/" + asset);
+                }
+            }
             copyFileAtomically(stagedAppData, appDataFile);
             return metadata;
         } catch (IOException error) {
@@ -468,9 +462,7 @@ public class LocalWebServer {
             }
             throw error;
         } finally {
-            for (File stagedFile : new File[]{stagedManifest, stagedRawAppData, stagedAppData, stagedLocalStorage}) {
-                if (!stagedFile.delete() && stagedFile.exists()) stagedFile.deleteOnExit();
-            }
+            if (!stagedAppData.delete() && stagedAppData.exists()) stagedAppData.deleteOnExit();
         }
     }
 
@@ -491,37 +483,10 @@ public class LocalWebServer {
         return totalBytes;
     }
 
-    private void rewriteImportedAssetReferences(
-            File rawAppData,
-            File rewrittenAppData,
-            File stagedAssets
-    ) throws IOException {
-        try (
-                JsonReader reader = new JsonReader(new InputStreamReader(
-                        new FileInputStream(rawAppData),
-                        StandardCharsets.UTF_8
-                ));
-                FileOutputStream fileOutput = new FileOutputStream(rewrittenAppData);
-                JsonWriter writer = new JsonWriter(new OutputStreamWriter(
-                        fileOutput,
-                        StandardCharsets.UTF_8
-                ))
-        ) {
-            copyImportedJsonValue(reader, writer, stagedAssets);
-            if (reader.peek() != JsonToken.END_DOCUMENT) {
-                throw new IOException("应用主数据包含多余内容。");
-            }
-            writer.flush();
-            fileOutput.getFD().sync();
-        } catch (IllegalStateException error) {
-            throw new IOException("应用主数据 JSON 格式无效。", error);
-        }
-    }
-
     private void copyImportedJsonValue(
             JsonReader reader,
             JsonWriter writer,
-            File stagedAssets
+            Set<String> referencedAssets
     ) throws IOException {
         JsonToken token = reader.peek();
         switch (token) {
@@ -531,7 +496,7 @@ public class LocalWebServer {
                 while (reader.hasNext()) {
                     String name = reader.nextName();
                     writer.name(name);
-                    copyImportedJsonValue(reader, writer, stagedAssets);
+                    copyImportedJsonValue(reader, writer, referencedAssets);
                 }
                 reader.endObject();
                 writer.endObject();
@@ -539,26 +504,21 @@ public class LocalWebServer {
             case BEGIN_ARRAY:
                 reader.beginArray();
                 writer.beginArray();
-                while (reader.hasNext()) copyImportedJsonValue(reader, writer, stagedAssets);
+                while (reader.hasNext()) copyImportedJsonValue(reader, writer, referencedAssets);
                 reader.endArray();
                 writer.endArray();
                 return;
             case STRING:
                 String value = reader.nextString();
-                if (stagedAssets != null && value.startsWith(COMPLETE_BACKUP_ASSET_PREFIX)) {
+                if (referencedAssets != null && value.startsWith(COMPLETE_BACKUP_ASSET_PREFIX)) {
                     String archivePath = value.substring(COMPLETE_BACKUP_ASSET_PREFIX.length())
                             .replace('\\', '/');
-                    if (!archivePath.startsWith("assets/")) {
-                        throw new IOException("图片资源引用路径非法。");
-                    }
-                    String relativePath = archivePath.substring("assets/".length());
-                    File assetFile = new File(stagedAssets, relativePath);
-                    String assetsCanonicalPath = stagedAssets.getCanonicalPath() + File.separator;
-                    if (!assetFile.getCanonicalPath().startsWith(assetsCanonicalPath)
-                            || !assetFile.isFile()) {
-                        throw new IOException("备份缺少图片资源：" + archivePath);
-                    }
-                    writer.value("/api/app-data/assets/" + relativePath.replace(File.separatorChar, '/'));
+                    String relativePath = archivePath.startsWith("assets/")
+                            ? normalizeCompleteBackupAssetPath(archivePath.substring("assets/".length()))
+                            : null;
+                    if (relativePath == null) throw new IOException("图片资源引用路径非法。");
+                    referencedAssets.add(relativePath);
+                    writer.value("/api/app-data/assets/" + encodePathSegments(relativePath));
                 } else {
                     writer.value(value);
                 }
@@ -579,102 +539,109 @@ public class LocalWebServer {
     }
 
     private CompleteBackupMetadata extractCompleteBackupAppData(
-            File completeBackup,
+            InputStream manifestInput,
             File stagedAppData,
-            File stagedLocalStorage
+            Set<String> referencedAssets
     ) throws IOException {
         String format = null;
         String version = null;
         String exportedAt = null;
         boolean appDataFound = false;
-        boolean localStorageFound = false;
-
-        try (PushbackInputStream input = new PushbackInputStream(
-                new BufferedInputStream(new java.io.FileInputStream(completeBackup)),
-                1
-        )) {
-            int rootStart = readNonWhitespace(input);
-            if (rootStart != '{') throw new IOException("备份文件不是有效的 JSON 对象。");
-
-            while (true) {
-                int next = readNonWhitespace(input);
-                if (next == '}') break;
-                if (next != '"') throw new IOException("备份文件顶层字段格式无效。");
-                String key = readJsonString(input);
-                if (readNonWhitespace(input) != ':') {
-                    throw new IOException("备份文件字段缺少冒号：" + key);
+        JSONObject localStorage = null;
+        Set<String> fields = new HashSet<>();
+        // Do not close the reader: the ZIP stream continues with the next entry.
+        JsonReader reader = new JsonReader(new InputStreamReader(manifestInput, StandardCharsets.UTF_8));
+        try (JsonWriter writer = new JsonWriter(new BufferedWriter(new OutputStreamWriter(
+                new FileOutputStream(stagedAppData), StandardCharsets.UTF_8), 64 * 1024))) {
+            reader.beginObject();
+            while (reader.hasNext()) {
+                String key = reader.nextName();
+                if (!fields.add(key)) throw new IOException("备份包含重复字段：" + key);
+                switch (key) {
+                    case "format":
+                        if (reader.peek() != JsonToken.STRING) throw new IOException("备份格式标识无效。");
+                        format = reader.nextString();
+                        break;
+                    case "version":
+                        if (reader.peek() != JsonToken.NUMBER) throw new IOException("备份版本无效。");
+                        version = reader.nextString();
+                        break;
+                    case "exportedAt":
+                        if (reader.peek() != JsonToken.STRING) throw new IOException("备份导出时间无效。");
+                        exportedAt = reader.nextString();
+                        break;
+                    case "appData":
+                        if (reader.peek() != JsonToken.BEGIN_OBJECT) throw new IOException("备份中的应用主数据无效。");
+                        copyImportedJsonValue(reader, writer, referencedAssets);
+                        appDataFound = true;
+                        break;
+                    case "localStorage":
+                        localStorage = new JSONObject();
+                        reader.beginObject();
+                        while (reader.hasNext()) {
+                            String name = reader.nextName();
+                            if (!name.startsWith("renge") || reader.peek() != JsonToken.STRING) {
+                                throw new IOException("备份中的本地设置格式无效。");
+                            }
+                            localStorage.put(name, reader.nextString());
+                        }
+                        reader.endObject();
+                        break;
+                    default:
+                        reader.skipValue();
                 }
-                int valueStart = readNonWhitespace(input);
-                if (valueStart < 0) throw new IOException("备份文件意外结束。");
-
-                if ("format".equals(key)) {
-                    if (valueStart != '"') throw new IOException("备份格式标识无效。");
-                    format = readJsonString(input);
-                } else if ("version".equals(key)) {
-                    version = readJsonPrimitive(input, valueStart);
-                } else if ("exportedAt".equals(key)) {
-                    if (valueStart != '"') throw new IOException("备份导出时间无效。");
-                    exportedAt = readJsonString(input);
-                } else if ("appData".equals(key)) {
-                    if (appDataFound || valueStart != '{') {
-                        throw new IOException("备份中的应用主数据无效。");
-                    }
-                    try (OutputStream appDataOutput = new FileOutputStream(stagedAppData)) {
-                        copyJsonComposite(input, valueStart, appDataOutput);
-                    }
-                    appDataFound = true;
-                } else if ("localStorage".equals(key)) {
-                    if (localStorageFound || valueStart != '{') {
-                        throw new IOException("备份中的本地设置格式无效。");
-                    }
-                    try (OutputStream localStorageOutput = new FileOutputStream(stagedLocalStorage)) {
-                        copyJsonComposite(input, valueStart, localStorageOutput);
-                    }
-                    localStorageFound = true;
-                } else {
-                    skipJsonValue(input, valueStart);
-                }
-
-                int separator = readNonWhitespace(input);
-                if (separator == '}') break;
-                if (separator != ',') throw new IOException("备份文件顶层 JSON 格式无效。");
             }
-
-            if (readNonWhitespace(input) >= 0) {
-                throw new IOException("备份文件包含多余内容。");
-            }
+            reader.endObject();
+            if (reader.peek() != JsonToken.END_DOCUMENT) throw new IOException("备份文件包含多余内容。");
+        } catch (IllegalStateException | NumberFormatException | JSONException error) {
+            throw new IOException("备份 JSON 格式无效。", error);
         }
-
         if (!"renge-agent-complete-backup".equals(format)) {
             throw new IOException("这不是 Renge Agent 完整备份文件。");
         }
         if (!"3".equals(version)) {
             throw new IOException("仅支持新版 v3 ZIP 完整备份，当前版本：" + (version == null ? "未知" : version) + "。");
         }
-        if (exportedAt == null || exportedAt.trim().isEmpty()) {
-            throw new IOException("备份缺少导出时间。");
+        if (exportedAt == null || exportedAt.trim().isEmpty()) throw new IOException("备份缺少导出时间。");
+        if (!appDataFound) throw new IOException("备份缺少应用主数据。");
+        if (localStorage == null) throw new IOException("备份缺少本地设置数据。");
+        return new CompleteBackupMetadata(exportedAt, 3, localStorage);
+    }
+
+    private String encodePathSegments(String path) throws IOException {
+        String[] parts = path.split("/");
+        for (int index = 0; index < parts.length; index++) {
+            parts[index] = URLEncoder.encode(parts[index], "UTF-8").replace("+", "%20");
         }
-        if (!appDataFound || stagedAppData.length() == 0) {
-            throw new IOException("备份缺少应用主数据。");
+        return String.join("/", parts);
+    }
+
+    private static final class CompleteBackupEntryInputStream extends InputStream {
+        private final InputStream input;
+        private final long limit;
+        long bytesRead;
+
+        CompleteBackupEntryInputStream(InputStream input, long limit) {
+            this.input = input;
+            this.limit = limit;
         }
-        if (!localStorageFound) {
-            throw new IOException("备份缺少本地设置数据。");
+
+        @Override public int read() throws IOException {
+            int value = input.read();
+            if (value >= 0) count(1);
+            return value;
         }
-        int parsedVersion = Integer.parseInt(version);
-        JSONObject localStorage;
-        try (InputStream input = new FileInputStream(stagedLocalStorage)) {
-            localStorage = new JSONObject(new String(readAll(input), StandardCharsets.UTF_8));
-            Iterator<String> keys = localStorage.keys();
-            while (keys.hasNext()) {
-                String key = keys.next();
-                if (!key.startsWith("renge") || !(localStorage.opt(key) instanceof String)) {
-                    throw new IOException("备份中的本地设置格式无效。");
-                }
-            }
-        } catch (JSONException error) {
-            throw new IOException("备份中的本地设置格式无效。", error);
+
+        @Override public int read(byte[] buffer, int offset, int length) throws IOException {
+            int count = input.read(buffer, offset, length);
+            if (count > 0) count(count);
+            return count;
         }
-        return new CompleteBackupMetadata(exportedAt, parsedVersion, localStorage);
+
+        private void count(int count) throws IOException {
+            bytesRead += count;
+            if (bytesRead > limit) throw new IOException("ZIP 解压后的数据超过 512MB。");
+        }
     }
 
     private void copyFileAtomically(File source, File target) throws IOException {
@@ -694,126 +661,6 @@ public class LocalWebServer {
         } catch (IOException error) {
             if (output != null) atomicFile.failWrite(output);
             throw error;
-        }
-    }
-
-    private int readNonWhitespace(InputStream input) throws IOException {
-        int value;
-        do {
-            value = input.read();
-        } while (value == ' ' || value == '\t' || value == '\r' || value == '\n');
-        return value;
-    }
-
-    private String readJsonString(InputStream input) throws IOException {
-        StringBuilder value = new StringBuilder();
-        boolean escaped = false;
-        while (true) {
-            int next = input.read();
-            if (next < 0) throw new IOException("JSON 字符串意外结束。");
-            if (!escaped && next == '"') return value.toString();
-            if (!escaped && next == '\\') {
-                escaped = true;
-                continue;
-            }
-            if (escaped) {
-                switch (next) {
-                    case '"': value.append('"'); break;
-                    case '\\': value.append('\\'); break;
-                    case '/': value.append('/'); break;
-                    case 'b': value.append('\b'); break;
-                    case 'f': value.append('\f'); break;
-                    case 'n': value.append('\n'); break;
-                    case 'r': value.append('\r'); break;
-                    case 't': value.append('\t'); break;
-                    case 'u':
-                        int codePoint = 0;
-                        for (int index = 0; index < 4; index++) {
-                            int digit = Character.digit(input.read(), 16);
-                            if (digit < 0) throw new IOException("JSON Unicode 转义无效。");
-                            codePoint = (codePoint << 4) | digit;
-                        }
-                        value.append((char) codePoint);
-                        break;
-                    default:
-                        throw new IOException("JSON 转义字符无效。");
-                }
-                escaped = false;
-            } else {
-                if (next < 0x20) throw new IOException("JSON 字符串包含无效控制字符。");
-                value.append((char) next);
-            }
-            if (value.length() > 16384) throw new IOException("备份字段名称或元数据过长。");
-        }
-    }
-
-    private String readJsonPrimitive(PushbackInputStream input, int first) throws IOException {
-        StringBuilder value = new StringBuilder();
-        int next = first;
-        while (next >= 0) {
-            if (next == ',' || next == '}' || next == ']') {
-                input.unread(next);
-                break;
-            }
-            if (next == ' ' || next == '\t' || next == '\r' || next == '\n') break;
-            value.append((char) next);
-            if (value.length() > 128) throw new IOException("JSON 基本值过长。");
-            next = input.read();
-        }
-        if (value.length() == 0) throw new IOException("JSON 基本值为空。");
-        return value.toString();
-    }
-
-    private void skipJsonValue(PushbackInputStream input, int first) throws IOException {
-        if (first == '{' || first == '[') {
-            copyJsonComposite(input, first, null);
-        } else if (first == '"') {
-            readJsonString(input);
-        } else {
-            readJsonPrimitive(input, first);
-        }
-    }
-
-    private void copyJsonComposite(
-            InputStream input,
-            int first,
-            OutputStream output
-    ) throws IOException {
-        ArrayDeque<Integer> expectedClosings = new ArrayDeque<>();
-        expectedClosings.push(first == '{' ? (int) '}' : (int) ']');
-        if (output != null) output.write(first);
-        boolean inString = false;
-        boolean escaped = false;
-
-        while (!expectedClosings.isEmpty()) {
-            int next = input.read();
-            if (next < 0) throw new IOException("JSON 对象或数组意外结束。");
-            if (output != null) output.write(next);
-
-            if (inString) {
-                if (escaped) {
-                    escaped = false;
-                } else if (next == '\\') {
-                    escaped = true;
-                } else if (next == '"') {
-                    inString = false;
-                } else if (next < 0x20) {
-                    throw new IOException("JSON 字符串包含无效控制字符。");
-                }
-                continue;
-            }
-
-            if (next == '"') {
-                inString = true;
-            } else if (next == '{') {
-                expectedClosings.push((int) '}');
-            } else if (next == '[') {
-                expectedClosings.push((int) ']');
-            } else if (next == '}' || next == ']') {
-                if (expectedClosings.isEmpty() || expectedClosings.pop() != next) {
-                    throw new IOException("JSON 对象与数组括号不匹配。");
-                }
-            }
         }
     }
 
