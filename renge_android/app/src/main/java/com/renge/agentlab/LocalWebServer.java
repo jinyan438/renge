@@ -1113,25 +1113,7 @@ public class LocalWebServer {
         if ("/api/characters/chats".equals(request.path)) {
             if (!"POST".equals(request.method)) { sendJson(output, 405, jsonError("Method not allowed")); return; }
             JSONObject body = parseJson(request.body);
-            JSONObject data;
-            try (InputStream input = new AtomicFile(appDataFile).openRead()) {
-                data = new JSONObject(new String(readAll(input), StandardCharsets.UTF_8));
-            }
-            JSONArray cards = data.optJSONArray("characterCards");
-            String cardId = "";
-            String avatar = body.optString("avatar_url", "");
-            if (cards != null) for (int index = 0; index < cards.length(); index++) {
-                JSONObject card = cards.optJSONObject(index);
-                if (card != null && (avatar.equals(card.optString("avatarDataUrl")) || avatar.equals(card.optString("id") + ".png"))) {
-                    cardId = card.optString("id"); break;
-                }
-            }
-            JSONArray result = new JSONArray();
-            JSONArray chats = data.optJSONArray("chatSessions");
-            if (!cardId.isEmpty() && chats != null) for (int index = 0; index < chats.length(); index++) {
-                JSONObject chat = chats.optJSONObject(index);
-                if (chat != null && cardId.equals(chat.optString("roleplayCharacterCardId"))) result.put(new JSONObject().put("file_name", chat.optString("id") + ".jsonl"));
-            }
+            JSONArray result = readCharacterChats(body.optString("avatar_url", ""));
             sendBytes(output, 200, "application/json;charset=utf-8", result.toString().getBytes(StandardCharsets.UTF_8));
             return;
         }
@@ -1480,6 +1462,10 @@ public class LocalWebServer {
         return versions;
     }
 
+    private synchronized JSONArray readCharacterChats(String avatar) throws IOException, JSONException {
+        return AppDataFileStore.characterChats(appDataFile, avatar);
+    }
+
     private synchronized void writeAppData(Object data) throws IOException {
         try {
             JSONObject normalized = data instanceof JSONObject
@@ -1490,7 +1476,7 @@ public class LocalWebServer {
                     && !appDataAssetsDirectory.exists()) {
                 copyFileAtomically(appDataFile, appDataBackupFile);
             }
-            writeJsonAtomically(appDataFile, normalized.toString());
+            AppDataFileStore.write(appDataFile, normalized);
         } catch (JSONException error) {
             throw new IOException(error);
         }
@@ -1502,25 +1488,15 @@ public class LocalWebServer {
                     ? (JSONObject) data
                     : new JSONObject(String.valueOf(data));
             if (patch.has("chatSessions")) throw new AppDataSessionPatch.ConflictException();
-            JSONObject current = new JSONObject();
             File source = appDataFile.isFile() && appDataFile.length() > 0
                     ? appDataFile
                     : appDataBackupFile;
-            if (source.isFile() && source.length() > 0) {
-                try (InputStream input = new BufferedInputStream(new FileInputStream(source))) {
-                    current = new JSONObject(new String(readAll(input), StandardCharsets.UTF_8));
-                }
+            JSONObject versions = source.isFile() && source.length() > 0
+                    ? readAppDataSessionVersions(source) : new JSONObject();
+            if (appDataFile.isFile() && appDataFile.length() > 0 && !appDataAssetsDirectory.exists()) {
+                copyFileAtomically(appDataFile, appDataBackupFile);
             }
-            Iterator<String> keys = patch.keys();
-            while (keys.hasNext()) {
-                String key = keys.next();
-                current.put(key, patch.get(key));
-            }
-            if (sessionPatch != null) {
-                current.put("chatSessions", AppDataSessionPatch.apply(current.optJSONArray("chatSessions"), sessionPatch));
-            }
-            writeAppData(current);
-            return AppDataSessionPatch.versions(current.optJSONArray("chatSessions"));
+            return AppDataFileStore.patch(source, appDataFile, patch, sessionPatch, versions);
         } catch (JSONException error) {
             throw new IOException(error);
         }

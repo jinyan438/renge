@@ -29,8 +29,8 @@ android {
         applicationId "com.renge.agentlab"
         minSdk 24
         targetSdk 35
-        versionCode 5
-        versionName "0.1.4"
+        versionCode 6
+        versionName "0.1.5"
     }
 
     compileOptions {
@@ -44,6 +44,7 @@ dependencies {
     implementation "com.github.termux.termux-app:terminal-emulator:0.118.3"
     testImplementation "junit:junit:4.13.2"
     testImplementation "org.json:json:20240303"
+    androidTestCompileOnly files("${android.sdkDirectory}/platforms/android-${android.compileSdk}/optional/android.test.base.jar")
 }
 
 tasks.named("preBuild") {

@@ -36,13 +36,16 @@ final class AppDataSessionPatch {
         return versions;
     }
 
-    static JSONArray apply(JSONArray sessions, JSONObject patch) throws JSONException, IOException {
+    static final class Plan {
+        final Map<String, JSONObject> replacements = new LinkedHashMap<>();
+        final Set<String> removed = new HashSet<>();
+    }
+
+    static Plan prepare(JSONObject versions, JSONObject patch) throws JSONException, IOException {
         JSONArray upserts = patch.getJSONArray("upserts");
         JSONArray deletes = patch.getJSONArray("deletes");
-        JSONObject versions = versions(sessions);
         Set<String> seen = new HashSet<>();
-        Map<String, JSONObject> replacements = new LinkedHashMap<>();
-        Set<String> removed = new HashSet<>();
+        Plan plan = new Plan();
         for (int group = 0; group < 2; group++) {
             JSONArray changes = group == 0 ? upserts : deletes;
             for (int i = 0; i < changes.length(); i++) {
@@ -55,20 +58,25 @@ final class AppDataSessionPatch {
                 Object expected = change.get("expectedVersion");
                 Object actual = versions.has(id) ? versions.get(id) : JSONObject.NULL;
                 if (!actual.equals(expected)) throw new ConflictException();
-                if (session == null) removed.add(id); else replacements.put(id, session);
+                if (session == null) plan.removed.add(id); else plan.replacements.put(id, session);
             }
         }
+        return plan;
+    }
+
+    static JSONArray apply(JSONArray sessions, JSONObject patch) throws JSONException, IOException {
+        Plan plan = prepare(versions(sessions), patch);
         JSONArray result = new JSONArray();
         if (sessions != null) {
             for (int i = 0; i < sessions.length(); i++) {
                 JSONObject session = sessions.getJSONObject(i);
                 String id = session.getString("id");
-                if (removed.contains(id)) continue;
-                JSONObject replacement = replacements.remove(id);
+                if (plan.removed.contains(id)) continue;
+                JSONObject replacement = plan.replacements.remove(id);
                 result.put(replacement == null ? session : replacement);
             }
         }
-        for (JSONObject session : replacements.values()) result.put(session);
+        for (JSONObject session : plan.replacements.values()) result.put(session);
         return result;
     }
 }
