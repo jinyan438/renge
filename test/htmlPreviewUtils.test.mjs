@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   collectInheritedHtmlPreviewStyleResources,
+  deferHtmlPreviewFontStylesheets,
   getHtmlPreviewLayoutSettleDelays,
   injectHtmlPreviewHead,
   isHtmlPreviewRootTag,
@@ -14,7 +15,36 @@ import {
   stabilizeHtmlPreviewRuntimeCompatibility,
   TAVERN_INLINE_PLACEHOLDER_PATTERN,
   unwrapTavernProseWrappers,
+  unwrapPackedHtmlPreviewDocument,
 } from "../src/htmlPreviewUtils.ts";
+
+const packDocument = (html) => `<body><script>(function(){var h=new TextDecoder().decode(Uint8Array.from(atob('${Buffer.from(html).toString('base64')}'),function(c){return c.charCodeAt(0)}));document.write(h)})();</script></body>`;
+
+test("unpacks complete UTF-8 document writers before preview compatibility transforms", () => {
+  const html = '<head><title>档案 $& $1</title></head><body><div id="app">旅人</div></body>';
+  assert.equal(unwrapPackedHtmlPreviewDocument(packDocument(html)),html);
+  assert.equal(unwrapPackedHtmlPreviewDocument(packDocument(packDocument(html))),html);
+  for (const source of [
+    packDocument(html).replace('document.write(h)','sideEffect();document.write(h)'),
+    packDocument(html).replace('<script>','<script src="external.js">'),
+    packDocument(html).replace('<script>','<script type="module">'),
+    packDocument(html).replace('<script>','<script type=module>'),
+    packDocument(html)+'<p>Keep accompanying content</p>',
+    packDocument('plain text'),
+    packDocument(html).replace(/atob\('[^']+'\)/,"atob('====')"),
+  ]) assert.equal(unwrapPackedHtmlPreviewDocument(source),source);
+});
+
+test("optional web fonts do not block frontend startup or alter author-managed links", () => {
+  const font='<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fixture">';
+  const deferred=deferHtmlPreviewFontStylesheets(font);
+  assert.ok(deferred.includes('media="print"'));
+  assert.ok(deferred.includes('onload="this.media=\'all\'"'));
+  assert.equal(deferHtmlPreviewFontStylesheets(deferred),deferred);
+  for (const tag of [font.replace('fonts.googleapis.com','fixture.invalid'),font.replace('rel="stylesheet"','rel="preconnect"'),font.replace('>',' media="screen">'),font.replace('>',' onload="loaded()">'),`<script>const font='${font}';</script>`,`<style>a::before{content:'${font}'}</style>`,`<!-- ${font} -->`]) {
+    assert.equal(deferHtmlPreviewFontStylesheets(tag),tag);
+  }
+});
 
 test("injects preview dependencies and card snapshots without expanding replacement tokens", () => {
   const injection = '<script>const tokens = ["$&", "$1", "$`", "$\'", "$$"];</script>';

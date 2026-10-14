@@ -8,6 +8,40 @@ type HtmlPreviewStyleMessage = {
   content?: string;
 };
 
+export function unwrapPackedHtmlPreviewDocument(content: string) {
+  let unpacked = content;
+  for (let depth = 0; depth < 3; depth += 1) {
+    const wrapper = /^\s*(?:<body\b[^>]*>\s*)?<script\b([^>]*)>([\s\S]*?)<\/script>\s*(?:<\/body>\s*)?$/i.exec(unpacked);
+    if (!wrapper) break;
+    const scriptType = /\btype\s*=\s*(?:(["'])(.*?)\1|([^\s>]+))/i.exec(wrapper[1]);
+    if (/(?:^|\s)(?:src|async|defer)\b/i.test(wrapper[1]) ||
+        (scriptType && !/^(?:text|application)\/javascript$/i.test(scriptType[2] ?? scriptType[3]))) break;
+    // Recognize the complete UTF-8/base64 document writer, without evaluating
+    // script code or discarding additional initialization statements.
+    const packed = /^\s*\(function\s*\(\)\s*\{\s*(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+TextDecoder\(\)\.decode\(\s*Uint8Array\.from\(\s*atob\((['"])([A-Za-z0-9+/=\s]+)\2\)\s*,\s*function\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\{\s*return\s+\4\.charCodeAt\(\s*0\s*\)\s*;?\s*\}\s*\)\s*\)\s*;\s*document\.write\(\s*\1\s*\)\s*;?\s*\}\s*\)\(\)\s*;?\s*$/.exec(wrapper[2]);
+    if (!packed) break;
+    try {
+      const decoded = new TextDecoder("utf-8", { fatal: true }).decode(
+        Uint8Array.from(atob(packed[3]), (character) => character.charCodeAt(0)),
+      );
+      if (!/^\s*(?:<!doctype\s+html|<(?:html|head|body)\b)/i.test(decoded)) break;
+      unpacked = decoded;
+    } catch { break; }
+  }
+  return unpacked;
+}
+
+export function deferHtmlPreviewFontStylesheets(content: string) {
+  return content.replace(/<!--[\s\S]*?-->|<script\b[^>]*>[\s\S]*?<\/script\s*>|<style\b[^>]*>[\s\S]*?<\/style\s*>|<link\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi, (tag) => {
+    if (!/^<link\b/i.test(tag) || !/\brel\s*=\s*(['"])stylesheet\1/i.test(tag) ||
+        !/\bhref\s*=\s*(['"])(?:https?:)?\/\/fonts\.googleapis\.com\/[^'"]*\1/i.test(tag) ||
+        /\b(?:media|onload)\s*=/i.test(tag)) return tag;
+    // Font downloads may be unavailable. Render with fallback fonts while the
+    // optional stylesheet loads instead of blocking the card's module startup.
+    return tag.replace(/\/?\s*>$/, " media=\"print\" onload=\"this.media='all'\">");
+  });
+}
+
 export function getHtmlPreviewRootAttributes(content: string, ownerDocument: Document) {
   const match = /<html\b((?:[^>"']|"[^"]*"|'[^']*')*)>/i.exec(content);
   if (!match) return {};

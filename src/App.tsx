@@ -92,10 +92,12 @@ import { createChatProgressTracker } from "./chatComposerStatusUtils";
 import { strToU8, zip } from "fflate";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
+import vueSource from "vue/dist/vue.global.prod.js?raw";
 import htmlPreviewDependenciesSource from "virtual:html-preview-dependencies";
 import { HTML_PREVIEW_PARENT_BRIDGE_SOURCE } from "./htmlPreviewParentBridge";
 import {
   collectInheritedHtmlPreviewStyleResources,
+  deferHtmlPreviewFontStylesheets,
   getHtmlPreviewLayoutSettleDelays,
   getHtmlPreviewRootAttributes,
   injectHtmlPreviewHead,
@@ -109,6 +111,7 @@ import {
   stabilizeHtmlPreviewRuntimeCompatibility,
   TAVERN_INLINE_PLACEHOLDER_PATTERN,
   unwrapTavernProseWrappers,
+  unwrapPackedHtmlPreviewDocument,
 } from "./htmlPreviewUtils";
 import {
   buildPersonaPrompt,
@@ -4340,6 +4343,7 @@ const htmlPreviewJqueryScript = [
 ].join("");
 const htmlPreviewDependenciesScript = [
   '<script data-renge-html-preview-dependencies="true">',
+  vueSource.replace(/<\/script/gi, "<\\/script"),
   htmlPreviewDependenciesSource.replace(/<\/script/gi, "<\\/script"),
   "</script>",
 ].join("");
@@ -5049,6 +5053,8 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "mvu.events.VARIABLE_UPDATE_ENDED ||= \"mag_variable_update_ended\";",
     "mvu.getMvuData = (option) => getVariables(option);",
     "mvu.setMvuData = (variables, option) => replaceVariables(variables, option);",
+    "mvu.replaceMvuData = (variables, option) => replaceVariables(variables, option);",
+    "mvu.updateMvuData = (updater, option) => updateVariablesWith(updater, option);",
     "window.Mvu = mvu;",
     "const notifyParentInteraction = () => {",
     "  try { parent.postMessage({ type: interactionMessageType, id: previewId }, \"*\"); } catch {}",
@@ -7046,6 +7052,7 @@ function buildHtmlPreviewDocument(
   context: HtmlPreviewContext,
   embeddedDepth = 0,
 ): string {
+  content = deferHtmlPreviewFontStylesheets(unwrapPackedHtmlPreviewDocument(content));
   context = { ...context, parentGlobals: getHtmlPreviewParentGlobals(content) };
   const isolatedContent = isolateHtmlPreviewParentReferences(
     stabilizeHtmlPreviewMapViewport(
