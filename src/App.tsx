@@ -4222,9 +4222,8 @@ const HTML_PREVIEW_FRAME_INIT_MESSAGE = "renge-html-preview-frame-init";
 const HTML_PREVIEW_FULLSCREEN_REQUEST_MESSAGE = "renge-html-preview-fullscreen-request";
 const HTML_PREVIEW_FULLSCREEN_EXIT_MESSAGE = "renge-html-preview-fullscreen-exit";
 const HYPNOOS_APPEND_OPERATION_MESSAGE = "HYPNOOS_APPEND_OPERATION";
-const HTML_PREVIEW_MEASURED_MIN_HEIGHT = 64;
+const HTML_PREVIEW_MEASURED_MIN_HEIGHT = 1;
 const HTML_PREVIEW_MAX_HEIGHT = 12000;
-const HTML_PREVIEW_EXPANDED_MIN_HEIGHT = 1200;
 const HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD = 512 * 1024;
 const HTML_PREVIEW_HEAVY_MOUNT_GAP = 900;
 const HTML_PREVIEW_FALLBACK_LOAD_DELAY = 600;
@@ -6501,7 +6500,6 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     `const heavyContent = ${heavyContent ? "true" : "false"};`,
     "const defaultHeight = 420;",
     `const minHeight = ${HTML_PREVIEW_MEASURED_MIN_HEIGHT};`,
-    "const padding = 12;",
     "let rafId = 0;",
     "let rafFallbackTimer = 0;",
     "let heavyPostTimer = 0;",
@@ -6513,8 +6511,6 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "let lastHeight = 0;",
     "let lastExpandedDetailsHeight = 0;",
     "let lastExpandedDetailsState = false;",
-    "let lastMeasuredContentHeight = 0;",
-    "let lastMeasuredViewportHeight = 0;",
     "let currentScale = 1;",
     "let ignoreLayoutResizeUntil = 0;",
     "let naturalLayout = null;",
@@ -6543,10 +6539,10 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     '  document.querySelectorAll("details[open]").forEach((element) => {',
     "    const rect = element.getBoundingClientRect();",
     "    if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom)) return;",
+    "    if (rect.width <= 0 || rect.height <= 0) return;",
     "    const top = rect.top + scrollY;",
-    "    const expandedHeight = Math.max(rect.height || 0, element.scrollHeight || 0, element.offsetHeight || 0);",
     "    minTop = Math.min(minTop, top);",
-    "    maxBottom = Math.max(maxBottom, top + expandedHeight, rect.bottom + scrollY);",
+    "    maxBottom = Math.max(maxBottom, rect.bottom + scrollY);",
     "  });",
     "  return Math.max(0, maxBottom - Math.min(0, minTop));",
     "};",
@@ -6626,7 +6622,6 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     '    numberFromStyle(bodyStyle, "margin-top") + numberFromStyle(bodyStyle, "margin-bottom");',
     "  const reportedViewportWidth = Number(window.__rengeParentViewportWidth);",
     "  const viewportWidth = Math.max(1, Number.isFinite(reportedViewportWidth) && reportedViewportWidth > 0 ? reportedViewportWidth : (window.innerWidth || document.documentElement.clientWidth || defaultHeight));",
-    "  const viewportHeight = window.innerHeight || defaultHeight;",
     "  /* Bounds already include the document's margins and viewport width. */",
     "  const availableWidth = viewportWidth;",
     "  if (Math.abs(viewportWidth - lastViewportWidth) > 1) naturalLayoutDirty = true;",
@@ -6645,34 +6640,24 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "  const expandedDetailsHeight = naturalLayout.expandedDetailsHeight;",
     "  const nextScale = bounds.width > availableWidth ? Math.max(0.1, availableWidth / bounds.width) : 1;",
     "  setScale(nextScale);",
-    "  const structuralTracksViewport = Math.abs(structuralHeight - viewportHeight) <= 2;",
-    "  if (expandedDetailsHeight > 0 || (structuralHeight > 0 && !structuralTracksViewport)) {",
+    "  /* Body layout excludes hidden panels; matching the frame height must not switch measurement paths. */",
+    "  if (expandedDetailsHeight > 0 || structuralHeight > 0) {",
     "    const measuredStructuralHeight = Math.max(",
     "      expandedDetailsHeight,",
-    "      structuralTracksViewport ? 0 : structuralHeight,",
+    "      structuralHeight,",
     "    );",
     "    return {",
-    "      height: clampHeight((measuredStructuralHeight + verticalMargin) * nextScale + padding),",
+    "      height: clampHeight((measuredStructuralHeight + verticalMargin) * nextScale),",
     "      hasIntrinsicElement: bounds.hasIntrinsicElement,",
     "    };",
     "  }",
     "  const contentHeight = Math.max(0, bounds.height);",
-    "  const contentDelta = contentHeight - lastMeasuredContentHeight;",
-    "  const viewportDelta = viewportHeight - lastMeasuredViewportHeight;",
-    "  const tracksRecentViewport =",
-    "    lastMeasuredContentHeight > 0 &&",
-    "    Math.abs(contentDelta - viewportDelta) <= 2 &&",
-    "    contentHeight >= viewportHeight - 2 &&",
-    "    contentHeight <= viewportHeight + 64;",
-    "  lastMeasuredContentHeight = contentHeight;",
-    "  lastMeasuredViewportHeight = viewportHeight;",
-    "  const tracksViewport = Math.abs(contentHeight - viewportHeight) <= 2;",
-    "  const usesProvisionalViewport = viewportHeight <= defaultHeight + 64;",
-    "  if (!contentHeight || (!bounds.hasIntrinsicElement && usesProvisionalViewport && (tracksViewport || tracksRecentViewport))) {",
+    "  /* Equal content/frame heights are a stable fit, not a reason to restore the loading height. */",
+    "  if (!contentHeight) {",
     "    return { height: clampHeight(defaultHeight), hasIntrinsicElement: bounds.hasIntrinsicElement };",
     "  }",
     "  return {",
-    "    height: clampHeight(contentHeight * nextScale + verticalMargin + padding),",
+    "    height: clampHeight(contentHeight * nextScale + verticalMargin),",
     "    hasIntrinsicElement: bounds.hasIntrinsicElement,",
     "  };",
     "};",
@@ -6683,11 +6668,10 @@ function buildHtmlPreviewScript(previewId: string, heavyContent: boolean) {
     "  if (!previewActive || parentScrolling) { measurementPending = true; return; }",
     "  measurementPending = false;",
     "  const measurement = measure();",
-    "  let height = measurement.height;",
-    "  if (lastHeight > 0 && Math.abs(height - lastHeight) <= padding) height = lastHeight;",
-    '  const hasExpandedDetails = Boolean(document.querySelector("details[open]"));',
+    "  const height = measurement.height;",
     "  const expandedDetailsHeight = getExpandedDetailsHeight();",
-    "  const reportedExpandedHeight = expandedDetailsHeight > 0 ? clampHeight(expandedDetailsHeight * currentScale + padding) : 0;",
+    "  const hasExpandedDetails = expandedDetailsHeight > 0;",
+    "  const reportedExpandedHeight = hasExpandedDetails ? clampHeight(expandedDetailsHeight) : 0;",
     "  const shouldForcePost = forceNextPost;",
     "  forceNextPost = false;",
     "  if (!shouldForcePost && Math.abs(height - lastHeight) < 1 && Math.abs(reportedExpandedHeight - lastExpandedDetailsHeight) < 1 && hasExpandedDetails === lastExpandedDetailsState) return;",
@@ -7071,7 +7055,7 @@ function buildHtmlPreviewDocument(
     '<html lang="zh-CN">',
     "<head>",
     '<meta charset="utf-8" />',
-    "<style>html,body{min-height:100%;}body{margin:0;}</style>",
+    "<style>body{margin:0;}</style>",
     headInjection,
     "</head>",
     "<body>",
@@ -7105,8 +7089,6 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
   const mountStartedRef = useRef(false);
   const previewActiveRef = useRef(false);
   const heavyContent = content.trim().length >= HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD;
-  const containsExpandedDetails =
-    /<details\b(?=[^>]*\bopen(?:\s|=|>))[^>]*>/i.test(content);
   const [renderReady, setRenderReady] = useState(false);
   const [previewActive, setPreviewActive] = useState(false);
   const loadSyncTimersRef = useRef<(() => void)[]>([]);
@@ -7403,7 +7385,6 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
           className="chat-html-frame"
           allow="autoplay; fullscreen; gamepad"
           allowFullScreen
-          data-expanded-layout={containsExpandedDetails ? "true" : "false"}
           data-message-id={messageId}
           loading="eager"
           onLoad={handleLoad}
@@ -7416,11 +7397,6 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
           }
           src={isolatedFrame?.url}
           srcDoc={isolatedFrame ? undefined : sourceDocumentRef.current.value}
-          style={
-            containsExpandedDetails
-              ? { minHeight: `${HTML_PREVIEW_EXPANDED_MIN_HEIGHT}px` }
-              : undefined
-          }
           tabIndex={0}
           title="HTML 预览"
         />
@@ -7480,7 +7456,7 @@ function fitHtmlPreviewFrame(frame: HTMLIFrameElement) {
     // missing measurement is not a 0px document: leave the provisional frame
     // height intact until the child resize bridge reports its real layout.
     if (measuredHeight <= 0) return;
-    const height = Math.ceil(measuredHeight + 12);
+    const height = Math.ceil(measuredHeight);
     frame.style.height = `${Math.max(HTML_PREVIEW_MEASURED_MIN_HEIGHT, height)}px`;
   } catch {
     // Preview internals should not break chat rendering.
@@ -7493,13 +7469,8 @@ function resizeHtmlPreviewFrame(event: SyntheticEvent<HTMLIFrameElement>) {
   const restoredHeight = Number(frame.dataset.restoredHeight);
   delete frame.dataset.restoredHeight;
   if (frameWidth > 0) {
-    const expandedLayoutMinHeight =
-      frame.dataset.expandedLayout === "true"
-        ? Math.max(HTML_PREVIEW_EXPANDED_MIN_HEIGHT, frameWidth * 0.9)
-        : 0;
     const measuringHeight = Math.max(
       420,
-      expandedLayoutMinHeight,
       Math.min(960, Math.round(frameWidth * 0.72)),
     );
     frame.style.height = `${
@@ -14632,29 +14603,19 @@ export function App() {
       const nextHeight = Number(payload.height);
       if (!Number.isFinite(nextHeight)) return;
 
-      const frameWidth = frame.getBoundingClientRect().width || frame.clientWidth || 0;
       if (typeof payload.expanded === "boolean") {
         frame.dataset.expandedLayout = String(payload.expanded);
       }
       const hasExpandedLayout = frame.dataset.expandedLayout === "true";
-      frame.style.minHeight = hasExpandedLayout
-        ? `${HTML_PREVIEW_EXPANDED_MIN_HEIGHT}px`
-        : `${HTML_PREVIEW_MEASURED_MIN_HEIGHT}px`;
+      frame.style.minHeight = `${HTML_PREVIEW_MEASURED_MIN_HEIGHT}px`;
       const reportedExpandedHeight = Number(payload.expandedHeight);
       const expandedHeightIsValid =
         hasExpandedLayout &&
         Number.isFinite(reportedExpandedHeight) &&
         reportedExpandedHeight > 0;
-      const expandedFallbackHeight =
-        hasExpandedLayout && frameWidth > 0
-          ? Math.max(HTML_PREVIEW_EXPANDED_MIN_HEIGHT, frameWidth * 0.9)
-          : 0;
       const expandedMinHeight = expandedHeightIsValid
-        ? Math.max(
-            reportedExpandedHeight,
-            reportedExpandedHeight < frameWidth * 0.72 ? expandedFallbackHeight : 0,
-          )
-        : expandedFallbackHeight;
+        ? Math.min(Math.ceil(reportedExpandedHeight), HTML_PREVIEW_MAX_HEIGHT)
+        : 0;
       const clampedHeight = Math.max(
         HTML_PREVIEW_MEASURED_MIN_HEIGHT,
         expandedMinHeight,

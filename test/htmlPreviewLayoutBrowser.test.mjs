@@ -30,7 +30,11 @@ const responsiveCard = `<style>
   <button onclick="this.textContent='已选择'">确认选择</button>
 </div></main>`;
 const fixedCard = `<style>body{margin:8px}.fixed{width:1600px;height:500px;background:#fff1f5;font:24px sans-serif}</style><div class="fixed">固定宽度界面</div>`;
-const documents = [responsiveCard, fixedCard, `${responsiveCard}<!--${"heavy fixture ".repeat(42_000)}-->`];
+const compactCard = `<style>body{margin:0;font:16px/1.5 sans-serif}.compact{padding:4px;background:#fff1f5}summary{cursor:pointer}</style>
+<main class="compact"><details class="visible-panel" open><summary>状态详情</summary><div style="height:180px">展开的内容</div></details>
+<div hidden><details open><summary>隐藏模板</summary><div style="height:2000px">不可见的内容</div></details></div></main>`;
+const documents = [responsiveCard, fixedCard, `${responsiveCard}<!--${"heavy fixture ".repeat(42_000)}-->`, compactCard,
+  `${compactCard}<!--${"heavy fixture ".repeat(42_000)}-->`];
 let server, browser, page;
 try {
   await mkdir(".runtime", { recursive: true });
@@ -67,11 +71,33 @@ try {
     const locator = message.locator("iframe.chat-html-frame");
     await locator.waitFor();
     const frame = await (await locator.elementHandle()).contentFrame();
-    await frame.locator(index === 1 ? ".fixed" : ".card").waitFor();
+    await frame.locator(index === 1 ? ".fixed" : index >= 3 ? ".compact" : ".card").waitFor();
     for (const width of [1440, 390, 1440]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
       await locator.scrollIntoViewIfNeeded();
-      if (index === 1) {
+      if (index >= 3) {
+        for (const open of [true, false, true, false]) {
+          await frame.locator(".visible-panel").evaluate((element, open) => { element.open = open; }, open);
+          await frame.waitForFunction(() => {
+            const bottom = document.querySelector(".compact").getBoundingClientRect().bottom;
+            return innerHeight >= bottom && innerHeight - bottom <= 1;
+          });
+          const height = (await locator.boundingBox()).height;
+          assert.ok(open ? height >= 200 && height < 220 : height < 40,
+            "open panels fit their content and collapse below the former minimum height");
+          assert.equal(await locator.getAttribute("data-expanded-layout"), String(open),
+            "hidden open templates must not keep the preview expanded");
+          const stable = await frame.evaluate(async () => {
+            for (let count = 0; count < 8; count += 1) {
+              await new Promise(requestAnimationFrame);
+              const bottom = document.querySelector(".compact").getBoundingClientRect().bottom;
+              if (innerHeight < bottom || innerHeight - bottom > 1) return false;
+            }
+            return true;
+          });
+          assert.ok(stable, "a fitted short panel must not jump back to a loading or expanded height");
+        }
+      } else if (index === 1) {
         await frame.waitForFunction(() => {
           const rect = document.querySelector(".fixed").getBoundingClientRect();
           return Number(document.body.style.zoom) < 1 && rect.right <= innerWidth + 1 && rect.width > innerWidth * 0.9;
@@ -98,12 +124,16 @@ try {
         await frame.getByText("更多选项", { exact: true }).evaluate(element => element.click());
         await frame.getByRole("button").evaluate(element => element.click());
         await frame.getByRole("button", { name: "已选择", exact: true }).waitFor();
+        await frame.waitForFunction(() => {
+          const bottom = document.querySelector(".card").getBoundingClientRect().bottom;
+          return innerHeight >= bottom && innerHeight - bottom <= 9;
+        });
       }
       assert.ok(await message.locator(".chat-bubble").evaluate(element => element.scrollWidth <= element.clientWidth + 1));
     }
   }
   assert.deepEqual(errors, []);
-  console.log("PASS: desktop/mobile responsive cards, clipped animation layers, hidden/clip/auto/scroll containers, CSS-sized canvas/SVG/images, expanded details, interactions, heavy cards and genuine fixed-width scaling");
+  console.log("PASS: desktop/mobile responsive cards, clipped effects, CSS-sized media, fixed-width scaling, content-fitted normal/heavy previews, hidden open templates and expanding/collapsing panels without reserved blank space");
 } catch (error) {
   console.log(await page?.locator("#chat .mes").evaluateAll(messages => messages.map(message => ({ index: message.getAttribute("mesid"), previews: message.querySelectorAll(".chat-html-preview").length, frames: message.querySelectorAll("iframe").length, placeholders: [...message.querySelectorAll(".chat-html-preview-placeholder")].map(element => element.textContent), text: message.textContent.slice(0, 100) }))));
   await page?.screenshot({ path: ".runtime/html-layout-failure.png" });
