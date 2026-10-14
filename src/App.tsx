@@ -89,7 +89,9 @@ import { ChatComposerStatus } from "./ChatComposerStatus";
 import { getPastedTextPreview, resizeChatComposerInput, shouldAttachPastedText } from "./chatComposerInputUtils";
 import { ChatPreviewImage } from "./ChatPreviewImage";
 import { createChatProgressTracker } from "./chatComposerStatusUtils";
-import { strToU8, zip } from "fflate";
+import { strToU8 } from "fflate";
+import { createStreamingCompleteBackupZip, type CompleteBackupZipEntry } from "./completeBackupZip";
+import { COMPLETE_BACKUP_MAX_EXTRACTED_BYTES, completeBackupSizeLimitError } from "./completeBackupLimits.mjs";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
 import vueSource from "vue/dist/vue.global.prod.js?raw";
@@ -1137,7 +1139,6 @@ const COMPLETE_BACKUP_FORMAT = "renge-agent-complete-backup" as const;
 const COMPLETE_BACKUP_VERSION = 3 as const;
 const COMPLETE_BACKUP_MANIFEST_FILE = "backup.json";
 const COMPLETE_BACKUP_ASSET_PREFIX = "renge-backup-asset:";
-const COMPLETE_BACKUP_MAX_BYTES = 512 * 1024 * 1024;
 const COMPLETE_BACKUP_MANAGED_ROOTS = [
   ".pi",
   "extensions",
@@ -3701,13 +3702,12 @@ function replaceRengeLocalStorage(entries: Record<string, string>) {
 type CompleteBackupAsset = {
   path: string;
   mimeType: string;
-  bytes: Uint8Array;
+  blob: Blob;
 };
 
 type CompleteBackupManagedFile = {
   path: string;
   size: number;
-  bytes: Uint8Array;
 };
 
 function isCompressibleCompleteBackupFile(path: string) {
@@ -3742,22 +3742,11 @@ async function readCompleteBackupManagedFiles() {
       throw new Error("应用文件清单包含无效条目。");
     }
     seenPaths.add(path);
-    const fileResponse = await fetch(
-      `/api/app-data/backup-file?path=${encodeURIComponent(path)}`,
-      { cache: "no-store" },
-    );
-    if (!fileResponse.ok) {
-      throw new Error(`无法读取应用文件 ${path}：${fileResponse.status}`);
+    totalBytes += entry.size;
+    if (totalBytes > COMPLETE_BACKUP_MAX_EXTRACTED_BYTES) {
+      throw new Error(completeBackupSizeLimitError("解压总量", COMPLETE_BACKUP_MAX_EXTRACTED_BYTES));
     }
-    const bytes = new Uint8Array(await fileResponse.arrayBuffer());
-    if (bytes.byteLength !== entry.size) {
-      throw new Error(`应用文件在备份过程中发生变化：${path}`);
-    }
-    totalBytes += bytes.byteLength;
-    if (totalBytes > COMPLETE_BACKUP_MAX_BYTES) {
-      throw new Error("应用文件总量超过 512 MB，无法生成完整备份。");
-    }
-    files.push({ path, size: bytes.byteLength, bytes });
+    files.push({ path, size: entry.size });
   }
   return files;
 }
@@ -3797,25 +3786,25 @@ function collectCompleteBackupImageSources(
 
 async function readCompleteBackupImageSource(source: string, index: number) {
   let mimeType = "image/png";
-  let bytes: Uint8Array;
+  let blob: Blob;
   if (source.startsWith("data:image/")) {
     const commaIndex = source.indexOf(",");
     if (commaIndex < 0) throw new Error("图片 Data URL 格式无效。");
     const metadata = source.slice(5, commaIndex);
     mimeType = metadata.split(";", 1)[0] || mimeType;
     const encoded = source.slice(commaIndex + 1);
-    bytes = metadata.toLowerCase().includes(";base64")
+    const bytes = metadata.toLowerCase().includes(";base64")
       ? new Uint8Array(base64ToArrayBuffer(encoded))
       : new TextEncoder().encode(decodeURIComponent(encoded));
+    blob = new Blob([bytes as Uint8Array<ArrayBuffer>], { type: mimeType });
   } else {
     const response = await fetch(source, { cache: "no-store" });
     if (!response.ok) throw new Error(`无法读取备份图片资源：${response.status}`);
-    const blob = await response.blob();
+    blob = await response.blob();
     mimeType = blob.type.startsWith("image/") ? blob.type : mimeType;
-    bytes = new Uint8Array(await blob.arrayBuffer());
   }
   const path = `assets/image-${String(index + 1).padStart(4, "0")}.${getBackupImageExtension(mimeType)}`;
-  return { path, mimeType, bytes } satisfies CompleteBackupAsset;
+  return { path, mimeType, blob } satisfies CompleteBackupAsset;
 }
 
 function replaceCompleteBackupImageSources(
@@ -3876,46 +3865,42 @@ async function createCompleteBackupZip(
       ? { desktopProjectPositions }
       : {}),
   };
-  const manifestBytes = strToU8(JSON.stringify(backup, null, 2));
+  const manifestBytes = strToU8(JSON.stringify(backup));
   const uncompressedSize =
     manifestBytes.byteLength +
-    assets.reduce((sum, asset) => sum + asset.bytes.byteLength, 0) +
-    managedFiles.reduce((sum, file) => sum + file.bytes.byteLength, 0);
-  if (uncompressedSize > COMPLETE_BACKUP_MAX_BYTES) {
-    throw new Error("完整备份解压后超过 512 MB，请减少应用中的大文件后重试。");
+    assets.reduce((sum, asset) => sum + asset.blob.size, 0) +
+    managedFiles.reduce((sum, file) => sum + file.size, 0);
+  if (uncompressedSize > COMPLETE_BACKUP_MAX_EXTRACTED_BYTES) {
+    throw new Error(completeBackupSizeLimitError("解压总量", COMPLETE_BACKUP_MAX_EXTRACTED_BYTES));
   }
-  const archiveFiles: Record<
-    string,
-    Uint8Array | [Uint8Array, { level: 0 | 6 }]
-  > = {
-    [COMPLETE_BACKUP_MANIFEST_FILE]: [
-      manifestBytes,
-      { level: 6 },
-    ],
-  };
-  assets.forEach((asset) => {
-    archiveFiles[asset.path] = [
-      asset.bytes,
-      { level: isCompressibleCompleteBackupFile(asset.path) ? 6 : 0 },
-    ];
-  });
-  managedFiles.forEach((file) => {
-    archiveFiles[`files/${file.path}`] = [
-      file.bytes,
-      { level: isCompressibleCompleteBackupFile(file.path) ? 6 : 0 },
-    ];
-  });
-  const bytes = await new Promise<Uint8Array>((resolve, reject) => {
-    zip(archiveFiles, (error, data) => {
-      if (error) reject(error);
-      else resolve(data);
+  const entries: CompleteBackupZipEntry[] = [{
+    path: COMPLETE_BACKUP_MANIFEST_FILE,
+    size: manifestBytes.byteLength,
+    compress: true,
+    read: async () => manifestBytes,
+  }];
+  for (const asset of assets) {
+    entries.push({
+      path: asset.path,
+      size: asset.blob.size,
+      compress: isCompressibleCompleteBackupFile(asset.path),
+      read: async () => asset.blob.stream(),
     });
-  });
-  if (bytes.byteLength > COMPLETE_BACKUP_MAX_BYTES) {
-    throw new Error("压缩后的完整备份超过 512 MB，无法导入。");
+  }
+  for (const file of managedFiles) {
+    entries.push({
+      path: `files/${file.path}`,
+      size: file.size,
+      compress: isCompressibleCompleteBackupFile(file.path),
+      read: async () => {
+        const response = await fetch(`/api/app-data/backup-file?path=${encodeURIComponent(file.path)}`, { cache: "no-store" });
+        if (!response.ok) throw new Error(`无法读取应用文件 ${file.path}：${response.status}`);
+        return response.body ?? new Uint8Array(await response.arrayBuffer());
+      },
+    });
   }
   return {
-    blob: new Blob([bytes.slice().buffer as ArrayBuffer], { type: "application/zip" }),
+    blob: await createStreamingCompleteBackupZip(entries),
     assetCount: assets.length,
     managedFileCount: managedFiles.length,
   };

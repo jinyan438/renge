@@ -11,8 +11,8 @@ import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { EnvHttpProxyAgent } from "undici";
-import { strFromU8 } from "fflate";
 import { unzipCompleteBackup } from "./src/completeBackupArchive.mjs";
+import { COMPLETE_BACKUP_MAX_ARCHIVE_BYTES, COMPLETE_BACKUP_MAX_EXTRACTED_BYTES, completeBackupSizeLimitError } from "./src/completeBackupLimits.mjs";
 import { createUpstreamDispatcherCache, describeUpstreamNetworkError } from "./src/upstreamNetworkUtils.mjs";
 import { createHtmlPreviewImageDispatcher, createHtmlPreviewImageHandler } from "./src/htmlPreviewImageProxy.mjs";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -42,7 +42,6 @@ const completeBackupManagedRoots = [
   "tavern-files",
   "tavern-script-assets",
 ];
-const completeBackupMaxBytes = 512 * 1024 * 1024;
 const appDataWriteQueues = new Map();
 const validatedAppDataFiles = new Map();
 const tavernModuleProxyVersion = "2";
@@ -827,12 +826,12 @@ async function forEachWithConcurrency(items, concurrency, visit) {
   if (hasError) throw firstError;
 }
 
-async function installCompleteBackupZip(dataFilePath, zipBytes) {
-  const archiveEntries = await unzipCompleteBackup(zipBytes, completeBackupMaxBytes);
-  const manifestBytes = archiveEntries["backup.json"];
-  if (!manifestBytes) throw new Error("ZIP 备份缺少 backup.json。");
+async function installCompleteBackupZip(dataFilePath, zipBytes, stagingDirectory) {
+  const archiveEntries = await unzipCompleteBackup(zipBytes, COMPLETE_BACKUP_MAX_EXTRACTED_BYTES, stagingDirectory);
+  const manifestFile = archiveEntries["backup.json"];
+  if (!manifestFile) throw new Error("ZIP 备份缺少 backup.json。");
   const manifest = parseCompleteBackupManifest(
-    JSON.parse(strFromU8(manifestBytes)),
+    JSON.parse(await readFile(manifestFile, "utf8")),
   );
   if (!manifest.appData || typeof manifest.appData !== "object" || Array.isArray(manifest.appData)) {
     throw new Error("备份缺少有效的应用主数据。");
@@ -842,12 +841,7 @@ async function installCompleteBackupZip(dataFilePath, zipBytes) {
   const assetsRoot = join(dataDirectory, "app-data-assets");
   const restoreWrites = [];
   const restoreDirectories = new Set();
-  let uncompressedSize = 0;
-  for (const [archivePath, bytes] of Object.entries(archiveEntries)) {
-    uncompressedSize += bytes.byteLength;
-    if (uncompressedSize > completeBackupMaxBytes) {
-      throw new Error("备份文件解压后超过 512MB，无法导入。");
-    }
+  for (const [archivePath, source] of Object.entries(archiveEntries)) {
     if (archivePath.endsWith("/")) continue;
 
     let target = null;
@@ -874,7 +868,7 @@ async function installCompleteBackupZip(dataFilePath, zipBytes) {
     }
 
     if (target) {
-      restoreWrites.push({ target, bytes });
+      restoreWrites.push({ target, source });
       restoreDirectories.add(dirname(target));
     }
   }
@@ -893,8 +887,11 @@ async function installCompleteBackupZip(dataFilePath, zipBytes) {
     await forEachWithConcurrency([...restoreDirectories], 16, (directory) =>
       mkdir(directory, { recursive: true }),
     );
-    await forEachWithConcurrency(restoreWrites, 16, ({ target, bytes }) =>
-      writeFile(target, bytes),
+    await forEachWithConcurrency(restoreWrites, 16, ({ target, source }) =>
+      rename(source, target).catch(error => {
+        if (error.code !== "EXDEV") throw error;
+        return copyFile(source, target);
+      }),
     );
     if (desktopProjectPositionsJson !== null) {
       await writeFile(
@@ -927,8 +924,8 @@ async function handleCompleteBackupImport(request, response, dataFilePath) {
   const sizeLimit = new Transform({
     transform(chunk, _encoding, callback) {
       uploadedBytes += chunk.length;
-      if (uploadedBytes > completeBackupMaxBytes) {
-        callback(new Error("备份文件超过 512MB，无法导入。"));
+      if (uploadedBytes > COMPLETE_BACKUP_MAX_ARCHIVE_BYTES) {
+        callback(new Error(completeBackupSizeLimitError("压缩文件", COMPLETE_BACKUP_MAX_ARCHIVE_BYTES)));
         return;
       }
       callback(null, chunk);
@@ -937,16 +934,16 @@ async function handleCompleteBackupImport(request, response, dataFilePath) {
   try {
     await pipeline(request, sizeLimit, createWriteStream(backupPath, { flags: "wx" }));
     if (uploadedBytes === 0) throw new Error("备份文件为空。");
-    const zipBytes = new Uint8Array(await readFile(backupPath));
+    const zipBytes = await readFile(backupPath);
     const signature = zipBytes.subarray(0, 4);
     const isZip = signature[0] === 0x50 && signature[1] === 0x4b &&
       signature[2] === 0x03 && signature[3] === 0x04;
     if (!isZip) throw new Error("仅支持新版 v3 ZIP 完整备份，请重新导出备份文件。");
-    const result = await installCompleteBackupZip(dataFilePath, zipBytes);
+    const result = await installCompleteBackupZip(dataFilePath, zipBytes, stagingDirectory);
     sendJson(response, 200, { ok: true, ...result, bytes: uploadedBytes });
   } catch (error) {
     const message = compactError(error);
-    const status = /512MB|超过|too large/i.test(message) ? 413 : 400;
+    const status = /超过|too large/i.test(message) ? 413 : 400;
     sendJson(response, status, {
       error: message,
       cleared: Boolean(error && typeof error === "object" && error.backupCleared),

@@ -43,6 +43,7 @@ import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -53,7 +54,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+import java.util.zip.ZipFile;
+import java.util.zip.CRC32;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -74,7 +76,8 @@ public class LocalWebServer {
     };
     private static final int PREFERRED_PORT = 5191;
     private static final String PI_KERNEL_ID = "@earendil-works/pi-coding-agent@0.87.1";
-    private static final long MAX_COMPLETE_BACKUP_BYTES = 512L * 1024L * 1024L;
+    private static final long MAX_COMPLETE_BACKUP_ARCHIVE_BYTES = 2L * 1024L * 1024L * 1024L - 1L;
+    private static final long MAX_COMPLETE_BACKUP_EXTRACTED_BYTES = 8L * 1024L * 1024L * 1024L;
     private static final String COMPLETE_BACKUP_MANIFEST_FILE = "backup.json";
     private static final String COMPLETE_BACKUP_ASSET_PREFIX = "renge-backup-asset:";
     private static final String[] COMPLETE_BACKUP_MANAGED_ROOTS = new String[]{
@@ -308,8 +311,8 @@ public class LocalWebServer {
             sendJson(output, 400, jsonError("备份文件为空或无法确定文件大小。"));
             return;
         }
-        if (request.contentLength > MAX_COMPLETE_BACKUP_BYTES) {
-            sendJson(output, 400, jsonError("备份文件超过 512MB，无法导入。"));
+        if (request.contentLength > MAX_COMPLETE_BACKUP_ARCHIVE_BYTES) {
+            sendJson(output, 400, jsonError("完整备份压缩文件超过 2 GB 上限。"));
             return;
         }
 
@@ -371,71 +374,82 @@ public class LocalWebServer {
         Set<String> restoredAssets = new HashSet<>();
         boolean dataCleared = false;
         CompleteBackupMetadata metadata = null;
-        try (ZipInputStream zipInput = new ZipInputStream(
-                new BufferedInputStream(new FileInputStream(completeBackup), 64 * 1024)
-        )) {
+        // ZipFile uses the central directory, including sizes for streamed STORED
+        // entries. ZipInputStream cannot read those data-descriptor entries.
+        try (ZipFile zipFile = new ZipFile(completeBackup)) {
+            long declaredBytes = 0;
+            Set<String> archiveNames = new HashSet<>();
+            Enumeration<? extends ZipEntry> declaredEntries = zipFile.entries();
+            while (declaredEntries.hasMoreElements()) {
+                ZipEntry declared = declaredEntries.nextElement();
+                if (!archiveNames.add(declared.getName().replace('\\', '/'))) {
+                    throw new IOException("ZIP 备份包含重复文件：" + declared.getName());
+                }
+                if (declared.getSize() < 0 || declared.getSize() > MAX_COMPLETE_BACKUP_EXTRACTED_BYTES - declaredBytes) {
+                    throw new IOException("完整备份解压总量超过 8 GB 上限。");
+                }
+                declaredBytes += declared.getSize();
+            }
             byte[] buffer = new byte[64 * 1024];
             long extractedBytes = 0;
             boolean manifestFound = false;
-            ZipEntry entry;
-            while ((entry = zipInput.getNextEntry()) != null) {
-                String entryName = entry.getName().replace('\\', '/');
-                if (entry.isDirectory()) {
-                    extractedBytes = copyCompleteBackupZipEntry(zipInput, null, buffer, extractedBytes);
-                    zipInput.closeEntry();
-                    continue;
-                }
-                if (!manifestFound) {
-                    if (!COMPLETE_BACKUP_MANIFEST_FILE.equals(entryName)) {
-                        throw new IOException("新版 v3 备份的 backup.json 必须是 ZIP 中的第一个文件。");
+            Enumeration<? extends ZipEntry> entries = zipFile.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                try (CompleteBackupEntryInputStream zipInput = new CompleteBackupEntryInputStream(
+                        zipFile.getInputStream(entry), MAX_COMPLETE_BACKUP_EXTRACTED_BYTES - extractedBytes, entry)) {
+                    String entryName = entry.getName().replace('\\', '/');
+                    if (entry.isDirectory()) {
+                        extractedBytes = copyCompleteBackupZipEntry(zipInput, null, buffer, extractedBytes);
+                        continue;
                     }
-                    // Parse and rewrite the manifest directly from this ZIP entry. The
-                    // counting stream keeps the decompression limit without another file pass.
-                    CompleteBackupEntryInputStream manifestInput = new CompleteBackupEntryInputStream(
-                            zipInput, MAX_COMPLETE_BACKUP_BYTES - extractedBytes);
-                    metadata = extractCompleteBackupAppData(manifestInput, stagedAppData, referencedAssets);
-                    extractedBytes += manifestInput.bytesRead;
-                    zipInput.closeEntry();
-                    manifestFound = true;
-                    dataCleared = true;
-                    clearAppData();
-                    continue;
-                }
-                if (COMPLETE_BACKUP_MANIFEST_FILE.equals(entryName)) {
-                    throw new IOException("ZIP 备份包含重复的 backup.json。");
-                }
+                    if (!manifestFound) {
+                        if (!COMPLETE_BACKUP_MANIFEST_FILE.equals(entryName)) {
+                            throw new IOException("新版 v3 备份的 backup.json 必须是 ZIP 中的第一个文件。");
+                        }
+                        // Parse and rewrite the manifest directly from this ZIP entry. The
+                        // counting stream keeps the decompression limit without another file pass.
+                        metadata = extractCompleteBackupAppData(zipInput, stagedAppData, referencedAssets);
+                        extractedBytes += zipInput.bytesRead;
+                        manifestFound = true;
+                        dataCleared = true;
+                        clearAppData();
+                        continue;
+                    }
+                    if (COMPLETE_BACKUP_MANIFEST_FILE.equals(entryName)) {
+                        throw new IOException("ZIP 备份包含重复的 backup.json。");
+                    }
 
-                File root;
-                File target;
-                if (entryName.startsWith("assets/")) {
-                    String relativePath = normalizeCompleteBackupAssetPath(entryName.substring("assets/".length()));
-                    if (relativePath == null) throw new IOException("ZIP 图片资源路径非法。");
-                    root = appDataAssetsDirectory;
-                    target = new File(root, relativePath);
-                    restoredAssets.add(relativePath);
-                } else if (entryName.startsWith("files/")) {
-                    String relativePath = normalizeCompleteBackupManagedPath(entryName.substring("files/".length()));
-                    if (relativePath == null) throw new IOException("ZIP 应用文件路径非法。");
-                    root = context.getFilesDir();
-                    target = new File(root, relativePath);
-                } else {
-                    extractedBytes = copyCompleteBackupZipEntry(zipInput, null, buffer, extractedBytes);
-                    zipInput.closeEntry();
-                    continue;
-                }
+                    File root;
+                    File target;
+                    if (entryName.startsWith("assets/")) {
+                        String relativePath = normalizeCompleteBackupAssetPath(entryName.substring("assets/".length()));
+                        if (relativePath == null) throw new IOException("ZIP 图片资源路径非法。");
+                        root = appDataAssetsDirectory;
+                        target = new File(root, relativePath);
+                        restoredAssets.add(relativePath);
+                    } else if (entryName.startsWith("files/")) {
+                        String relativePath = normalizeCompleteBackupManagedPath(entryName.substring("files/".length()));
+                        if (relativePath == null) throw new IOException("ZIP 应用文件路径非法。");
+                        root = context.getFilesDir();
+                        target = new File(root, relativePath);
+                    } else {
+                        extractedBytes = copyCompleteBackupZipEntry(zipInput, null, buffer, extractedBytes);
+                        continue;
+                    }
 
-                String rootCanonicalPath = root.getCanonicalPath() + File.separator;
-                if (!target.getCanonicalPath().startsWith(rootCanonicalPath)) {
-                    throw new IOException("ZIP 应用文件路径越界。");
+                    String rootCanonicalPath = root.getCanonicalPath() + File.separator;
+                    if (!target.getCanonicalPath().startsWith(rootCanonicalPath)) {
+                        throw new IOException("ZIP 应用文件路径越界。");
+                    }
+                    File parent = target.getParentFile();
+                    if (parent != null && !parent.mkdirs() && !parent.isDirectory()) {
+                        throw new IOException("无法创建应用文件目录。");
+                    }
+                    try (OutputStream fileOutput = new BufferedOutputStream(new FileOutputStream(target))) {
+                        extractedBytes = copyCompleteBackupZipEntry(zipInput, fileOutput, buffer, extractedBytes);
+                    }
                 }
-                File parent = target.getParentFile();
-                if (parent != null && !parent.mkdirs() && !parent.isDirectory()) {
-                    throw new IOException("无法创建应用文件目录。");
-                }
-                try (OutputStream fileOutput = new BufferedOutputStream(new FileOutputStream(target))) {
-                    extractedBytes = copyCompleteBackupZipEntry(zipInput, fileOutput, buffer, extractedBytes);
-                }
-                zipInput.closeEntry();
             }
             if (!manifestFound || metadata == null) {
                 throw new IOException("ZIP 备份缺少 backup.json。");
@@ -467,7 +481,7 @@ public class LocalWebServer {
     }
 
     private long copyCompleteBackupZipEntry(
-            ZipInputStream input,
+            InputStream input,
             OutputStream output,
             byte[] buffer,
             long totalBytes
@@ -475,8 +489,8 @@ public class LocalWebServer {
         int count;
         while ((count = input.read(buffer)) != -1) {
             totalBytes += count;
-            if (totalBytes > MAX_COMPLETE_BACKUP_BYTES) {
-                throw new IOException("ZIP 解压后的数据超过 512MB。");
+            if (totalBytes > MAX_COMPLETE_BACKUP_EXTRACTED_BYTES) {
+                throw new IOException("完整备份解压总量超过 8 GB 上限。");
             }
             if (output != null) output.write(buffer, 0, count);
         }
@@ -619,29 +633,48 @@ public class LocalWebServer {
     private static final class CompleteBackupEntryInputStream extends InputStream {
         private final InputStream input;
         private final long limit;
+        private final ZipEntry entry;
+        private final CRC32 checksum = new CRC32();
         long bytesRead;
 
-        CompleteBackupEntryInputStream(InputStream input, long limit) {
+        CompleteBackupEntryInputStream(InputStream input, long limit, ZipEntry entry) {
             this.input = input;
             this.limit = limit;
+            this.entry = entry;
         }
 
         @Override public int read() throws IOException {
             int value = input.read();
-            if (value >= 0) count(1);
+            if (value >= 0) {
+                count(1);
+                checksum.update(value);
+            } else verify();
             return value;
         }
 
         @Override public int read(byte[] buffer, int offset, int length) throws IOException {
             int count = input.read(buffer, offset, length);
-            if (count > 0) count(count);
+            if (count > 0) {
+                count(count);
+                checksum.update(buffer, offset, count);
+            } else if (count < 0) verify();
             return count;
         }
 
         private void count(int count) throws IOException {
             bytesRead += count;
-            if (bytesRead > limit) throw new IOException("ZIP 解压后的数据超过 512MB。");
+            if (bytesRead > limit) throw new IOException("完整备份解压总量超过 8 GB 上限。");
+            if (entry.getSize() >= 0 && bytesRead > entry.getSize()) throw new IOException("ZIP 备份的文件大小不一致。");
         }
+
+        private void verify() throws IOException {
+            if ((entry.getSize() >= 0 && bytesRead != entry.getSize())
+                    || (entry.getCrc() >= 0 && checksum.getValue() != entry.getCrc())) {
+                throw new IOException("ZIP 备份的文件不完整或校验失败。");
+            }
+        }
+
+        @Override public void close() throws IOException { input.close(); }
     }
 
     private void copyFileAtomically(File source, File target) throws IOException {
