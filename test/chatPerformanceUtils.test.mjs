@@ -488,7 +488,7 @@ test("keeps mounted HTML previews alive and freezes their rendering offscreen", 
 test("preview measurements pause during scrolling or while offscreen", () => {
   const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
   const start = appSource.indexOf("function buildHtmlPreviewScript(");
-  const end = appSource.indexOf("\nfunction injectHtmlPreviewHead(", start);
+  const end = appSource.indexOf("\nfunction getIsolatedHtmlPreviewFrame(", start);
   assert.ok(start >= 0 && end > start);
   const builder = ts.transpileModule(appSource.slice(start, end), {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
