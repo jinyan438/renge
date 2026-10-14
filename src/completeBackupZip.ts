@@ -1,4 +1,4 @@
-import { Zip, ZipDeflate, ZipPassThrough } from "fflate";
+import { Deflate, Zip, ZipPassThrough } from "fflate";
 import {
   COMPLETE_BACKUP_MAX_ARCHIVE_BYTES,
   COMPLETE_BACKUP_MAX_EXTRACTED_BYTES,
@@ -11,6 +11,40 @@ export type CompleteBackupZipEntry = {
   compress: boolean;
   read: () => Promise<Uint8Array | ReadableStream<Uint8Array>>;
 };
+
+// fflate's streaming encoder can refer to its initial zero-filled window before
+// any bytes have been emitted. Strict ZIP readers reject those distances. Emit
+// a real 32 KiB stored prefix and seed the compressor with that exact history.
+class CompatibleZipDeflate extends ZipPassThrough {
+  compression = 8;
+  private prefix = new Uint8Array(32 * 1024);
+  private prefixLength = 0;
+  private compressor?: Deflate;
+
+  process(chunk: Uint8Array, final: boolean) {
+    if (!this.compressor) {
+      const count = Math.min(this.prefix.length - this.prefixLength, chunk.length);
+      this.prefix.set(chunk.subarray(0, count), this.prefixLength);
+      this.prefixLength += count;
+      chunk = chunk.subarray(count);
+      if (this.prefixLength < this.prefix.length && !final) return;
+      const complete = final && chunk.length === 0;
+      const block = new Uint8Array(5 + this.prefixLength);
+      block[0] = complete ? 1 : 0;
+      block[1] = this.prefixLength & 255;
+      block[2] = this.prefixLength >>> 8;
+      block[3] = ~this.prefixLength & 255;
+      block[4] = ~this.prefixLength >>> 8 & 255;
+      block.set(this.prefix.subarray(0, this.prefixLength), 5);
+      this.ondata(null, block, complete);
+      if (complete) return;
+      this.compressor = new Deflate({ level: 6, dictionary: this.prefix }, (bytes, last) => {
+        this.ondata(null, bytes, last);
+      });
+    }
+    this.compressor.push(chunk, final);
+  }
+}
 
 export async function createStreamingCompleteBackupZip(entries: CompleteBackupZipEntry[]) {
   // v3 exports use classic ZIP headers, which allow at most 65535 entries.
@@ -41,7 +75,7 @@ export async function createStreamingCompleteBackupZip(entries: CompleteBackupZi
       if (entry.size !== undefined && extractedBytes + entry.size > COMPLETE_BACKUP_MAX_EXTRACTED_BYTES) {
         throw new Error(completeBackupSizeLimitError("解压总量", COMPLETE_BACKUP_MAX_EXTRACTED_BYTES));
       }
-      const file = entry.compress ? new ZipDeflate(entry.path, { level: 6 }) : new ZipPassThrough(entry.path);
+      const file = entry.compress ? new CompatibleZipDeflate(entry.path) : new ZipPassThrough(entry.path);
       archive.add(file);
       let fileBytes = 0;
       const push = async (chunk: Uint8Array) => {

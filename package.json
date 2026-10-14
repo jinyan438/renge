@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "test:backup": "node --experimental-strip-types --test test/completeBackupArchive.test.mjs test/completeBackupZip.test.mjs test/serverAppData.test.mjs",
     "test:backup-browser": "node test/completeBackupBrowser.test.mjs",
+    "test:backup-import-browser": "node test/completeBackupImportBrowser.test.mjs",
     "test:backup-large": "node test/completeBackupBrowser.test.mjs --large",
     "test:mcp": "node --test test/piMcpAdapterBridge.test.mjs",
     "test:session-safety": "node --experimental-strip-types --test test/piSafetyRegression.test.mjs test/sessionPersistenceRegression.test.mjs && node test/sessionSafetyBrowser.test.mjs",

@@ -1172,6 +1172,7 @@ type PersistentAppDataLoadResult = {
   available: boolean;
   data: RengeAppData | null;
   sessionVersions?: Record<string, string>;
+  error?: string;
 };
 
 type LocalFileHandle = {
@@ -3264,16 +3265,20 @@ async function loadPersistentAppData(): Promise<PersistentAppDataLoadResult> {
       method: "GET",
       headers: { Accept: "application/json" },
     });
-    if (!response.ok) return { available: false, data: null };
+    if (!response.ok) {
+      const errorPayload = await response.json().catch(() => ({})) as { error?: string };
+      return { available: false, data: null, error: errorPayload.error || `主数据读取失败（${response.status}）。` };
+    }
 
     const payload = (await response.json()) as { data?: RengeAppData; sessionVersions?: Record<string, string> };
+    if (!isObjectRecord(payload.data)) return { available: false, data: null, error: "数据服务未返回有效的应用主数据。" };
     return {
       available: true,
       data: payload.data && typeof payload.data === "object" ? payload.data : null,
       sessionVersions: payload.sessionVersions,
     };
-  } catch {
-    return { available: false, data: null };
+  } catch (error) {
+    return { available: false, data: null, error: error instanceof Error ? error.message : "无法读取应用主数据。" };
   }
 }
 
@@ -8221,6 +8226,7 @@ function uploadCompleteBackupWithProgress(
     exportedAt?: string;
     localStorage?: Record<string, string>;
     personas?: AgentPersona[];
+    restoredCounts?: Record<string, number>;
   }>((resolve, reject) => {
     const request = new XMLHttpRequest();
     const rejectWithUnknownOutcome = (message: string) => {
@@ -8243,6 +8249,8 @@ function uploadCompleteBackupWithProgress(
         localStorage?: Record<string, string>;
         personas?: AgentPersona[];
         cleared?: boolean;
+        ok?: boolean;
+        restoredCounts?: Record<string, number>;
       } = {};
       try {
         const parsed = JSON.parse(request.responseText) as unknown;
@@ -8251,6 +8259,11 @@ function uploadCompleteBackupWithProgress(
             error: typeof parsed.error === "string" ? parsed.error : undefined,
             exportedAt: typeof parsed.exportedAt === "string" ? parsed.exportedAt : undefined,
             cleared: parsed.cleared === true,
+            ok: parsed.ok === true,
+            ...(isObjectRecord(parsed.restoredCounts)
+              ? { restoredCounts: Object.fromEntries(Object.entries(parsed.restoredCounts).filter((entry): entry is [string, number] =>
+                  typeof entry[1] === "number" && Number.isSafeInteger(entry[1]) && entry[1] >= 0)) }
+              : {}),
             ...(Array.isArray(parsed.personas)
               ? { personas: parsed.personas as AgentPersona[] }
               : {}),
@@ -8263,6 +8276,10 @@ function uploadCompleteBackupWithProgress(
         // The status code below still provides a useful fallback error.
       }
       if (request.status >= 200 && request.status < 300) {
+        if (!payload.ok) {
+          rejectWithUnknownOutcome("数据服务未返回有效的备份恢复结果。");
+          return;
+        }
         resolve(payload);
       } else {
         const error = new Error(payload.error || `本地数据服务返回 ${request.status || "未知状态"}`);
@@ -15077,6 +15094,9 @@ export function App() {
         personaStore.list(),
       ]);
       if (cancelled) return;
+      if (window.rengeAndroid?.isAndroid && !persistentResult.available) {
+        throw new Error(persistentResult.error || "手机本地数据服务无法读取应用主数据。");
+      }
       const persistentData = persistentResult.data;
       lastChatSessionsForPersistentStore = persistentData?.chatSessions ?? [];
       persistentChatSessionVersions = persistentResult.sessionVersions ?? {};
@@ -15557,7 +15577,12 @@ export function App() {
     void loadInitialAppData().catch(async (error) => {
       if (cancelled) return;
       pendingPersistentStoreBaselineRef.current = null;
-      console.error("应用数据加载失败，已回退到本地缓存", error);
+      appDataPersistenceSuspendedRef.current = true;
+      persistentStoreReadyRef.current = false;
+      const loadError = `应用主数据读取失败，已暂停自动保存：${error instanceof Error ? error.message : "未知错误"}`;
+      setDataBackupState({ status: "error", message: loadError });
+      reportAppDataSaveError(loadError);
+      console.error("应用数据加载失败，已回退到本地缓存并暂停保存", error);
       let fallbackPersonas: AgentPersona[];
       try {
         fallbackPersonas = mergeBuiltInPersonas(
@@ -16791,7 +16816,7 @@ export function App() {
   };
 
   const exportCompleteAppData = async () => {
-    if (!appDataLoaded || dataBackupState.status === "loading") return;
+    if (!appDataLoaded || appDataPersistenceSuspendedRef.current || dataBackupState.status === "loading") return;
     setDataBackupProgress({ active: false, value: null, label: "" });
     setDataBackupState({ status: "loading", message: "正在整理全部应用数据..." });
     try {
@@ -16841,10 +16866,11 @@ export function App() {
     });
     setDataBackupState({ status: "loading", message: "正在准备完整备份导入..." });
     let persistenceSuspended = false;
+    const previouslySuspended = appDataPersistenceSuspendedRef.current;
     let backupInstalled = false;
     try {
       const confirmed = window.confirm(
-        `即将导入 ${file.name}（${formatFileSize(file.size)}）的 v3 ZIP 完整备份。\n\n导入时会清空当前全部应用数据，再直接解包恢复备份。该操作不可直接撤销；如果导入过程中失败，当前数据可能不完整，请重新导入备份。是否继续？`,
+        `即将导入 ${file.name}（${formatFileSize(file.size)}）的 v3 ZIP 完整备份。\n\n备份通过完整校验后，会替换当前全部应用数据。该操作不可直接撤销；如果写入过程中失败，请保留备份并重新导入。是否继续？`,
       );
       if (!confirmed) {
         setDataBackupProgress({ active: false, value: null, label: "" });
@@ -16875,12 +16901,12 @@ export function App() {
         () => {
           setDataBackupState({
             status: "loading",
-            message: "备份上传完成，正在直接解包并恢复应用数据与文件...",
+            message: "备份上传完成，正在校验并恢复应用数据与文件...",
           });
           setDataBackupProgress({
             active: true,
             value: null,
-            label: "正在解包并写入应用文件",
+            label: "正在校验并恢复应用文件",
           });
         },
       );
@@ -16895,7 +16921,9 @@ export function App() {
 
       setDataBackupState({
         status: "success",
-        message: "完整数据已恢复，正在重新载入应用...",
+        message: importResult.restoredCounts
+          ? `已恢复 ${importResult.restoredCounts.characterCards ?? 0} 张角色卡、${importResult.restoredCounts.chatSessions ?? 0} 个会话、${importResult.restoredCounts.personas ?? 0} 个人格，正在重新载入应用...`
+          : "完整数据已恢复，正在重新载入应用...",
       });
       setDataBackupProgress({ active: true, value: 100, label: "导入完成" });
       window.setTimeout(() => window.location.reload(), 450);
@@ -16908,32 +16936,23 @@ export function App() {
         error instanceof Error &&
         "dataCleared" in error &&
         error.dataCleared === true;
-      if (importDataCleared || importOutcomeUnknown) {
-        try {
-          replaceRengeLocalStorage({});
-        } catch {
-          // Do not let stale browser settings return after an uncertain import.
-        }
-        await saveCharacterCardsToDatabase([]);
-      }
-      if (importDataCleared || importOutcomeUnknown) {
-        backupInstalled = true;
-      }
+      // Keep the browser cache and the error on screen. A failed/unknown
+      // import must not silently reload into an empty installation.
+      if (importDataCleared || importOutcomeUnknown) backupInstalled = true;
       if (persistenceSuspended && !backupInstalled) {
-        appDataPersistenceSuspendedRef.current = false;
+        appDataPersistenceSuspendedRef.current = previouslySuspended;
       }
       setDataBackupProgress({ active: false, value: null, label: "" });
       setDataBackupState({
         status: "error",
         message: backupInstalled
           ? importOutcomeUnknown
-            ? `无法确认备份导入结果：${error instanceof Error ? error.message : "未知错误"}。正在重新载入应用...`
-            : `当前数据已清空，但备份恢复未完成：${error instanceof Error ? error.message : "未知错误"}。正在重新载入应用...`
+            ? `无法确认备份导入结果：${error instanceof Error ? error.message : "未知错误"}。已暂停保存，请保留备份并重试。`
+            : `备份恢复未完成：${error instanceof Error ? error.message : "未知错误"}。已暂停保存，请保留备份并重试。`
           : error instanceof Error
             ? `导入失败：${error.message}`
             : "完整备份导入失败。",
       });
-      if (backupInstalled) window.setTimeout(() => window.location.reload(), 450);
     } finally {
       if (completeBackupImportInputRef.current) {
         completeBackupImportInputRef.current.value = "";
@@ -37462,7 +37481,7 @@ export function App() {
                   <button
                     type="button"
                     className="small-action data-backup-action"
-                    disabled={!appDataLoaded || dataBackupState.status === "loading"}
+                    disabled={!appDataLoaded || appDataPersistenceSuspendedRef.current || dataBackupState.status === "loading"}
                     onClick={() => void exportCompleteAppData()}
                   >
                     <Download size={16} />

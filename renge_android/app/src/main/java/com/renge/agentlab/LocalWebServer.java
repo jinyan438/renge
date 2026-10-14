@@ -317,15 +317,11 @@ public class LocalWebServer {
         }
 
         File uploadedBackup = File.createTempFile("renge-complete-backup-", ".backup", context.getCacheDir());
+        CompleteBackupMetadata metadata = null;
         try {
             copyFixedLength(input, uploadedBackup, request.contentLength);
-            CompleteBackupMetadata metadata = installCompleteBackup(uploadedBackup);
-            JSONObject payload = new JSONObject();
-            payload.put("ok", true);
-            payload.put("exportedAt", metadata.exportedAt);
-            payload.put("localStorage", metadata.localStorage);
-            payload.put("bytes", request.contentLength);
-            sendJson(output, 200, payload);
+            metadata = installCompleteBackup(uploadedBackup);
+            sendCompleteBackupImportResult(output, metadata, request.contentLength);
         } catch (Exception error) {
             JSONObject payload = jsonError(error.getMessage() == null ? "完整备份格式无效。" : error.getMessage());
             try {
@@ -335,10 +331,20 @@ public class LocalWebServer {
             }
             sendJson(output, 400, payload);
         } finally {
+            if (metadata != null && !metadata.localStorageFile.delete() && metadata.localStorageFile.exists()) {
+                metadata.localStorageFile.deleteOnExit();
+            }
             if (!uploadedBackup.delete() && uploadedBackup.exists()) {
                 uploadedBackup.deleteOnExit();
             }
         }
+    }
+
+    private void sendCompleteBackupImportResult(OutputStream output, CompleteBackupMetadata metadata, long uploadedBytes) throws IOException {
+        CompleteBackupImportResponse body = new CompleteBackupImportResponse(
+                metadata.exportedAt, uploadedBytes, metadata.localStorageFile, metadata.restoredCounts);
+        writeHead(output, 200, "application/json;charset=utf-8", body.length());
+        body.writeTo(output);
     }
 
     private void copyFixedLength(InputStream input, File target, long contentLength) throws IOException {
@@ -368,8 +374,13 @@ public class LocalWebServer {
         }
     }
 
-    private CompleteBackupMetadata installCompleteBackupZip(File completeBackup) throws IOException {
-        File stagedAppData = File.createTempFile("renge-app-data-import-", ".json", context.getCacheDir());
+    private synchronized CompleteBackupMetadata installCompleteBackupZip(File completeBackup) throws IOException {
+        File stagedRoot = new File(context.getCacheDir(), "renge-complete-restore-" + java.util.UUID.randomUUID());
+        if (!stagedRoot.mkdirs()) throw new IOException("无法创建备份恢复临时目录。");
+        File stagedAppData = new File(stagedRoot, "app-data.json");
+        File stagedAssets = new File(stagedRoot, "app-data-assets");
+        File stagedLocalStorage = new File(context.getCacheDir(), stagedRoot.getName() + "-local-storage.json");
+        boolean installed = false;
         Set<String> referencedAssets = new HashSet<>();
         Set<String> restoredAssets = new HashSet<>();
         boolean dataCleared = false;
@@ -409,11 +420,9 @@ public class LocalWebServer {
                         }
                         // Parse and rewrite the manifest directly from this ZIP entry. The
                         // counting stream keeps the decompression limit without another file pass.
-                        metadata = extractCompleteBackupAppData(zipInput, stagedAppData, referencedAssets);
+                        metadata = extractCompleteBackupAppData(zipInput, stagedAppData, stagedLocalStorage, referencedAssets);
                         extractedBytes += zipInput.bytesRead;
                         manifestFound = true;
-                        dataCleared = true;
-                        clearAppData();
                         continue;
                     }
                     if (COMPLETE_BACKUP_MANIFEST_FILE.equals(entryName)) {
@@ -425,13 +434,13 @@ public class LocalWebServer {
                     if (entryName.startsWith("assets/")) {
                         String relativePath = normalizeCompleteBackupAssetPath(entryName.substring("assets/".length()));
                         if (relativePath == null) throw new IOException("ZIP 图片资源路径非法。");
-                        root = appDataAssetsDirectory;
+                        root = stagedAssets;
                         target = new File(root, relativePath);
                         restoredAssets.add(relativePath);
                     } else if (entryName.startsWith("files/")) {
                         String relativePath = normalizeCompleteBackupManagedPath(entryName.substring("files/".length()));
                         if (relativePath == null) throw new IOException("ZIP 应用文件路径非法。");
-                        root = context.getFilesDir();
+                        root = stagedRoot;
                         target = new File(root, relativePath);
                     } else {
                         extractedBytes = copyCompleteBackupZipEntry(zipInput, null, buffer, extractedBytes);
@@ -454,18 +463,32 @@ public class LocalWebServer {
             if (!manifestFound || metadata == null) {
                 throw new IOException("ZIP 备份缺少 backup.json。");
             }
-            for (String root : COMPLETE_BACKUP_MANAGED_ROOTS) {
-                File directory = new File(context.getFilesDir(), root);
-                if (!directory.mkdirs() && !directory.isDirectory()) {
-                    throw new IOException("无法准备应用文件目录：" + root);
-                }
-            }
             for (String asset : referencedAssets) {
                 if (!restoredAssets.contains(asset)) {
                     throw new IOException("备份缺少图片资源：assets/" + asset);
                 }
             }
+            // Finish decompression, path checks and CRC validation before touching
+            // the current installation. Cached directories can then move in place.
+            dataCleared = true;
+            clearAppData();
+            if (stagedAssets.exists() && !stagedAssets.renameTo(appDataAssetsDirectory)) {
+                throw new IOException("无法安装恢复后的图片资源。");
+            }
+            for (String root : COMPLETE_BACKUP_MANAGED_ROOTS) {
+                File staged = new File(stagedRoot, root);
+                File target = new File(context.getFilesDir(), root);
+                if (staged.exists()) {
+                    if (!staged.renameTo(target)) throw new IOException("无法安装恢复后的应用文件：" + root);
+                } else if (!target.mkdirs() && !target.isDirectory()) {
+                    throw new IOException("无法准备应用文件目录：" + root);
+                }
+            }
             copyFileAtomically(stagedAppData, appDataFile);
+            if (!appDataFile.isFile() || appDataFile.length() != stagedAppData.length()) {
+                throw new IOException("恢复后的应用主数据未完整写入。");
+            }
+            installed = true;
             return metadata;
         } catch (IOException error) {
             if (dataCleared && !(error instanceof CompleteBackupImportException)) {
@@ -476,7 +499,8 @@ public class LocalWebServer {
             }
             throw error;
         } finally {
-            if (!stagedAppData.delete() && stagedAppData.exists()) stagedAppData.deleteOnExit();
+            try { deleteRecursively(stagedRoot); } catch (IOException ignored) { }
+            if (!installed && !stagedLocalStorage.delete() && stagedLocalStorage.exists()) stagedLocalStorage.deleteOnExit();
         }
     }
 
@@ -555,18 +579,22 @@ public class LocalWebServer {
     private CompleteBackupMetadata extractCompleteBackupAppData(
             InputStream manifestInput,
             File stagedAppData,
+            File stagedLocalStorage,
             Set<String> referencedAssets
     ) throws IOException {
         String format = null;
         String version = null;
         String exportedAt = null;
         boolean appDataFound = false;
-        JSONObject localStorage = null;
+        boolean localStorageFound = false;
+        JSONObject restoredCounts = new JSONObject();
         Set<String> fields = new HashSet<>();
         // Do not close the reader: the ZIP stream continues with the next entry.
         JsonReader reader = new JsonReader(new InputStreamReader(manifestInput, StandardCharsets.UTF_8));
         try (JsonWriter writer = new JsonWriter(new BufferedWriter(new OutputStreamWriter(
-                new FileOutputStream(stagedAppData), StandardCharsets.UTF_8), 64 * 1024))) {
+                new FileOutputStream(stagedAppData), StandardCharsets.UTF_8), 64 * 1024));
+             JsonWriter localWriter = new JsonWriter(new BufferedWriter(new OutputStreamWriter(
+                new FileOutputStream(stagedLocalStorage), StandardCharsets.UTF_8), 64 * 1024))) {
             reader.beginObject();
             while (reader.hasNext()) {
                 String key = reader.nextName();
@@ -586,20 +614,22 @@ public class LocalWebServer {
                         break;
                     case "appData":
                         if (reader.peek() != JsonToken.BEGIN_OBJECT) throw new IOException("备份中的应用主数据无效。");
-                        copyImportedJsonValue(reader, writer, referencedAssets);
+                        copyImportedAppData(reader, writer, referencedAssets, restoredCounts);
                         appDataFound = true;
                         break;
                     case "localStorage":
-                        localStorage = new JSONObject();
                         reader.beginObject();
+                        localWriter.beginObject();
                         while (reader.hasNext()) {
                             String name = reader.nextName();
                             if (!name.startsWith("renge") || reader.peek() != JsonToken.STRING) {
                                 throw new IOException("备份中的本地设置格式无效。");
                             }
-                            localStorage.put(name, reader.nextString());
+                            localWriter.name(name).value(reader.nextString());
                         }
                         reader.endObject();
+                        localWriter.endObject();
+                        localStorageFound = true;
                         break;
                     default:
                         reader.skipValue();
@@ -618,8 +648,35 @@ public class LocalWebServer {
         }
         if (exportedAt == null || exportedAt.trim().isEmpty()) throw new IOException("备份缺少导出时间。");
         if (!appDataFound) throw new IOException("备份缺少应用主数据。");
-        if (localStorage == null) throw new IOException("备份缺少本地设置数据。");
-        return new CompleteBackupMetadata(exportedAt, 3, localStorage);
+        if (!localStorageFound) throw new IOException("备份缺少本地设置数据。");
+        return new CompleteBackupMetadata(exportedAt, 3, stagedLocalStorage, restoredCounts);
+    }
+
+    private void copyImportedAppData(JsonReader reader, JsonWriter writer, Set<String> referencedAssets,
+                                     JSONObject counts) throws IOException, JSONException {
+        reader.beginObject();
+        writer.beginObject();
+        while (reader.hasNext()) {
+            String key = reader.nextName();
+            writer.name(key);
+            if (Arrays.asList("characterCards", "chatSessions", "personas", "providers", "worldBooks", "chatPresets").contains(key)
+                    && reader.peek() == JsonToken.BEGIN_ARRAY) {
+                reader.beginArray();
+                writer.beginArray();
+                int count = 0;
+                while (reader.hasNext()) {
+                    copyImportedJsonValue(reader, writer, referencedAssets);
+                    count++;
+                }
+                reader.endArray();
+                writer.endArray();
+                counts.put(key, count);
+            } else {
+                copyImportedJsonValue(reader, writer, referencedAssets);
+            }
+        }
+        reader.endObject();
+        writer.endObject();
     }
 
     private String encodePathSegments(String path) throws IOException {
@@ -2225,12 +2282,14 @@ public class LocalWebServer {
     private static final class CompleteBackupMetadata {
         final String exportedAt;
         final int version;
-        final JSONObject localStorage;
+        final File localStorageFile;
+        final JSONObject restoredCounts;
 
-        CompleteBackupMetadata(String exportedAt, int version, JSONObject localStorage) {
+        CompleteBackupMetadata(String exportedAt, int version, File localStorageFile, JSONObject restoredCounts) {
             this.exportedAt = exportedAt;
             this.version = version;
-            this.localStorage = localStorage;
+            this.localStorageFile = localStorageFile;
+            this.restoredCounts = restoredCounts;
         }
     }
 

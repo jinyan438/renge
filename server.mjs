@@ -906,6 +906,8 @@ async function installCompleteBackupZip(dataFilePath, zipBytes, stagingDirectory
       version: manifest.version,
       localStorage: manifest.localStorage,
       personas: Array.isArray(manifest.appData.personas) ? manifest.appData.personas : [],
+      restoredCounts: Object.fromEntries(["characterCards", "chatSessions", "personas", "providers", "worldBooks", "chatPresets"]
+        .map(key => [key, Array.isArray(appData[key]) ? appData[key].length : 0])),
     };
   } catch (error) {
     if (dataCleared && error && typeof error === "object") error.backupCleared = true;
