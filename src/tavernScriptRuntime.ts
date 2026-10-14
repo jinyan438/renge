@@ -1385,17 +1385,26 @@ function normalizeTavernWorldBookEntry(
 function normalizeTavernRegexRecord(
   value: unknown,
   fallbackScope = "global",
+  fromApi = false,
 ): Record<string, unknown> {
   const raw = isRecord(value) ? cloneValue(value) : {};
+  // Returned rows include legacy aliases. On writes, a script's native fields
+  // must win over stale aliases carried along by {...row, enabled: ...}.
   const disabled =
-    typeof raw.disabled === "boolean"
-      ? raw.disabled
-      : typeof raw.enabled === "boolean"
-        ? !raw.enabled
-        : false;
-  const placement = Array.isArray(raw.placement)
-    ? raw.placement.map(Number).filter(Number.isFinite)
-    : [2];
+    fromApi && typeof raw.enabled === "boolean"
+      ? !raw.enabled
+      : typeof raw.disabled === "boolean"
+        ? raw.disabled
+        : typeof raw.enabled === "boolean"
+          ? !raw.enabled
+          : false;
+  const placement = fromApi && isRecord(raw.source)
+    ? Object.entries({ user_input: 1, ai_output: 2, slash_command: 3, world_info: 5, reasoning: 6 })
+        .filter(([name]) => (raw.source as Record<string, unknown>)[name] === true)
+        .map(([, value]) => value)
+    : Array.isArray(raw.placement)
+      ? raw.placement.map(Number).filter(Number.isFinite)
+      : [2];
   const scriptName = String(raw.script_name ?? raw.scriptName ?? raw.name ?? "Unnamed Regex");
   const findRegex = String(raw.find_regex ?? raw.findRegex ?? "");
   const replaceString = String(raw.replace_string ?? raw.replaceString ?? "");
@@ -1403,8 +1412,9 @@ function normalizeTavernRegexRecord(
   const trimStrings = Array.isArray(rawTrimStrings)
     ? rawTrimStrings.map(String)
     : [];
-  const markdownOnly = Boolean(raw.markdown_only ?? raw.markdownOnly ?? true);
-  const promptOnly = Boolean(raw.prompt_only ?? raw.promptOnly ?? false);
+  const destination = fromApi && isRecord(raw.destination) ? raw.destination : null;
+  const markdownOnly = Boolean(destination?.display ?? raw.markdown_only ?? raw.markdownOnly ?? true);
+  const promptOnly = Boolean(destination?.prompt ?? raw.prompt_only ?? raw.promptOnly ?? false);
   const scope = ["global", "character", "preset"].includes(String(raw.scope))
     ? String(raw.scope)
     : fallbackScope;
@@ -1443,12 +1453,13 @@ function normalizeTavernRegexRecord(
           ai_output: placement.includes(2),
           slash_command: placement.includes(3),
           world_info: placement.includes(5),
+          reasoning: placement.includes(6),
         },
     destination: isRecord(raw.destination)
       ? raw.destination
       : {
-          display: markdownOnly || !promptOnly,
-          prompt: promptOnly || !markdownOnly,
+          display: markdownOnly,
+          prompt: promptOnly,
         },
   };
 }
@@ -2971,7 +2982,7 @@ export class TavernScriptRuntime {
       );
     const getTavernRegexes = (options: unknown = {}) => {
       const normalizedOptions = isRecord(options) ? options : {};
-      const scope = String(normalizedOptions.scope ?? "all");
+      const scope = String(normalizedOptions.type ?? normalizedOptions.scope ?? "all");
       const enableState = String(normalizedOptions.enable_state ?? "all");
       return this.adapter
         .getRegexes()
@@ -2987,12 +2998,13 @@ export class TavernScriptRuntime {
     const replaceTavernRegexes = async (values: unknown, options: unknown = {}) => {
       if (!Array.isArray(values)) return false;
       const normalizedOptions = isRecord(options) ? options : {};
-      const scope = String(normalizedOptions.scope ?? "all");
+      const scope = String(normalizedOptions.type ?? normalizedOptions.scope ?? "all");
       const incoming = values.map((value) =>
-        normalizeTavernRegexRecord(value, scope === "all" ? "global" : scope),
+        normalizeTavernRegexRecord(value, scope === "all" ? "global" : scope, true),
       );
       if (scope === "all") {
         this.adapter.setRegexes(incoming);
+        await this.adapter.flushPersistence?.();
         return true;
       }
       const retained = getTavernRegexes({ scope: "all", enable_state: "all" }).filter(
@@ -3002,6 +3014,7 @@ export class TavernScriptRuntime {
         ...retained,
         ...incoming.map((regex) => ({ ...regex, scope })),
       ]);
+      await this.adapter.flushPersistence?.();
       return true;
     };
     const updateTavernRegexesWith = async (updater: unknown, options: unknown = {}) => {
@@ -3012,7 +3025,7 @@ export class TavernScriptRuntime {
           : current;
       const next = Array.isArray(updated) ? updated : current;
       await replaceTavernRegexes(next, options);
-      return cloneValue(next);
+      return getTavernRegexes(options);
     };
     const importRawTavernRegex = (fileNameOrValue: unknown, rawValue?: unknown) => {
       const sourceFileName = rawValue === undefined ? "" : String(fileNameOrValue ?? "");
@@ -3074,7 +3087,8 @@ export class TavernScriptRuntime {
         (result, regex) => {
           const regexSource = isRecord(regex.source) ? regex.source : {};
           const regexDestination = isRecord(regex.destination) ? regex.destination : {};
-          if (regexSource[source] === false || regexDestination[destination] === false) {
+          const hasDestination = regexDestination.display === true || regexDestination.prompt === true;
+          if (regexSource[source] === false || (hasDestination && regexDestination[destination] === false)) {
             return result;
           }
           const minDepth = regex.min_depth == null ? null : Number(regex.min_depth);

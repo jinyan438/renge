@@ -156,6 +156,7 @@ function extractCharacterRegexScripts(
   root: UnknownRecord,
   data: UnknownRecord,
   sourceFileName: string,
+  requireIds = false,
 ) {
   const paths = [
     ["extensions", "chub", "extensions", "regex_scripts"],
@@ -177,24 +178,54 @@ function extractCharacterRegexScripts(
 
   const seen = new Set<string>();
   return values
-    .map((value, index) => ({
-      ...normalizeRegexScript(value, index, sourceFileName),
-      id: createId("character-regex"),
-      sourceFormat: "sillytavern" as const,
-      sourceFileName,
-    }))
-    .filter((script) => {
-      if (!script.findRegex.trim()) return false;
+    .flatMap((value, index) => {
+      if (requireIds && (!isRecord(value) || !stringValue(value.id).trim())) return [];
+      const script = {
+        ...normalizeRegexScript(value, index, sourceFileName),
+        sourceFormat: "sillytavern" as const,
+        sourceFileName,
+      };
+      if (!script.findRegex.trim()) return [];
       const identity = [
+        isRecord(value) ? stringValue(value.id) : "",
         script.scriptName,
         script.findRegex,
         script.replaceString,
         script.placement.join(","),
       ].join("\u0000");
-      if (seen.has(identity)) return false;
+      if (seen.has(identity)) return [];
       seen.add(identity);
-      return true;
+      return [script];
     });
+}
+
+function restoreCharacterRegexIds(
+  scripts: RegexScript[], root: UnknownRecord, data: UnknownRecord, sourceFileName: string,
+) {
+  if (!scripts.some((script) => script.id.startsWith("character-regex-"))) return scripts;
+  // Older imports replaced embedded IDs. Recover only unambiguous matches to
+  // the original rules, retaining the user's order, edits and enabled states.
+  const originals = extractCharacterRegexScripts(
+    { extensions: root.extensions, regex_scripts: root.regex_scripts },
+    { extensions: data.extensions, regex_scripts: data.regex_scripts },
+    sourceFileName,
+    true,
+  );
+  const used = new Set(scripts.map((script) => script.id));
+  let changed = false;
+  const restored = scripts.map((script) => {
+    if (!script.id.startsWith("character-regex-")) return script;
+    const matches = originals.filter((original) => original.scriptName === script.scriptName);
+    const exact = matches.filter((original) => original.findRegex === script.findRegex);
+    const candidates = exact.length ? exact : matches;
+    const peers = scripts.filter((peer) => peer.scriptName === script.scriptName &&
+      (!exact.length || peer.findRegex === script.findRegex));
+    if (candidates.length !== 1 || peers.length !== 1 || used.has(candidates[0].id)) return script;
+    used.add(candidates[0].id);
+    changed = true;
+    return { ...script, id: candidates[0].id };
+  });
+  return changed ? restored : scripts;
 }
 
 export function createCharacterCard(name = "新角色") : CharacterCard {
@@ -263,9 +294,9 @@ export function normalizeCharacterCard(
       }
     : normalizeCharacterBook(rawBook, name, sourceFileName);
   const storedRegexScripts = Array.isArray(data.regexScripts)
-    ? data.regexScripts.map((script, scriptIndex) =>
+    ? restoreCharacterRegexIds(data.regexScripts.map((script, scriptIndex) =>
         normalizeRegexScript(script, scriptIndex, sourceFileName),
-      )
+      ), root, data, sourceFileName)
     : null;
   const embeddedRegexScripts = extractCharacterRegexScripts(root, data, sourceFileName);
   const storedTavernScripts = Array.isArray(data.tavernScripts)
@@ -384,7 +415,9 @@ export function normalizeStoredCharacterCard(rawValue: unknown, index = 0): Char
     typeof rawValue.createdAt === "string" &&
     typeof rawValue.updatedAt === "string"
   ) {
-    return rawValue as CharacterCard;
+    const card = rawValue as CharacterCard;
+    const regexScripts = restoreCharacterRegexIds(card.regexScripts, rawValue, rawValue, card.sourceFileName);
+    return regexScripts === card.regexScripts ? card : { ...card, regexScripts };
   }
   return normalizeCharacterCard(rawValue, index);
 }

@@ -90,6 +90,7 @@ function getLegacyPlacements(raw: UnknownRecord) {
   if (raw.source.ai_output !== false) placements.push(2);
   if (raw.source.slash_command !== false) placements.push(3);
   if (raw.source.world_info !== false) placements.push(5);
+  if (raw.source.reasoning === true) placements.push(6);
   return placements;
 }
 
@@ -141,9 +142,9 @@ export function normalizeRegexScript(
     ),
     trimStrings: toStringArray(raw.trimStrings ?? raw.trim_strings),
     placement:
-      placements.length > 0
+      Array.isArray(raw.placement)
         ? placements
-        : legacyPlacements.length > 0
+        : isRecord(raw.source)
           ? legacyPlacements
           : [2],
     disabled:

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyRegexScripts, createRegexScript } from "../src/regexUtils.ts";
+import { applyRegexScripts, createRegexScript, normalizeRegexScript } from "../src/regexUtils.ts";
 
 function createTestScript(overrides) {
   return {
@@ -9,6 +9,20 @@ function createTestScript(overrides) {
     ...overrides,
   };
 }
+
+test("explicit empty regex sources stay empty across API persistence", () => {
+  for (const source of [{placement:[]},{source:{user_input:false,ai_output:false,slash_command:false,world_info:false,reasoning:false}}]) {
+    const script=normalizeRegexScript({...source,findRegex:'fixture',replaceString:'REPLACED'});
+    assert.deepEqual(script.placement,[]);
+    assert.equal(applyRegexScripts('fixture',[script]),'fixture');
+  }
+});
+
+test("native reasoning sources roundtrip without enabling other sources", () => {
+  const script=normalizeRegexScript({source:{user_input:false,ai_output:false,slash_command:false,world_info:false,reasoning:true},findRegex:'fixture',replaceString:'REPLACED'});
+  assert.deepEqual(script.placement,[6]);
+  assert.equal(applyRegexScripts('fixture',[script],{placement:6}),'REPLACED');
+});
 
 test("does not apply trim strings when a Tavern regex does not match", () => {
   const source =
