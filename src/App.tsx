@@ -1145,6 +1145,7 @@ const COMPLETE_BACKUP_MANAGED_ROOTS = [
   "session-images",
   "skills",
   "tavern-files",
+  "tavern-script-assets",
 ] as const;
 const COMPLETE_BACKUP_ALREADY_COMPRESSED_EXTENSIONS = new Set([
   "7z", "aab", "apk", "apng", "avif", "br", "bz2", "flac", "gif", "gz", "heic",

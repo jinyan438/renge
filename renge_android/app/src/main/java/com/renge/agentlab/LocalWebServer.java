@@ -78,7 +78,7 @@ public class LocalWebServer {
     private static final String COMPLETE_BACKUP_MANIFEST_FILE = "backup.json";
     private static final String COMPLETE_BACKUP_ASSET_PREFIX = "renge-backup-asset:";
     private static final String[] COMPLETE_BACKUP_MANAGED_ROOTS = new String[]{
-            ".pi", "extensions", "generated-images", "session-images", "skills", "tavern-files"
+            ".pi", "extensions", "generated-images", "session-images", "skills", "tavern-files", "tavern-script-assets"
     };
     private final Context context;
     private final ExecutorService executor = Executors.newCachedThreadPool();
