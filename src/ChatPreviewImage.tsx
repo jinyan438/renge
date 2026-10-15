@@ -1,6 +1,7 @@
 import { Maximize, Minus, Plus, X } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useDesktopWindow } from "./NativeDesktopWindow";
 import "./chat-image-preview.css";
 
 function ChatImagePreview({ src, alt, onClose }: {
@@ -8,6 +9,7 @@ function ChatImagePreview({ src, alt, onClose }: {
   alt: string;
   onClose: () => void;
 }) {
+  const document = useDesktopWindow().document;
   const dialogRef = useRef<HTMLDialogElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);

@@ -11,6 +11,7 @@ import {
   WINDOW_SNAP_COMPACT_BREAKPOINT,
   type WindowSnapSide,
 } from "./windowSnapUtils";
+import { useDesktopWindow } from "./NativeDesktopWindow";
 
 export type WindowOffset = {
   x: number;
@@ -60,6 +61,8 @@ export function useWindowDrag({
   viewportMargin = 8,
   snapEnabled = true,
 }: UseWindowDragOptions) {
+  const hostWindow = useDesktopWindow();
+  disabled ||= hostWindow !== window;
   const offsetRef = useRef<WindowOffset>(initialOffset);
   const pendingRef = useRef<WindowOffset>(initialOffset);
   const restoreOffsetRef = useRef<WindowOffset>(initialOffset);

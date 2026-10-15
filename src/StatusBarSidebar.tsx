@@ -39,6 +39,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { useDesktopWindow } from "./NativeDesktopWindow";
 import type { BrowserPageComment } from "./browserSidebarComments";
 import type { FileBrowserSource } from "./FilesSidebarPanel";
 import type { CodeReviewPanelProps } from "./CodeReviewPanel";
@@ -881,6 +882,8 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   onHeartbeatChange,
   onHeartbeatReminderVisibleChange,
 }: StatusBarSidebarProps) {
+  const window = useDesktopWindow();
+  const document = window.document;
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
   const [statusBarSection, setStatusBarSection] = useState<StatusBarEditorTabId>("protagonist");
   const [selectedImportantCharacterId, setSelectedImportantCharacterId] = useState("");
@@ -1344,7 +1347,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   const openEditor = (event?: MouseEvent<HTMLButtonElement>) => {
     const activeElement = typeof document !== "undefined" ? document.activeElement : null;
     editorTriggerRef.current =
-      event?.currentTarget ?? (activeElement instanceof HTMLElement ? activeElement : null);
+      event?.currentTarget ?? (activeElement?.nodeType === 1 ? activeElement as HTMLElement : null);
     const nextDrafts: Record<string, StatusBarState> = {
       protagonist: createDraftForSection("protagonist"),
       important: createDraftForSection("important"),

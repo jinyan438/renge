@@ -2,6 +2,12 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("rengeDesktop", {
   isElectron: true,
+  controlDesktopWindow: (options) => ipcRenderer.invoke("desktop-window:control", options),
+  onDesktopWindowState: (listener) => {
+    const wrapped = (_event, state) => listener(state);
+    ipcRenderer.on("desktop-window:state", wrapped);
+    return () => ipcRenderer.removeListener("desktop-window:state", wrapped);
+  },
   notifyConversationCompleted: (options) =>
     ipcRenderer.invoke("notification:conversation-completed", options),
   clearAppStorage: () => ipcRenderer.invoke("app-data:clear-storage"),

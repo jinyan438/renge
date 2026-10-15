@@ -31,6 +31,7 @@ import defaultDesktopWallpaper from "./assets/wallpapers/default-desktop.webp";
 import { WindowResizeHandles } from "./WindowResizeHandles";
 import { WindowSnapPreview } from "./WindowSnapPreview";
 import { useWindowDrag } from "./useWindowDrag";
+import { NativeDesktopWindow, nativeDesktopWindowsEnabled } from "./NativeDesktopWindow";
 
 const BACKGROUND_IMAGE = defaultDesktopWallpaper;
 
@@ -742,6 +743,7 @@ function DockIcon({
 }
 
 function WindowShell({
+  id,
   title,
   wide = false,
   zIndex,
@@ -749,6 +751,7 @@ function WindowShell({
   onClose,
   children,
 }: {
+  id: string;
   title: string;
   wide?: boolean;
   zIndex: number;
@@ -758,6 +761,8 @@ function WindowShell({
 }) {
   const [visible, setVisible] = useState(false);
   const [maximized, setMaximized] = useState(false);
+  const native = nativeDesktopWindowsEnabled();
+  const nativeId = `home-${id}`;
   const compact = useCompactViewport();
   const reducedMotion = useReducedMotion();
   const windowRef = useRef<HTMLElement | null>(null);
@@ -765,7 +770,7 @@ function WindowShell({
   const titleDragHandlers = useWindowDrag({
     targetRef: dragLayerRef,
     initialOffset: { x: 0, y: 0 },
-    disabled: maximized,
+    disabled: native || maximized,
     visibleTitleWidth: 96,
   });
 
@@ -787,12 +792,17 @@ function WindowShell({
   }, [onClose]);
 
   const toggleMaximized = () => {
+    if (native) {
+      void window.rengeDesktop?.controlDesktopWindow?.({ id: nativeId, action: "toggle-maximize" });
+      return;
+    }
     titleDragHandlers.clearSnap();
     setMaximized((current) => !current);
   };
 
-  return createPortal(
+  const content = (
     <div
+      className="desktop-home-native-layer"
       role="presentation"
       style={{
         position: "fixed",
@@ -846,6 +856,7 @@ function WindowShell({
             disabled={maximized || titleDragHandlers.snappedSide !== null}
           />
           <div
+            className="managed-window-drag-handle"
             onPointerDown={titleDragHandlers.onPointerDown}
             onPointerMove={titleDragHandlers.onPointerMove}
             onPointerUp={titleDragHandlers.onPointerUp}
@@ -876,7 +887,9 @@ function WindowShell({
                 className="desktop-home-window-light minimize"
                 title="最小化窗口"
                 aria-label="最小化窗口"
-                onClick={onClose}
+                onClick={() => native
+                  ? void window.rengeDesktop?.controlDesktopWindow?.({ id: nativeId, action: "minimize" })
+                  : onClose()}
               />
               <button
                 type="button"
@@ -921,9 +934,14 @@ function WindowShell({
           </div>
         </section>
       </div>
-    </div>,
-    document.body,
+    </div>
   );
+  return native ? (
+    <NativeDesktopWindow id={nativeId} title={title} onClose={onClose} focusKey={zIndex}
+      onStateChange={(state) => setMaximized(Boolean(state.maximized))}>
+      {content}
+    </NativeDesktopWindow>
+  ) : createPortal(content, document.body);
 }
 
 const panelHeadingStyle: CSSProperties = {
@@ -1328,6 +1346,8 @@ export const DesktopHome = memo(function DesktopHome({
 
       {activeProject && activeProject.id !== "recent" && (
         <WindowShell
+          key={activeProject.id}
+          id={activeProject.id}
           title={activeProject.title}
           zIndex={overlayZIndex}
           onActivate={onOverlayActivate}
@@ -1407,6 +1427,7 @@ export const DesktopHome = memo(function DesktopHome({
 
       {overlay === "recent" && (
         <WindowShell
+          id="recent"
           title="最近会话"
           wide
           zIndex={overlayZIndex}
@@ -1521,6 +1542,7 @@ export const DesktopHome = memo(function DesktopHome({
 
       {overlay === "about" && (
         <WindowShell
+          id="about"
           title="关于 Renge"
           zIndex={overlayZIndex}
           onActivate={onOverlayActivate}

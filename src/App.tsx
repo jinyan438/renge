@@ -273,6 +273,7 @@ import {
   type PromptTemplateStoredMessage,
 } from "./promptTemplateExtension";
 import { DesktopHome, type HomeDestination } from "./DesktopHome";
+import { NativeDesktopWindow, getDesktopWindow, nativeDesktopWindowsEnabled, type NativeDesktopWindowState } from "./NativeDesktopWindow";
 import { WindowResizeHandles } from "./WindowResizeHandles";
 import { WindowSnapPreview } from "./WindowSnapPreview";
 import { useWindowDrag, type WindowOffset } from "./useWindowDrag";
@@ -1303,6 +1304,8 @@ type SidebarTerminalReadResult = Omit<SidebarTerminalSession, "buffer"> & {
 
 type RengeDesktopApi = {
   isElectron: boolean;
+  controlDesktopWindow?(options: { id: string; action: "show" | "close" | "minimize" | "toggle-maximize" }): Promise<{ ok: boolean }>;
+  onDesktopWindowState?(listener: (state: NativeDesktopWindowState) => void): () => void;
   notifyConversationCompleted?(options: { content: string }): Promise<{ ok: boolean }>;
   clearAppStorage?(): Promise<{ ok: boolean }>;
   showTextContextMenu?(options: { hasSelection: boolean }): Promise<{ ok: boolean }>;
@@ -7894,12 +7897,13 @@ function canEditChatMessageAsRendered(content: string, htmlRenderEnabled: boolea
 
 function serializeRenderedEditorInline(node: Node): string {
   if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
-  if (!(node instanceof HTMLElement)) return "";
+  if (node.nodeType !== Node.ELEMENT_NODE) return "";
+  const element = node as HTMLElement;
 
-  const tagName = node.tagName.toLowerCase();
+  const tagName = element.tagName.toLowerCase();
   if (tagName === "br") return "\n";
   if (tagName === "img") {
-    return `![${node.getAttribute("alt") ?? ""}](${node.getAttribute("src") ?? ""})`;
+    return `![${element.getAttribute("alt") ?? ""}](${element.getAttribute("src") ?? ""})`;
   }
 
   const content = Array.from(node.childNodes).map(serializeRenderedEditorInline).join("");
@@ -7907,7 +7911,7 @@ function serializeRenderedEditorInline(node: Node): string {
   if (tagName === "em" || tagName === "i") return `*${content}*`;
   if (tagName === "del" || tagName === "s") return `~~${content}~~`;
   if (tagName === "code") return `\`${content}\``;
-  if (tagName === "a") return `[${content}](${node.getAttribute("href") ?? ""})`;
+  if (tagName === "a") return `[${content}](${element.getAttribute("href") ?? ""})`;
   if (tagName === "div" || tagName === "p") return `${content}\n`;
   return content;
 }
@@ -7979,6 +7983,7 @@ function serializeRenderedChatEditor(editor: HTMLElement) {
 }
 
 function getTextOffsetAtPoint(container: HTMLElement, x: number, y: number) {
+  const document = container.ownerDocument;
   const documentWithCaret = document as Document & {
     caretRangeFromPoint?: (clientX: number, clientY: number) => Range | null;
     caretPositionFromPoint?: (
@@ -8011,6 +8016,8 @@ function getTextOffsetAtPoint(container: HTMLElement, x: number, y: number) {
 }
 
 function placeCaretAtTextOffset(container: HTMLElement, requestedOffset: number | null) {
+  const document = container.ownerDocument;
+  const window = document.defaultView!;
   const selection = window.getSelection();
   if (!selection) return;
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
@@ -12496,7 +12503,7 @@ function PersonalizationOpacityCard({
 
   const previewValue = (nextValue: number) => {
     setDraftValue(nextValue);
-    document.querySelectorAll<HTMLElement>(".chat-shell").forEach((chatShell) => {
+    getDesktopWindow("chat").document.querySelectorAll<HTMLElement>(".chat-shell").forEach((chatShell) => {
       chatShell.style.setProperty(previewVariable, String(nextValue / 100));
     });
   };
@@ -12652,6 +12659,7 @@ function PortfolioDesktopWindow({
 }
 
 export function App() {
+  const focusedDesktopWindowRef = useRef("chat");
   const [openWindows, setOpenWindows] = useState<ManagedWindowState[]>([]);
   const topWindowZIndexRef = useRef(100);
   const [desktopOverlayZIndex, setDesktopOverlayZIndex] = useState(50);
@@ -12682,9 +12690,11 @@ export function App() {
 
   const syncMobileSidebarDomState = (open: boolean) => {
     mobileSidebarOpenRef.current = open;
-    document
-      .querySelectorAll<HTMLElement>(".portfolio-window-body, .settings-shell")
-      .forEach((element) => element.classList.toggle("mobile-sidebar-open", open));
+    for (const id of ["studio", "characters", "extensions", "settings", "chat"]) {
+      getDesktopWindow(id).document
+        .querySelectorAll<HTMLElement>(".portfolio-window-body, .settings-shell")
+        .forEach((element) => element.classList.toggle("mobile-sidebar-open", open));
+    }
   };
 
   const openWindow = useCallback((id: ModuleWindowId) => {
@@ -12736,6 +12746,10 @@ export function App() {
   }, []);
 
   const minimizeWindow = useCallback((id: ModuleWindowId) => {
+    if (nativeDesktopWindowsEnabled()) {
+      void window.rengeDesktop?.controlDesktopWindow?.({ id, action: "minimize" });
+      return;
+    }
     setOpenWindows((current) =>
       current.map((windowState) =>
         windowState.id === id ? { ...windowState, minimized: true } : windowState,
@@ -12745,6 +12759,10 @@ export function App() {
   }, []);
 
   const toggleMaximizeWindow = useCallback((id: ModuleWindowId) => {
+    if (nativeDesktopWindowsEnabled()) {
+      void window.rengeDesktop?.controlDesktopWindow?.({ id, action: "toggle-maximize" });
+      return;
+    }
     const zIndex = ++topWindowZIndexRef.current;
     setOpenWindows((current) =>
       current.map((windowState) =>
@@ -12765,7 +12783,7 @@ export function App() {
   const settingsTitleDragHandlers = useWindowDrag({
     targetRef: settingsWindowRef,
     initialOffset: settingsWindowState?.initialOffset,
-    disabled: settingsWindowState?.maximized ?? false,
+    disabled: nativeDesktopWindowsEnabled() || (settingsWindowState?.maximized ?? false),
   });
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("providers");
   const [dataBackupState, setDataBackupState] = useState<{
@@ -13282,7 +13300,7 @@ export function App() {
     if (!chatInputContextDirtyRef.current) return;
     // HTML cards can react to context updates with arbitrary layout and focus
     // work. Never let those callbacks interrupt somebody who is still typing.
-    if (!force && document.activeElement === chatInputRef.current) return;
+    if (!force && chatInputRef.current?.ownerDocument.activeElement === chatInputRef.current) return;
 
     chatInputContextDirtyRef.current = false;
     const chatInput = chatInputValueRef.current;
@@ -15855,6 +15873,7 @@ export function App() {
 
   useEffect(() => {
     if (!chatMessageMenu) return;
+    const window = getDesktopWindow("chat");
 
     const closeMenu = () => setChatMessageMenu(null);
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -21691,6 +21710,8 @@ export function App() {
   };
 
   const openChatMessageMenu = (messageId: string, event: MouseEvent<HTMLElement>) => {
+    const document = event.currentTarget.ownerDocument;
+    const window = document.defaultView!;
     event.preventDefault();
     event.stopPropagation();
 
@@ -30620,8 +30641,9 @@ export function App() {
   }, [activeChatSessionId, chatInputHasContent, chatAttachments.length, chatGenerationState, chatRunningInputMenuSessionId]);
   useEffect(() => {
     if (!chatRunningInputMenuSessionId) return;
+    const document = getDesktopWindow("chat").document;
     const closeOutside = (event: PointerEvent | FocusEvent) => {
-      if (event.target instanceof Node && !chatRunningInputMenuRef.current?.contains(event.target)) {
+      if (event.target && "nodeType" in event.target && !chatRunningInputMenuRef.current?.contains(event.target as Node)) {
         setChatRunningInputMenuSessionId(null);
       }
     };
@@ -32067,6 +32089,27 @@ export function App() {
       closeMobileSidebar();
     },
   });
+
+  const renderDesktopWindow = (id: ModuleWindowId, title: string, content: ReactNode) => {
+    if (!content) return null;
+    const state = openWindows.find((item) => item.id === id);
+    return (
+      <NativeDesktopWindow
+        id={id}
+        title={title}
+        focusKey={state?.zIndex}
+        onClose={() => closeWindow(id)}
+        onStateChange={(nativeState) => {
+          if (nativeState.focused) focusedDesktopWindowRef.current = id;
+          setOpenWindows((current) => current.map((item) =>
+            item.id === id && item.maximized !== nativeState.maximized
+              ? { ...item, maximized: Boolean(nativeState.maximized) }
+              : item,
+          ));
+        }}
+      >{content}</NativeDesktopWindow>
+    );
+  };
 
   const desktopHome = (
     <DesktopHome
@@ -38905,7 +38948,7 @@ export function App() {
                     删除
                   </button>
                 </div>,
-                document.body,
+                getDesktopWindow("chat").document.body,
               )}
           </div>
 
@@ -38949,7 +38992,7 @@ export function App() {
             }}
             onDragLeave={(event) => {
               const nextTarget = event.relatedTarget;
-              if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+              if (!nextTarget || !("nodeType" in nextTarget) || !event.currentTarget.contains(nextTarget as Node)) {
                 setIsChatComposerDragActive(false);
               }
             }}
@@ -40518,19 +40561,19 @@ export function App() {
         </div>
       )}
       {desktopHome}
-      {extensionsWindow}
-      {charactersWindow}
-      {settingsWindow}
-      {chatWindow}
-      {studioWindow}
+      {renderDesktopWindow("extensions", "扩展管理器", extensionsWindow)}
+      {renderDesktopWindow("characters", "角色卡", charactersWindow)}
+      {renderDesktopWindow("settings", "系统设置", settingsWindow)}
+      {renderDesktopWindow("chat", "Agent Chat", chatWindow)}
+      {renderDesktopWindow("studio", "人格工作室", studioWindow)}
       {(avatarCropModal ||
         roleplayGreetingSelectorModal ||
         dataClearConfirmationModal) && (
-        <div className="managed-global-overlays portfolio-desktop-shell">
+        createPortal(<div className="managed-global-overlays portfolio-desktop-shell">
           {avatarCropModal}
           {roleplayGreetingSelectorModal}
           {dataClearConfirmationModal}
-        </div>
+        </div>, getDesktopWindow(focusedDesktopWindowRef.current).document.body)
       )}
     </>
   );

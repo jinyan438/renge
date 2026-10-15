@@ -57,6 +57,7 @@ import {
 import { createSidebarTerminalManager } from "./sidebar-terminal.mjs";
 import { shouldDisableHardwareAcceleration } from "./hardware-acceleration.mjs";
 import { createTextContextMenuTemplate } from "./text-context-menu.mjs";
+import { createDesktopWindowManager } from "./desktop-windows.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const appIconPath = join(
@@ -66,6 +67,11 @@ const appIconPath = join(
 );
 const execFileAsync = promisify(execFile);
 let mainWindow = null;
+const desktopWindows = createDesktopWindowManager({
+  screen,
+  icon: appIconPath,
+  onWindowCreated: (child) => configureWindowWebviews(child),
+});
 let serverController = null;
 let workspaceRoot = null;
 let workspaceFullAccessEnabled = false;
@@ -1198,21 +1204,23 @@ function registerIpcHandlers() {
     if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
       throw new Error("文本菜单操作来源无效");
     }
+    const targetWindow = desktopWindows.getFocusedWindow() ?? mainWindow;
     const actions = {
-      copy: () => event.sender.copy(),
-      paste: () => event.sender.paste(),
-      cut: () => event.sender.cut(),
+      copy: () => targetWindow.webContents.copy(),
+      paste: () => targetWindow.webContents.paste(),
+      cut: () => targetWindow.webContents.cut(),
     };
     const template = createTextContextMenuTemplate({
       hasSelection: Boolean(options.hasSelection),
       hasClipboardText: Boolean(clipboard.readText()),
     }).map(({ action, ...item }) => ({ ...item, click: actions[action] }));
     const menu = Menu.buildFromTemplate(template);
-    menu.popup({ window: mainWindow });
+    menu.popup({ window: targetWindow });
     return { ok: true };
   });
 
   ipcMain.handle("desktop-layout:load", async () => loadDesktopProjectPositions());
+  ipcMain.handle("desktop-window:control", (event, options) => desktopWindows.control(event, options));
 
   ipcMain.handle("desktop-layout:save", async (_event, positions = {}) => {
     desktopProjectPositionsWriteQueue = desktopProjectPositionsWriteQueue
@@ -1769,10 +1777,19 @@ async function createMainWindow() {
       nodeIntegration: false,
       sandbox: false,
       webviewTag: true,
+      // Module portals keep running when the desktop home is minimized.
+      backgroundThrottling: false,
     },
   });
 
-  mainWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
+  desktopWindows.attach(mainWindow);
+  configureWindowWebviews(mainWindow);
+  mainWindow.removeMenu();
+  await mainWindow.loadURL(serverController.url);
+}
+
+function configureWindowWebviews(hostWindow) {
+  hostWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
     delete webPreferences.preload;
     webPreferences.nodeIntegration = false;
     webPreferences.nodeIntegrationInSubFrames = false;
@@ -1782,7 +1799,7 @@ async function createMainWindow() {
     if (!isAllowedSidebarBrowserUrl(params.src)) event.preventDefault();
   });
 
-  mainWindow.webContents.on("did-attach-webview", (_event, guestContents) => {
+  hostWindow.webContents.on("did-attach-webview", (_event, guestContents) => {
     guestContents.on("render-process-gone", (_goneEvent, details) => {
       let url = "";
       try {
@@ -1801,8 +1818,8 @@ async function createMainWindow() {
       contextEvent.preventDefault();
       if (!mainWindow || mainWindow.isDestroyed()) return;
       const cursorPoint = screen.getCursorScreenPoint();
-      const contentBounds = mainWindow.getContentBounds();
-      const rendererZoomFactor = mainWindow.webContents.getZoomFactor() || 1;
+      const contentBounds = hostWindow.getContentBounds();
+      const rendererZoomFactor = hostWindow.webContents.getZoomFactor() || 1;
       mainWindow.webContents.send("sidebar-browser:context-menu", {
         sourceWebContentsId: guestContents.id,
         x: params.x,
@@ -1834,9 +1851,6 @@ async function createMainWindow() {
     guestContents.on("will-redirect", preventDisallowedNavigation);
   });
 
-  mainWindow.removeMenu();
-
-  await mainWindow.loadURL(serverController.url);
 }
 
 if (!singleInstanceLockAcquired) {

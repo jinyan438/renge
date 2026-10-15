@@ -1,6 +1,7 @@
 import { ArrowLeft, Check, ClipboardCheck, Copy, FileCode2, Maximize2, MessageSquarePlus, Minimize2, RefreshCw, Search, Send, Sparkles, Square, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useDesktopWindow } from "./NativeDesktopWindow";
 import { buildReviewReport, buildSplitReviewRows, normalizeReviewFindings, parseReviewDiff, type ReviewAiResult, type ReviewDetail, type ReviewFinding, type ReviewLine, type ReviewMode, type ReviewRequest, type ReviewSnapshot, type ReviewSource } from "./codeReviewUtils";
 import { highlightSourceCode } from "./syntaxHighlighting";
 import "./code-review.css";
@@ -26,6 +27,8 @@ function loadReview(key: string): StoredReview {
 const describeError = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 export function CodeReviewPanel({ source, onBack, onClose, onChooseWorkspace, onAiReview, onSendToChat, modelLabel }: CodeReviewPanelProps) {
+  const window = useDesktopWindow();
+  const document = window.document;
   const storageKey = `renge-code-review-v1:${source?.id ?? "none"}`;
   const [stored, setStored] = useState(() => loadReview(storageKey));
   const [mode, setMode] = useState<ReviewMode>("working");

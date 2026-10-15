@@ -44,6 +44,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useDesktopWindow } from "./NativeDesktopWindow";
 import {
   buildAndroidBrowserCommandIntentUrl,
   buildAndroidBrowserIntentUrl,
@@ -396,6 +397,8 @@ export function BrowserSidebarPanel({
   onClose,
   onBrowserComment,
 }: BrowserSidebarPanelProps) {
+  const hostWindow = useDesktopWindow();
+  const document = hostWindow.document;
   const electronAvailable = Boolean(window.rengeDesktop?.isElectron);
   const androidAppShell = isAndroidAppShell(window.location.search, window.navigator.userAgent);
   const androidAvailable = Boolean(
@@ -530,14 +533,14 @@ export function BrowserSidebarPanel({
     };
     const resizeObserver = new ResizeObserver(syncLayout);
     resizeObserver.observe(page);
-    window.addEventListener("resize", syncLayout);
+    hostWindow.addEventListener("resize", syncLayout);
     window.visualViewport?.addEventListener("resize", syncLayout);
     window.visualViewport?.addEventListener("scroll", syncLayout);
     syncLayout();
     return () => {
       window.cancelAnimationFrame(animationFrame);
       resizeObserver.disconnect();
-      window.removeEventListener("resize", syncLayout);
+      hostWindow.removeEventListener("resize", syncLayout);
       window.visualViewport?.removeEventListener("resize", syncLayout);
       window.visualViewport?.removeEventListener("scroll", syncLayout);
     };
@@ -1717,7 +1720,7 @@ export function BrowserSidebarPanel({
   useEffect(() => {
     if (!popoverView) return;
     const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (event.target instanceof Node && !popoverRootRef.current?.contains(event.target)) {
+      if (event.target && "nodeType" in event.target && !popoverRootRef.current?.contains(event.target as Node)) {
         setPopoverView(null);
         setDownloadActionsId("");
       }

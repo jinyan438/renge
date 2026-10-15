@@ -1,0 +1,40 @@
+body.native-desktop-window {
+  margin: 0;
+  overflow: hidden;
+  background: #f8f8fa;
+}
+
+.native-desktop-window .managed-window-layer,
+.native-desktop-window .desktop-home-native-layer {
+  padding: 0 !important;
+}
+
+.native-desktop-window .portfolio-window-shell,
+.native-desktop-window .settings-window-shell,
+.native-desktop-window .desktop-home-window-drag-layer,
+.native-desktop-window .desktop-home-window-shell {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: none !important;
+  max-height: none !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  transform: none !important;
+  animation: none !important;
+}
+
+.native-desktop-window .managed-window-drag-handle {
+  -webkit-app-region: drag;
+  cursor: default;
+}
+
+.native-desktop-window .managed-window-drag-handle button,
+.native-desktop-window .managed-window-drag-handle input,
+.native-desktop-window .managed-window-drag-handle a {
+  -webkit-app-region: no-drag;
+}

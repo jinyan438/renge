@@ -1,3 +1,4 @@
+import { useDesktopWindow } from "./NativeDesktopWindow";
 import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
@@ -76,6 +77,7 @@ export function WindowResizeHandles({
   viewportMargin = 8,
   disabled = false,
 }: WindowResizeHandlesProps) {
+  const nativeWindow = useDesktopWindow() !== window;
   const sessionRef = useRef<ResizeSession>({ ...initialSession });
   const pendingRef = useRef<ResizeBounds | null>(null);
   const frameRef = useRef<number | null>(null);
@@ -261,7 +263,7 @@ export function WindowResizeHandles({
     return () => compactQuery.removeEventListener("change", resetForCompactViewport);
   }, [targetRef]);
 
-  if (disabled) return null;
+  if (disabled || nativeWindow) return null;
 
   return (
     <>

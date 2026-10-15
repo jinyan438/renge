@@ -32,6 +32,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { useDesktopWindow } from "./NativeDesktopWindow";
 import {
   formatFileBrowserSize,
   getFileBrowserAbsolutePath,
@@ -294,6 +295,8 @@ export function FilesSidebarPanel({
   onClose,
   onChooseWorkspace,
 }: FilesSidebarPanelProps) {
+  const window = useDesktopWindow();
+  const document = window.document;
   const [directoryEntries, setDirectoryEntries] = useState<Record<string, FileBrowserEntry[]>>({});
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
