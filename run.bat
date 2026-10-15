@@ -18,13 +18,15 @@ if errorlevel 1 (
 )
 
 if not exist "node_modules" (
-  echo Installing dependencies...
-  call npm install
-  if errorlevel 1 (
-    echo npm install failed.
-    pause
-    exit /b 1
-  )
+  echo Dependencies were not found. Run build.bat first.
+  pause
+  exit /b 1
+)
+
+if not exist "dist\index.html" (
+  echo The desktop app has not been built. Run build.bat first.
+  pause
+  exit /b 1
 )
 
 echo Starting Renge Agent Lab desktop app...

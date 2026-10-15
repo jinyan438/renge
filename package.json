@@ -29,7 +29,7 @@
     "start": "node server.mjs",
     "android:apk": "build_android_apk.bat --no-pause",
     "electron:install-local": "node scripts/install-electron-local.mjs",
-    "electron": "npm run build && electron electron/main.mjs",
+    "electron": "electron electron/main.mjs",
     "desktop": "npm run electron",
     "test:pocket-phone": "tsx --test test/pocketPhoneChat.test.mjs test/pocketPhoneContext.test.mjs test/pocketPhoneGroup.test.mjs test/pocketPhoneSync.test.mjs test/pocketPhoneInner.test.mjs && node test/pocketPhoneBrowser.test.mjs",
     "test:pocket-friends": "tsx --test test/pocketFriends.test.mjs && node --experimental-strip-types test/pocketFriendsBrowser.test.mjs",

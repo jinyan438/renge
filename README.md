@@ -151,7 +151,7 @@ http://localhost:5190
 
 启动时终端还会输出可用的局域网地址。除非已经配置防火墙、访问控制或可信网络，否则不要把服务直接暴露到公网。
 
-Windows 上也可以直接双击 `run_server.bat`（构建并启动 Web 服务）或 `run.bat`（直接启动桌面端），脚本会自动检查 Node.js 并在缺少 `node_modules` 时安装依赖。
+Windows 桌面端分为两个脚本：首次使用或更新代码后先双击 `build.bat`，检查环境、安装缺失的依赖并构建；日常双击 `run.bat`，只运行已构建的应用，不安装依赖、不重新构建。缺少依赖或构建结果时，`run.bat` 会提示先运行 `build.bat`。`run_server.bat` 仍用于构建并启动 Web 服务。
 
 通过 `run.bat` 启动桌面端时，正常关闭应用后启动终端会自动退出；启动失败或异常退出时保留错误提示，方便排查。
 
@@ -185,10 +185,11 @@ npm run preview
 ## Electron 桌面端
 
 ```powershell
+npm run build
 npm run desktop
 ```
 
-该命令会先构建前端，再启动 Electron。桌面端会在本机启动内嵌服务（端口 `5191`），并提供更完整的能力：
+`npm run build` 只构建，`npm run desktop` / `npm run electron` 只启动已有构建。代码更新后需要重新构建，日常启动可以直接运行后者；Windows 下对应 `build.bat` 和 `run.bat`。桌面端会在本机启动内嵌服务（端口 `5191`），并提供更完整的能力：
 
 - 选择和恢复电脑工作区，读取当前系统账户有权访问的任意目录
 - 文件读写、搜索、移动与删除（工作区外变更按「完全访问」设置直接执行或逐次审批）
@@ -207,6 +208,7 @@ electron-v42.4.1-win32-x64.zip
 
 ```powershell
 npm run electron:install-local
+npm run build
 npm run desktop
 ```
 
@@ -396,7 +398,9 @@ npm start
 | `npm run build` | 执行 TypeScript 检查并构建前端 |
 | `npm run preview` | 预览已构建的静态前端 |
 | `npm start` / `npm run serve` | 启动完整 Web 服务，默认端口 5190 |
-| `npm run desktop` / `npm run electron` | 构建并启动 Electron 桌面端 |
+| `build.bat` | Windows 构建入口，准备缺失的依赖并构建，不启动应用 |
+| `run.bat` | Windows 运行入口，只启动已有构建 |
+| `npm run desktop` / `npm run electron` | 启动已构建的 Electron 桌面端 |
 | `npm run electron:install-local` | 从项目根目录的 Electron ZIP 安装 Windows x64 Runtime |
 | `npm run android:apk` | 构建并验证 Android Debug APK |
 | `npm test` | 运行 Node 测试套件并追加预设测试 |
@@ -428,7 +432,8 @@ renge/
 ├─ scripts/                     Electron 安装与 APK 验证脚本
 ├─ server.mjs                   Web 服务、API、Pi 宿主接入、酒馆模块代理与文件服务
 ├─ build_android_apk.bat        Android APK 一键构建脚本
-├─ run.bat                       Windows 桌面端快速启动
+├─ build.bat                    Windows 桌面端构建
+├─ run.bat                      Windows 桌面端运行（不构建）
 ├─ run_server.bat                Windows Web 服务快速启动
 ├─ start-client.sh              Linux Electron 客户端一键启动
 ├─ start-renge.sh               Linux Web 服务一键启动
