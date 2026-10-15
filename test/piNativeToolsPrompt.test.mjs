@@ -9,6 +9,9 @@ test("routes one-shot and interactive commands on Windows without falling back t
   assert.match(prompt, /跨命令保留工作目录\/环境变量\/Shell 函数\/登录或 REPL 状态/);
   assert.match(prompt, /不要调用 bash 或 WSL/);
   assert.match(prompt, /不要为了选择工具而预先调用 terminal_list/);
+  assert.match(prompt, /进程继续执行，timeout 不变/);
+  assert.match(prompt, /shell_status.*shell_stop/);
+  assert.match(prompt, /不要重复启动原命令/);
 });
 
 test("uses the native bash tool on non-Windows platforms", () => {

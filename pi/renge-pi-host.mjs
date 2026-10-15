@@ -16,6 +16,7 @@ import { createPiMcpAdapter, normalizePiMcpConfig } from "./pi-mcp-adapter-bridg
 import { createPiPackageManager } from "./pi-package-manager.mjs";
 import { installContinuousPiRetry } from "./continuous-retry.mjs";
 import { createPermissionCheckedPiTools } from "./permission-tools.mjs";
+import { createShellSessionManager } from "./shell-sessions.mjs";
 import {
   convertOpenAiMessagesToPi,
   filterPiCustomToolDefinitions,
@@ -496,6 +497,7 @@ export function createRengePiHost({
       id: runId,
       response,
       pendingTools: new Map(),
+      shellSessions: null,
       streamingToolCalls: new Map(),
       // A toolcall_end event only means the JSON parser closed. Keep the
       // preview here until tool_execution_start proves the tool really ran.
@@ -516,10 +518,22 @@ export function createRengePiHost({
       acceptingInput: false,
       inputs: new Map(),
     };
+    run.shellSessions = createShellSessionManager({
+      onBackgroundUpdate: ({ toolCallId, toolName, result, finished, isError }) => {
+        if (run.completed || run.cancelled) return;
+        writeSse(response, piEvent(finished ? "tool_end" : "tool_update", {
+          runId,
+          toolCallId: resolvePreviewToolCallId(run, toolCallId, toolName),
+          executionToolCallId: toolCallId,
+          toolName, result, isError,
+        }));
+      },
+    });
     runs.set(runId, run);
     const abortRun = () => {
       if (run.completed) return;
       run.cancelled = true;
+      run.shellSessions.dispose();
       void run.session?.abort();
       settlePendingTools(run, new Error("Pi 会话连接已关闭"));
     };
@@ -625,10 +639,14 @@ export function createRengePiHost({
         .getExtensions()
         .extensions
         .flatMap((extension) => Array.from(extension.tools.keys()));
+      const localCustomTools = createPermissionCheckedPiTools({
+        cwd, nativeTools, sessionId: ownerSessionId, authorizeTool, checkCancelled,
+        shellSessions: run.shellSessions,
+      });
       const customDefinitionsForRun = requestedToolsEnabled ? filterPiCustomToolDefinitions(
         requestedToolDefinitions,
         workspace,
-        new Set([...nativeTools, ...extensionToolNames]),
+        new Set([...nativeTools, ...extensionToolNames, ...localCustomTools.map((tool) => tool.name)]),
       ) : [];
       const bridgedCustomTools = customDefinitionsForRun.map(
         (definition) => createCustomTool(definition, run),
@@ -636,9 +654,6 @@ export function createRengePiHost({
       // Override Pi's whole-file write with a bounded, offset-checked version.
       // A local gateway that cuts a long stream can no longer leave a giant
       // write call perpetually "running" or duplicate an already-applied chunk.
-      const localCustomTools = createPermissionCheckedPiTools({
-        cwd, nativeTools, sessionId: ownerSessionId, authorizeTool, checkCancelled,
-      });
       const customTools = [...bridgedCustomTools, ...localCustomTools];
       const initialActiveToolNames = toolsEnabled
         ? [
@@ -821,6 +836,16 @@ export function createRengePiHost({
         if (event.type === "tool_execution_start") {
           resolvePreviewToolCallId(run, event.toolCallId, event.toolName);
         }
+        if (event.type === "tool_execution_update" && !customToolNames.has(event.toolName)) {
+          writeSse(response, piEvent("tool_update", {
+            runId,
+            toolCallId: resolvePreviewToolCallId(run, event.toolCallId, event.toolName),
+            executionToolCallId: event.toolCallId,
+            toolName: event.toolName,
+            result: event.partialResult,
+          }));
+          return;
+        }
         if (
           event.type === "tool_execution_end" &&
           !customToolNames.has(event.toolName)
@@ -898,6 +923,7 @@ export function createRengePiHost({
         if (retryError) throw new Error(retryError);
       }
       const finishReason = getSessionFinishReason(session, run.lastAssistantStopReason);
+      await run.shellSessions.dispose();
       run.acceptingInput = false;
       flushIncompleteStreamingToolCalls(run, { finishReason, willRetry: false });
       // Some local gateways report zero usage, so the SDK cannot run its
@@ -917,6 +943,7 @@ export function createRengePiHost({
     } finally {
       run.acceptingInput = false;
       run.completed = true;
+      await run.shellSessions.dispose();
       response.off("close", abortRun);
       if (run.cancelled) await run.session?.abort();
       unsubscribe();
@@ -1016,6 +1043,7 @@ export function createRengePiHost({
     const run = runs.get(runId);
     if (!run) return { ok: true, aborted: false };
     run.cancelled = true;
+    run.shellSessions.dispose();
     settlePendingTools(run, new Error("Pi 会话已由用户中止"));
     await run.session?.abort();
     return { ok: true, aborted: true };
@@ -1096,6 +1124,7 @@ export function createRengePiHost({
   const dispose = async () => {
     await Promise.all(Array.from(runs.values()).map(async (run) => {
       run.cancelled = true;
+      run.shellSessions.dispose();
       settlePendingTools(run, new Error("Pi Host 已关闭"));
       await run.session?.abort();
       run.session?.dispose();

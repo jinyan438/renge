@@ -11,6 +11,7 @@ Renge Agent Lab 是一个本地优先的 AI Agent 工作台。它把 **Pi 编码
 会话执行由 [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 驱动（当前 `0.87.1`），`server.mjs` 通过 `pi/renge-pi-host.mjs` 把 Pi 的 `AgentSession` 包装成 SSE 流式接口：
 
 - **原生工具**：`read` / `grep` / `find` / `ls` / `write` / `edit` / `powershell`（Windows）或 `bash`（Unix）等由 Pi 内核直接执行，不经过前端桥接。
+- **长命令回传**：原生 Shell 实时显示输出；超过单次等待窗口（默认 10 秒）先返回输出和 `session_id`，命令继续运行，AI 可用 `shell_status` 继续读取结果，或用 `shell_stop` 停止进程树。`yield_time_ms` 只控制交还控制权的时间，不缩短或重置命令的 `timeout`；本轮结束、断开或停止时会清理剩余命令。
 - **可恢复写入**：Pi 原生 `write` 被替换为带偏移校验的分块式 `write` 工具（`pi/resumable-write-tool.mjs`），本地网关截断长流时不会留下永久运行的写入调用。
 - **持续重试**：`pi/continuous-retry.mjs` 在内核层接管重试，配合 `flushIncompleteStreamingToolCalls` 清理未执行完的工具预览。
 - **原生压缩**：按上下文窗口和保留 Token 自动执行 Pi 的 `compact()`；网关谎报用量时使用本地估算兜底，并在首次超限报错后从错误信息中解析真实窗口并重试同一轮。

@@ -7,6 +7,7 @@ import {
   createPowerShellToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { createResumableWriteTool } from "./resumable-write-tool.mjs";
+import { createShellSessionManager } from "./shell-sessions.mjs";
 
 async function canonicalPath(path) {
   const missing = [];
@@ -24,7 +25,7 @@ async function canonicalPath(path) {
   }
 }
 
-export function createPermissionCheckedPiTools({ cwd, nativeTools, sessionId, authorizeTool, checkCancelled }) {
+export function createPermissionCheckedPiTools({ cwd, nativeTools, sessionId, authorizeTool, checkCancelled, shellSessions = createShellSessionManager() }) {
   const authorize = async (toolName, args, signal) => {
     checkCancelled?.();
     if (signal?.aborted) throw new Error("Operation aborted");
@@ -68,13 +69,8 @@ export function createPermissionCheckedPiTools({ cwd, nativeTools, sessionId, au
   for (const name of ["bash", "powershell"]) {
     if (!nativeTools.includes(name)) continue;
     const tool = name === "powershell" ? createPowerShellToolDefinition(cwd) : createBashToolDefinition(cwd);
-    tools.push({
-      ...tool,
-      execute: async (id, args, signal, onUpdate, ctx) => {
-        await authorize(name, args, signal);
-        return tool.execute(id, args, signal, onUpdate, ctx);
-      },
-    });
+    tools.push(shellSessions.wrap(tool, (args, signal) => authorize(name, args, signal)));
   }
+  if (nativeTools.some((name) => name === "bash" || name === "powershell")) tools.push(...shellSessions.tools);
   return tools;
 }

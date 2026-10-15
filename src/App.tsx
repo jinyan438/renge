@@ -1586,6 +1586,7 @@ type PiStreamEvent = {
     | "input_delivered"
     | "tool_request"
     | "tool_start"
+    | "tool_update"
     | "tool_end"
     | "tool_call_start"
     | "tool_call_delta"
@@ -9583,7 +9584,7 @@ function upsertAssistantToolVisualization(
     if (!anchor) return current;
     anchored = true;
     return current.map((message) =>
-      message.id === anchor.id ? { ...message, toolVisualization: options.visualization } : message,
+      message.id === anchor.id ? { ...message, toolVisualization: { ...message.toolVisualization, ...options.visualization } } : message,
     );
   });
   if (!anchored) options.append();
@@ -11613,7 +11614,12 @@ function formatPiNativeToolAction(event: PiStreamEvent) {
     case "edit":
       return `Pi 修改文件：\n${path}`;
     case "bash":
+    case "powershell":
       return `Pi 运行命令：\n${String(args.command ?? "")}`;
+    case "shell_status":
+      return `Pi 等待命令：\n${String(args.session_id ?? "")}`;
+    case "shell_stop":
+      return `Pi 停止命令：\n${String(args.session_id ?? "")}`;
     default:
       return `Pi 执行原生工具：${event.toolName || "unknown"}`;
   }
@@ -11632,6 +11638,15 @@ function formatPiNativeToolResult(event: PiStreamEvent) {
     ? `Pi 工具失败：${event.toolName || "unknown"}`
     : `Pi 工具完成：${event.toolName || "unknown"}`;
   return content ? `${title}\n${trimBlock(content, 900)}` : title;
+}
+
+function isPiShellStillRunning(result: unknown, toolName?: string) {
+  // A status query finishes even when its command is still running. Only the
+  // original command remains active until its background completion event.
+  if (toolName !== "bash" && toolName !== "powershell") return false;
+  if (!isObjectRecord(result) || !isObjectRecord(result.details)) return false;
+  const session = result.details.shellSession;
+  return isObjectRecord(session) && (session.status === "running" || session.status === "stopping");
 }
 
 function formatPiRuntimeStatus(event: PiStreamEvent) {
@@ -24376,7 +24391,7 @@ export function App() {
       ["read", "read_file", "file_read"].includes(normalizedName) ||
       normalizedName.includes("read_file");
     const isShell =
-      ["bash", "shell", "exec", "exec_command", "command"].includes(normalizedName) ||
+      ["bash", "powershell", "shell_status", "shell_stop", "shell", "exec", "exec_command", "command"].includes(normalizedName) ||
       normalizedName.includes("run_command") || normalizedName.includes("execute_script");
     const isMutation =
       ["write", "edit", "write_file", "apply_patch"].includes(normalizedName) ||
@@ -24392,7 +24407,7 @@ export function App() {
     const title = isRead
       ? "读取文件"
       : isShell
-        ? "运行命令"
+        ? normalizedName === "shell_status" ? "查询命令" : normalizedName === "shell_stop" ? "停止命令" : "运行命令"
         : isMutation
           ? normalizedName.includes("write")
             ? unexecutedArguments
@@ -26395,6 +26410,14 @@ export function App() {
             });
             return;
           }
+          if (event.type === "tool_update") {
+            const previous = event.toolCallId ? piToolVisualizations.get(event.toolCallId) : undefined;
+            if (!previous || !event.toolCallId) return;
+            const visualization: ToolVisualization = { ...previous, result: event.result, phase: "execution", status: "running", endedAt: undefined };
+            piToolVisualizations.set(event.toolCallId, visualization);
+            updateAssistantToolVisualization(commitChatMessages, event.toolCallId, () => visualization);
+            return;
+          }
           if (event.type === "tool_end") {
             const previous = event.toolCallId ? piToolVisualizations.get(event.toolCallId) : undefined;
             const visualization: ToolVisualization = {
@@ -26404,9 +26427,9 @@ export function App() {
               args: previous?.args ?? {},
               result: event.result,
               phase: "execution",
-              status: event.isError ? "error" : "done",
+              status: event.isError ? "error" : isPiShellStillRunning(event.result, event.toolName) ? "running" : "done",
               startedAt: previous?.startedAt,
-              endedAt: new Date().toISOString(),
+              endedAt: isPiShellStillRunning(event.result, event.toolName) ? undefined : new Date().toISOString(),
             };
             upsertAssistantToolVisualization(commitChatMessages, {
               toolCallId: event.toolCallId ?? previous?.toolCallId,
@@ -26948,17 +26971,24 @@ export function App() {
                 [],
                 "",
                 subAgentSender,
+                { toolCallId: event.toolCallId, name: event.toolName || "unknown_tool", args: event.arguments, phase: "execution", status: "running", startedAt: new Date().toISOString() },
               );
               return;
             }
+            if (event.type === "tool_update") {
+              if (event.toolCallId) updateAssistantToolVisualization(commitChatMessages, event.toolCallId, (previous) => ({ ...previous, result: event.result }));
+              return;
+            }
             if (event.type === "tool_end") {
-              appendAssistantTimelineMessage(
-                commitChatMessages,
-                formatPiNativeToolResult(event),
-                [],
-                "",
-                subAgentSender,
-              );
+              const visualization: ToolVisualization = {
+                toolCallId: event.toolCallId, name: event.toolName || "unknown_tool", result: event.result,
+                phase: "execution", status: event.isError ? "error" : isPiShellStillRunning(event.result, event.toolName) ? "running" : "done",
+                endedAt: isPiShellStillRunning(event.result, event.toolName) ? undefined : new Date().toISOString(),
+              };
+              upsertAssistantToolVisualization(commitChatMessages, {
+                toolCallId: event.toolCallId, toolName: event.toolName, visualization,
+                append: () => appendAssistantTimelineMessage(commitChatMessages, formatPiNativeToolResult(event), [], "", subAgentSender, visualization),
+              });
               return;
             }
             if (event.type !== "tool_request") return;
@@ -29758,6 +29788,14 @@ export function App() {
             }
             return;
           }
+          if (event.type === "tool_update") {
+            const previous = event.toolCallId ? piToolVisualizations.get(event.toolCallId) : undefined;
+            if (!previous || !event.toolCallId) return;
+            const visualization: ToolVisualization = { ...previous, result: event.result, phase: "execution", status: "running", endedAt: undefined };
+            piToolVisualizations.set(event.toolCallId, visualization);
+            updateAssistantToolVisualization(commitChatMessages, event.toolCallId, () => visualization);
+            return;
+          }
           if (event.type === "tool_end") {
             const previous = event.toolCallId ? piToolVisualizations.get(event.toolCallId) : undefined;
             const visualization: ToolVisualization = {
@@ -29767,9 +29805,9 @@ export function App() {
               args: previous?.args ?? {},
               result: event.result,
               phase: "execution",
-              status: event.isError ? "error" : "done",
+              status: event.isError ? "error" : isPiShellStillRunning(event.result, event.toolName) ? "running" : "done",
               startedAt: previous?.startedAt,
-              endedAt: new Date().toISOString(),
+              endedAt: isPiShellStillRunning(event.result, event.toolName) ? undefined : new Date().toISOString(),
             };
             upsertAssistantToolVisualization(commitChatMessages, {
               toolCallId: event.toolCallId ?? previous?.toolCallId,

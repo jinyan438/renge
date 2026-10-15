@@ -16,6 +16,8 @@ const toolLabels: Record<string, string> = {
   ls: "查看目录",
   bash: "运行命令",
   powershell: "运行命令",
+  shell_status: "等待命令结果",
+  shell_stop: "停止命令",
   local_run_command: "运行命令",
   multi_agent_delegate_task: "安排 Agent 协作",
   chat_present_options: "准备选项",
