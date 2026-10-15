@@ -30,12 +30,12 @@ test("loads and calls native MCP tools in the Windows Electron runtime", {
   assert.equal(report.text, "Electron native MCP");
 });
 
-test("uses the Pi 0.87-compatible MCP adapter package", async () => {
+test("uses the Pi 1.2-compatible MCP adapter package", async () => {
   const packageJson = JSON.parse(
     await readFile(new URL("../node_modules/pi-mcp-adapter/package.json", import.meta.url), "utf8"),
   );
-  assert.equal(packageJson.version, "2.36.0");
-  assert.match(packageJson.peerDependencies["@earendil-works/pi-ai"], /\^0\.87\.0/);
+  assert.equal(packageJson.version, "5.3.0");
+  assert.match(packageJson.peerDependencies["@earendil-works/pi-ai"], /\^1\.0\.0/);
 });
 
 test("normalizes Renge MCP servers without dropping Pi adapter fields", () => {

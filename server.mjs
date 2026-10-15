@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { getCodeReviewSnapshot, getCodeReviewFile } from "./code-review.mjs";
+import { configurePiAgentEnvironment } from "./pi/agent-environment.mjs";
 import { applyChatSessionPatch, getChatSessionVersions } from "./app-data-session-patch.mjs";
 import { createReadStream, createWriteStream } from "node:fs";
 import { copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -4033,7 +4034,9 @@ function formatNetworkUrl(address, port) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  startRengeServer({ host: "::", port: defaultPort }).then(({ port, dataFile }) => {
+  const dataDir = getDefaultDataDir();
+  const piAgentDir = configurePiAgentEnvironment(dataDir);
+  startRengeServer({ host: "::", port: defaultPort, dataDir, piAgentDir }).then(({ port, dataFile }) => {
     console.log(`Renge Agent Lab server running at http://localhost:${port}`);
     const networkUrls = Object.values(networkInterfaces())
       .flat()

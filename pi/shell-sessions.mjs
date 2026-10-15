@@ -124,7 +124,8 @@ export function createShellSessionManager({ onBackgroundUpdate } = {}) {
             for (const listener of session.listeners) listener(result);
             publish();
           }, ctx)).then(
-            (result) => finish(result, false),
+            // Pi 1.2 shell tools return flagged error results for nonzero exits.
+            (result) => finish(result, result?.isError === true),
             (error) => finish({ content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] }, true),
           );
           return wait(session, duration, signal, onUpdate);
