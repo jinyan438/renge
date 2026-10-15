@@ -153,6 +153,8 @@ http://localhost:5190
 
 Windows 上也可以直接双击 `run_server.bat`（构建并启动 Web 服务）或 `run.bat`（直接启动桌面端），脚本会自动检查 Node.js 并在缺少 `node_modules` 时安装依赖。
 
+通过 `run.bat` 启动桌面端时，正常关闭应用后启动终端会自动退出；启动失败或异常退出时保留错误提示，方便排查。
+
 ### Linux 一键启动
 
 双击仓库根目录的 `Renge Agent Lab.desktop`，会自动完成环境检查、依赖安装和构建并打开 Electron 桌面客户端。首次启动需要联网下载 Node.js、项目依赖和 Electron Runtime；后续启动仅在依赖变化时重新安装。

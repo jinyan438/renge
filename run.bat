@@ -29,5 +29,10 @@ if not exist "node_modules" (
 
 echo Starting Renge Agent Lab desktop app...
 call npm run desktop
+set "DESKTOP_EXIT_CODE=%ERRORLEVEL%"
 
-pause
+if not "%DESKTOP_EXIT_CODE%"=="0" (
+  echo Desktop app stopped with exit code %DESKTOP_EXIT_CODE%. Review the error output above.
+  pause
+)
+exit /b %DESKTOP_EXIT_CODE%
