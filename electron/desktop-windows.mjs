@@ -15,6 +15,7 @@ const windowTitles = {
 
 export function createDesktopWindowManager({ screen, icon, onWindowCreated = () => {} }) {
   const windows = new Map();
+  const drags = new Map();
   let owner = null;
   const send = (id, state) => {
     if (owner && !owner.isDestroyed()) {
@@ -79,6 +80,7 @@ export function createDesktopWindowManager({ screen, icon, onWindowCreated = () 
         child.on("closed", () => {
           if (windows.get(id) !== child) return;
           windows.delete(id);
+          drags.delete(id);
           send(id, { closed: true });
         });
         onWindowCreated(child);
@@ -89,7 +91,7 @@ export function createDesktopWindowManager({ screen, icon, onWindowCreated = () 
       });
       mainWindow.on("closed", () => this.closeAll());
     },
-    control(event, { id, action } = {}) {
+    control(event, { id, action, deltaX, deltaY } = {}) {
       if (!owner || owner.isDestroyed() || event.sender !== owner.webContents) {
         throw new Error("桌面窗口操作来源无效");
       }
@@ -107,6 +109,15 @@ export function createDesktopWindowManager({ screen, icon, onWindowCreated = () 
           else child.maximize();
           break;
         case "close": child.close(); break;
+        case "drag-start": drags.set(id, child.getBounds()); break;
+        case "drag-move": {
+          const start = drags.get(id);
+          if (start && Number.isFinite(deltaX) && Number.isFinite(deltaY)) {
+            child.setPosition(Math.round(start.x + deltaX), Math.round(start.y + deltaY));
+          }
+          break;
+        }
+        case "drag-end": drags.delete(id); break;
         default: throw new Error("未知的桌面窗口操作");
       }
       return { ok: true };
@@ -119,6 +130,7 @@ export function createDesktopWindowManager({ screen, icon, onWindowCreated = () 
         if (!child.isDestroyed()) child.destroy();
       }
       windows.clear();
+      drags.clear();
     },
   };
 }

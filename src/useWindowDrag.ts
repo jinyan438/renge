@@ -11,7 +11,6 @@ import {
   WINDOW_SNAP_COMPACT_BREAKPOINT,
   type WindowSnapSide,
 } from "./windowSnapUtils";
-import { useDesktopWindow } from "./NativeDesktopWindow";
 
 export type WindowOffset = {
   x: number;
@@ -61,8 +60,7 @@ export function useWindowDrag({
   viewportMargin = 8,
   snapEnabled = true,
 }: UseWindowDragOptions) {
-  const hostWindow = useDesktopWindow();
-  disabled ||= hostWindow !== window;
+  const nativeDragRef = useRef<{ id: string; pointerId: number; x: number; y: number } | null>(null);
   const offsetRef = useRef<WindowOffset>(initialOffset);
   const pendingRef = useRef<WindowOffset>(initialOffset);
   const restoreOffsetRef = useRef<WindowOffset>(initialOffset);
@@ -100,6 +98,13 @@ export function useWindowDrag({
 
   const finishDrag = useCallback(
     (event: ReactPointerEvent<HTMLElement>, commitSnap: boolean) => {
+      const nativeDrag = nativeDragRef.current;
+      if (nativeDrag?.pointerId === event.pointerId) {
+        nativeDragRef.current = null;
+        void window.rengeDesktop?.controlDesktopWindow?.({ id: nativeDrag.id, action: "drag-end" });
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+        return;
+      }
       const session = sessionRef.current;
       if (!session.active || session.pointerId !== event.pointerId) return;
       session.active = false;
@@ -146,7 +151,6 @@ export function useWindowDrag({
       if (
         disabled ||
         event.button !== 0 ||
-        window.innerWidth <= 820 ||
         (event.target as HTMLElement).closest("button, input, textarea, select, a")
       ) {
         return;
@@ -154,6 +158,17 @@ export function useWindowDrag({
 
       const target = targetRef.current;
       if (!target) return;
+      const nativeId = target.ownerDocument.body.dataset.desktopWindow;
+      if (nativeId && window.rengeDesktop?.controlDesktopWindow) {
+        // Native app regions usually handle this in the OS. Keep pointer
+        // capture as a fallback for compositors that deliver DOM drag events.
+        event.preventDefault();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        nativeDragRef.current = { id: nativeId, pointerId: event.pointerId, x: event.screenX, y: event.screenY };
+        void window.rengeDesktop.controlDesktopWindow({ id: nativeId, action: "drag-start" });
+        return;
+      }
+      if (window.innerWidth <= 820) return;
       event.preventDefault();
       event.currentTarget.setPointerCapture(event.pointerId);
       let rect = target.getBoundingClientRect();
@@ -208,6 +223,15 @@ export function useWindowDrag({
 
   const onPointerMove = useCallback(
     (event: ReactPointerEvent<HTMLElement>) => {
+      const nativeDrag = nativeDragRef.current;
+      if (nativeDrag?.pointerId === event.pointerId) {
+        event.preventDefault();
+        void window.rengeDesktop?.controlDesktopWindow?.({
+          id: nativeDrag.id, action: "drag-move",
+          deltaX: event.screenX - nativeDrag.x, deltaY: event.screenY - nativeDrag.y,
+        });
+        return;
+      }
       const session = sessionRef.current;
       if (!session.active || session.pointerId !== event.pointerId) return;
       event.preventDefault();
@@ -258,6 +282,8 @@ export function useWindowDrag({
 
   useEffect(
     () => () => {
+      const nativeDrag = nativeDragRef.current;
+      if (nativeDrag) void window.rengeDesktop?.controlDesktopWindow?.({ id: nativeDrag.id, action: "drag-end" });
       if (frameRef.current !== null) window.cancelAnimationFrame(frameRef.current);
       const session = sessionRef.current;
       if (session.active) {

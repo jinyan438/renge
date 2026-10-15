@@ -770,7 +770,7 @@ function WindowShell({
   const titleDragHandlers = useWindowDrag({
     targetRef: dragLayerRef,
     initialOffset: { x: 0, y: 0 },
-    disabled: native || maximized,
+    disabled: maximized,
     visibleTitleWidth: 96,
   });
 

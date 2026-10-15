@@ -64,6 +64,13 @@ try {
   });
   const outside = await nativeState("Agent Chat");
   assert.ok(outside.bounds.x + outside.bounds.width > 1080, "chat extends past the main window's right edge");
+  const fallbackStyle = await chat.addStyleTag({ content: ".managed-window-drag-handle { -webkit-app-region: no-drag !important; }" });
+  await chat.mouse.move(400, 20);
+  await chat.mouse.down();
+  await chat.mouse.move(460, 40);
+  await chat.mouse.up();
+  assert.ok((await nativeState("Agent Chat")).bounds.x > outside.bounds.x, "pointer dragging also moves the native window when OS drag regions are unavailable");
+  await fallbackStyle.evaluate((element) => element.remove());
   assert.equal(await input.inputValue(), "拖出主窗口后保留的草稿");
   await chat.getByLabel("最小化窗口", { exact: true }).click();
   await home.waitForFunction(() => true);

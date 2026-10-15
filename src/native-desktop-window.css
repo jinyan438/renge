@@ -7,6 +7,7 @@ body.native-desktop-window {
 .native-desktop-window .managed-window-layer,
 .native-desktop-window .desktop-home-native-layer {
   padding: 0 !important;
+  pointer-events: auto !important;
 }
 
 .native-desktop-window .portfolio-window-shell,

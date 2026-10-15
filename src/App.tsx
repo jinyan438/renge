@@ -1304,7 +1304,7 @@ type SidebarTerminalReadResult = Omit<SidebarTerminalSession, "buffer"> & {
 
 type RengeDesktopApi = {
   isElectron: boolean;
-  controlDesktopWindow?(options: { id: string; action: "show" | "close" | "minimize" | "toggle-maximize" }): Promise<{ ok: boolean }>;
+  controlDesktopWindow?(options: { id: string; action: "show" | "close" | "minimize" | "toggle-maximize" | "drag-start" | "drag-move" | "drag-end"; deltaX?: number; deltaY?: number }): Promise<{ ok: boolean }>;
   onDesktopWindowState?(listener: (state: NativeDesktopWindowState) => void): () => void;
   notifyConversationCompleted?(options: { content: string }): Promise<{ ok: boolean }>;
   clearAppStorage?(): Promise<{ ok: boolean }>;
@@ -12783,7 +12783,7 @@ export function App() {
   const settingsTitleDragHandlers = useWindowDrag({
     targetRef: settingsWindowRef,
     initialOffset: settingsWindowState?.initialOffset,
-    disabled: nativeDesktopWindowsEnabled() || (settingsWindowState?.maximized ?? false),
+    disabled: settingsWindowState?.maximized ?? false,
   });
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("providers");
   const [dataBackupState, setDataBackupState] = useState<{
