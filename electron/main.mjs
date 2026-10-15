@@ -60,6 +60,7 @@ import { createTextContextMenuTemplate } from "./text-context-menu.mjs";
 import { createDesktopWindowManager } from "./desktop-windows.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const desktopAppId = "com.renge.agentlab";
 const appIconPath = join(
   __dirname,
   "assets",
@@ -70,7 +71,7 @@ let mainWindow = null;
 const desktopWindows = createDesktopWindowManager({
   screen,
   icon: appIconPath,
-  onWindowCreated: (child) => configureWindowWebviews(child),
+  onWindowCreated: (child) => configureDesktopWindow(child),
 });
 let serverController = null;
 let workspaceRoot = null;
@@ -1783,12 +1784,25 @@ async function createMainWindow() {
   });
 
   desktopWindows.attach(mainWindow);
-  configureWindowWebviews(mainWindow);
+  configureDesktopWindow(mainWindow);
   mainWindow.removeMenu();
   await mainWindow.loadURL(serverController.url);
 }
 
-function configureWindowWebviews(hostWindow) {
+function configureDesktopWindow(hostWindow) {
+  if (process.platform === "win32") {
+    // The taskbar group uses relaunch metadata rather than the window icon.
+    // Use the same identity for the home and every independent module window.
+    hostWindow.setAppDetails({
+      appId: desktopAppId,
+      appIconPath,
+      appIconIndex: 0,
+      relaunchCommand: app.isPackaged
+        ? `"${process.execPath}"`
+        : `"${process.execPath}" "${join(__dirname, "main.mjs")}"`,
+      relaunchDisplayName: "Renge Agent Lab",
+    });
+  }
   hostWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
     delete webPreferences.preload;
     webPreferences.nodeIntegration = false;
@@ -1867,7 +1881,7 @@ if (!singleInstanceLockAcquired) {
 
   app.whenReady().then(async () => {
     if (process.platform === "win32") {
-      app.setAppUserModelId("com.renge.agentlab");
+      app.setAppUserModelId(desktopAppId);
     }
     await migrateLegacySidebarBrowserCookies().catch(() => undefined);
     return createMainWindow();
