@@ -16,6 +16,7 @@ Renge Agent Lab 是一个本地优先的 AI Agent 工作台。它把 **Pi 编码
 - **持续重试**：`pi/continuous-retry.mjs` 在内核层接管重试，配合 `flushIncompleteStreamingToolCalls` 清理未执行完的工具预览。
 - **原生压缩**：按上下文窗口和保留 Token 自动执行 Pi 的 `compact()`；网关谎报用量时使用本地估算兜底，并在首次超限报错后从错误信息中解析真实窗口并重试同一轮。
 - **Pi 原生扩展**：`pi/pi-package-manager.mjs` 让扩展中心可以直接安装、更新、启停和卸载 npm 上的 Pi 包，以及 `pi:` 前缀的 Git / 本地包。
+- **Pi 搜索类插件兼容**：支持 pi-gpt-search 的 `codex-search`、`codex-research`、`web` 工具与 `/gpt-search` 命令。通用 RPC 桥接接收通知、状态、文本组件、自定义消息及有渲染器的文本条目，并提供选择、确认、输入、多行编辑和停止信号；终端超链接会转换为网页链接，返回 `isError` 的工具会正确标记失败。自定义条目只显示并持久保存，不加入模型上下文。终端组件工厂仍需要 Pi TUI；搜索服务的授权与网络由插件自身处理。
 
 ### 右侧栏工具组
 
@@ -310,6 +311,7 @@ npm test
 | 命令 | 说明 |
 | --- | --- |
 | `npm run test:mcp` | Pi MCP 适配器桥接测试 |
+| `npm run test:pi-extensions` | 构建并检查 Pi 扩展 RPC、命令、搜索工具和浏览器界面；自动检查本机已安装的 pi-gpt-search，可用 `PI_GPT_SEARCH_PACKAGE` 指定包目录，未安装时跳过真实包测试。使用模拟搜索服务与测试凭据。 |
 | `npm run test:preset` | 预设工具测试（经 tsx） |
 | `npm run test:tavern` | 浏览器端酒馆运行时回归测试 |
 
@@ -365,6 +367,7 @@ npm start
 | --- | --- |
 | `POST /api/pi/chat` | Pi 内核会话入口，返回 SSE（`run_start`、`tool_call_*`、`tool_start` / `tool_end`、`context_usage` 等事件） |
 | `POST /api/pi/tool-result` | 把前端工具执行结果回填给等待中的 Pi 工具调用 |
+| `POST /api/pi/extension-ui-response` | 回填 Pi 扩展选择、确认、输入或编辑结果；通过 runId 与交互 ID 区分请求 |
 | `POST /api/pi/abort` | 中止指定 run |
 | `POST /api/pi/compact` | 对空闲的 Pi 会话执行手动压缩 |
 | `POST /api/pi/set-auto-compaction` | 开关该会话的自动压缩 |

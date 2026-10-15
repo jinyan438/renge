@@ -17,6 +17,8 @@ import { createPiPackageManager } from "./pi-package-manager.mjs";
 import { installContinuousPiRetry } from "./continuous-retry.mjs";
 import { createPermissionCheckedPiTools } from "./permission-tools.mjs";
 import { createShellSessionManager } from "./shell-sessions.mjs";
+import { bindPiCommandSignals, createPiExtensionUi, installPiToolResultCompatibility } from "./extension-ui.mjs";
+import { normalizePiExtensionResult } from "../src/piExtensionText.mjs";
 import {
   convertOpenAiMessagesToPi,
   filterPiCustomToolDefinitions,
@@ -497,6 +499,8 @@ export function createRengePiHost({
       id: runId,
       response,
       pendingTools: new Map(),
+      abortController: new AbortController(),
+      extensionUi: null,
       shellSessions: null,
       streamingToolCalls: new Map(),
       // A toolcall_end event only means the JSON parser closed. Keep the
@@ -518,6 +522,10 @@ export function createRengePiHost({
       acceptingInput: false,
       inputs: new Map(),
     };
+    run.extensionUi = createPiExtensionUi({
+      signal: run.abortController.signal,
+      emit: (event) => writeSse(response, piEvent(event.type, { runId, ...event })),
+    });
     run.shellSessions = createShellSessionManager({
       onBackgroundUpdate: ({ toolCallId, toolName, result, finished, isError }) => {
         if (run.completed || run.cancelled) return;
@@ -533,6 +541,7 @@ export function createRengePiHost({
     const abortRun = () => {
       if (run.completed) return;
       run.cancelled = true;
+      run.abortController.abort();
       run.shellSessions.dispose();
       void run.session?.abort();
       settlePendingTools(run, new Error("Pi 会话连接已关闭"));
@@ -635,9 +644,12 @@ export function createRengePiHost({
       });
       await resourceLoader.reload();
       checkCancelled();
-      const extensionToolNames = resourceLoader
-        .getExtensions()
-        .extensions
+      const extensionResult = resourceLoader.getExtensions();
+      for (const error of extensionResult.errors) {
+        writeSse(response, piEvent("extension_error", { runId, event: "load", ...error }));
+      }
+      bindPiCommandSignals(extensionResult.extensions, run.abortController.signal);
+      const extensionToolNames = extensionResult.extensions
         .flatMap((extension) => Array.from(extension.tools.keys()));
       const localCustomTools = createPermissionCheckedPiTools({
         cwd, nativeTools, sessionId: ownerSessionId, authorizeTool, checkCancelled,
@@ -698,8 +710,10 @@ export function createRengePiHost({
         session.setActiveToolsByName(initialActiveToolNames);
       }
       installContinuousPiRetry(session);
-      await session.bindExtensions({
-        mode: "json",
+      installPiToolResultCompatibility(session);
+      const extensionBindings = {
+        mode: "rpc",
+        uiContext: run.extensionUi.context,
         onError: (extensionError) => {
           console.warn(
             `[pi-extension] ${extensionError.extensionPath} ${extensionError.event}: ${extensionError.error}`,
@@ -720,11 +734,25 @@ export function createRengePiHost({
             return { cancelled: result.cancelled };
           },
           switchSession: async () => ({ cancelled: true }),
-          reload: async () => session.reload(),
+          reload: async () => {
+            await session.reload();
+            bindPiCommandSignals(resourceLoader.getExtensions().extensions, run.abortController.signal);
+            installPiToolResultCompatibility(session);
+          },
         },
-      });
+      };
 
       unsubscribe = session.subscribe((event) => {
+        if (event.type === "entry_appended" && event.entry?.type === "custom" &&
+            resourceLoader.getExtensions().extensions.some((extension) =>
+              extension.entryRenderers?.has(event.entry.customType))) {
+          writeSse(response, piEvent("extension_entry", { runId, entry: event.entry }));
+          return;
+        }
+        if (event.type === "message_end" && event.message?.role === "custom" && event.message.display) {
+          writeSse(response, piEvent("extension_message", { runId, message: event.message }));
+          return;
+        }
         if (event.type === "message_start" && event.message?.role === "user") {
           const input = run.inputs.get(event.message.rengeInputId);
           if (input && !input.delivered) {
@@ -842,7 +870,7 @@ export function createRengePiHost({
             toolCallId: resolvePreviewToolCallId(run, event.toolCallId, event.toolName),
             executionToolCallId: event.toolCallId,
             toolName: event.toolName,
-            result: event.partialResult,
+            result: normalizePiExtensionResult(event.partialResult),
           }));
           return;
         }
@@ -856,7 +884,7 @@ export function createRengePiHost({
             executionToolCallId: event.toolCallId,
             toolName: event.toolName,
             isError: event.isError,
-            result: event.result,
+            result: normalizePiExtensionResult(event.result),
           }));
           return;
         }
@@ -866,15 +894,21 @@ export function createRengePiHost({
         }
       });
 
+      // Subscribe before session_start so startup output is not lost.
+      await session.bindExtensions(extensionBindings);
+      checkCancelled();
       const prompt = resolvePrompt(
         converted.promptMessage ?? converted.fallbackPromptMessage,
+      );
+      const isExtensionCommand = prompt.text.startsWith("/") && Boolean(
+        session.extensionRunner?.getCommand(prompt.text.slice(1).split(" ", 1)[0]),
       );
       checkCancelled();
       const pendingPromptTokens = estimatePendingPromptTokens(prompt);
       // PiDeck performs native auto-compaction before a prompt when the
       // context is over the reserve threshold. Keep that behavior even when
       // a local OpenAI-compatible gateway omits usage metadata.
-      await maybeAutoCompact(session, compaction, pendingPromptTokens);
+      if (!isExtensionCommand) await maybeAutoCompact(session, compaction, pendingPromptTokens);
       checkCancelled();
       const promptOptions = prompt.images.length > 0 ? { images: prompt.images } : undefined;
       run.acceptingInput = true;
@@ -882,7 +916,7 @@ export function createRengePiHost({
       try {
         await session.prompt(prompt.text, promptOptions);
         const errorMessage = session.agent.state.errorMessage;
-        if (errorMessage) throw new Error(errorMessage);
+        if (errorMessage && !isExtensionCommand) throw new Error(errorMessage);
       } catch (promptError) {
         checkCancelled();
         const discoveredWindow = extractContextWindowFromError(promptError);
@@ -922,13 +956,13 @@ export function createRengePiHost({
         const retryError = session.agent.state.errorMessage;
         if (retryError) throw new Error(retryError);
       }
-      const finishReason = getSessionFinishReason(session, run.lastAssistantStopReason);
+      const finishReason = isExtensionCommand ? "stop" : getSessionFinishReason(session, run.lastAssistantStopReason);
       await run.shellSessions.dispose();
       run.acceptingInput = false;
       flushIncompleteStreamingToolCalls(run, { finishReason, willRetry: false });
       // Some local gateways report zero usage, so the SDK cannot run its
       // post-turn threshold check. Re-check Pi's own message estimator here.
-      if (!run.cancelled) await maybeAutoCompact(session, compaction);
+      if (!run.cancelled && !isExtensionCommand) await maybeAutoCompact(session, compaction);
       writeSse(response, piEvent("context_usage", {
         runId,
         usage: getReliableContextUsage(session),
@@ -943,6 +977,7 @@ export function createRengePiHost({
     } finally {
       run.acceptingInput = false;
       run.completed = true;
+      run.abortController.abort();
       await run.shellSessions.dispose();
       response.off("close", abortRun);
       if (run.cancelled) await run.session?.abort();
@@ -1043,10 +1078,19 @@ export function createRengePiHost({
     const run = runs.get(runId);
     if (!run) return { ok: true, aborted: false };
     run.cancelled = true;
+    run.abortController.abort();
     run.shellSessions.dispose();
     settlePendingTools(run, new Error("Pi 会话已由用户中止"));
     await run.session?.abort();
     return { ok: true, aborted: true };
+  };
+
+  const handleExtensionUiResponse = (body) => {
+    const run = runs.get(String(body?.runId ?? ""));
+    if (!run || run.cancelled || !run.extensionUi.respond(String(body?.id ?? ""), body)) {
+      return { ok: false, status: 404, error: "Pi 扩展交互不存在或已经结束" };
+    }
+    return { ok: true, status: 200 };
   };
 
   const handleInput = async (body) => {
@@ -1124,6 +1168,7 @@ export function createRengePiHost({
   const dispose = async () => {
     await Promise.all(Array.from(runs.values()).map(async (run) => {
       run.cancelled = true;
+      run.abortController.abort();
       run.shellSessions.dispose();
       settlePendingTools(run, new Error("Pi Host 已关闭"));
       await run.session?.abort();
@@ -1138,6 +1183,7 @@ export function createRengePiHost({
   return {
     handleChat,
     handleToolResult,
+    handleExtensionUiResponse,
     handleAbort,
     handleInput,
     handleCompact,

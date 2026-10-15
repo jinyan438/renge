@@ -15,6 +15,7 @@ import {
 } from "../src/chatBubbleStatusUtils.ts";
 import { createChatStreamUpdateBatcher } from "../src/chatPerformanceUtils.ts";
 import { createPiStreamingTimeline } from "../src/piStreamingTimeline.ts";
+import { normalizePiExtensionText } from "../src/piExtensionText.mjs";
 
 const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
 function loadAppCode(start, end, expression, globals = {}) {
@@ -307,6 +308,7 @@ test("completed and failed tools auto-collapse, including file mutations", () =>
     "renderPiToolVisualization",
     {
       React,
+      normalizePiExtensionText,
       toolVisualizationResultText: () => "",
       toolVisualizationDiff: () => "",
       isObjectRecord: () => false,

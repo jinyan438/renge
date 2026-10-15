@@ -3260,6 +3260,12 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
       return;
     }
 
+    if (pathname === "/api/pi/extension-ui-response") {
+      const result = piHost.handleExtensionUiResponse(body);
+      sendJson(response, result.status, result.ok ? { ok: true } : { error: result.error });
+      return;
+    }
+
     if (pathname === "/api/pi/compact") {
       const result = await piHost.handleCompact(body);
       sendJson(response, result.status, result.ok

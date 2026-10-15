@@ -1,0 +1,14 @@
+.pi-extension-dialog-backdrop { z-index: 20000; }
+.pi-extension-dialog {
+  width: min(480px, calc(100vw - 32px)); padding: 24px; border-radius: 20px;
+  background: var(--panel-bg, #fff); color: var(--text-primary, #172033);
+  box-shadow: 0 16px 64px #0003; max-height: calc(100vh - 48px); overflow: auto;
+}
+.pi-extension-dialog h2 { margin: 0 0 18px; font-size: 20px; }
+.pi-extension-dialog p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.pi-extension-dialog input, .pi-extension-dialog select, .pi-extension-dialog textarea {
+  box-sizing: border-box; width: 100%; padding: 12px; font: inherit;
+  border: 1px solid #b8c3d8; border-radius: 8px; background: inherit; color: inherit;
+}
+.pi-extension-dialog textarea { min-height: 180px; resize: vertical; }
+.pi-extension-dialog-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px; }

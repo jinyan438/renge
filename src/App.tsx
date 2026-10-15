@@ -1,6 +1,8 @@
 import { createChatSessionRuntime, type ChatInputMode, type SessionRunStatus } from "./chatSessionRuntime";
 import type { ReviewSource, ReviewSnapshot, ReviewDetail, ReviewRequest, ReviewAiResult } from "./codeReviewUtils";
 import { ChatCodeContent } from "./ChatCodeContent";
+import { usePiExtensionDialogs, type PiExtensionEventFields } from "./PiExtensionDialog";
+import { getPiExtensionDisplayText, normalizePiExtensionText } from "./piExtensionText.mjs";
 import { createUserProfile, normalizeUserProfiles, type UserProfile } from "./userProfileUtils";
 import {
   ArrowLeft,
@@ -1579,7 +1581,7 @@ type PendingChatInput = {
   execute?: () => Promise<void>;
 };
 
-type PiStreamEvent = {
+type PiStreamEvent = PiExtensionEventFields & {
   type:
     | "run_start"
     | "run_ready"
@@ -1596,7 +1598,12 @@ type PiStreamEvent = {
     | "compaction_end"
     | "context_usage"
     | "auto_retry_start"
-    | "auto_retry_end";
+    | "auto_retry_end"
+    | "extension_ui_request"
+    | "extension_ui_cancel"
+    | "extension_entry"
+    | "extension_message"
+    | "extension_error";
   runId?: string;
   inputId?: string;
   kernel?: string;
@@ -12663,6 +12670,7 @@ function PortfolioDesktopWindow({
 }
 
 export function App() {
+  const piExtensionDialogs = usePiExtensionDialogs();
   const focusedDesktopWindowRef = useRef("chat");
   const [openWindows, setOpenWindows] = useState<ManagedWindowState[]>([]);
   const topWindowZIndexRef = useRef(100);
@@ -13098,6 +13106,8 @@ export function App() {
   const [extensions, setExtensions] = useState<InstalledExtension[]>(() =>
     loadInstalledExtensions(EXTENSIONS_STORAGE_KEY),
   );
+  const piExtensionsEnabled = extensions.some((extension) => extension.compatibility === "pi" &&
+    extension.enabled && extension.status !== "error" && (extension.piResources?.extensions ?? 1) > 0);
   const [extensionInstallUrl, setExtensionInstallUrl] = useState(
     "@ff-labs/pi-fff",
   );
@@ -13142,7 +13152,7 @@ export function App() {
   const [chatChoiceDrafts, setChatChoiceDrafts] = useState<Record<string, string>>({});
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const contextVisibleChatMessages = useMemo(
-    () => chatMessages.filter((message) => !isTavernHiddenMessage(message)),
+    () => chatMessages.filter((message) => !isTavernHiddenMessage(message) && message.extra?.piExtensionDisplayOnly !== true),
     [chatMessages],
   );
   const contextMeterChatMessages = useThrottledValue(
@@ -13784,6 +13794,65 @@ export function App() {
     emitTavernMessageEventNow: (eventName: typeof TAVERN_EVENTS.MESSAGE_SENT | typeof TAVERN_EVENTS.MESSAGE_RECEIVED, messageId: string) =>
       activeChatSessionIdRef.current === sessionId ? emitTavernMessageEventNow(eventName, messageId) : Promise.resolve(-1),
   });
+
+  const createPiExtensionEventHandler = (
+    sessionId: string, signal: AbortSignal | undefined, sender?: ChatSenderIdentity, beforeOutput?: () => void,
+  ) => {
+    const statuses = new Map<string, string>();
+    let lastStatus = "";
+    const append = (content: string, displayOnly = true, entryId?: string) => {
+      if (!content.trim()) return false;
+      beforeOutput?.();
+      commitMessagesForSession(sessionId, (messages) => [...messages, {
+        id: crypto.randomUUID(), role: "assistant", content,
+        ...(sender ? { sender } : {}), createdAt: new Date().toISOString(),
+        extra: { piExtensionDisplayOnly: displayOnly, ...(entryId ? { piEntryId: entryId } : {}) },
+      }]);
+      return true;
+    };
+    return (event: PiStreamEvent): { handled: boolean; visible?: boolean; status?: SessionRunStatus } => {
+      if (event.type === "extension_ui_cancel") {
+        piExtensionDialogs.cancel(event);
+        return { handled: true };
+      }
+      if (event.type === "extension_entry" || event.type === "extension_message") {
+        const text = getPiExtensionDisplayText(event.type === "extension_entry" ? event.entry?.data : event.message);
+        return { handled: true, visible: append(text, event.type === "extension_entry", event.entry?.id) };
+      }
+      if (event.type === "extension_error") {
+        const message = `Pi 扩展错误：${normalizePiExtensionText(event.error || "扩展加载或执行失败")}`;
+        const status: SessionRunStatus = { status: "error", message };
+        setSessionChatStatus(sessionId, status);
+        return { handled: true, visible: append(message), status };
+      }
+      if (event.type !== "extension_ui_request") return { handled: false };
+      if (["select", "confirm", "input", "editor"].includes(event.method ?? "")) {
+        piExtensionDialogs.request(event, signal, (message) => setSessionChatStatus(sessionId, { status: "error", message }));
+      } else if (event.method === "notify") {
+        const text = getPiExtensionDisplayText(event.message);
+        const prefix = event.notifyType === "error" ? "Pi 扩展错误" : event.notifyType === "warning" ? "Pi 扩展提示" : "Pi 扩展";
+        const status: SessionRunStatus = {
+          status: event.notifyType === "error" ? "error" : event.notifyType === "warning" ? "warning" : "success",
+          message: text,
+        };
+        setSessionChatStatus(sessionId, status);
+        return { handled: true, visible: append(`${prefix}：${text}`), status };
+      } else if (event.method === "setStatus" || event.method === "setWorkingMessage" || event.method === "setWidget") {
+        const key = event.statusKey ?? event.widgetKey ?? "working";
+        const text = normalizePiExtensionText(event.statusText ?? event.widgetLines?.join("\n") ?? event.message);
+        if (text) statuses.set(key, text); else statuses.delete(key);
+        const message = [...statuses.values()].join(" · ");
+        setSessionChatStatus(sessionId, (current) => message
+          ? { status: "loading", message }
+          : current.message === lastStatus ? { status: "loading", message: "Pi 正在处理..." } : current);
+        lastStatus = message;
+      } else if (event.method === "set_editor_text") {
+        const text = event.text ?? "";
+        if (activeChatSessionIdRef.current === sessionId) setChatInput(text);
+      }
+      return { handled: true };
+    };
+  };
 
   const getSessionStatusBarState = (sessionId = activeChatSessionIdRef.current) => {
     const session = chatSessionsRef.current.find((candidate) => candidate.id === sessionId);
@@ -24397,7 +24466,7 @@ export function App() {
       ["write", "edit", "write_file", "apply_patch"].includes(normalizedName) ||
       normalizedName.includes("write_file") ||
       normalizedName.includes("edit_file");
-    const resultText = toolVisualizationResultText(meta.result);
+    const resultText = normalizePiExtensionText(toolVisualizationResultText(meta.result));
     const diff = toolVisualizationDiff(meta);
     const lines = resultText.split("\n").slice(0, 400);
     const unexecutedArguments = meta.phase === "arguments" && meta.status !== "done";
@@ -24467,7 +24536,7 @@ export function App() {
               <pre>{resultText || (meta.status === "running" ? "等待输出…" : "无输出")}</pre>
             </div>
           ) : resultText && meta.status !== "error" ? (
-            <pre className="pi-tool-result-preview">{resultText}</pre>
+            <pre className="pi-tool-result-preview">{renderInlineText(resultText)}</pre>
           ) : null}
         </div>
       </details>
@@ -25903,7 +25972,7 @@ export function App() {
             requestContextSettings,
           );
       let messagesForApi = nextMessages.filter(
-        (message) => !isTavernHiddenMessage(message),
+        (message) => !isTavernHiddenMessage(message) && message.extra?.piExtensionDisplayOnly !== true,
       );
       if (useImageRecognitionMcp && imageRecognitionMcpTool && latestImageUserMessage) {
         const imageRecognitionContext = await describeImageAttachmentsWithMcp(
@@ -26201,6 +26270,7 @@ export function App() {
       let assistantMessageVariables: Record<string, unknown> = {};
       let hasVisibleToolResult = false;
       let hasSuccessfulVisibleToolResult = false;
+      let piExtensionStatus: SessionRunStatus | undefined;
       let multiAgentDelegationDisabled = false;
       let preferStreamingSupervisorToolCalls = chatStreamEnabled;
       let pendingMcpObservationPrompt = "";
@@ -26265,7 +26335,16 @@ export function App() {
         const piReturnedToolCalls: ChatToolCall[] = [];
         const piIncompleteToolCalls = new Map<string, ChatToolCall>();
         const piToolVisualizations = new Map<string, ToolVisualization>();
+        const handlePiExtensionEvent = createPiExtensionEventHandler(
+          requestSessionId, abortSignal, assistantSender, options.beforePiToolMessage,
+        );
         const handlePiEvent = async (event: PiStreamEvent) => {
+          const extension = handlePiExtensionEvent(event);
+          if (extension.handled) {
+            if (extension.visible) hasVisibleToolResult = true;
+            if (extension.status) piExtensionStatus = extension.status;
+            return;
+          }
           if (event.type === "run_ready") {
             runtime.piReady = true;
             void flushSteeringInputs(requestSessionId);
@@ -26957,7 +27036,11 @@ export function App() {
             abortSignal,
             subAgentSender,
           );
+          const handleSubExtensionEvent = createPiExtensionEventHandler(
+            requestSessionId, abortSignal, subAgentSender, () => subStreamingTimeline.beforeTool(),
+          );
           const handleSubAgentPiEvent = async (event: PiStreamEvent) => {
+            if (handleSubExtensionEvent(event).handled) return;
             const runtimeStatus = formatPiRuntimeStatus(event);
             if (runtimeStatus) {
               setChatStatus({ status: "loading", message: `${subAgent.name}：${runtimeStatus}` });
@@ -27048,7 +27131,7 @@ export function App() {
             body: JSON.stringify({
               ...buildProviderApiTarget(subAgentProvider),
               runId: subPiRunId,
-              enableTools: subAgentToolDefinitions.length > 0 || piMcpEnabled,
+              enableTools: subAgentToolDefinitions.length > 0 || piMcpEnabled || piExtensionsEnabled,
               allowImageInputs: subAgentCanReceiveImages,
               modelMaxOutputTokens: getProviderModelMaxOutputTokens(
                 subAgentProvider.modelMaxOutputTokens,
@@ -27490,7 +27573,7 @@ export function App() {
         assistantMessageId = streamingTimeline.messageId ?? assistantMessageId;
         try {
           const streamResult = await requestChatCompletion(apiMessages, {
-            includeTools: availableChatTools.length > 0 || piMcpEnabled,
+            includeTools: availableChatTools.length > 0 || piMcpEnabled || piExtensionsEnabled,
             stream: true,
             onDelta: streamingTimeline.pushContent,
             onReasoningDelta: streamingTimeline.pushReasoning,
@@ -27554,7 +27637,7 @@ export function App() {
           let completionResult;
           try {
             completionResult = await requestChatCompletion(apiMessages, {
-              includeTools: availableChatTools.length > 0 || piMcpEnabled,
+              includeTools: availableChatTools.length > 0 || piMcpEnabled || piExtensionsEnabled,
               stream: preferStreamingSupervisorToolCalls,
               toolChoice: "auto",
               onDelta: streamingRound?.pushContent,
@@ -27604,7 +27687,7 @@ export function App() {
               message: "主 Agent 正在切换兼容的流式工具调用...",
             });
             completionResult = await requestChatCompletion(apiMessages, {
-              includeTools: availableChatTools.length > 0 || piMcpEnabled,
+              includeTools: availableChatTools.length > 0 || piMcpEnabled || piExtensionsEnabled,
               stream: true,
               toolChoice: "auto",
               onDelta: streamingRound?.pushContent,
@@ -28018,7 +28101,7 @@ export function App() {
           );
         }
         if (hasVisibleToolResult) {
-          setChatStatus({ status: "success", message: options.successMessage ?? "工具执行完成。" });
+          setChatStatus(piExtensionStatus ?? { status: "success", message: options.successMessage ?? "工具执行完成。" });
           return null;
         }
         throw new Error("响应里没有可显示的回复内容。");
@@ -29374,7 +29457,7 @@ export function App() {
         (!useImageRecognitionMcp && canProviderReceiveImageUrl(chatProvider, requestModelId));
       const suppressAttachmentTransferTool = false;
       let messagesForApi = nextMessages.filter(
-        (message) => !isTavernHiddenMessage(message),
+        (message) => !isTavernHiddenMessage(message) && message.extra?.piExtensionDisplayOnly !== true,
       );
       if (useImageRecognitionMcp && imageRecognitionMcpTool) {
         const imageRecognitionContext = await describeImageAttachmentsWithMcp(
@@ -29615,6 +29698,7 @@ export function App() {
       let assistantChoiceRequest: ChatChoiceRequest | undefined;
       let assistantMessageVariables: Record<string, unknown> = {};
       let hasVisibleToolResult = false;
+      let piExtensionStatus: SessionRunStatus | undefined;
       let pendingMcpObservationPrompt = "";
       let pendingMcpObservationRetries = 0;
       let pendingMcpObservationPromptSent = false;
@@ -29659,7 +29743,16 @@ export function App() {
         const piReturnedToolCalls: ChatToolCall[] = [];
         const piIncompleteToolCalls = new Map<string, ChatToolCall>();
         const piToolVisualizations = new Map<string, ToolVisualization>();
+        const handlePiExtensionEvent = createPiExtensionEventHandler(
+          requestSessionId, abortSignal, undefined, options.beforePiToolMessage,
+        );
         const handlePiEvent = async (event: PiStreamEvent) => {
+          const extension = handlePiExtensionEvent(event);
+          if (extension.handled) {
+            if (extension.visible) hasVisibleToolResult = true;
+            if (extension.status) piExtensionStatus = extension.status;
+            return;
+          }
           if (event.type === "run_ready") {
             runtime.piReady = true;
             void flushSteeringInputs(requestSessionId);
@@ -30160,7 +30253,7 @@ export function App() {
         assistantMessageId = streamingTimeline.messageId ?? assistantMessageId;
         try {
           const streamResult = await requestChatCompletion(apiMessages, {
-            includeTools: availableChatTools.length > 0 || piMcpEnabled,
+            includeTools: availableChatTools.length > 0 || piMcpEnabled || piExtensionsEnabled,
             stream: true,
             onDelta: streamingTimeline.pushContent,
             onReasoningDelta: streamingTimeline.pushReasoning,
@@ -30225,7 +30318,7 @@ export function App() {
           let completionResult;
           try {
             completionResult = await requestChatCompletion(apiMessages, {
-              includeTools: availableChatTools.length > 0 || piMcpEnabled,
+              includeTools: availableChatTools.length > 0 || piMcpEnabled || piExtensionsEnabled,
               stream: useStreamingToolCompletion,
               toolChoice: "auto",
               onDelta: streamingRound?.pushContent,
@@ -30517,7 +30610,7 @@ export function App() {
       }
       if (!hasAssistantTimelinePayload(assistantContent, assistantReasoning)) {
         if (hasVisibleToolResult) {
-          setChatStatus({ status: "success", message: "工具执行完成。" });
+          setChatStatus(piExtensionStatus ?? { status: "success", message: "工具执行完成。" });
           return;
         }
         throw new Error("响应里没有可显示的回复内容。");
@@ -40657,11 +40750,12 @@ export function App() {
       {renderDesktopWindow("studio", "人格工作室", studioWindow)}
       {(avatarCropModal ||
         roleplayGreetingSelectorModal ||
-        dataClearConfirmationModal) && (
+        dataClearConfirmationModal || piExtensionDialogs.dialog) && (
         createPortal(<div className="managed-global-overlays portfolio-desktop-shell">
           {avatarCropModal}
           {roleplayGreetingSelectorModal}
           {dataClearConfirmationModal}
+          {piExtensionDialogs.dialog}
         </div>, getDesktopWindow(focusedDesktopWindowRef.current).document.body)
       )}
     </>
