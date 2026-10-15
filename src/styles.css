@@ -2131,6 +2131,24 @@ summary:focus-visible {
   padding: 16px;
 }
 
+.user-profile-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 20px;
+}
+
+.user-profile-toolbar .field {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.user-profile-toolbar select {
+  width: 100%;
+  min-width: 0;
+}
+
 .user-profile-form {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);
@@ -2152,6 +2170,16 @@ summary:focus-visible {
 
 .user-profile-toggle span {
   color: #334155;
+}
+
+@media (max-width: 600px) {
+  .user-profile-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .user-profile-form .avatar-profile {
+    grid-row: auto;
+  }
 }
 
 .llm-settings {

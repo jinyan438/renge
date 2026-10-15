@@ -41,7 +41,8 @@
     "test:pocket-calendar": "tsx --test test/pocketCalendar.test.mjs && node --experimental-strip-types test/pocketCalendarBrowser.test.mjs",
     "test:pocket-notes": "tsx --test test/pocketNotes.test.mjs && node --experimental-strip-types test/pocketNotesBrowser.test.mjs",
     "test:pocket-moments": "tsx --test test/pocketMoments.test.mjs && node --experimental-strip-types test/pocketMomentsBrowser.test.mjs",
-    "test:character-card": "tsx --test test/characterCardRegexCompatibility.test.mjs"
+    "test:character-card": "tsx --test test/characterCardRegexCompatibility.test.mjs",
+    "test:user-profiles": "node --experimental-strip-types --test test/userProfileUtils.test.mjs && node test/userProfilesBrowser.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.87.1",

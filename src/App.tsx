@@ -1,6 +1,7 @@
 import { createChatSessionRuntime, type ChatInputMode, type SessionRunStatus } from "./chatSessionRuntime";
 import type { ReviewSource, ReviewSnapshot, ReviewDetail, ReviewRequest, ReviewAiResult } from "./codeReviewUtils";
 import { ChatCodeContent } from "./ChatCodeContent";
+import { createUserProfile, normalizeUserProfiles, type UserProfile } from "./userProfileUtils";
 import {
   ArrowLeft,
   Bot,
@@ -496,6 +497,7 @@ const influenceLevelShortLabels: Record<InfluenceLevel, string> = {
 
 type AvatarCropState = {
   target: "persona" | "user";
+  userProfileId?: string;
   src: string;
   zoom: number;
   offsetX: number;
@@ -998,14 +1000,6 @@ const BUILT_IN_SYSTEM_PROMPTS: SystemPromptProfile[] = [
   },
 ];
 
-type UserProfile = {
-  nickname: string;
-  bio: string;
-  avatarImage: string;
-  sendToAi: boolean;
-  updatedAt: string;
-};
-
 type ChatMessageFontFamily = "system" | "lxgw-wenkai-screen";
 
 type ChatPersonalizationSettings = {
@@ -1116,6 +1110,8 @@ type RengeAppData = {
   characterTranslationAdditionalPrompt?: string;
   characterTranslationPromptEnabled?: boolean;
   userProfile?: UserProfile;
+  userProfiles?: UserProfile[];
+  activeUserProfileId?: string;
   chatSender?: ChatSenderIdentity;
   chatMultiBubbleEnabled?: boolean;
   chatHtmlRenderEnabled?: boolean;
@@ -1665,6 +1661,7 @@ const CHARACTER_TRANSLATION_PROMPT_STORAGE_KEY = "renge_character_translation_pr
 const CHARACTER_TRANSLATION_PROMPT_ENABLED_STORAGE_KEY =
   "renge_character_translation_prompt_enabled";
 const USER_PROFILE_STORAGE_KEY = "renge_user_profile";
+const USER_PROFILES_STORAGE_KEY = "renge_user_profiles";
 const CHAT_SENDER_STORAGE_KEY = "renge_chat_sender";
 const CHAT_MULTI_BUBBLE_STORAGE_KEY = "renge_chat_multi_bubble_enabled";
 const CHAT_HTML_RENDER_STORAGE_KEY = "renge_chat_html_render_enabled";
@@ -2512,33 +2509,21 @@ function loadChatSender() {
   }
 }
 
-function createUserProfile(): UserProfile {
-  return {
-    nickname: "User",
-    bio: "",
-    avatarImage: "",
-    sendToAi: false,
-    updatedAt: new Date().toISOString(),
-  };
-}
-
-function normalizeUserProfile(rawProfile?: Partial<UserProfile>): UserProfile {
-  return {
-    nickname: rawProfile?.nickname ?? "User",
-    bio: rawProfile?.bio ?? "",
-    avatarImage: rawProfile?.avatarImage ?? "",
-    sendToAi: Boolean(rawProfile?.sendToAi),
-    updatedAt: rawProfile?.updatedAt ?? new Date().toISOString(),
-  };
-}
-
-function loadUserProfile() {
+function loadUserProfiles() {
+  let legacyProfile: unknown;
   try {
     const rawValue = localStorage.getItem(USER_PROFILE_STORAGE_KEY);
-    if (!rawValue) return createUserProfile();
-    return normalizeUserProfile(JSON.parse(rawValue) as Partial<UserProfile>);
+    legacyProfile = rawValue ? JSON.parse(rawValue) : undefined;
   } catch {
-    return createUserProfile();
+    // A damaged legacy cache must not block loading a saved collection.
+  }
+  try {
+    const rawValue = localStorage.getItem(USER_PROFILES_STORAGE_KEY);
+    const state = rawValue ? JSON.parse(rawValue) : null;
+    return normalizeUserProfiles(state?.userProfiles, state?.activeUserProfileId, legacyProfile);
+  } catch {
+    // Recover the original single profile if the collection cannot be read.
+    return normalizeUserProfiles(undefined, undefined, legacyProfile);
   }
 }
 
@@ -3579,6 +3564,10 @@ function persistAppDataToLocalStores(
     String(data.characterTranslationPromptEnabled ?? true),
   );
   setLocalStorageJsonSafely(USER_PROFILE_STORAGE_KEY, data.userProfile ?? {});
+  setLocalStorageJsonSafely(USER_PROFILES_STORAGE_KEY, {
+    userProfiles: data.userProfiles,
+    activeUserProfileId: data.activeUserProfileId,
+  });
   setLocalStorageJsonSafely(CHAT_SENDER_STORAGE_KEY, data.chatSender ?? { kind: "user" });
   setLocalStorageValueSafely(
     CHAT_MULTI_BUBBLE_STORAGE_KEY,
@@ -12973,7 +12962,33 @@ export function App() {
       selected: boolean;
     }>;
   } | null>(null);
-  const [userProfile, setUserProfile] = useState<UserProfile>(loadUserProfile);
+  const [userProfileState, setUserProfileState] = useState(loadUserProfiles);
+  const { userProfiles, activeUserProfileId } = userProfileState;
+  const userProfile = userProfiles.find((profile) => profile.id === activeUserProfileId) ?? userProfiles[0];
+  const setUserProfile = (update: (profile: UserProfile) => UserProfile, profileId = userProfile.id) => {
+    setUserProfileState((current) => ({
+      ...current,
+      userProfiles: current.userProfiles.map((profile) => profile.id === profileId ? update(profile) : profile),
+    }));
+  };
+  const addUserProfile = () => {
+    const profile = createUserProfile("新用户");
+    setUserProfileState((current) => ({
+      userProfiles: [...current.userProfiles, profile],
+      activeUserProfileId: profile.id,
+    }));
+  };
+  const deleteUserProfile = () => {
+    if (userProfiles.length <= 1 || !window.confirm(`删除用户资料“${userProfile.nickname || "未命名用户"}”？删除后无法恢复。`)) return;
+    setUserProfileState((current) => {
+      if (current.userProfiles.length <= 1) return current;
+      const remaining = current.userProfiles.filter((profile) => profile.id !== userProfile.id);
+      return {
+        userProfiles: remaining,
+        activeUserProfileId: current.activeUserProfileId === userProfile.id ? remaining[0].id : current.activeUserProfileId,
+      };
+    });
+  };
   const [providerPullState, setProviderPullState] = useState<{
     status: ProviderPullState;
     message: string;
@@ -15062,6 +15077,8 @@ export function App() {
       characterTranslationAdditionalPrompt,
       characterTranslationPromptEnabled,
       userProfile,
+      userProfiles,
+      activeUserProfileId,
       chatSender,
       chatMultiBubbleEnabled,
       chatHtmlRenderEnabled,
@@ -15081,7 +15098,7 @@ export function App() {
       pcConnection: appDataPcConnection,
       updatedAt: snapshotUpdatedAt,
     };
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataPcConnection, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, contextCompressionSettings, extensions, llmContextSettings, llmFullAccessEnabled, llmPushNotificationsEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, tavernExtensionSettings, tavernSettingsStore, userProfile, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataPcConnection, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, contextCompressionSettings, extensions, llmContextSettings, llmFullAccessEnabled, llmPushNotificationsEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, tavernExtensionSettings, tavernSettingsStore, userProfile, userProfiles, activeUserProfileId, worldBooks]);
 
   flushTavernPersistenceRef.current = async () => {
     if (!appDataLoaded || appDataPersistenceSuspendedRef.current) {
@@ -15232,9 +15249,9 @@ export function App() {
       lastCharacterCardsForPersistentStore = characterCardsPersistenceBlocked
         ? normalizedCharacterCards
         : null;
-      const normalizedUserProfile = persistentData?.userProfile
-        ? normalizeUserProfile(persistentData.userProfile)
-        : loadUserProfile();
+      const normalizedUserProfileState = persistentData && ("userProfiles" in persistentData || "userProfile" in persistentData)
+        ? normalizeUserProfiles(persistentData.userProfiles, persistentData.activeUserProfileId, persistentData.userProfile)
+        : loadUserProfiles();
       const nextChatSender = normalizeChatSenderIdentity(
         persistentData?.chatSender ?? loadChatSender(),
         normalizedPersonas,
@@ -15547,7 +15564,7 @@ export function App() {
       setActiveCharacterCardId(nextActiveCharacterCardId);
       setCharacterTranslationAdditionalPrompt(nextCharacterTranslationAdditionalPrompt);
       setCharacterTranslationPromptEnabled(nextCharacterTranslationPromptEnabled);
-      setUserProfile(normalizedUserProfile);
+      setUserProfileState(normalizedUserProfileState);
       setChatSender(nextChatSender);
       setChatMode(nextChatMode);
       setMultiAgentWorkflow(nextMultiAgentWorkflow);
@@ -31820,6 +31837,7 @@ export function App() {
 
     setAvatarCrop({
       target,
+      userProfileId: target === "user" ? userProfile.id : undefined,
       src,
       zoom: 1,
       offsetX: 0,
@@ -31867,7 +31885,7 @@ export function App() {
         ...current,
         avatarImage,
         updatedAt: new Date().toISOString(),
-      }));
+      }), avatarCrop.userProfileId);
     } else {
       updatePersona((persona) => ({ ...persona, avatarImage }));
     }
@@ -36462,8 +36480,40 @@ export function App() {
               <div className="section-heading compact">
                 <div>
                   <h2>用户资料</h2>
-                  <p>用于聊天界面的用户显示；开启后昵称和简介会注入给 AI。</p>
+                  <p>可保存多份用户资料，选择后用于聊天显示；开启后将当前资料的昵称和简介发送给 AI。</p>
                 </div>
+              </div>
+
+              <div className="user-profile-toolbar">
+                <label className="field">
+                  <span>当前使用的用户</span>
+                  <select
+                    aria-label="当前使用的用户"
+                    value={activeUserProfileId}
+                    onChange={(event) => {
+                      const profileId = event.target.value;
+                      setUserProfileState((current) => current.userProfiles.some((profile) => profile.id === profileId)
+                        ? { ...current, activeUserProfileId: profileId }
+                        : current);
+                    }}
+                  >
+                    {userProfiles.map((profile, index) => (
+                      <option key={profile.id} value={profile.id}>{index + 1}. {profile.nickname || "未命名用户"}</option>
+                    ))}
+                  </select>
+                </label>
+                <button type="button" className="small-action" onClick={addUserProfile}>
+                  <Plus size={16} /> 新增用户
+                </button>
+                <button
+                  type="button"
+                  className="ghost-action"
+                  disabled={userProfiles.length <= 1}
+                  title={userProfiles.length <= 1 ? "至少保留一份用户资料" : "删除当前用户资料"}
+                  onClick={deleteUserProfile}
+                >
+                  <Trash2 size={16} /> 删除用户
+                </button>
               </div>
 
               <div className="user-profile-form">
@@ -36508,6 +36558,7 @@ export function App() {
                   <span>用户简介</span>
                   <textarea
                     value={userProfile.bio}
+                    aria-label="用户简介"
                     placeholder="写给 AI 了解你的简短资料"
                     onChange={(event) =>
                       setUserProfile((current) => ({
