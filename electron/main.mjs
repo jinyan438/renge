@@ -60,7 +60,8 @@ import { createTextContextMenuTemplate } from "./text-context-menu.mjs";
 import { createDesktopWindowManager } from "./desktop-windows.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const desktopAppId = "com.renge.agentlab";
+// Separate the desktop from the legacy group cached with Electron's icon.
+const desktopAppId = "com.renge.agentlab.desktop";
 const appIconPath = join(
   __dirname,
   "assets",
@@ -1771,6 +1772,7 @@ async function createMainWindow() {
     title: "Renge Agent Lab",
     icon: appIconPath,
     backgroundColor: "#f5f7fa",
+    show: false, // Apply taskbar identity before Windows first displays the window.
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
@@ -1787,6 +1789,7 @@ async function createMainWindow() {
   configureDesktopWindow(mainWindow);
   mainWindow.removeMenu();
   await mainWindow.loadURL(serverController.url);
+  mainWindow.show();
 }
 
 function configureDesktopWindow(hostWindow) {
