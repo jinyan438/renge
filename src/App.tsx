@@ -719,6 +719,8 @@ type ChatChoiceRequest = {
 
 type ToolVisualization = {
   toolCallId?: string;
+  parentToolCallId?: string;
+  durationMs?: number;
   name: string;
   args?: Record<string, unknown>;
   partialArguments?: string;
@@ -1586,6 +1588,7 @@ type PiStreamEvent = PiExtensionEventFields & {
     | "run_start"
     | "run_ready"
     | "input_delivered"
+    | "agent_settled"
     | "tool_request"
     | "tool_start"
     | "tool_update"
@@ -1612,6 +1615,8 @@ type PiStreamEvent = PiExtensionEventFields & {
   // Pi's own id for the execution phase, which may differ from the streamed
   // toolCallId used for the rendered preview.
   executionToolCallId?: string;
+  parentToolCallId?: string;
+  durationMs?: number;
   toolName?: string;
   contentIndex?: number;
   delta?: string;
@@ -2763,6 +2768,12 @@ function normalizeChatMessage(
             : rawToolVisualization.status) as ToolVisualization["status"],
           ...(typeof rawToolVisualization.toolCallId === "string"
             ? { toolCallId: rawToolVisualization.toolCallId }
+            : {}),
+          ...(typeof rawToolVisualization.parentToolCallId === "string"
+            ? { parentToolCallId: rawToolVisualization.parentToolCallId }
+            : {}),
+          ...(typeof rawToolVisualization.durationMs === "number" && Number.isFinite(rawToolVisualization.durationMs) && rawToolVisualization.durationMs >= 0
+            ? { durationMs: rawToolVisualization.durationMs }
             : {}),
           ...(isObjectRecord(rawToolVisualization.args)
             ? { args: rawToolVisualization.args }
@@ -24511,7 +24522,7 @@ export function App() {
           </span>
           <span className="pi-tool-visualization-status">
             {meta.status === "done" ? <CircleCheck size={14} /> : meta.status === "error" ? <X size={14} /> : <LoaderCircle className="chat-status-spinner" size={14} />}
-            {statusLabel}
+            {statusLabel}{meta.status !== "running" && meta.durationMs !== undefined ? ` · ${(meta.durationMs / 1000).toFixed(2)} 秒` : ""}
           </span>
           <ChevronDown className="pi-tool-visualization-chevron" size={15} />
         </summary>
@@ -26462,6 +26473,7 @@ export function App() {
             const visualization: ToolVisualization = {
               ...(previous ?? {}),
               toolCallId: event.toolCallId,
+              parentToolCallId: event.parentToolCallId,
               name: event.toolName || previous?.name || "unknown_tool",
               args: event.arguments ?? previous?.args ?? {},
               phase: "execution",
@@ -26502,6 +26514,8 @@ export function App() {
             const visualization: ToolVisualization = {
               ...(previous ?? {}),
               toolCallId: event.toolCallId ?? previous?.toolCallId,
+              parentToolCallId: event.parentToolCallId ?? previous?.parentToolCallId,
+              durationMs: event.durationMs ?? previous?.durationMs,
               name: event.toolName || previous?.name || "unknown_tool",
               args: previous?.args ?? {},
               result: event.result,
@@ -27054,7 +27068,7 @@ export function App() {
                 [],
                 "",
                 subAgentSender,
-                { toolCallId: event.toolCallId, name: event.toolName || "unknown_tool", args: event.arguments, phase: "execution", status: "running", startedAt: new Date().toISOString() },
+                { toolCallId: event.toolCallId, parentToolCallId: event.parentToolCallId, name: event.toolName || "unknown_tool", args: event.arguments, phase: "execution", status: "running", startedAt: new Date().toISOString() },
               );
               return;
             }
@@ -27065,6 +27079,7 @@ export function App() {
             if (event.type === "tool_end") {
               const visualization: ToolVisualization = {
                 toolCallId: event.toolCallId, name: event.toolName || "unknown_tool", result: event.result,
+                parentToolCallId: event.parentToolCallId, durationMs: event.durationMs,
                 phase: "execution", status: event.isError ? "error" : isPiShellStillRunning(event.result, event.toolName) ? "running" : "done",
                 endedAt: isPiShellStillRunning(event.result, event.toolName) ? undefined : new Date().toISOString(),
               };
@@ -29861,6 +29876,7 @@ export function App() {
             const visualization: ToolVisualization = {
               ...(previous ?? {}),
               toolCallId: event.toolCallId,
+              parentToolCallId: event.parentToolCallId,
               name: event.toolName || previous?.name || "unknown_tool",
               args: event.arguments ?? previous?.args ?? {},
               phase: "execution",
@@ -29894,6 +29910,8 @@ export function App() {
             const visualization: ToolVisualization = {
               ...(previous ?? {}),
               toolCallId: event.toolCallId ?? previous?.toolCallId,
+              parentToolCallId: event.parentToolCallId ?? previous?.parentToolCallId,
+              durationMs: event.durationMs ?? previous?.durationMs,
               name: event.toolName || previous?.name || "unknown_tool",
               args: previous?.args ?? {},
               result: event.result,

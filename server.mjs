@@ -3999,9 +3999,10 @@ export function startRengeServer(options = {}) {
 
     await serveStatic(request, response, url.pathname);
   });
+  let resourceDisposal;
+  const dispose = () => resourceDisposal ??= Promise.all([piHost.dispose(), directImageDispatcher.close()]);
   server.once("close", () => {
-    void piHost.dispose();
-    void directImageDispatcher.close();
+    void dispose().catch((error) => console.warn("Server resource cleanup failed", error));
   });
 
   return new Promise((resolveServer, rejectServer) => {
@@ -4012,6 +4013,7 @@ export function startRengeServer(options = {}) {
       const actualPort = typeof address === "object" && address ? address.port : port;
       resolveServer({
         server,
+        dispose,
         host,
         port: actualPort,
         url: `http://127.0.0.1:${actualPort}`,

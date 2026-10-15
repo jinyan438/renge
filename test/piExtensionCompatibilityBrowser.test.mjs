@@ -22,8 +22,11 @@ let server, browser, page;
 const errors = [];
 const waitFor = async (check) => {
   const end = Date.now() + 15_000;
-  while (!check() && Date.now() < end) await delay(20);
-  assert.ok(check(), "expected fixture progress");
+  while (Date.now() < end) {
+    if (await check()) return;
+    await delay(20);
+  }
+  assert.ok(await check(), "expected fixture progress");
 };
 try {
   await mkdir(".runtime", { recursive: true });
@@ -117,12 +120,24 @@ try {
   await page.getByRole("button", { name: "停止输出", exact: true }).waitFor({ state: "hidden" });
   await send("验证工具引用");
   pi({ type: "tool_start", toolCallId: "research", toolName: "codex-research", arguments: { open: [{ ref_id: "turn0search0" }] } });
-  pi({ type: "tool_end", toolCallId: "research", toolName: "codex-research", result: { content: [{ type: "text", text: "引用 [1](https://example.com/source)" }], details: {} } });
+  pi({ type: "tool_end", toolCallId: "research", toolName: "codex-research", durationMs: 1234, result: { content: [{ type: "text", text: "引用 [1](https://example.com/source)" }], details: {} } });
   finish();
   const tool = page.locator(".pi-tool-visualization").filter({ hasText: "codex-research" });
   await page.locator(".chat-tool-run").filter({ has: tool }).locator(":scope > summary").click();
   await tool.locator("summary").click();
   assert.equal(await tool.getByRole("link", { name: "1", exact: true }).getAttribute("href"), "https://example.com/source");
+  await tool.locator(".pi-tool-visualization-status").filter({ hasText: "1.23 秒" }).waitFor();
+  await page.getByRole("button", { name: "停止输出", exact: true }).waitFor({ state: "hidden" });
+  await waitFor(async () => {
+    const snapshot = await (await fetch(`${server.url}/api/app-data`)).json();
+    return snapshot.data.chatSessions.some((session) => session.messages.some((message) => message.toolVisualization?.durationMs === 1234));
+  });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.reload();
+  await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
+  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
+  await page.locator(".chat-session-item").filter({ hasText: "插件兼容测试" }).click();
+  await page.locator(".pi-tool-visualization-status").filter({ hasText: "1.23 秒" }).waitFor({ state: "attached" });
   assert.equal(await page.getByText("响应里没有可显示的回复内容。", { exact: false }).count(), 0);
   assert.deepEqual(errors, []);
   console.log("Pi extension browser compatibility passed: command results, links, context isolation, notices/errors, dialogs, timeout cleanup, narrow layout and tool citations.");

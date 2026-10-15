@@ -18,6 +18,7 @@ Renge Agent Lab 是一个本地优先的 AI Agent 工作台。它把 **Pi 编码
 - **Pi 原生扩展**：`pi/pi-package-manager.mjs` 让扩展中心可以直接安装、更新、启停和卸载 npm 上的 Pi 包，以及 `pi:` 前缀的 Git / 本地包。
 - **Pi 搜索类插件兼容**：支持 pi-gpt-search 的 `codex-search`、`codex-research`、`web` 工具与 `/gpt-search` 命令。通用 RPC 桥接接收通知、状态、文本组件、自定义消息及有渲染器的文本条目，并提供选择、确认、输入、多行编辑和停止信号；终端超链接会转换为网页链接，返回 `isError` 的工具会正确标记失败。自定义条目只显示并持久保存，不加入模型上下文。终端组件工厂仍需要 Pi TUI；搜索服务的授权与网络由插件自身处理。
 - **Pi 指令类插件兼容**：支持 pi-gpt-with-taste 使用的 Pi 1.2 生命周期、`context_with_system` 命名系统段、`before_provider_request` 最终请求处理及会话分支状态。桌面端和独立服务会将 `getAgentDir()` 与资源加载目录对齐；显式的 `PI_CODING_AGENT_DIR` 配置优先。GPT with Taste 的配置位于 `<agent-dir>/extensions/pi-gpt-with-taste/config.json`，可用 `/taste config` 查看；自定义渠道需要将 `/taste status` 显示的 provider ID 加入 `providers`。`/taste on` 不绕过模型范围或配置错误，指令与提醒仅作用于当前模型请求。
+- **Pi 版本迁移验收**：[0.87.1 → 1.2.0 逐项清单](docs/pi-1.2-migration-audit.md)覆盖 10 个发布版本的 259 条变更，并区分实测、SDK 承接、外部服务待验及产品边界。宿主加载内置 codemode、tool-search 和 MCP 扩展；应用 MCP 配置仍走现有适配器，两个 MCP 引擎互斥。嵌套工具、执行耗时、自定义消息启动回合、启动阶段取消与追加输入处理均有迁移回归。
 
 ### 右侧栏工具组
 
@@ -313,6 +314,7 @@ npm test
 | --- | --- |
 | `npm run test:mcp` | Pi MCP 适配器桥接测试 |
 | `npm run test:pi-extensions` | 构建并检查 Pi 扩展 RPC、命令、搜索、指令投影及浏览器界面；自动检查本机已安装的 pi-gpt-search 与 pi-gpt-with-taste，可用 `PI_GPT_SEARCH_PACKAGE` / `PI_GPT_WITH_TASTE_PACKAGE` 指定包目录，未安装时跳过相应真实包测试。使用本地模拟服务与测试凭据。 |
+| `npm run test:pi-migration` | 构建、逐条清单完整性、Pi 版本迁移协议测试、现有 Pi／插件／MCP／Shell／会话回归，以及扩展和并发会话浏览器检查；不发起真实付费模型请求。 |
 | `npm run test:preset` | 预设工具测试（经 tsx） |
 | `npm run test:tavern` | 浏览器端酒馆运行时回归测试 |
 

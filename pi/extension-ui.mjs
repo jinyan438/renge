@@ -34,6 +34,9 @@ export function createPiExtensionUi({ emit, signal }) {
     message: "此扩展使用了终端专用组件，请使用支持 RPC 的文本界面。", notifyType: "warning",
   });
   const plainTheme = {
+    name: "renge-text", appearance: "light",
+    colors: new Proxy(Object.freeze({}), { get: () => "#666666" }),
+    style: (text) => text,
     fg: (_color, text) => text, bg: (_color, text) => text,
     bold: (text) => text, italic: (text) => text, underline: (text) => text,
     inverse: (text) => text, strikethrough: (text) => text,
@@ -88,15 +91,4 @@ export function bindPiCommandSignals(extensions, signal) {
       }));
     }
   }
-}
-
-// Some Pi extensions return the MCP-style isError flag instead of throwing.
-// The SDK's executor otherwise classifies every returned value as success.
-export function installPiToolResultCompatibility(session) {
-  const afterToolCall = session.agent.afterToolCall;
-  session.agent.afterToolCall = async (event) => {
-    const isError = event.isError || event.result?.isError === true;
-    const patch = await afterToolCall?.({ ...event, isError });
-    return patch ?? (isError !== event.isError ? { isError } : undefined);
-  };
 }

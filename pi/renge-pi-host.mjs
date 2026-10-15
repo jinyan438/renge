@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { join, resolve } from "node:path";
 import {
   createAgentSession,
@@ -17,7 +18,8 @@ import { createPiPackageManager } from "./pi-package-manager.mjs";
 import { installContinuousPiRetry } from "./continuous-retry.mjs";
 import { createPermissionCheckedPiTools } from "./permission-tools.mjs";
 import { createShellSessionManager } from "./shell-sessions.mjs";
-import { bindPiCommandSignals, createPiExtensionUi, installPiToolResultCompatibility } from "./extension-ui.mjs";
+import { bindPiCommandSignals, createPiExtensionUi } from "./extension-ui.mjs";
+import { createPiBuiltinExtensions } from "./builtin-extensions.mjs";
 import { normalizePiExtensionResult } from "../src/piExtensionText.mjs";
 import {
   convertOpenAiMessagesToPi,
@@ -160,10 +162,17 @@ function flushIncompleteStreamingToolCalls(
  * Pi numbers tool calls per assistant message, so the oldest unexecuted
  * preview with the same tool name belongs to this execution.
  */
-function resolvePreviewToolCallId(run, executionToolCallId, toolName) {
+function resolvePreviewToolCallId(run, executionToolCallId, toolName, parentToolCallId) {
   const executionId = String(executionToolCallId ?? "");
   const known = run.executionToolCallAliases.get(executionId);
   if (known) return known;
+
+  // Nested calls have no model-streamed preview. Matching by name here would
+  // consume a later top-level call's preview when both call the same tool.
+  if (parentToolCallId) {
+    run.executionToolCallAliases.set(executionId, executionId);
+    return executionId;
+  }
 
   for (const [previewId, preview] of run.unexecutedToolCalls) {
     if (toolName && preview.toolName !== toolName) continue;
@@ -321,8 +330,9 @@ export function createRengePiHost({
     run.pendingTools.clear();
   };
 
-  const releaseSessionResource = (entry) => {
+  const releaseSessionResource = async (entry, reason = "quit") => {
     if (!entry) return;
+    await entry.session?.extensionRunner?.emit({ type: "session_shutdown", reason });
     entry.session?.dispose();
     if (entry.providerId && entry.modelRuntime) {
       const remaining = (providerUsers.get(entry.providerId) ?? 1) - 1;
@@ -334,8 +344,8 @@ export function createRengePiHost({
     }
   };
 
-  const invalidateIdleSessions = () => {
-    for (const entry of idleSessions.values()) releaseSessionResource(entry);
+  const invalidateIdleSessions = async () => {
+    await Promise.all(Array.from(idleSessions.values(), (entry) => releaseSessionResource(entry, "reload")));
     idleSessions.clear();
   };
 
@@ -466,9 +476,10 @@ export function createRengePiHost({
       return;
     }
     const previousIdleSession = idleSessions.get(sessionKey);
+    let previousIdleRelease;
     if (previousIdleSession) {
       idleSessions.delete(sessionKey);
-      releaseSessionResource(previousIdleSession);
+      previousIdleRelease = releaseSessionResource(previousIdleSession, "resume");
     }
     const compaction = normalizePiCompactionConfig(body?.piCompaction);
     const additionalSkillPaths = normalizePiSkillPaths(body?.piSkillPaths)
@@ -521,6 +532,7 @@ export function createRengePiHost({
       ownerSessionId,
       acceptingInput: false,
       inputs: new Map(),
+      inputContext: new AsyncLocalStorage(),
     };
     run.extensionUi = createPiExtensionUi({
       signal: run.abortController.signal,
@@ -567,6 +579,7 @@ export function createRengePiHost({
     let modelRuntime;
     let effectiveContextWindow = 0;
     try {
+      await previousIdleRelease;
       checkCancelled();
       const contextWindow = resolveContextWindow(body, provider);
       effectiveContextWindow = contextWindow;
@@ -627,9 +640,8 @@ export function createRengePiHost({
         httpIdleTimeoutMs: 0,
       });
       run.settingsManager = settingsManager;
-      const extensionFactories = hasMcpServers
-        ? [await createPiMcpAdapter(mcpConfig, { agentDir })]
-        : [];
+      const extensionFactories = await createPiBuiltinExtensions({ agentDir, legacyMcp: hasMcpServers, enableMcp: requestedToolsEnabled });
+      if (hasMcpServers) extensionFactories.push(await createPiMcpAdapter(mcpConfig, { agentDir }));
       const resourceLoader = new DefaultResourceLoader({
         cwd,
         agentDir,
@@ -651,6 +663,10 @@ export function createRengePiHost({
       bindPiCommandSignals(extensionResult.extensions, run.abortController.signal);
       const extensionToolNames = extensionResult.extensions
         .flatMap((extension) => Array.from(extension.tools.keys()));
+      const defaultExtensionToolNames = extensionResult.extensions
+        .flatMap((extension) => Array.from(extension.tools.values()))
+        .filter((tool) => tool.definition.defaultActive !== false)
+        .map((tool) => tool.definition.name);
       const localCustomTools = createPermissionCheckedPiTools({
         cwd, nativeTools, sessionId: ownerSessionId, authorizeTool, checkCancelled,
         shellSessions: run.shellSessions,
@@ -670,7 +686,7 @@ export function createRengePiHost({
       const initialActiveToolNames = toolsEnabled
         ? [
             ...nativeTools,
-            ...(requestedToolsEnabled ? extensionToolNames : []),
+            ...(requestedToolsEnabled ? defaultExtensionToolNames : []),
             ...customTools.map((tool) => tool.name),
           ]
         : [];
@@ -705,15 +721,34 @@ export function createRengePiHost({
         sessionManager,
       });
       run.session = session;
+      // Preserve the app's input identity through Pi's input handlers, skill
+      // expansion and queue API. AsyncLocalStorage also separates concurrent
+      // submissions whose text happens to be identical.
+      for (const method of ["steer", "followUp"]) {
+        const enqueue = session.agent[method].bind(session.agent);
+        session.agent[method] = (message) => {
+          const input = run.inputContext.getStore();
+          enqueue(input ? { ...message, rengeInputId: input.id } : message);
+        };
+      }
       checkCancelled();
       if (allowDynamicExtensionTools) {
-        session.setActiveToolsByName(initialActiveToolNames);
+        const configuredExtensionTools = session.getActiveToolNames().filter((name) => extensionToolNames.includes(name));
+        const eligibleTools = new Set([...initialActiveToolNames, ...configuredExtensionTools]);
+        const activeTools = new Set(eligibleTools);
+        const defaults = settingsManager.getSettings().defaultTools;
+        for (const entry of Array.isArray(defaults) ? defaults : []) {
+          if (typeof entry !== "string") continue;
+          if (entry.startsWith("-")) activeTools.delete(entry.slice(1));
+          if (entry.startsWith("+") && eligibleTools.has(entry.slice(1))) activeTools.add(entry.slice(1));
+        }
+        session.setActiveToolsByName([...activeTools]);
       }
       installContinuousPiRetry(session);
-      installPiToolResultCompatibility(session);
       const extensionBindings = {
         mode: "rpc",
         uiContext: run.extensionUi.context,
+        shutdownHandler: abortRun,
         onError: (extensionError) => {
           console.warn(
             `[pi-extension] ${extensionError.extensionPath} ${extensionError.event}: ${extensionError.error}`,
@@ -737,7 +772,6 @@ export function createRengePiHost({
           reload: async () => {
             await session.reload();
             bindPiCommandSignals(resourceLoader.getExtensions().extensions, run.abortController.signal);
-            installPiToolResultCompatibility(session);
           },
         },
       };
@@ -851,6 +885,7 @@ export function createRengePiHost({
             run,
             event.toolCallId,
             event.toolName,
+            event.parentToolCallId,
           );
           writeSse(response, piEvent("tool_start", {
             runId,
@@ -858,19 +893,21 @@ export function createRengePiHost({
             executionToolCallId: event.toolCallId,
             toolName: event.toolName,
             arguments: event.args,
+            parentToolCallId: event.parentToolCallId,
           }));
           return;
         }
         if (event.type === "tool_execution_start") {
-          resolvePreviewToolCallId(run, event.toolCallId, event.toolName);
+          resolvePreviewToolCallId(run, event.toolCallId, event.toolName, event.parentToolCallId);
         }
         if (event.type === "tool_execution_update" && !customToolNames.has(event.toolName)) {
           writeSse(response, piEvent("tool_update", {
             runId,
-            toolCallId: resolvePreviewToolCallId(run, event.toolCallId, event.toolName),
+            toolCallId: resolvePreviewToolCallId(run, event.toolCallId, event.toolName, event.parentToolCallId),
             executionToolCallId: event.toolCallId,
             toolName: event.toolName,
             result: normalizePiExtensionResult(event.partialResult),
+            parentToolCallId: event.parentToolCallId,
           }));
           return;
         }
@@ -880,15 +917,17 @@ export function createRengePiHost({
         ) {
           writeSse(response, piEvent("tool_end", {
             runId,
-            toolCallId: resolvePreviewToolCallId(run, event.toolCallId, event.toolName),
+            toolCallId: resolvePreviewToolCallId(run, event.toolCallId, event.toolName, event.parentToolCallId),
             executionToolCallId: event.toolCallId,
             toolName: event.toolName,
             isError: event.isError,
+            parentToolCallId: event.parentToolCallId,
+            durationMs: event.durationMs,
             result: normalizePiExtensionResult(event.result),
           }));
           return;
         }
-        if (event.type === "compaction_start" || event.type === "compaction_end" ||
+        if (event.type === "agent_settled" || event.type === "compaction_start" || event.type === "compaction_end" ||
           event.type === "auto_retry_start" || event.type === "auto_retry_end") {
           writeSse(response, piEvent(event.type, { runId, ...event }));
         }
@@ -915,8 +954,11 @@ export function createRengePiHost({
       writeSse(response, piEvent("run_ready", { runId, sessionId: ownerSessionId }));
       try {
         await session.prompt(prompt.text, promptOptions);
+        // Extension commands can start a turn with the fire-and-forget
+        // pi.sendMessage API. Keep the HTTP stream and cancellation alive.
+        await session.waitForIdle();
         const errorMessage = session.agent.state.errorMessage;
-        if (errorMessage && !isExtensionCommand) throw new Error(errorMessage);
+        if (errorMessage && (!isExtensionCommand || run.lastAssistantStopReason)) throw new Error(errorMessage);
       } catch (promptError) {
         checkCancelled();
         const discoveredWindow = extractContextWindowFromError(promptError);
@@ -956,7 +998,7 @@ export function createRengePiHost({
         const retryError = session.agent.state.errorMessage;
         if (retryError) throw new Error(retryError);
       }
-      const finishReason = isExtensionCommand ? "stop" : getSessionFinishReason(session, run.lastAssistantStopReason);
+      const finishReason = isExtensionCommand && !run.lastAssistantStopReason ? "stop" : getSessionFinishReason(session, run.lastAssistantStopReason);
       await run.shellSessions.dispose();
       run.acceptingInput = false;
       flushIncompleteStreamingToolCalls(run, { finishReason, willRetry: false });
@@ -994,7 +1036,7 @@ export function createRengePiHost({
           cwd,
         });
       } else {
-        releaseSessionResource({ session: run.session, providerId, modelRuntime });
+        await releaseSessionResource({ session: run.session, providerId, modelRuntime });
       }
       runs.delete(runId);
       if (!response.destroyed && !response.writableEnded) response.end();
@@ -1109,17 +1151,20 @@ export function createRengePiHost({
     }
     const existing = run.inputs.get(id);
     if (existing) return existing.text === text && existing.mode === mode
-      ? { ok: true, status: 200, inputId: id }
+      ? { ok: true, status: 200, inputId: id, disposition: existing.disposition }
       : { ok: false, status: 409, error: "追加消息编号已被其他内容使用。" };
     // Register before queueing: a running tool can settle during this await.
     run.inputs.set(id, { id, text, mode, delivered: false });
     try {
-      // The public core queue preserves correlation metadata without exposing
-      // it in the model prompt or relying on matching duplicate user text.
-      run.session.agent[mode === "steer" ? "steer" : "followUp"]({
-        role: "user", content: [{ type: "text", text }], timestamp: Date.now(), rengeInputId: id,
-      });
-      return { ok: true, status: 200, inputId: id };
+      const input = run.inputs.get(id);
+      const disposition = await run.inputContext.run(input, () =>
+        run.session[mode === "steer" ? "steer" : "followUp"](text, undefined, { source: "rpc" }));
+      input.disposition = disposition;
+      if (disposition === "handled") {
+        input.delivered = true;
+        writeSse(run.response, piEvent("input_delivered", { runId: run.id, inputId: id, mode, disposition }));
+      }
+      return { ok: true, status: 200, inputId: id, disposition };
     } catch (error) {
       run.inputs.delete(id);
       return { ok: false, status: 409, error: error instanceof Error ? error.message : String(error) };
@@ -1135,7 +1180,7 @@ export function createRengePiHost({
     for (const [key, entry] of idleSessions) {
       if (key.includes(`${ownerHash}`)) {
         idleSessions.delete(key);
-        releaseSessionResource(entry);
+        await releaseSessionResource(entry);
       }
     }
     return { ok: true, status: 200 };
@@ -1143,25 +1188,25 @@ export function createRengePiHost({
 
   const installPiPackage = async (source) => {
     const extension = await piPackageManager.install(source);
-    invalidateIdleSessions();
+    await invalidateIdleSessions();
     return extension;
   };
 
   const updatePiPackage = async (source) => {
     const extension = await piPackageManager.update(source);
-    invalidateIdleSessions();
+    await invalidateIdleSessions();
     return extension;
   };
 
   const setPiPackageEnabled = async (source, enabled) => {
     const result = await piPackageManager.setEnabled(source, enabled);
-    invalidateIdleSessions();
+    await invalidateIdleSessions();
     return result;
   };
 
   const removePiPackage = async (source) => {
     const result = await piPackageManager.remove(source);
-    invalidateIdleSessions();
+    await invalidateIdleSessions();
     return result;
   };
 
@@ -1172,10 +1217,10 @@ export function createRengePiHost({
       run.shellSessions.dispose();
       settlePendingTools(run, new Error("Pi Host 已关闭"));
       await run.session?.abort();
-      run.session?.dispose();
+      await releaseSessionResource({ session: run.session });
       return undefined;
     }));
-    for (const entry of idleSessions.values()) releaseSessionResource(entry);
+    await Promise.all(Array.from(idleSessions.values(), (entry) => releaseSessionResource(entry)));
     idleSessions.clear();
     runs.clear();
   };
