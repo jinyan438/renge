@@ -27,7 +27,7 @@ try {
     response.end("<title>Native browser fixture</title><h1>Native browser fixture</h1>");
   });
   await new Promise((resolve) => fixture.listen(0, "127.0.0.1", resolve));
-  app = await electron.launch({ args: [resolve("electron/main.mjs")], env, timeout: 60_000 });
+  app = await electron.launch({ args: [resolve("electron/main.mjs"), `--user-data-dir=${join(root, "profile")}`], env, timeout: 60_000 });
   const home = await app.firstWindow();
   home.setDefaultTimeout(20_000);
   const errors = [];

@@ -100,6 +100,7 @@ import lodashSource from "lodash/lodash.min.js?raw";
 import vueSource from "vue/dist/vue.global.prod.js?raw";
 import htmlPreviewDependenciesSource from "virtual:html-preview-dependencies";
 import { HTML_PREVIEW_PARENT_BRIDGE_SOURCE } from "./htmlPreviewParentBridge";
+import { postMessageToFrame } from "./frameMessaging";
 import { buildHtmlPreviewImagesScript } from "./htmlPreviewImages";
 import {
   collectInheritedHtmlPreviewStyleResources,
@@ -276,7 +277,7 @@ import {
   type PromptTemplateStoredMessage,
 } from "./promptTemplateExtension";
 import { DesktopHome, type HomeDestination } from "./DesktopHome";
-import { NativeDesktopWindow, getDesktopWindow, nativeDesktopWindowsEnabled, type NativeDesktopWindowState } from "./NativeDesktopWindow";
+import { NativeDesktopWindow, getDesktopWindow, nativeDesktopWindowsEnabled, useDesktopWindow, type NativeDesktopWindowState } from "./NativeDesktopWindow";
 import { WindowResizeHandles } from "./WindowResizeHandles";
 import { WindowSnapPreview } from "./WindowSnapPreview";
 import { useWindowDrag, type WindowOffset } from "./useWindowDrag";
@@ -7132,6 +7133,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
   previewId,
   frameRegistry,
 }: ChatHtmlPreviewProps) {
+  const hostWindow = useDesktopWindow();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const requestHeavyMountRef = useRef<() => void>(() => {});
@@ -7191,7 +7193,8 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       if (previewActiveRef.current === active) return;
       previewActiveRef.current = active;
       setPreviewActive(active);
-      frameRef.current?.contentWindow?.postMessage(
+      postMessageToFrame(
+        frameRef.current,
         { type: HTML_PREVIEW_ACTIVITY_MESSAGE, id: previewId, active },
         "*",
       );
@@ -7216,7 +7219,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       const frame = frameRef.current;
       if (
         frame &&
-        (document.activeElement === frame ||
+        (hostWindow.document.activeElement === frame ||
           frame.classList.contains("renge-html-fullscreen-frame"))
       ) {
         freezeTimer = window.setTimeout(
@@ -7265,13 +7268,14 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       requestHeavyMountRef.current = () => {};
       cancelQueuedMount?.();
     };
-  }, [heavyContent, mountReady, previewId]);
+  }, [heavyContent, hostWindow, mountReady, previewId]);
 
   const sendContextUpdate = useCallback(() => {
-    const frameWindow = frameRef.current?.contentWindow;
-    if (!frameWindow) return;
+    const frame = frameRef.current;
+    if (!frame) return;
     const parentGlobals = getHtmlPreviewParentGlobals(content);
-    frameWindow.postMessage(
+    postMessageToFrame(
+      frame,
       {
         type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
         id: previewId,
@@ -7287,23 +7291,25 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
     const container = containerRef.current;
     const containerWidth =
       container?.getBoundingClientRect().width || container?.clientWidth || 0;
-    frameRef.current?.contentWindow?.postMessage(
+    postMessageToFrame(
+      frameRef.current,
       {
         type: HTML_PREVIEW_VIEWPORT_MESSAGE,
         id: previewId,
         width:
           frameWidth ||
           containerWidth ||
-          window.visualViewport?.width ||
-          window.innerWidth,
-        height: window.visualViewport?.height ?? window.innerHeight,
+          hostWindow.visualViewport?.width ||
+          hostWindow.innerWidth,
+        height: hostWindow.visualViewport?.height ?? hostWindow.innerHeight,
       },
       "*",
     );
-  }, [previewId]);
+  }, [hostWindow, previewId]);
 
   const requestLayoutMeasurement = useCallback(() => {
-    frameRef.current?.contentWindow?.postMessage(
+    postMessageToFrame(
+      frameRef.current,
       {
         type: HTML_PREVIEW_REMEASURE_MESSAGE,
         id: previewId,
@@ -7318,9 +7324,9 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
 
   useEffect(() => {
     const update = () => sendViewportUpdate();
-    window.addEventListener("resize", update);
-    window.addEventListener("orientationchange", update);
-    window.visualViewport?.addEventListener("resize", update);
+    hostWindow.addEventListener("resize", update);
+    hostWindow.addEventListener("orientationchange", update);
+    hostWindow.visualViewport?.addEventListener("resize", update);
     const container = containerRef.current;
     let lastObservedWidth = container?.getBoundingClientRect().width ?? 0;
     const resizeObserver =
@@ -7335,12 +7341,12 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
         : null;
     if (container) resizeObserver?.observe(container);
     return () => {
-      window.removeEventListener("resize", update);
-      window.removeEventListener("orientationchange", update);
-      window.visualViewport?.removeEventListener("resize", update);
+      hostWindow.removeEventListener("resize", update);
+      hostWindow.removeEventListener("orientationchange", update);
+      hostWindow.visualViewport?.removeEventListener("resize", update);
       resizeObserver?.disconnect();
     };
-  }, [requestLayoutMeasurement, sendViewportUpdate]);
+  }, [hostWindow, requestLayoutMeasurement, sendViewportUpdate]);
 
   const registerFrame = useCallback(
     (frame: HTMLIFrameElement | null) => {
@@ -7373,7 +7379,8 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       loadSyncTimersRef.current = [];
       resizeHtmlPreviewFrame(event);
       const loadedFrame = event.currentTarget;
-      loadedFrame.contentWindow?.postMessage(
+      postMessageToFrame(
+        loadedFrame,
         {
           type: HTML_PREVIEW_ACTIVITY_MESSAGE,
           id: previewId,
@@ -7387,7 +7394,8 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
         sourceDocumentRef.current
       ) {
         initializedFrameRef.current = loadedFrame;
-        loadedFrame.contentWindow?.postMessage(
+        postMessageToFrame(
+          loadedFrame,
           {
             type: HTML_PREVIEW_FRAME_INIT_MESSAGE,
             id: previewId,
@@ -7398,7 +7406,8 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       }
       const synchronizeLoadedFrame = () => {
         if (frameRef.current !== loadedFrame) return;
-        loadedFrame.contentWindow?.postMessage(
+        postMessageToFrame(
+          loadedFrame,
           {
             type: HTML_PREVIEW_ACTIVITY_MESSAGE,
             id: previewId,
@@ -13356,7 +13365,8 @@ export function App() {
     chatInputContextDirtyRef.current = false;
     const chatInput = chatInputValueRef.current;
     htmlPreviewFrameRefs.current.forEach((frame, previewId) => {
-      frame.contentWindow?.postMessage(
+      postMessageToFrame(
+        frame,
         {
           type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
           id: previewId,
@@ -14251,7 +14261,8 @@ export function App() {
       document.documentElement.classList.remove("renge-html-fullscreen");
       window.rengeAndroid?.exitFullscreen?.();
       if (notifyFrame) {
-        frame.contentWindow?.postMessage(
+        postMessageToFrame(
+          frame,
           { type: HTML_PREVIEW_FULLSCREEN_EXIT_MESSAGE, id: frame.dataset.previewId },
           "*",
         );
@@ -14409,7 +14420,8 @@ export function App() {
       error?: unknown,
     ) => {
       if (typeof requestId !== "string") return;
-      frame.contentWindow?.postMessage(
+      postMessageToFrame(
+        frame,
         {
           type: HTML_PREVIEW_COMMAND_RESULT_MESSAGE,
           id,
@@ -14476,12 +14488,14 @@ export function App() {
         const [, frame] = sourceFrameEntry;
         try {
           const result = await executeSlashCommand(payload.command);
-          frame.contentWindow?.postMessage(
+          postMessageToFrame(
+            frame,
             { type: "TH_TRIGGER_SLASH_RESPONSE", requestId: payload.requestId, result },
             "*",
           );
         } catch (error) {
-          frame.contentWindow?.postMessage(
+          postMessageToFrame(
+            frame,
             {
               type: "TH_TRIGGER_SLASH_RESPONSE",
               requestId: payload.requestId,
@@ -14689,7 +14703,8 @@ export function App() {
             host.extension_settings = tavernSettingsStore.root;
             void saveTavernExtensionSettings(settings);
             htmlPreviewFrameRefs.current.forEach((candidateFrame, candidateId) => {
-              candidateFrame.contentWindow?.postMessage(
+              postMessageToFrame(
+                candidateFrame,
                 {
                   type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
                   id: candidateId,
@@ -20061,7 +20076,8 @@ export function App() {
         host.extension_settings = next;
         const saved = saveTavernExtensionSettings(settings);
         htmlPreviewFrameRefs.current.forEach((frame, previewId) => {
-          frame.contentWindow?.postMessage(
+          postMessageToFrame(
+            frame,
             {
               type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
               id: previewId,
@@ -28841,7 +28857,8 @@ export function App() {
       ([, frame]) => !sourceFrame || frame === sourceFrame,
     );
     targets.forEach(([id, frame]) => {
-      frame.contentWindow?.postMessage(
+      postMessageToFrame(
+        frame,
         {
           type: HTML_PREVIEW_GENERATION_EVENT_MESSAGE,
           id,
