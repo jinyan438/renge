@@ -16,6 +16,8 @@ import { unzipCompleteBackup } from "./src/completeBackupArchive.mjs";
 import { COMPLETE_BACKUP_MAX_ARCHIVE_BYTES, COMPLETE_BACKUP_MAX_EXTRACTED_BYTES, completeBackupSizeLimitError } from "./src/completeBackupLimits.mjs";
 import { createUpstreamDispatcherCache, describeUpstreamNetworkError } from "./src/upstreamNetworkUtils.mjs";
 import { createHtmlPreviewImageDispatcher, createHtmlPreviewImageHandler } from "./src/htmlPreviewImageProxy.mjs";
+import { createTavernModuleLoader, getTavernModuleCandidates } from "./src/tavernModuleLoader.mjs";
+import { getTavernStaticModuleImports } from "./src/tavernModuleImports.mjs";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   buildResponsesApiRequest,
@@ -46,7 +48,6 @@ const completeBackupManagedRoots = [
 const appDataWriteQueues = new Map();
 const validatedAppDataFiles = new Map();
 const tavernModuleProxyVersion = "2";
-const tavernModuleProxyCache = new Map();
 
 function readWindowsInternetSetting(valueName) {
   if (process.platform !== "win32") return "";
@@ -334,64 +335,7 @@ export function rewriteTavernModuleImports(source, origin, remoteUrl) {
   );
 }
 
-function getTavernModuleCandidates(remoteUrl) {
-  const parsed = new URL(remoteUrl);
-  if (parsed.protocol !== "https:" || ![
-    "testingcf.jsdelivr.net",
-    "cdn.jsdelivr.net",
-    "fastly.jsdelivr.net",
-    "gcore.jsdelivr.net",
-  ].includes(parsed.hostname.toLowerCase())) {
-    throw new Error("仅支持 jsDelivr 角色卡模块。");
-  }
-  const candidates = [parsed.href];
-  if (parsed.hostname.toLowerCase() !== "cdn.jsdelivr.net") {
-    const fallback = new URL(parsed.href);
-    fallback.hostname = "cdn.jsdelivr.net";
-    candidates.push(fallback.href);
-  }
-  return candidates;
-}
-
-async function loadTavernModule(remoteUrl, origin) {
-  const cacheKey = `${origin}\n${remoteUrl}`;
-  if (!tavernModuleProxyCache.has(cacheKey)) {
-    tavernModuleProxyCache.set(cacheKey, (async () => {
-      let lastError;
-      for (const candidate of getTavernModuleCandidates(remoteUrl)) {
-        try {
-          const remoteResponse = await fetch(candidate, {
-            signal: AbortSignal.timeout(30_000),
-            headers: { Accept: "text/javascript, application/javascript, */*;q=0.8" },
-            dispatcher: getUpstreamDispatcher(),
-          });
-          if (!remoteResponse.ok) {
-            throw new Error(`远程模块返回 ${remoteResponse.status}`);
-          }
-          const source = await remoteResponse.text();
-          const contentType = String(remoteResponse.headers.get("content-type") ?? "");
-          return {
-            source: contentType.toLowerCase().includes("text/css")
-              ? source
-              : rewriteTavernModuleImports(source, origin, candidate),
-            contentType,
-          };
-        } catch (error) {
-          lastError = error;
-        }
-      }
-      throw lastError ?? new Error("角色卡模块加载失败。");
-    })());
-  }
-  try {
-    return await tavernModuleProxyCache.get(cacheKey);
-  } catch (error) {
-    tavernModuleProxyCache.delete(cacheKey);
-    throw error;
-  }
-}
-
-async function serveTavernModuleProxy(request, response, url) {
+async function serveTavernModuleProxy(request, response, url, loadTavernModule) {
   if (request.method !== "GET") {
     sendJson(response, 405, { error: "Method not allowed" });
     return;
@@ -400,17 +344,20 @@ async function serveTavernModuleProxy(request, response, url) {
   try {
     getTavernModuleCandidates(remoteUrl);
     const origin = `${url.protocol}//${url.host}`;
-    const module = await loadTavernModule(remoteUrl, origin);
+    const module = await loadTavernModule(remoteUrl);
     const contentType = String(module?.contentType ?? "").toLowerCase();
     response.writeHead(200, {
       "Content-Type": contentType.includes("text/css")
         ? "text/css;charset=utf-8"
         : "text/javascript;charset=utf-8",
-      "Cache-Control": "no-store",
+      "Cache-Control": /\bno-store\b/i.test(module.cacheControl) ? "no-store"
+        : `private, max-age=${Math.max(0, Math.floor((module.expiresAt - Date.now()) / 1000))}, must-revalidate`,
       "Access-Control-Allow-Origin": "*",
       "X-Content-Type-Options": "nosniff",
     });
-    response.end(module.source);
+    response.end(contentType.includes("text/css")
+      ? module.source
+      : rewriteTavernModuleImports(module.source, origin, module.resolvedUrl));
   } catch (error) {
     sendJson(response, 502, { error: compactError(error) });
   }
@@ -3872,6 +3819,19 @@ export function startRengeServer(options = {}) {
   const port = options.port ?? defaultPort;
   const dataDir = resolve(options.dataDir ?? getDefaultDataDir());
   const dataFilePath = resolve(dataDir, appDataFileName);
+  const loadTavernModule = createTavernModuleLoader({
+    cacheDir: join(dataDir, "cache", "tavern-modules"),
+    fetchModule: (url, options) => fetch(url, { ...options, dispatcher: getUpstreamDispatcher() }),
+    getDependencies: module => getTavernStaticModuleImports(
+      rewriteTavernModuleImports(module.source, "http://renge.invalid", module.resolvedUrl),
+    ).flatMap(url => {
+      try {
+        const parsed = new URL(url);
+        return parsed.origin === "http://renge.invalid" && parsed.pathname === "/api/tavern-module-proxy"
+          ? [parsed.searchParams.get("url")] : [];
+      } catch { return []; }
+    }),
+  });
   const temporaryFilesRoot = options.temporaryFilesRoot
     ? resolve(options.temporaryFilesRoot)
     : "";
@@ -3936,7 +3896,7 @@ export function startRengeServer(options = {}) {
     }
 
     if (url.pathname === "/api/tavern-module-proxy") {
-      await serveTavernModuleProxy(request, response, url);
+      await serveTavernModuleProxy(request, response, url, loadTavernModule);
       return;
     }
 

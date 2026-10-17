@@ -1,35 +1,5 @@
-function skipQuotedSegment(source: string, startIndex: number, quote: string) {
-  for (let index = startIndex + 1; index < source.length; index += 1) {
-    if (source[index] === "\\") {
-      index += 1;
-      continue;
-    }
-    if (source[index] === quote) return index + 1;
-  }
-  return source.length;
-}
-
-function skipWhitespaceAndComments(source: string, startIndex: number) {
-  let index = startIndex;
-  while (index < source.length) {
-    if (/\s/.test(source[index])) {
-      index += 1;
-      continue;
-    }
-    if (source[index] === "/" && source[index + 1] === "/") {
-      const lineEnd = source.indexOf("\n", index + 2);
-      index = lineEnd < 0 ? source.length : lineEnd + 1;
-      continue;
-    }
-    if (source[index] === "/" && source[index + 1] === "*") {
-      const commentEnd = source.indexOf("*/", index + 2);
-      index = commentEnd < 0 ? source.length : commentEnd + 2;
-      continue;
-    }
-    break;
-  }
-  return index;
-}
+import { skipQuotedSegment, skipWhitespaceAndComments } from "./tavernModuleImports.mjs";
+export { getTavernStaticModuleImports } from "./tavernModuleImports.mjs";
 
 function hasTavernModuleKeyword(source: string) {
   let index = 0;

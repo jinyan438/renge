@@ -3,10 +3,29 @@ import test from "node:test";
 import vm from "node:vm";
 
 import {
+  getTavernStaticModuleImports,
   requiresTavernChatDom,
   scopeTavernClassicScript,
   usesTavernModuleSyntax,
 } from "../src/tavernScriptModuleUtils.ts";
+
+test("preloads static imports and re-exports without evaluating lazy imports or serialized helpers", () => {
+  const urls = getTavernStaticModuleImports(`
+    import'https://cdn.jsdelivr.net/gh/example/core@1.0.0/a.js';
+    import { x as y } /* comment */ from "https://cdn.jsdelivr.net/gh/example/schema/b.js";
+    export { x } from './helper.js';
+    export * from './other.js';
+    import'https://cdn.jsdelivr.net/gh/example/core@1.0.0/a.js';
+    const lazy = () => import('https://cdn.jsdelivr.net/optional.js');
+    const example = "import'https://cdn.jsdelivr.net/serialized.js'";
+    // import 'https://cdn.jsdelivr.net/comment.js';
+    obj.import('not-a-module');
+  `);
+  assert.deepEqual(urls, [
+    'https://cdn.jsdelivr.net/gh/example/core@1.0.0/a.js',
+    'https://cdn.jsdelivr.net/gh/example/schema/b.js', './helper.js', './other.js',
+  ]);
+});
 
 test("chat DOM dependencies exclude serialized helpers, comments and ordinary data", () => {
   assert.equal(requiresTavernChatDom("observer.observe(parent.document.getElementById('chat'), {childList:true})"), true);

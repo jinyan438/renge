@@ -22,6 +22,7 @@ import fontAwesomeRegularUrl from "@fortawesome/fontawesome-free/webfonts/fa-reg
 import fontAwesomeSolidUrl from "@fortawesome/fontawesome-free/webfonts/fa-solid-900.woff2?url";
 import fontAwesomeV4CompatibilityUrl from "@fortawesome/fontawesome-free/webfonts/fa-v4compatibility.woff2?url";
 import {
+  getTavernStaticModuleImports,
   requiresTavernChatDom,
   scopeTavernClassicScript,
   usesTavernModuleSyntax,
@@ -1694,6 +1695,22 @@ export class TavernScriptRuntime {
     }
     this.fontAwesomeCleanups.push(...fontAwesomeSupports.map((support) => support.cleanup));
     this.installCompatibilityApi();
+    // Start network/module-graph work together with the local libraries. A
+    // modulepreload never evaluates card code; startup execution stays ordered.
+    const preloadUrls = new Set(this.scripts
+      .filter(script => script.enabled && script.autoRun && script.runOn === "startup")
+      .flatMap(script => usesTavernModuleSyntax(script.content) ? getTavernStaticModuleImports(script.content) : []));
+    const runtimeDocument = this.runtimeWindow?.document;
+    if (runtimeDocument) {
+      for (const url of preloadUrls) {
+        const proxiedUrl = proxyTavernModuleUrl(url, window.location.origin);
+        if (proxiedUrl === url) continue;
+        const link = runtimeDocument.createElement("link");
+        link.rel = "modulepreload";
+        link.href = proxiedUrl;
+        runtimeDocument.head.appendChild(link);
+      }
+    }
     await Promise.all([this.loadDependencies(), ...fontAwesomeSupports.map((support) => support.ready)]);
     if (this.destroyed) return;
     if (this.runtimeWindow) {
