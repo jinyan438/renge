@@ -32,15 +32,16 @@ try {
     manager = await managerWindow;
     manager.setDefaultTimeout(15_000);
     await manager.locator(".extension-manager-shell").waitFor();
+    await home.evaluate(() => { window.confirm = () => { throw new Error("Confirmation was shown on the desktop home"); }; });
+    await manager.evaluate(() => { window.confirm = () => true; });
   }
   const card = (name) => manager.locator("article.extension-card").filter({ has: manager.getByRole("heading", { name, exact: true }) });
   await openManager();
-  // The confirmation is evaluated in the main renderer that owns these portals.
-  await home.evaluate(() => { window.confirm = () => false; });
+  await manager.evaluate(() => { window.confirm = () => false; });
   await card("pi-gpt-search").getByRole("button", { name: "删除", exact: true }).click();
   assert.equal(await card("pi-gpt-search").count(), 1, "cancel keeps the package card");
   assert.ok((await stat(fixture.npmPath)).isDirectory());
-  await home.evaluate(() => { window.confirm = () => true; });
+  await manager.evaluate(() => { window.confirm = () => true; });
   for (const extension of fixture.targets) {
     const deleted = home.waitForResponse((response) => response.request().method() === "DELETE" &&
       new URL(response.url()).pathname === `/api/extensions/${extension.id}`);
@@ -54,7 +55,6 @@ try {
     await home.reload();
     await openManager();
     assert.equal(await card(extension.packageName).count(), 0, "deleted cards stay absent after reload");
-    await home.evaluate(() => { window.confirm = () => true; });
   }
   assert.equal(await stat(fixture.npmPath).catch(() => null), null);
   assert.equal(await stat(fixture.gitPath).catch(() => null), null);

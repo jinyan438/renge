@@ -20,6 +20,7 @@ export type NativeDesktopWindowState = {
 
 const DesktopWindowContext = createContext<Window | null>(null);
 const nativeWindows = new Map<string, Window>();
+let lastActiveDesktopWindow: Window | null = null;
 
 export function nativeDesktopWindowsEnabled() {
   return Boolean(window.rengeDesktop?.isElectron && window.rengeDesktop.controlDesktopWindow);
@@ -31,6 +32,14 @@ export function useDesktopWindow() {
 
 export function getDesktopWindow(id: string) {
   return nativeWindows.get(id) ?? window;
+}
+
+export function getActiveDesktopWindow() {
+  // Portal documents can all report hasFocus() in Electron. Track actual
+  // interaction instead; this also survives focus moving to a native file picker.
+  return lastActiveDesktopWindow && !lastActiveDesktopWindow.closed
+    ? lastActiveDesktopWindow
+    : window;
 }
 
 export function NativeDesktopWindow({
@@ -91,9 +100,18 @@ export function NativeDesktopWindow({
       root.id = "root";
       doc.body.appendChild(root);
       nativeWindows.set(id, popup);
+      const activate = () => { lastActiveDesktopWindow = popup; };
+      const activateHome = () => { lastActiveDesktopWindow = window; };
+      popup.addEventListener("focus", activate);
+      for (const event of ["pointerdown", "keydown", "change"]) {
+        doc.addEventListener(event, activate, true);
+        document.addEventListener(event, activateHome, true);
+      }
+      window.addEventListener("focus", activateHome);
       setHost(popup);
       const unsubscribe = window.rengeDesktop?.onDesktopWindowState?.((state) => {
         if (state.id !== id) return;
+        if (state.focused) activate();
         if (state.closed) callbacks.current.onClose();
         else callbacks.current.onStateChange?.(state);
       });
@@ -121,6 +139,13 @@ export function NativeDesktopWindow({
         popup.removeEventListener("keyup", forwardKey);
         popup.removeEventListener("message", forwardMessage);
         popup.removeEventListener("beforeunload", onUnload);
+        popup.removeEventListener("focus", activate);
+        for (const event of ["pointerdown", "keydown", "change"]) {
+          doc.removeEventListener(event, activate, true);
+          document.removeEventListener(event, activateHome, true);
+        }
+        window.removeEventListener("focus", activateHome);
+        if (lastActiveDesktopWindow === popup) lastActiveDesktopWindow = null;
         nativeWindows.delete(id);
       };
     };

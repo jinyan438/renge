@@ -850,8 +850,12 @@ async function gitDiff({ path = "", staged = false } = {}) {
   return { ok: true, staged: Boolean(staged), path: normalizedPath, stdout, stderr };
 }
 
-async function confirmHighRiskGitCommand(command, args, cwd = workspaceRoot, signal) {
-  const result = await dialog.showMessageBox(mainWindow, {
+function getDialogParent() {
+  return desktopWindows.getDialogWindow() ?? mainWindow;
+}
+
+async function confirmHighRiskGitCommand(command, args, cwd = workspaceRoot, signal, parentWindow = getDialogParent()) {
+  const result = await dialog.showMessageBox(parentWindow, {
     ...(signal ? { signal } : {}),
     type: "warning",
     buttons: ["授权执行", "取消"],
@@ -872,8 +876,8 @@ async function confirmHighRiskGitCommand(command, args, cwd = workspaceRoot, sig
   return result.response === 0;
 }
 
-async function confirmExternalWorkspaceMutation(operation, targetPaths, cwd = workspaceRoot, signal) {
-  const result = await dialog.showMessageBox(mainWindow, {
+async function confirmExternalWorkspaceMutation(operation, targetPaths, cwd = workspaceRoot, signal, parentWindow = getDialogParent()) {
+  const result = await dialog.showMessageBox(parentWindow, {
     ...(signal ? { signal } : {}),
     type: "warning",
     buttons: ["授权本次操作", "取消"],
@@ -895,7 +899,7 @@ async function confirmExternalWorkspaceMutation(operation, targetPaths, cwd = wo
   return result.response === 0;
 }
 
-async function authorizeWorkspaceMutation(operation, inputPaths, authorizedRoot = workspaceRoot, signal) {
+async function authorizeWorkspaceMutation(operation, inputPaths, authorizedRoot = workspaceRoot, signal, parentWindow = getDialogParent()) {
   const targetPaths = inputPaths.map((inputPath) => resolveReadablePath(inputPath));
   const canonicalWorkspaceRoot = authorizedRoot
     ? await realpath(authorizedRoot).catch(() => authorizedRoot)
@@ -925,16 +929,16 @@ async function authorizeWorkspaceMutation(operation, inputPaths, authorizedRoot 
   );
 
   if (!workspaceFullAccessEnabled && externalPaths.length > 0) {
-    const authorized = await confirmExternalWorkspaceMutation(operation, externalPaths, authorizedRoot, signal);
+    const authorized = await confirmExternalWorkspaceMutation(operation, externalPaths, authorizedRoot, signal, parentWindow);
     if (!authorized) throw new Error(`用户取消授权在工作区外${operation}`);
   }
 
   return targetPaths;
 }
 
-async function confirmUnlistedWorkspaceCommand(commandLine, sessionId, cwd = workspaceRoot, signal) {
+async function confirmUnlistedWorkspaceCommand(commandLine, sessionId, cwd = workspaceRoot, signal, parentWindow = getDialogParent()) {
   const hasSessionId = Boolean(String(sessionId ?? "").trim());
-  const result = await dialog.showMessageBox(mainWindow, {
+  const result = await dialog.showMessageBox(parentWindow, {
     ...(signal ? { signal } : {}),
     type: "warning",
     buttons: [hasSessionId ? "授权当前会话" : "允许本次运行", "取消"],
@@ -958,13 +962,13 @@ async function confirmUnlistedWorkspaceCommand(commandLine, sessionId, cwd = wor
   return result.response === 0;
 }
 
-async function validateWorkspaceCommand(command, args, alreadyAuthorized = false, { cwd = workspaceRoot, signal } = {}) {
+async function validateWorkspaceCommand(command, args, alreadyAuthorized = false, { cwd = workspaceRoot, signal, parentWindow = getDialogParent() } = {}) {
   const normalizedCommand = String(command ?? "").trim().toLowerCase();
   const firstArg = String(args[0] ?? "").toLowerCase();
 
   if (!workspaceFullAccessEnabled && !alreadyAuthorized && normalizedCommand === "git") {
     if (highRiskGitCommands.has(firstArg)) {
-      const authorized = await confirmHighRiskGitCommand(normalizedCommand, args, cwd, signal);
+      const authorized = await confirmHighRiskGitCommand(normalizedCommand, args, cwd, signal, parentWindow);
       if (!authorized) {
         return {
           ok: false,
@@ -998,8 +1002,9 @@ async function validateWorkspaceCommand(command, args, alreadyAuthorized = false
 
 async function authorizePiTool({ toolName, args, cwd, signal }) {
   if (signal?.aborted) throw new Error("操作已中止");
+  const parentWindow = desktopWindows.getWindow("chat") ?? getDialogParent();
   if (toolName === "write" || toolName === "edit") {
-    await authorizeWorkspaceMutation(toolName === "write" ? "写入文件" : "编辑文件", [args.path], cwd, signal);
+    await authorizeWorkspaceMutation(toolName === "write" ? "写入文件" : "编辑文件", [args.path], cwd, signal, parentWindow);
     return;
   }
   if (workspaceFullAccessEnabled) return;
@@ -1012,17 +1017,18 @@ async function authorizePiTool({ toolName, args, cwd, signal }) {
   // substitutions and pipelines require approval of the complete command.
   if (command && whitelistedCommandNames.includes(commandName) && !hasExecutableOptions && !/[\r\n;&|<>`$(){}]/.test(commandLine)) {
     if (commandName === "node" && tokens[0]) {
-      await authorizeWorkspaceMutation("运行 Node 脚本", [resolve(cwd, tokens[0])], cwd, signal);
+      await authorizeWorkspaceMutation("运行 Node 脚本", [resolve(cwd, tokens[0])], cwd, signal, parentWindow);
       return;
     }
-    const result = await validateWorkspaceCommand(command, tokens, false, { cwd, signal });
+    const result = await validateWorkspaceCommand(command, tokens, false, { cwd, signal, parentWindow });
     if (!result.ok) throw new Error(result.stderr || "用户取消命令授权");
-  } else if (!await confirmUnlistedWorkspaceCommand(commandLine, "", cwd, signal)) {
+  } else if (!await confirmUnlistedWorkspaceCommand(commandLine, "", cwd, signal, parentWindow)) {
     throw new Error("用户取消运行 Shell 命令");
   }
 }
 
 async function runWorkspaceCommand({ command, args = [], timeoutMs = 60000, sessionId = "" }) {
+  const parentWindow = getDialogParent();
   const rawCommandLine = normalizeCommandLine(command, whitelistedCommandNames);
   const hasExplicitArgs = Array.isArray(args) && args.length > 0;
   const commandTokens = hasExplicitArgs
@@ -1043,7 +1049,7 @@ async function runWorkspaceCommand({ command, args = [], timeoutMs = 60000, sess
 
   const sessionAlreadyApproved = unlistedCommandApprovalSessions.has(sessionId);
   if (requiresShell && !workspaceFullAccessEnabled && !sessionAlreadyApproved) {
-    const authorized = await confirmUnlistedWorkspaceCommand(shellCommandLine, sessionId);
+    const authorized = await confirmUnlistedWorkspaceCommand(shellCommandLine, sessionId, workspaceRoot, undefined, parentWindow);
     if (!authorized) {
       return {
         ok: false,
@@ -1057,7 +1063,7 @@ async function runWorkspaceCommand({ command, args = [], timeoutMs = 60000, sess
     unlistedCommandApprovalSessions.approve(sessionId);
   }
 
-  const validation = await validateWorkspaceCommand(rawCommand, commandTokens, requiresShell);
+  const validation = await validateWorkspaceCommand(rawCommand, commandTokens, requiresShell, { parentWindow });
   if (!validation.ok) {
     return {
       ok: false,
@@ -1206,7 +1212,7 @@ function registerIpcHandlers() {
     if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
       throw new Error("文本菜单操作来源无效");
     }
-    const targetWindow = desktopWindows.getFocusedWindow() ?? mainWindow;
+    const targetWindow = getDialogParent();
     const actions = {
       copy: () => targetWindow.webContents.copy(),
       paste: () => targetWindow.webContents.paste(),
@@ -1278,6 +1284,7 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("sidebar-browser:capture", async (event, options = {}) => {
+    const parentWindow = getDialogParent();
     const target = getSidebarBrowserGuest(event, options.webContentsId);
     const image = await target.capturePage();
     let host = "page";
@@ -1288,7 +1295,7 @@ function registerIpcHandlers() {
     }
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const defaultName = `${host.replace(/[^a-z0-9._-]+/gi, "-")}-${timestamp}.png`;
-    const result = await dialog.showSaveDialog(mainWindow, {
+    const result = await dialog.showSaveDialog(parentWindow, {
       defaultPath: join(app.getPath("pictures"), defaultName),
       filters: [{ name: "PNG 图片", extensions: ["png"] }],
       title: "保存网页截图",
@@ -1369,7 +1376,7 @@ function registerIpcHandlers() {
 
   ipcMain.handle("sidebar-browser:import-profile", async (event) => {
     assertSidebarBrowserSender(event);
-    const result = await dialog.showOpenDialog(mainWindow, {
+    const result = await dialog.showOpenDialog(getDialogParent(), {
       filters: [
         { name: "Cookie 或密码文件", extensions: ["json", "csv"] },
       ],
@@ -1545,7 +1552,7 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("sidebar-files:import-temporary", async () => {
-    const result = await dialog.showOpenDialog(mainWindow, {
+    const result = await dialog.showOpenDialog(getDialogParent(), {
       properties: ["openFile", "multiSelections"],
       title: "添加临时文件",
     });
@@ -1581,7 +1588,7 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("workspace:select", async () => {
-    const result = await dialog.showOpenDialog(mainWindow, {
+    const result = await dialog.showOpenDialog(getDialogParent(), {
       properties: ["openDirectory", "createDirectory"],
       title: "选择 AI 可操作的工作区",
     });
@@ -1592,7 +1599,7 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("skill:select-folder", async () => {
-    const result = await dialog.showOpenDialog(mainWindow, {
+    const result = await dialog.showOpenDialog(getDialogParent(), {
       properties: ["openDirectory"],
       title: "选择 Skill 文件夹",
     });

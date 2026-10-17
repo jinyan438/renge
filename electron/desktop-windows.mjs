@@ -17,6 +17,7 @@ export function createDesktopWindowManager({ screen, icon, onWindowCreated = () 
   const windows = new Map();
   const drags = new Map();
   let owner = null;
+  let lastActiveWindow = null;
   const send = (id, state) => {
     if (owner && !owner.isDestroyed()) {
       owner.webContents.send("desktop-window:state", { id, ...state });
@@ -26,6 +27,7 @@ export function createDesktopWindowManager({ screen, icon, onWindowCreated = () 
   return {
     attach(mainWindow) {
       owner = mainWindow;
+      mainWindow.on("focus", () => { lastActiveWindow = mainWindow; });
       const hostUrl = () => new URL("/desktop-window.html", mainWindow.webContents.getURL()).href;
       mainWindow.webContents.setWindowOpenHandler(({ url, frameName }) => {
         const id = frameName.replace(/^renge-desktop-/, "");
@@ -65,6 +67,7 @@ export function createDesktopWindowManager({ screen, icon, onWindowCreated = () 
       mainWindow.webContents.on("did-create-window", (child, { frameName }) => {
         const id = frameName.slice("renge-desktop-".length);
         windows.set(id, child);
+        child.on("focus", () => { lastActiveWindow = child; });
         child.removeMenu();
         child.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
         child.webContents.on("will-navigate", (event, url) => {
@@ -124,6 +127,15 @@ export function createDesktopWindowManager({ screen, icon, onWindowCreated = () 
     },
     getFocusedWindow() {
       return [...windows.values()].find((child) => !child.isDestroyed() && child.isFocused());
+    },
+    getWindow(id) {
+      const child = windows.get(id);
+      return child && !child.isDestroyed() ? child : undefined;
+    },
+    getDialogWindow() {
+      if (owner && !owner.isDestroyed() && owner.isFocused()) return owner;
+      return this.getFocusedWindow() ??
+        (lastActiveWindow && !lastActiveWindow.isDestroyed() ? lastActiveWindow : owner);
     },
     closeAll() {
       for (const child of windows.values()) {

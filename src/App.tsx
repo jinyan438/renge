@@ -278,7 +278,7 @@ import {
   type PromptTemplateStoredMessage,
 } from "./promptTemplateExtension";
 import { DesktopHome, type HomeDestination } from "./DesktopHome";
-import { NativeDesktopWindow, getDesktopWindow, nativeDesktopWindowsEnabled, useDesktopWindow, type NativeDesktopWindowState } from "./NativeDesktopWindow";
+import { NativeDesktopWindow, getActiveDesktopWindow, getDesktopWindow, nativeDesktopWindowsEnabled, useDesktopWindow, type NativeDesktopWindowState } from "./NativeDesktopWindow";
 import { WindowResizeHandles } from "./WindowResizeHandles";
 import { WindowSnapPreview } from "./WindowSnapPreview";
 import { useWindowDrag, type WindowOffset } from "./useWindowDrag";
@@ -12687,7 +12687,9 @@ function PortfolioDesktopWindow({
 }
 
 export function App() {
-  const focusedDesktopWindowRef = useRef("chat");
+  const [globalOverlayWindow, setGlobalOverlayWindow] = useState<Window | null>(null);
+  const globalOverlayWindowRef = useRef<Window | null>(null);
+  globalOverlayWindowRef.current = globalOverlayWindow;
   const [openWindows, setOpenWindows] = useState<ManagedWindowState[]>([]);
   const chatWindowOpen = openWindows.some((windowState) => windowState.id === "chat");
   const topWindowZIndexRef = useRef(100);
@@ -12771,6 +12773,13 @@ export function App() {
   }, []);
 
   const closeWindow = useCallback((id: ModuleWindowId) => {
+    const overlayWindow = globalOverlayWindowRef.current;
+    if (overlayWindow && (overlayWindow === getDesktopWindow(id) || overlayWindow.closed)) {
+      setAvatarCrop(null);
+      setRoleplayGreetingSelectorOpen(false);
+      setDataClearConfirmationOpen(false);
+      setGlobalOverlayWindow(null);
+    }
     setOpenWindows((current) => current.filter((windowState) => windowState.id !== id));
   }, []);
 
@@ -13019,7 +13028,7 @@ export function App() {
     }));
   };
   const deleteUserProfile = () => {
-    if (userProfiles.length <= 1 || !window.confirm(`删除用户资料“${userProfile.nickname || "未命名用户"}”？删除后无法恢复。`)) return;
+    if (userProfiles.length <= 1 || !getActiveDesktopWindow().confirm(`删除用户资料“${userProfile.nickname || "未命名用户"}”？删除后无法恢复。`)) return;
     setUserProfileState((current) => {
       if (current.userProfiles.length <= 1) return current;
       const remaining = current.userProfiles.filter((profile) => profile.id !== userProfile.id);
@@ -16918,6 +16927,7 @@ export function App() {
 
   const exportCompleteAppData = async () => {
     if (!appDataLoaded || appDataPersistenceSuspendedRef.current || dataBackupState.status === "loading") return;
+    const document = getActiveDesktopWindow().document;
     setDataBackupProgress({ active: false, value: null, label: "" });
     setDataBackupState({ status: "loading", message: "正在整理全部应用数据..." });
     try {
@@ -16970,7 +16980,7 @@ export function App() {
     const previouslySuspended = appDataPersistenceSuspendedRef.current;
     let backupInstalled = false;
     try {
-      const confirmed = window.confirm(
+      const confirmed = getActiveDesktopWindow().confirm(
         `即将导入 ${file.name}（${formatFileSize(file.size)}）的 v3 ZIP 完整备份。\n\n备份通过完整校验后，会替换当前全部应用数据。该操作不可直接撤销；如果写入过程中失败，请保留备份并重新导入。是否继续？`,
       );
       if (!confirmed) {
@@ -17063,7 +17073,8 @@ export function App() {
 
   const requestClearAllAppData = () => {
     if (dataBackupState.status === "loading") return;
-    const confirmed = window.confirm(
+    const dialogWindow = getActiveDesktopWindow();
+    const confirmed = dialogWindow.confirm(
       "这会永久清除全部应用数据并恢复出厂状态，包括聊天、角色卡、人格、API Key、世界书、脚本、扩展、Skills 和界面设置。\n\n你手动导出的 JSON 备份和外部工作区文件不会被删除。是否继续？",
     );
     if (!confirmed) {
@@ -17071,6 +17082,7 @@ export function App() {
       return;
     }
     setDataClearConfirmationText("");
+    setGlobalOverlayWindow(dialogWindow);
     setDataClearConfirmationOpen(true);
   };
 
@@ -17119,6 +17131,7 @@ export function App() {
   };
 
   const downloadJsonFile = (content: string, name: string, fallbackName = "export") => {
+    const document = getActiveDesktopWindow().document;
     const safeName = (name.trim() || fallbackName).replace(/[\\/:*?"<>|]/g, "_");
     const fileName = `${safeName}.json`;
     if (window.rengeAndroid?.isAndroid) {
@@ -17392,6 +17405,7 @@ export function App() {
     if (characterImportInputRef.current) characterImportInputRef.current.value = "";
   };
   const downloadCharacterFile = (data: BlobPart, fileName: string, type: string) => {
+    const document = getActiveDesktopWindow().document;
     const url = URL.createObjectURL(new Blob([data], { type }));
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -17423,7 +17437,7 @@ export function App() {
     }
   };
   const deleteCharacterCard = (card: CharacterCard) => {
-    if (!window.confirm(`删除角色卡「${card.name}」？已产生的会话消息会保留。`)) return;
+    if (!getActiveDesktopWindow().confirm(`删除角色卡「${card.name}」？已产生的会话消息会保留。`)) return;
     const remaining = characterCards.filter((item) => item.id !== card.id);
     setCharacterCards(remaining);
     if (activeCharacterCardId === card.id) setActiveCharacterCardId(remaining[0]?.id ?? "");
@@ -18595,7 +18609,7 @@ export function App() {
   };
 
   const deleteInstalledExtension = async (extension: InstalledExtension) => {
-    const confirmed = window.confirm(
+    const confirmed = getActiveDesktopWindow().confirm(
       `确定删除扩展「${extension.displayName}」吗？本地扩展文件和配置记录都会移除。`,
     );
     if (!confirmed) return;
@@ -22223,7 +22237,7 @@ export function App() {
       return;
     }
     const deletedSession = chatSessions.find((session) => session.id === sessionId);
-    if (!deletedSession || !window.confirm(
+    if (!deletedSession || !getActiveDesktopWindow().confirm(
       `确定删除会话「${deletedSession.title}」？\n\n会话记录、生成图片和相关记忆绑定将被删除。此操作无法撤销。`,
     )) return;
     // 后端清理该会话目录下持久化的生成图片，fire-and-forget
@@ -22282,7 +22296,7 @@ export function App() {
     const workspaceMemoryCount = chatSessions.filter(
       (session) => session.workspaceKey === workspaceKey && session.memoryPersonaIds.length > 0,
     ).length;
-    const confirmed = window.confirm(
+    const confirmed = getActiveDesktopWindow().confirm(
       `删除「${workspaceName}」下的 ${workspaceSessionCount} 个会话？\n只会删除会话记录，不会删除工作区文件。${
         workspaceMemoryCount > 0 ? `\n其中 ${workspaceMemoryCount} 个会话的记忆也会取消。` : ""
       }`,
@@ -31730,6 +31744,7 @@ export function App() {
 
   const exportJson = () => {
     if (!activePersona) return;
+    const document = getActiveDesktopWindow().document;
     const content = JSON.stringify(activePersona, null, 2);
     const fileName = `${activePersona.name || "persona"}.json`;
     if (window.rengeAndroid?.isAndroid) {
@@ -31756,6 +31771,7 @@ export function App() {
 
   const importPersonaFile = async (file?: File) => {
     if (!file) return;
+    const dialogWindow = getActiveDesktopWindow();
 
     try {
       const text = await file.text();
@@ -31793,7 +31809,7 @@ export function App() {
       setActivePersonaId(imported.id);
     } catch (error) {
       console.error(error);
-      window.alert("导入失败：请提供有效的 Persona JSON，或符合 Prompt 预览格式的文本文件。");
+      if (!dialogWindow.closed) dialogWindow.alert("导入失败：请提供有效的 Persona JSON，或符合 Prompt 预览格式的文本文件。");
     }
   };
 
@@ -31863,6 +31879,7 @@ export function App() {
   };
 
   const uploadAiAvatarImages = async (fileList: FileList | null) => {
+    const dialogWindow = getActiveDesktopWindow();
     const imageFiles = Array.from(fileList ?? []).filter((file) => file.type.startsWith("image/"));
     if (imageFiles.length === 0) return;
 
@@ -31901,7 +31918,7 @@ export function App() {
       .map((result) => result.error)
       .filter(Boolean);
     if (failedFiles.length > 0) {
-      window.alert("部分头像读取失败：" + failedFiles.join("、"));
+      if (!dialogWindow.closed) dialogWindow.alert("部分头像读取失败：" + failedFiles.join("、"));
     }
   };
 
@@ -31936,6 +31953,7 @@ export function App() {
 
   const selectAvatarFile = async (file?: File, target: AvatarCropState["target"] = "persona") => {
     if (!file || !file.type.startsWith("image/")) return;
+    const dialogWindow = getActiveDesktopWindow();
     const src = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => {
@@ -31955,6 +31973,8 @@ export function App() {
 
     if (!image.naturalWidth || !image.naturalHeight) return;
 
+    if (dialogWindow.closed) return;
+    setGlobalOverlayWindow(dialogWindow);
     setAvatarCrop({
       target,
       userProfileId: target === "user" ? userProfile.id : undefined,
@@ -32238,7 +32258,6 @@ export function App() {
         focusKey={state?.zIndex}
         onClose={() => closeWindow(id)}
         onStateChange={(nativeState) => {
-          if (nativeState.focused) focusedDesktopWindowRef.current = id;
           setOpenWindows((current) => current.map((item) =>
             item.id === id && item.maximized !== nativeState.maximized
               ? { ...item, maximized: Boolean(nativeState.maximized) }
@@ -34502,7 +34521,7 @@ export function App() {
                       const enabled = event.target.checked;
                       if (
                         enabled &&
-                        !window.confirm(
+                        !getActiveDesktopWindow().confirm(
                           "系统文件读取权限始终开放。开启运行完全访问后，AI 还可无审批修改非工作区文件，并可无审批运行任意命令。\n\n该设置会持久保存。仅在你信任当前模型、提示词和任务内容时开启。是否继续？",
                         )
                       ) {
@@ -37834,7 +37853,7 @@ export function App() {
       setSessionChatStatus(sessionId, { status: "warning", message: "请等当前任务结束后再重置会话。" });
       return;
     }
-    if (!window.confirm(
+    if (!getActiveDesktopWindow().confirm(
       "确定重置当前会话？\n\n将清空该会话的所有数据，角色卡恢复到开场白，会话 ID 保持不变。此操作无法撤销。",
     )) return;
 
@@ -39034,6 +39053,7 @@ export function App() {
                                       onClick={(event) => {
                                         event.stopPropagation();
                                         setChatMessageMenu(null);
+                                        setGlobalOverlayWindow(getDesktopWindow("chat"));
                                         setRoleplayGreetingSelectorOpen(true);
                                       }}
                                     >
@@ -40755,12 +40775,14 @@ export function App() {
       {renderDesktopWindow("studio", "人格工作室", studioWindow)}
       {(avatarCropModal ||
         roleplayGreetingSelectorModal ||
-        dataClearConfirmationModal) && (
+        dataClearConfirmationModal) && !globalOverlayWindow?.closed && (
         createPortal(<div className="managed-global-overlays portfolio-desktop-shell">
           {avatarCropModal}
           {roleplayGreetingSelectorModal}
           {dataClearConfirmationModal}
-        </div>, getDesktopWindow(focusedDesktopWindowRef.current).document.body)
+        </div>, globalOverlayWindow && !globalOverlayWindow.closed
+          ? globalOverlayWindow.document.body
+          : document.body)
       )}
     </>
   );
