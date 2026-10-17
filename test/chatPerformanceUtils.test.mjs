@@ -315,33 +315,6 @@ test("buffers streamed text during scrolling but flushes final text immediately"
   assert.ok(scheduler.tasks.every((task) => task.cancelled));
 });
 
-test("visible preview mounting does not wait for an idle callback", (context) => {
-  const previousWindow = globalThis.window;
-  const previousDocument = globalThis.document;
-  const scheduler = createFakeScheduler();
-  const frames = [];
-  globalThis.window = {
-    setTimeout: scheduler.schedule,
-    clearTimeout: (cancel) => cancel(),
-    requestAnimationFrame: (callback) => { frames.push(callback); return frames.length; },
-    cancelAnimationFrame() {},
-    requestIdleCallback: () => { throw new Error("Visible content waited for idle"); },
-  };
-  globalThis.document = { visibilityState: "visible" };
-  context.after(() => {
-    if (previousWindow === undefined) delete globalThis.window;
-    else globalThis.window = previousWindow;
-    if (previousDocument === undefined) delete globalThis.document;
-    else globalThis.document = previousDocument;
-  });
-  let mounted = false;
-  createChatPreviewMountQueue().enqueue(() => { mounted = true; });
-  scheduler.runNext();
-  assert.equal(frames.length, 1);
-  frames.shift()();
-  assert.equal(mounted, true);
-});
-
 test("serializes normal and heavy previews with a mount gap", () => {
   const scheduler = createFakeScheduler();
   const queue = createChatPreviewMountQueue(scheduler.schedule);
@@ -380,7 +353,7 @@ test("layout-driven scroll events do not interrupt automatic following", (contex
     scrollTop: 0,
     scrollHeight: 2000,
     clientHeight: 500,
-    querySelectorAll: () => [{ ownerDocument: { defaultView: globalThis.window }, contentWindow: { postMessage: (payload) => previews.push(payload) } }],
+    querySelectorAll: () => [{ contentWindow: { postMessage: (payload) => previews.push(payload) } }],
   });
   context.mock.method(globalThis, "setTimeout", timers.schedule);
   const previousWindow = globalThis.window;

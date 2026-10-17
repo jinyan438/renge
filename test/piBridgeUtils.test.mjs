@@ -128,9 +128,9 @@ test("Electron workspaces use all Pi native coding tools and remove Renge duplic
     "edit",
     "powershell",
   ]);
-  assert.equal(packageJson.dependencies["@earendil-works/pi-ai"], "1.2.0");
-  assert.equal(packageJson.dependencies["@earendil-works/pi-coding-agent"], "1.2.0");
-  assert.equal(packageJson.dependencies["@earendil-works/pi-tui"], "1.2.0");
+  assert.equal(packageJson.dependencies["@earendil-works/pi-ai"], "0.87.1");
+  assert.equal(packageJson.dependencies["@earendil-works/pi-coding-agent"], "0.87.1");
+  assert.equal(packageJson.dependencies["@earendil-works/pi-tui"], "0.87.1");
   assert.equal(
     PI_KERNEL_ID,
     `@earendil-works/pi-coding-agent@${packageJson.dependencies["@earendil-works/pi-coding-agent"]}`,

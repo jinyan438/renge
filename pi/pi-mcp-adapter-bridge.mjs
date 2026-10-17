@@ -129,11 +129,7 @@ export async function createPiMcpAdapter(config, { agentDir } = {}) {
   // Keep embedded Renge sessions isolated from the user's global Pi CLI state.
   if (agentDir) process.env.PI_CODING_AGENT_DIR = resolve(agentDir);
   const module = await loadAdapterModule();
-  const normalized = normalizePiMcpConfig(config);
-  // Adapter 5 makes scripting opt-in. Preserve Renge's existing tool surface
-  // while respecting an explicit caller setting.
-  normalized.settings = { scriptMode: true, ...normalized.settings };
-  return module.createMcpAdapter({ config: normalized });
+  return module.createMcpAdapter({ config: normalizePiMcpConfig(config) });
 }
 
 function toToolDefinition(serverName, serverId, tool) {

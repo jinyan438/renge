@@ -1,5 +1,35 @@
-import { skipQuotedSegment, skipWhitespaceAndComments } from "./tavernModuleImports.mjs";
-export { getTavernStaticModuleImports } from "./tavernModuleImports.mjs";
+function skipQuotedSegment(source: string, startIndex: number, quote: string) {
+  for (let index = startIndex + 1; index < source.length; index += 1) {
+    if (source[index] === "\\") {
+      index += 1;
+      continue;
+    }
+    if (source[index] === quote) return index + 1;
+  }
+  return source.length;
+}
+
+function skipWhitespaceAndComments(source: string, startIndex: number) {
+  let index = startIndex;
+  while (index < source.length) {
+    if (/\s/.test(source[index])) {
+      index += 1;
+      continue;
+    }
+    if (source[index] === "/" && source[index + 1] === "/") {
+      const lineEnd = source.indexOf("\n", index + 2);
+      index = lineEnd < 0 ? source.length : lineEnd + 1;
+      continue;
+    }
+    if (source[index] === "/" && source[index + 1] === "*") {
+      const commentEnd = source.indexOf("*/", index + 2);
+      index = commentEnd < 0 ? source.length : commentEnd + 2;
+      continue;
+    }
+    break;
+  }
+  return index;
+}
 
 function hasTavernModuleKeyword(source: string) {
   let index = 0;
@@ -65,46 +95,4 @@ export function scopeTavernClassicScript(source: string) {
   // TavernHelper evaluates each classic script in its own function scope. Keep
   // bundled top-level names from shadowing globals used by another card module.
   return `(function () {\n${source}\n}).call(window);`;
-}
-
-export function requiresTavernChatDom(source: string) {
-  let index = 0;
-  const observerCalls: boolean[] = [];
-  while (index < source.length) {
-    index = skipWhitespaceAndComments(source, index);
-    const character = source[index];
-    if (character === '"' || character === "'" || character === "`") {
-      index = skipQuotedSegment(source, index, character);
-      continue;
-    }
-    if (character === "(") {
-      observerCalls.push(/\bobserve\s*$/.test(source.slice(Math.max(0, index - 64), index)));
-    } else if (character === ")") {
-      observerCalls.pop();
-    }
-    const match = character === "g" || character === "q"
-      ? /^(getElementById|querySelectorAll|querySelector)\b/.exec(source.slice(index))
-      : null;
-    if (match && !/[\w$]/.test(source[index - 1] ?? "")) {
-      const call = skipWhitespaceAndComments(source, index + match[0].length);
-      if (source[call] === "(") {
-        const argument = skipWhitespaceAndComments(source, call + 1);
-        const quote = source[argument];
-        if (quote === '"' || quote === "'") {
-          const end = skipQuotedSegment(source, argument, quote);
-          const selector = source.slice(argument + 1, end - 1);
-          const chatSelector = match[0] === "getElementById"
-            ? selector === "chat"
-            : /^#chat(?:$|[\s.#:[,>+~])/.test(selector);
-          const close = skipWhitespaceAndComments(source, end);
-          const member = skipWhitespaceAndComments(source, close + 1);
-          // Merely defining a guarded decorator must keep working before chat
-          // opens. A concrete observer target or direct dereference needs DOM.
-          if (chatSelector && (observerCalls.includes(true) || (source[close] === ")" && source[member] === "."))) return true;
-        }
-      }
-    }
-    index += 1;
-  }
-  return false;
 }

@@ -63,10 +63,7 @@ try {
     activeCharacterCardId: "card", activeProviderId: "provider",
     providers: [{id:"provider", name:"Fixture", apiBaseUrl:"http://fixture.invalid/v1", apiKey:"fixture", apiType:"chat-completions",modelId:"fixture-model",models:["fixture-model"],updatedAt:now}],
     llmContextSettings: {skills:false,mcpTools:false,workspaceTools:false},
-    tavernScripts: [
-      {id:"background-fixture",name:"Background startup fixture",enabled:true,content:"parent.__fixtureBackgroundReady = true;"},
-      {id:"runner-fixture",name:"Runner compatibility fixture",enabled:true,content:script},
-    ],
+    tavernScripts: [{id:"runner-fixture",name:"Runner compatibility fixture",enabled:true,content:script}],
     characterCards: [{id:"card",name:"Runner fixture",firstMessage:'<div data-runner-opening="yes">Opening loading</div>',
       characterBook:{id:"book",name:"Runner World",entries:[{uid:"lore",keys:["fixture-world-key"],content:"SCANNED_WORLD_LORE"}]},createdAt:now,updatedAt:now}],
     chatSessions: ["one","two"].map(id => ({id,title:`Runner ${id}`,mode:"roleplay",roleplayCharacterCardId:"card",
@@ -86,7 +83,6 @@ try {
       `data: ${JSON.stringify({choices:[{index:0,delta:{},finish_reason:"stop"}]})}\n\ndata: [DONE]\n\n`});
   });
   await page.goto(server.url);
-  await page.waitForFunction(() => window.__fixtureBackgroundReady);
   await page.getByRole("button",{name:"打开Agent Chat",exact:true}).click();
   await page.getByRole("button",{name:"开始对话",exact:true}).last().click();
   await page.locator(".chat-session-item").filter({hasText:"Runner one"}).click();
@@ -146,7 +142,7 @@ try {
   await previews.nth(1).waitFor();
   for (let part=0; part<2; part++) {
     const frame = await (await previews.nth(part).elementHandle()).contentFrame();
-    await frame.waitForFunction(() => document.querySelector('#lookup')?.textContent, undefined, {polling:50});
+    await frame.waitForFunction(() => document.querySelector('#lookup')?.textContent);
     assert.deepEqual(JSON.parse(await frame.locator("#lookup").textContent()), {index:5,part,raw:true,hostExposed:false,date:"Day 2"});
     assert.notEqual(new URL(frame.url()).hostname, new URL(page.url()).hostname, "frontend documents retain a separate origin");
     await frame.evaluate(() => { window.originalChat = SillyTavern.getContext().chat; });
@@ -156,9 +152,7 @@ try {
   await page.waitForFunction(() => getChatMessages(1)[0].message === 'Updated user source');
   for (let part=0; part<2; part++) {
     const frame = await (await previews.nth(part).elementHandle()).contentFrame();
-    // Offscreen previews intentionally suspend animation frames. Context sync
-    // remains live and must be checked independently of animation scheduling.
-    await frame.waitForFunction(() => SillyTavern.getContext().chat[1].mes === 'Updated user source', undefined, {polling:50}).catch(async error => {
+    await frame.waitForFunction(() => SillyTavern.getContext().chat[1].mes === 'Updated user source').catch(async error => {
       console.error('Preview sync:', await frame.evaluate(() => ({chat:SillyTavern.getContext().chat.map(m=>m.mes.slice(0,50)),api:getChatMessages(1)})));
       throw error;
     });

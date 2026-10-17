@@ -1,5 +1,3 @@
-import { postMessageToFrame } from "./frameMessaging.ts";
-
 export type ChatStreamUpdate = {
   content: string;
   reasoning: string;
@@ -206,7 +204,7 @@ export function observeChatScrollActivity(thread: HTMLElement) {
   let scrollEndTimer: number | null = null;
   const notifyPreviews = (scrolling: boolean) => {
     thread.querySelectorAll<HTMLIFrameElement>(".chat-html-preview iframe").forEach((frame) => {
-      postMessageToFrame(frame, { type: CHAT_SCROLL_ACTIVITY_MESSAGE, scrolling }, "*");
+      frame.contentWindow?.postMessage({ type: CHAT_SCROLL_ACTIVITY_MESSAGE, scrolling }, "*");
     });
   };
   const markScrolling = () => {
@@ -310,9 +308,7 @@ export function scheduleChatIdleWork(
 }
 
 export function createChatPreviewMountQueue(
-  // Visible content must not wait for an idle deadline on a busy renderer.
-  // Keep serialization and scroll deferral, and yield between mounts.
-  schedule: ScheduleChatStreamFlush = scheduleChatFrameWork,
+  schedule: ScheduleChatStreamFlush = scheduleChatIdleWork,
 ) {
   type MountTask = { mount: () => void; gapMs: number; cancelled: boolean };
   const tasks: MountTask[] = [];

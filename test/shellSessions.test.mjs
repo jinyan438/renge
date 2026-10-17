@@ -114,20 +114,13 @@ setInterval(() => {}, 1000);`);
 test("run cancellation and disposal abort yielded commands and reject cross-run ids", { timeout: 20_000 }, async (t) => {
   const f = await fixture(t);
   const script = join(f.cwd, "alive.mjs");
-  await writeFile(script, "import { appendFileSync } from 'node:fs'; appendFileSync('starts.txt', 'started\\n'); setInterval(() => {}, 1000);");
-  const waitForStarts = (count) => waitUntil(async () => {
-    try { return (await readFile(join(f.cwd, "starts.txt"), "utf8")).trim().split("\n").length === count; }
-    catch { return false; }
-  });
+  await writeFile(script, "setInterval(() => {}, 1000);");
   const controller = new AbortController();
   const first = await f.execute(shellName, { command: command(script), yield_time_ms: 0 }, controller.signal);
-  // Exercise cancellation of running children, independently of shell startup timing.
-  await waitForStarts(1);
   controller.abort();
   const stopped = await f.execute("shell_status", { session_id: first.details.shellSession.id });
   assert.equal(stopped.details.shellSession.status, "stopped");
   const second = await f.execute(shellName, { command: command(script), yield_time_ms: 0 });
-  await waitForStarts(2);
   const other = createShellSessionManager();
   t.after(() => other.dispose());
   await assert.rejects(other.tools[0].execute("status", { session_id: second.details.shellSession.id }), /Unknown shell session/);

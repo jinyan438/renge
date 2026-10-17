@@ -1,8 +1,6 @@
 import { createChatSessionRuntime, type ChatInputMode, type SessionRunStatus } from "./chatSessionRuntime";
 import type { ReviewSource, ReviewSnapshot, ReviewDetail, ReviewRequest, ReviewAiResult } from "./codeReviewUtils";
 import { ChatCodeContent } from "./ChatCodeContent";
-import { usePiExtensionDialogs, type PiExtensionEventFields } from "./PiExtensionDialog";
-import { getPiExtensionDisplayText, isPiTerminalUiCompatibilityNotice, normalizePiExtensionText } from "./piExtensionText.mjs";
 import { createUserProfile, normalizeUserProfiles, type UserProfile } from "./userProfileUtils";
 import {
   ArrowLeft,
@@ -97,9 +95,9 @@ import { createStreamingCompleteBackupZip, type CompleteBackupZipEntry } from ".
 import { COMPLETE_BACKUP_MAX_EXTRACTED_BYTES, completeBackupSizeLimitError } from "./completeBackupLimits.mjs";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
-import htmlPreviewDependenciesUrl from "virtual:html-preview-dependencies-url";
+import vueSource from "vue/dist/vue.global.prod.js?raw";
+import htmlPreviewDependenciesSource from "virtual:html-preview-dependencies";
 import { HTML_PREVIEW_PARENT_BRIDGE_SOURCE } from "./htmlPreviewParentBridge";
-import { postMessageToFrame } from "./frameMessaging";
 import { buildHtmlPreviewImagesScript } from "./htmlPreviewImages";
 import {
   collectInheritedHtmlPreviewStyleResources,
@@ -276,7 +274,7 @@ import {
   type PromptTemplateStoredMessage,
 } from "./promptTemplateExtension";
 import { DesktopHome, type HomeDestination } from "./DesktopHome";
-import { NativeDesktopWindow, getDesktopWindow, nativeDesktopWindowsEnabled, useDesktopWindow, type NativeDesktopWindowState } from "./NativeDesktopWindow";
+import { NativeDesktopWindow, getDesktopWindow, nativeDesktopWindowsEnabled, type NativeDesktopWindowState } from "./NativeDesktopWindow";
 import { WindowResizeHandles } from "./WindowResizeHandles";
 import { WindowSnapPreview } from "./WindowSnapPreview";
 import { useWindowDrag, type WindowOffset } from "./useWindowDrag";
@@ -313,10 +311,8 @@ import {
   createPersistentReferenceBaseline,
   createChatSessionPatch,
   createShallowReferencePatch,
-  exceedsJsonStringBudget,
   hasMeaningfulPatchChanges,
 } from "./appDataPersistenceUtils";
-import { sendAppDataSave } from "./appDataSaveClient";
 import {
   compactToolCallForReplay,
   formatCodexDuration,
@@ -721,8 +717,6 @@ type ChatChoiceRequest = {
 
 type ToolVisualization = {
   toolCallId?: string;
-  parentToolCallId?: string;
-  durationMs?: number;
   name: string;
   args?: Record<string, unknown>;
   partialArguments?: string;
@@ -1585,12 +1579,11 @@ type PendingChatInput = {
   execute?: () => Promise<void>;
 };
 
-type PiStreamEvent = PiExtensionEventFields & {
+type PiStreamEvent = {
   type:
     | "run_start"
     | "run_ready"
     | "input_delivered"
-    | "agent_settled"
     | "tool_request"
     | "tool_start"
     | "tool_update"
@@ -1603,12 +1596,7 @@ type PiStreamEvent = PiExtensionEventFields & {
     | "compaction_end"
     | "context_usage"
     | "auto_retry_start"
-    | "auto_retry_end"
-    | "extension_ui_request"
-    | "extension_ui_cancel"
-    | "extension_entry"
-    | "extension_message"
-    | "extension_error";
+    | "auto_retry_end";
   runId?: string;
   inputId?: string;
   kernel?: string;
@@ -1617,8 +1605,6 @@ type PiStreamEvent = PiExtensionEventFields & {
   // Pi's own id for the execution phase, which may differ from the streamed
   // toolCallId used for the rendered preview.
   executionToolCallId?: string;
-  parentToolCallId?: string;
-  durationMs?: number;
   toolName?: string;
   contentIndex?: number;
   delta?: string;
@@ -2771,12 +2757,6 @@ function normalizeChatMessage(
           ...(typeof rawToolVisualization.toolCallId === "string"
             ? { toolCallId: rawToolVisualization.toolCallId }
             : {}),
-          ...(typeof rawToolVisualization.parentToolCallId === "string"
-            ? { parentToolCallId: rawToolVisualization.parentToolCallId }
-            : {}),
-          ...(typeof rawToolVisualization.durationMs === "number" && Number.isFinite(rawToolVisualization.durationMs) && rawToolVisualization.durationMs >= 0
-            ? { durationMs: rawToolVisualization.durationMs }
-            : {}),
           ...(isObjectRecord(rawToolVisualization.args)
             ? { args: rawToolVisualization.args }
             : {}),
@@ -3361,11 +3341,15 @@ async function savePersistentAppData(
         lastChatSessionsForPersistentStore = data.chatSessions ?? [];
         return true;
       }
-      const { ok, status, payload } = await sendAppDataSave(
-        patchExistingData ? "PATCH" : "PUT",
-        { data: requestData, ...(sessionPatch ? { sessionPatch } : {}) },
-      );
-      if (ok) {
+      const response = await fetch("/api/app-data", {
+        method: patchExistingData ? "PATCH" : "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: requestData, ...(sessionPatch ? { sessionPatch } : {}) }),
+      });
+      const payload = await response.json().catch(() => ({})) as {
+        error?: string; sessionVersions?: Record<string, string>;
+      };
+      if (response.ok) {
         lastCharacterCardsForPersistentStore = characterCards;
         lastAppDataForPersistentStore = data;
         lastChatSessionsForPersistentStore = data.chatSessions ?? [];
@@ -3380,9 +3364,9 @@ async function savePersistentAppData(
         for (const { id } of sessionPatch?.deletes ?? []) delete persistentChatSessionVersions[id];
         reportAppDataSaveError("");
       } else {
-        reportAppDataSaveError(payload.error || `应用数据保存失败（${status}），请先导出本页备份。`);
+        reportAppDataSaveError(payload.error || `应用数据保存失败（${response.status}），请先导出本页备份。`);
       }
-      return ok;
+      return response.ok;
     } catch (error) {
       // The app can still run with localStorage when the persistence API is unavailable.
       reportAppDataSaveError(error instanceof Error ? `应用数据保存失败：${error.message}` : "应用数据保存失败，请先导出本页备份。");
@@ -3438,13 +3422,6 @@ function setLocalStorageJsonSafely(key: string, value: unknown) {
   if (blockedLocalStorageJsonKeys.has(key)) return false;
   let stored = false;
   try {
-    // localStorage cannot hold multi-megabyte history archives. Counting string
-    // lengths first avoids building a huge JSON only to hit QuotaExceededError.
-    if (exceedsJsonStringBudget(value, 8 * 1024 * 1024)) {
-      blockedLocalStorageJsonKeys.add(key);
-      localStorageJsonAttemptByKey.set(key, { value, stored: false });
-      return false;
-    }
     localStorage.setItem(key, JSON.stringify(value));
     stored = true;
   } catch {
@@ -4246,7 +4223,6 @@ const HTML_PREVIEW_HEAVY_MOUNT_GAP = 900;
 const HTML_PREVIEW_FALLBACK_LOAD_DELAY = 600;
 const HTML_PREVIEW_LAZY_ROOT_MARGIN = "240px 0px";
 const HTML_PREVIEW_FREEZE_DELAY_MS = 900;
-const TAVERN_CHAT_DOM_READY_EVENT = "renge-tavern-chat-dom-ready";
 const HTML_PREVIEW_ACTIVITY_MESSAGE = "renge-html-preview-activity";
 const HTML_PREVIEW_STREAMING_CONTEXT_INTERVAL_MS = 500;
 
@@ -4345,15 +4321,17 @@ function buildHtmlPreviewFullscreenScript(previewId: string) {
 }
 const htmlPreviewViewportMeta =
   '<meta data-renge-html-preview-viewport="true" name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover" />';
-// A parser-blocking classic script keeps globals available to card <head>
-// scripts while allowing every preview to reuse the browser's resource cache.
-function buildHtmlPreviewDependenciesScript(assetBaseUrl: string) {
-  const source = new URL(htmlPreviewDependenciesUrl, window.location.href);
-  const url = source.protocol === "data:"
-    ? source.href
-    : new URL(source.pathname + source.search, assetBaseUrl).href;
-  return `<script data-renge-html-preview-dependencies="true" src=${JSON.stringify(url)}></script>`;
-}
+const htmlPreviewJqueryScript = [
+  '<script data-renge-html-preview-jquery="true">',
+  jquerySource.replace(/<\/script/gi, "<\\/script"),
+  "</script>",
+].join("");
+const htmlPreviewDependenciesScript = [
+  '<script data-renge-html-preview-dependencies="true">',
+  vueSource.replace(/<\/script/gi, "<\\/script"),
+  htmlPreviewDependenciesSource.replace(/<\/script/gi, "<\\/script"),
+  "</script>",
+].join("");
 const htmlPreviewBootstrapScript = [
   '<script data-renge-html-preview-bootstrap="true">',
   "(() => {",
@@ -7091,14 +7069,12 @@ function buildHtmlPreviewDocument(
   const inheritedStyleInjection = inheritedStyleResources
     ? `<!-- renge-inherited-html-styles -->${inheritedStyleResources}`
     : "";
-  const previewFrameUrl = getIsolatedHtmlPreviewFrame(previewId)?.url ?? window.location.href;
   const iconBaseUrl = !window.RengeAndroidNative
-    ? previewFrameUrl
+    ? getIsolatedHtmlPreviewFrame(previewId)?.url ?? window.location.href
     : window.location.href;
   const iconStyle = `<style data-renge-html-preview-icons="true">${getTavernFontAwesomeCss(iconBaseUrl)}</style>`;
-  const htmlPreviewDependenciesScript = buildHtmlPreviewDependenciesScript(previewFrameUrl);
   const imageScript = buildHtmlPreviewImagesScript(new URL("/html-preview-image", window.location.href).href);
-  const headInjection = `${htmlPreviewViewportMeta}${imageScript}${inheritedStyleInjection}${htmlPreviewStyle}${iconStyle}${buildHtmlPreviewFullscreenScript(previewId)}${htmlPreviewDependenciesScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
+  const headInjection = `${htmlPreviewViewportMeta}${imageScript}${inheritedStyleInjection}${htmlPreviewStyle}${iconStyle}${buildHtmlPreviewFullscreenScript(previewId)}${htmlPreviewJqueryScript}${htmlPreviewDependenciesScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
     return injectHtmlPreviewHead(trimmedContent, headInjection);
   }
@@ -7138,9 +7114,6 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
   previewId,
   frameRegistry,
 }: ChatHtmlPreviewProps) {
-  const hostWindow = useDesktopWindow();
-  const latestContextRef = useRef(context);
-  latestContextRef.current = context;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const requestHeavyMountRef = useRef<() => void>(() => {});
@@ -7200,8 +7173,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       if (previewActiveRef.current === active) return;
       previewActiveRef.current = active;
       setPreviewActive(active);
-      postMessageToFrame(
-        frameRef.current,
+      frameRef.current?.contentWindow?.postMessage(
         { type: HTML_PREVIEW_ACTIVITY_MESSAGE, id: previewId, active },
         "*",
       );
@@ -7226,7 +7198,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       const frame = frameRef.current;
       if (
         frame &&
-        (hostWindow.document.activeElement === frame ||
+        (document.activeElement === frame ||
           frame.classList.contains("renge-html-fullscreen-frame"))
       ) {
         freezeTimer = window.setTimeout(
@@ -7275,20 +7247,17 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       requestHeavyMountRef.current = () => {};
       cancelQueuedMount?.();
     };
-  }, [heavyContent, hostWindow, mountReady, previewId]);
+  }, [heavyContent, mountReady, previewId]);
 
   const sendContextUpdate = useCallback(() => {
-    const frame = frameRef.current;
-    if (!frame) return;
+    const frameWindow = frameRef.current?.contentWindow;
+    if (!frameWindow) return;
     const parentGlobals = getHtmlPreviewParentGlobals(content);
-    postMessageToFrame(
-      frame,
+    frameWindow.postMessage(
       {
         type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
         id: previewId,
-        // Load-settling callbacks can outlive the render which scheduled them.
-        // Always send the latest snapshot, including after a rapid card edit.
-        context: { ...latestContextRef.current, parentGlobals },
+        context: { ...context, parentGlobals },
       },
       "*",
     );
@@ -7300,25 +7269,23 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
     const container = containerRef.current;
     const containerWidth =
       container?.getBoundingClientRect().width || container?.clientWidth || 0;
-    postMessageToFrame(
-      frameRef.current,
+    frameRef.current?.contentWindow?.postMessage(
       {
         type: HTML_PREVIEW_VIEWPORT_MESSAGE,
         id: previewId,
         width:
           frameWidth ||
           containerWidth ||
-          hostWindow.visualViewport?.width ||
-          hostWindow.innerWidth,
-        height: hostWindow.visualViewport?.height ?? hostWindow.innerHeight,
+          window.visualViewport?.width ||
+          window.innerWidth,
+        height: window.visualViewport?.height ?? window.innerHeight,
       },
       "*",
     );
-  }, [hostWindow, previewId]);
+  }, [previewId]);
 
   const requestLayoutMeasurement = useCallback(() => {
-    postMessageToFrame(
-      frameRef.current,
+    frameRef.current?.contentWindow?.postMessage(
       {
         type: HTML_PREVIEW_REMEASURE_MESSAGE,
         id: previewId,
@@ -7333,9 +7300,9 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
 
   useEffect(() => {
     const update = () => sendViewportUpdate();
-    hostWindow.addEventListener("resize", update);
-    hostWindow.addEventListener("orientationchange", update);
-    hostWindow.visualViewport?.addEventListener("resize", update);
+    window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
+    window.visualViewport?.addEventListener("resize", update);
     const container = containerRef.current;
     let lastObservedWidth = container?.getBoundingClientRect().width ?? 0;
     const resizeObserver =
@@ -7350,12 +7317,12 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
         : null;
     if (container) resizeObserver?.observe(container);
     return () => {
-      hostWindow.removeEventListener("resize", update);
-      hostWindow.removeEventListener("orientationchange", update);
-      hostWindow.visualViewport?.removeEventListener("resize", update);
+      window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
+      window.visualViewport?.removeEventListener("resize", update);
       resizeObserver?.disconnect();
     };
-  }, [hostWindow, requestLayoutMeasurement, sendViewportUpdate]);
+  }, [requestLayoutMeasurement, sendViewportUpdate]);
 
   const registerFrame = useCallback(
     (frame: HTMLIFrameElement | null) => {
@@ -7388,8 +7355,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       loadSyncTimersRef.current = [];
       resizeHtmlPreviewFrame(event);
       const loadedFrame = event.currentTarget;
-      postMessageToFrame(
-        loadedFrame,
+      loadedFrame.contentWindow?.postMessage(
         {
           type: HTML_PREVIEW_ACTIVITY_MESSAGE,
           id: previewId,
@@ -7403,8 +7369,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
         sourceDocumentRef.current
       ) {
         initializedFrameRef.current = loadedFrame;
-        postMessageToFrame(
-          loadedFrame,
+        loadedFrame.contentWindow?.postMessage(
           {
             type: HTML_PREVIEW_FRAME_INIT_MESSAGE,
             id: previewId,
@@ -7415,8 +7380,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       }
       const synchronizeLoadedFrame = () => {
         if (frameRef.current !== loadedFrame) return;
-        postMessageToFrame(
-          loadedFrame,
+        loadedFrame.contentWindow?.postMessage(
           {
             type: HTML_PREVIEW_ACTIVITY_MESSAGE,
             id: previewId,
@@ -12698,104 +12662,7 @@ function PortfolioDesktopWindow({
   );
 }
 
-const PiToolVisualization = memo(function PiToolVisualization({ meta, onCopy }: {
-  meta: ToolVisualization; onCopy: (content: string) => Promise<void>;
-}) {
-    const [bodyReady, setBodyReady] = useState(meta.status === "running");
-    const showBody = bodyReady || meta.status === "running";
-    const normalizedName = meta.name.trim().toLocaleLowerCase().replace(/[\s.-]+/g, "_");
-    const args = meta.args ?? {};
-    const path = String(args.path ?? args.filePath ?? args.file_path ?? "");
-    const command = String(args.command ?? args.cmd ?? args.script ?? "");
-    const isRead =
-      ["read", "read_file", "file_read"].includes(normalizedName) ||
-      normalizedName.includes("read_file");
-    const isShell =
-      ["bash", "powershell", "shell_status", "shell_stop", "shell", "exec", "exec_command", "command"].includes(normalizedName) ||
-      normalizedName.includes("run_command") || normalizedName.includes("execute_script");
-    const isMutation =
-      ["write", "edit", "write_file", "apply_patch"].includes(normalizedName) ||
-      normalizedName.includes("write_file") ||
-      normalizedName.includes("edit_file");
-    const resultText = showBody ? normalizePiExtensionText(toolVisualizationResultText(meta.result)) : "";
-    const diff = showBody ? toolVisualizationDiff(meta) : "";
-    const lines = resultText.split("\n").slice(0, 400);
-    const unexecutedArguments = meta.phase === "arguments" && meta.status !== "done";
-    const statusLabel = meta.status === "running"
-      ? meta.phase === "arguments" ? "生成参数" : "执行中"
-      : meta.status === "error" ? unexecutedArguments ? "未执行" : "失败" : "完成";
-    const title = isRead
-      ? "读取文件"
-      : isShell
-        ? normalizedName === "shell_status" ? "查询命令" : normalizedName === "shell_stop" ? "停止命令" : "运行命令"
-        : isMutation
-          ? normalizedName.includes("write")
-            ? unexecutedArguments
-              ? meta.status === "running" ? "准备写入" : "写入未执行"
-              : "写入文件"
-            : "修改文件"
-          : meta.name;
-    const Icon = isRead ? FileCode2 : isShell ? Terminal : isMutation ? FilePenLine : Wrench;
-    const result = isObjectRecord(meta.result) ? meta.result : {};
-    const resultDetails = isObjectRecord(result.details) ? result.details : result;
-    const description = meta.status === "error"
-      ? unexecutedArguments ? "操作尚未执行" : "执行遇到问题"
-      : isMutation
-        ? unexecutedArguments ? "正在生成文件内容" : "文件变更"
-        : isShell ? "执行脚本与命令" : isRead ? "读取文件内容" : "工具执行记录";
-    return (
-      <details
-        className={`pi-tool-visualization ${meta.status} ${isMutation ? "mutation" : ""} ${isShell ? "shell" : ""}`}
-        onToggle={(event) => { if (event.currentTarget.open) setBodyReady(true); }}
-        open={meta.status === "running"}
-      >
-        <summary className="pi-tool-visualization-header">
-          <span className="pi-tool-visualization-icon"><Icon size={21} /></span>
-          <span className="chat-tool-heading">
-            <span className="chat-tool-heading-line">
-              <strong>{title}</strong>
-              <span className="pi-tool-visualization-summary" title={path || command || meta.name}>
-                {path || command || meta.name}
-              </span>
-            </span>
-            <span className="chat-tool-description">{description}</span>
-          </span>
-          <span className="pi-tool-visualization-status">
-            {meta.status === "done" ? <CircleCheck size={14} /> : meta.status === "error" ? <X size={14} /> : <LoaderCircle className="chat-status-spinner" size={14} />}
-            {statusLabel}{meta.status !== "running" && meta.durationMs !== undefined ? ` · ${(meta.durationMs / 1000).toFixed(2)} 秒` : ""}
-          </span>
-          <ChevronDown className="pi-tool-visualization-chevron" size={15} />
-        </summary>
-        {showBody && <div className="pi-tool-visualization-body">
-          {path && !diff && <div className="pi-tool-visualization-path"><FileCode2 size={13} /> <code>{path}</code></div>}
-          {meta.status === "error" && resultText ? (
-            <pre className="pi-tool-result-preview">{resultText}</pre>
-          ) : null}
-          {isMutation && diff ? (
-            <ChatToolDiffPreview
-              diff={diff}
-              path={path}
-              numbered={normalizedName === "edit" && typeof resultDetails.diff === "string"}
-              completed={meta.status === "done"}
-              onCopy={onCopy}
-            />
-          ) : isRead && resultText ? (
-            <div className="pi-tool-code-preview"><pre>{lines.map((line, index) => <span key={index}><i>{index + 1}</i>{line || " "}</span>)}</pre></div>
-          ) : isShell ? (
-            <div className="pi-tool-terminal-preview">
-              {command && <div className="command"><b>$</b>{command}</div>}
-              <pre>{resultText || (meta.status === "running" ? "等待输出…" : "无输出")}</pre>
-            </div>
-          ) : resultText && meta.status !== "error" ? (
-            <pre className="pi-tool-result-preview">{renderInlineText(resultText)}</pre>
-          ) : null}
-        </div>}
-      </details>
-    );
-});
-
 export function App() {
-  const piExtensionDialogs = usePiExtensionDialogs();
   const focusedDesktopWindowRef = useRef("chat");
   const [openWindows, setOpenWindows] = useState<ManagedWindowState[]>([]);
   const topWindowZIndexRef = useRef(100);
@@ -13231,8 +13098,6 @@ export function App() {
   const [extensions, setExtensions] = useState<InstalledExtension[]>(() =>
     loadInstalledExtensions(EXTENSIONS_STORAGE_KEY),
   );
-  const piExtensionsEnabled = extensions.some((extension) => extension.compatibility === "pi" &&
-    extension.enabled && extension.status !== "error" && (extension.piResources?.extensions ?? 1) > 0);
   const [extensionInstallUrl, setExtensionInstallUrl] = useState(
     "@ff-labs/pi-fff",
   );
@@ -13277,7 +13142,7 @@ export function App() {
   const [chatChoiceDrafts, setChatChoiceDrafts] = useState<Record<string, string>>({});
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const contextVisibleChatMessages = useMemo(
-    () => chatMessages.filter((message) => !isTavernHiddenMessage(message) && message.extra?.piExtensionDisplayOnly !== true),
+    () => chatMessages.filter((message) => !isTavernHiddenMessage(message)),
     [chatMessages],
   );
   const contextMeterChatMessages = useThrottledValue(
@@ -13470,8 +13335,7 @@ export function App() {
     chatInputContextDirtyRef.current = false;
     const chatInput = chatInputValueRef.current;
     htmlPreviewFrameRefs.current.forEach((frame, previewId) => {
-      postMessageToFrame(
-        frame,
+      frame.contentWindow?.postMessage(
         {
           type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
           id: previewId,
@@ -13823,7 +13687,6 @@ export function App() {
       chatLayoutCleanupRef.current = null;
       chatThreadRef.current = thread;
       if (!thread) return;
-      window.dispatchEvent(new Event(TAVERN_CHAT_DOM_READY_EVENT));
       chatScrollActivityCleanupRef.current = observeChatScrollActivity(thread);
       chatLayoutCleanupRef.current = observeChatLayoutChanges(
         thread,
@@ -13921,66 +13784,6 @@ export function App() {
     emitTavernMessageEventNow: (eventName: typeof TAVERN_EVENTS.MESSAGE_SENT | typeof TAVERN_EVENTS.MESSAGE_RECEIVED, messageId: string) =>
       activeChatSessionIdRef.current === sessionId ? emitTavernMessageEventNow(eventName, messageId) : Promise.resolve(-1),
   });
-
-  const createPiExtensionEventHandler = (
-    sessionId: string, signal: AbortSignal | undefined, sender?: ChatSenderIdentity, beforeOutput?: () => void,
-  ) => {
-    const statuses = new Map<string, string>();
-    let lastStatus = "";
-    const append = (content: string, displayOnly = true, entryId?: string) => {
-      if (!content.trim()) return false;
-      beforeOutput?.();
-      commitMessagesForSession(sessionId, (messages) => [...messages, {
-        id: crypto.randomUUID(), role: "assistant", content,
-        ...(sender ? { sender } : {}), createdAt: new Date().toISOString(),
-        extra: { piExtensionDisplayOnly: displayOnly, ...(entryId ? { piEntryId: entryId } : {}) },
-      }]);
-      return true;
-    };
-    return (event: PiStreamEvent): { handled: boolean; visible?: boolean; status?: SessionRunStatus } => {
-      if (event.type === "extension_ui_cancel") {
-        piExtensionDialogs.cancel(event);
-        return { handled: true };
-      }
-      if (event.type === "extension_entry" || event.type === "extension_message") {
-        const text = getPiExtensionDisplayText(event.type === "extension_entry" ? event.entry?.data : event.message);
-        return { handled: true, visible: append(text, event.type === "extension_entry", event.entry?.id) };
-      }
-      if (event.type === "extension_error") {
-        const message = `Pi 扩展错误：${normalizePiExtensionText(event.error || "扩展加载或执行失败")}`;
-        const status: SessionRunStatus = { status: "error", message };
-        setSessionChatStatus(sessionId, status);
-        return { handled: true, visible: append(message), status };
-      }
-      if (event.type !== "extension_ui_request") return { handled: false };
-      if (["select", "confirm", "input", "editor"].includes(event.method ?? "")) {
-        piExtensionDialogs.request(event, signal, (message) => setSessionChatStatus(sessionId, { status: "error", message }));
-      } else if (event.method === "notify") {
-        if (isPiTerminalUiCompatibilityNotice(event.message)) return { handled: true };
-        const text = getPiExtensionDisplayText(event.message);
-        const prefix = event.notifyType === "error" ? "Pi 扩展错误" : event.notifyType === "warning" ? "Pi 扩展提示" : "Pi 扩展";
-        const status: SessionRunStatus = {
-          status: event.notifyType === "error" ? "error" : event.notifyType === "warning" ? "warning" : "success",
-          message: text,
-        };
-        setSessionChatStatus(sessionId, status);
-        return { handled: true, visible: append(`${prefix}：${text}`), status };
-      } else if (event.method === "setStatus" || event.method === "setWorkingMessage" || event.method === "setWidget") {
-        const key = event.statusKey ?? event.widgetKey ?? "working";
-        const text = normalizePiExtensionText(event.statusText ?? event.widgetLines?.join("\n") ?? event.message);
-        if (text) statuses.set(key, text); else statuses.delete(key);
-        const message = [...statuses.values()].join(" · ");
-        setSessionChatStatus(sessionId, (current) => message
-          ? { status: "loading", message }
-          : current.message === lastStatus ? { status: "loading", message: "Pi 正在处理..." } : current);
-        lastStatus = message;
-      } else if (event.method === "set_editor_text") {
-        const text = event.text ?? "";
-        if (activeChatSessionIdRef.current === sessionId) setChatInput(text);
-      }
-      return { handled: true };
-    };
-  };
 
   const getSessionStatusBarState = (sessionId = activeChatSessionIdRef.current) => {
     const session = chatSessionsRef.current.find((candidate) => candidate.id === sessionId);
@@ -14368,8 +14171,7 @@ export function App() {
       document.documentElement.classList.remove("renge-html-fullscreen");
       window.rengeAndroid?.exitFullscreen?.();
       if (notifyFrame) {
-        postMessageToFrame(
-          frame,
+        frame.contentWindow?.postMessage(
           { type: HTML_PREVIEW_FULLSCREEN_EXIT_MESSAGE, id: frame.dataset.previewId },
           "*",
         );
@@ -14527,8 +14329,7 @@ export function App() {
       error?: unknown,
     ) => {
       if (typeof requestId !== "string") return;
-      postMessageToFrame(
-        frame,
+      frame.contentWindow?.postMessage(
         {
           type: HTML_PREVIEW_COMMAND_RESULT_MESSAGE,
           id,
@@ -14595,14 +14396,12 @@ export function App() {
         const [, frame] = sourceFrameEntry;
         try {
           const result = await executeSlashCommand(payload.command);
-          postMessageToFrame(
-            frame,
+          frame.contentWindow?.postMessage(
             { type: "TH_TRIGGER_SLASH_RESPONSE", requestId: payload.requestId, result },
             "*",
           );
         } catch (error) {
-          postMessageToFrame(
-            frame,
+          frame.contentWindow?.postMessage(
             {
               type: "TH_TRIGGER_SLASH_RESPONSE",
               requestId: payload.requestId,
@@ -14810,8 +14609,7 @@ export function App() {
             host.extension_settings = tavernSettingsStore.root;
             void saveTavernExtensionSettings(settings);
             htmlPreviewFrameRefs.current.forEach((candidateFrame, candidateId) => {
-              postMessageToFrame(
-                candidateFrame,
+              candidateFrame.contentWindow?.postMessage(
                 {
                   type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
                   id: candidateId,
@@ -20083,17 +19881,6 @@ export function App() {
     };
 
     runtime = new TavernScriptRuntime(activeTavernScripts, {
-      waitForChatReady: (signal) => new Promise<void>((resolve) => {
-        const check = () => {
-          if (!signal.aborted && !chatThreadRef.current?.isConnected) return;
-          window.removeEventListener(TAVERN_CHAT_DOM_READY_EVENT, check);
-          signal.removeEventListener("abort", check);
-          resolve();
-        };
-        window.addEventListener(TAVERN_CHAT_DOM_READY_EVENT, check);
-        signal.addEventListener("abort", check, { once: true });
-        check();
-      }),
       getMessages: () => chatMessagesRef.current as TavernRuntimeMessage[],
       setMessages: (messages) => {
         const normalized = messages.map((message) =>
@@ -20194,8 +19981,7 @@ export function App() {
         host.extension_settings = next;
         const saved = saveTavernExtensionSettings(settings);
         htmlPreviewFrameRefs.current.forEach((frame, previewId) => {
-          postMessageToFrame(
-            frame,
+          frame.contentWindow?.postMessage(
             {
               type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
               id: previewId,
@@ -20739,6 +20525,7 @@ export function App() {
       // Give React, extension hooks and resize observers a fully painted chat
       // before executing the character frontend. This is the programmatic
       // equivalent of the formerly required off -> enter -> on workaround.
+      await delay(80);
       await afterNextPaint();
       if (cancelled || activeChatSessionIdRef.current !== sessionId) return;
       setHtmlPreviewReadyMountKey(desiredMountKey);
@@ -23691,10 +23478,10 @@ export function App() {
     }
   };
 
-  const copyChatCodeBlock = useCallback(async (content: string) => {
+  const copyChatCodeBlock = async (content: string) => {
     await navigator.clipboard.writeText(content);
     setChatStatus({ status: "success", message: "已复制代码块。" });
-  }, []);
+  };
 
   const executeMcpTool = async (
     toolName: string,
@@ -24595,8 +24382,97 @@ export function App() {
     </header>
   );
 
-  const renderPiToolVisualization = (meta: ToolVisualization, key: string) =>
-    <PiToolVisualization key={key} meta={meta} onCopy={copyChatCodeBlock} />;
+  const renderPiToolVisualization = (meta: ToolVisualization, key: string) => {
+    const normalizedName = meta.name.trim().toLocaleLowerCase().replace(/[\s.-]+/g, "_");
+    const args = meta.args ?? {};
+    const path = String(args.path ?? args.filePath ?? args.file_path ?? "");
+    const command = String(args.command ?? args.cmd ?? args.script ?? "");
+    const isRead =
+      ["read", "read_file", "file_read"].includes(normalizedName) ||
+      normalizedName.includes("read_file");
+    const isShell =
+      ["bash", "powershell", "shell_status", "shell_stop", "shell", "exec", "exec_command", "command"].includes(normalizedName) ||
+      normalizedName.includes("run_command") || normalizedName.includes("execute_script");
+    const isMutation =
+      ["write", "edit", "write_file", "apply_patch"].includes(normalizedName) ||
+      normalizedName.includes("write_file") ||
+      normalizedName.includes("edit_file");
+    const resultText = toolVisualizationResultText(meta.result);
+    const diff = toolVisualizationDiff(meta);
+    const lines = resultText.split("\n").slice(0, 400);
+    const unexecutedArguments = meta.phase === "arguments" && meta.status !== "done";
+    const statusLabel = meta.status === "running"
+      ? meta.phase === "arguments" ? "生成参数" : "执行中"
+      : meta.status === "error" ? unexecutedArguments ? "未执行" : "失败" : "完成";
+    const title = isRead
+      ? "读取文件"
+      : isShell
+        ? normalizedName === "shell_status" ? "查询命令" : normalizedName === "shell_stop" ? "停止命令" : "运行命令"
+        : isMutation
+          ? normalizedName.includes("write")
+            ? unexecutedArguments
+              ? meta.status === "running" ? "准备写入" : "写入未执行"
+              : "写入文件"
+            : "修改文件"
+          : meta.name;
+    const Icon = isRead ? FileCode2 : isShell ? Terminal : isMutation ? FilePenLine : Wrench;
+    const result = isObjectRecord(meta.result) ? meta.result : {};
+    const resultDetails = isObjectRecord(result.details) ? result.details : result;
+    const description = meta.status === "error"
+      ? unexecutedArguments ? "操作尚未执行" : "执行遇到问题"
+      : isMutation
+        ? unexecutedArguments ? "正在生成文件内容" : "文件变更"
+        : isShell ? "执行脚本与命令" : isRead ? "读取文件内容" : "工具执行记录";
+    return (
+      <details
+        className={`pi-tool-visualization ${meta.status} ${isMutation ? "mutation" : ""} ${isShell ? "shell" : ""}`}
+        key={key}
+        open={meta.status === "running"}
+      >
+        <summary className="pi-tool-visualization-header">
+          <span className="pi-tool-visualization-icon"><Icon size={21} /></span>
+          <span className="chat-tool-heading">
+            <span className="chat-tool-heading-line">
+              <strong>{title}</strong>
+              <span className="pi-tool-visualization-summary" title={path || command || meta.name}>
+                {path || command || meta.name}
+              </span>
+            </span>
+            <span className="chat-tool-description">{description}</span>
+          </span>
+          <span className="pi-tool-visualization-status">
+            {meta.status === "done" ? <CircleCheck size={14} /> : meta.status === "error" ? <X size={14} /> : <LoaderCircle className="chat-status-spinner" size={14} />}
+            {statusLabel}
+          </span>
+          <ChevronDown className="pi-tool-visualization-chevron" size={15} />
+        </summary>
+        <div className="pi-tool-visualization-body">
+          {path && !diff && <div className="pi-tool-visualization-path"><FileCode2 size={13} /> <code>{path}</code></div>}
+          {meta.status === "error" && resultText ? (
+            <pre className="pi-tool-result-preview">{resultText}</pre>
+          ) : null}
+          {isMutation && diff ? (
+            <ChatToolDiffPreview
+              diff={diff}
+              path={path}
+              numbered={normalizedName === "edit" && typeof resultDetails.diff === "string"}
+              completed={meta.status === "done"}
+              onCopy={copyChatCodeBlock}
+            />
+          ) : isRead && resultText ? (
+            <div className="pi-tool-code-preview"><pre>{lines.map((line, index) => <span key={`${key}-read-${index}`}><i>{index + 1}</i>{line || " "}</span>)}</pre></div>
+          ) : isShell ? (
+            <div className="pi-tool-terminal-preview">
+              {command && <div className="command"><b>$</b>{command}</div>}
+              <pre>{resultText || (meta.status === "running" ? "等待输出…" : "无输出")}</pre>
+            </div>
+          ) : resultText && meta.status !== "error" ? (
+            <pre className="pi-tool-result-preview">{resultText}</pre>
+          ) : null}
+        </div>
+      </details>
+    );
+  };
 
   const renderToolProgressBlock = (block: ChatToolProgressBlock, messageId: string) => {
     const linkLabels = new Set(block.links.map((link) => stripMarkdownLinks(link.label).trim()));
@@ -26027,7 +25903,7 @@ export function App() {
             requestContextSettings,
           );
       let messagesForApi = nextMessages.filter(
-        (message) => !isTavernHiddenMessage(message) && message.extra?.piExtensionDisplayOnly !== true,
+        (message) => !isTavernHiddenMessage(message),
       );
       if (useImageRecognitionMcp && imageRecognitionMcpTool && latestImageUserMessage) {
         const imageRecognitionContext = await describeImageAttachmentsWithMcp(
@@ -26325,7 +26201,6 @@ export function App() {
       let assistantMessageVariables: Record<string, unknown> = {};
       let hasVisibleToolResult = false;
       let hasSuccessfulVisibleToolResult = false;
-      let piExtensionStatus: SessionRunStatus | undefined;
       let multiAgentDelegationDisabled = false;
       let preferStreamingSupervisorToolCalls = chatStreamEnabled;
       let pendingMcpObservationPrompt = "";
@@ -26390,16 +26265,7 @@ export function App() {
         const piReturnedToolCalls: ChatToolCall[] = [];
         const piIncompleteToolCalls = new Map<string, ChatToolCall>();
         const piToolVisualizations = new Map<string, ToolVisualization>();
-        const handlePiExtensionEvent = createPiExtensionEventHandler(
-          requestSessionId, abortSignal, assistantSender, options.beforePiToolMessage,
-        );
         const handlePiEvent = async (event: PiStreamEvent) => {
-          const extension = handlePiExtensionEvent(event);
-          if (extension.handled) {
-            if (extension.visible) hasVisibleToolResult = true;
-            if (extension.status) piExtensionStatus = extension.status;
-            return;
-          }
           if (event.type === "run_ready") {
             runtime.piReady = true;
             void flushSteeringInputs(requestSessionId);
@@ -26517,7 +26383,6 @@ export function App() {
             const visualization: ToolVisualization = {
               ...(previous ?? {}),
               toolCallId: event.toolCallId,
-              parentToolCallId: event.parentToolCallId,
               name: event.toolName || previous?.name || "unknown_tool",
               args: event.arguments ?? previous?.args ?? {},
               phase: "execution",
@@ -26558,8 +26423,6 @@ export function App() {
             const visualization: ToolVisualization = {
               ...(previous ?? {}),
               toolCallId: event.toolCallId ?? previous?.toolCallId,
-              parentToolCallId: event.parentToolCallId ?? previous?.parentToolCallId,
-              durationMs: event.durationMs ?? previous?.durationMs,
               name: event.toolName || previous?.name || "unknown_tool",
               args: previous?.args ?? {},
               result: event.result,
@@ -27094,11 +26957,7 @@ export function App() {
             abortSignal,
             subAgentSender,
           );
-          const handleSubExtensionEvent = createPiExtensionEventHandler(
-            requestSessionId, abortSignal, subAgentSender, () => subStreamingTimeline.beforeTool(),
-          );
           const handleSubAgentPiEvent = async (event: PiStreamEvent) => {
-            if (handleSubExtensionEvent(event).handled) return;
             const runtimeStatus = formatPiRuntimeStatus(event);
             if (runtimeStatus) {
               setChatStatus({ status: "loading", message: `${subAgent.name}：${runtimeStatus}` });
@@ -27112,7 +26971,7 @@ export function App() {
                 [],
                 "",
                 subAgentSender,
-                { toolCallId: event.toolCallId, parentToolCallId: event.parentToolCallId, name: event.toolName || "unknown_tool", args: event.arguments, phase: "execution", status: "running", startedAt: new Date().toISOString() },
+                { toolCallId: event.toolCallId, name: event.toolName || "unknown_tool", args: event.arguments, phase: "execution", status: "running", startedAt: new Date().toISOString() },
               );
               return;
             }
@@ -27123,7 +26982,6 @@ export function App() {
             if (event.type === "tool_end") {
               const visualization: ToolVisualization = {
                 toolCallId: event.toolCallId, name: event.toolName || "unknown_tool", result: event.result,
-                parentToolCallId: event.parentToolCallId, durationMs: event.durationMs,
                 phase: "execution", status: event.isError ? "error" : isPiShellStillRunning(event.result, event.toolName) ? "running" : "done",
                 endedAt: isPiShellStillRunning(event.result, event.toolName) ? undefined : new Date().toISOString(),
               };
@@ -27190,7 +27048,7 @@ export function App() {
             body: JSON.stringify({
               ...buildProviderApiTarget(subAgentProvider),
               runId: subPiRunId,
-              enableTools: subAgentToolDefinitions.length > 0 || piMcpEnabled || piExtensionsEnabled,
+              enableTools: subAgentToolDefinitions.length > 0 || piMcpEnabled,
               allowImageInputs: subAgentCanReceiveImages,
               modelMaxOutputTokens: getProviderModelMaxOutputTokens(
                 subAgentProvider.modelMaxOutputTokens,
@@ -27632,7 +27490,7 @@ export function App() {
         assistantMessageId = streamingTimeline.messageId ?? assistantMessageId;
         try {
           const streamResult = await requestChatCompletion(apiMessages, {
-            includeTools: availableChatTools.length > 0 || piMcpEnabled || piExtensionsEnabled,
+            includeTools: availableChatTools.length > 0 || piMcpEnabled,
             stream: true,
             onDelta: streamingTimeline.pushContent,
             onReasoningDelta: streamingTimeline.pushReasoning,
@@ -27696,7 +27554,7 @@ export function App() {
           let completionResult;
           try {
             completionResult = await requestChatCompletion(apiMessages, {
-              includeTools: availableChatTools.length > 0 || piMcpEnabled || piExtensionsEnabled,
+              includeTools: availableChatTools.length > 0 || piMcpEnabled,
               stream: preferStreamingSupervisorToolCalls,
               toolChoice: "auto",
               onDelta: streamingRound?.pushContent,
@@ -27746,7 +27604,7 @@ export function App() {
               message: "主 Agent 正在切换兼容的流式工具调用...",
             });
             completionResult = await requestChatCompletion(apiMessages, {
-              includeTools: availableChatTools.length > 0 || piMcpEnabled || piExtensionsEnabled,
+              includeTools: availableChatTools.length > 0 || piMcpEnabled,
               stream: true,
               toolChoice: "auto",
               onDelta: streamingRound?.pushContent,
@@ -28160,7 +28018,7 @@ export function App() {
           );
         }
         if (hasVisibleToolResult) {
-          setChatStatus(piExtensionStatus ?? { status: "success", message: options.successMessage ?? "工具执行完成。" });
+          setChatStatus({ status: "success", message: options.successMessage ?? "工具执行完成。" });
           return null;
         }
         throw new Error("响应里没有可显示的回复内容。");
@@ -28885,8 +28743,7 @@ export function App() {
       ([, frame]) => !sourceFrame || frame === sourceFrame,
     );
     targets.forEach(([id, frame]) => {
-      postMessageToFrame(
-        frame,
+      frame.contentWindow?.postMessage(
         {
           type: HTML_PREVIEW_GENERATION_EVENT_MESSAGE,
           id,
@@ -29517,7 +29374,7 @@ export function App() {
         (!useImageRecognitionMcp && canProviderReceiveImageUrl(chatProvider, requestModelId));
       const suppressAttachmentTransferTool = false;
       let messagesForApi = nextMessages.filter(
-        (message) => !isTavernHiddenMessage(message) && message.extra?.piExtensionDisplayOnly !== true,
+        (message) => !isTavernHiddenMessage(message),
       );
       if (useImageRecognitionMcp && imageRecognitionMcpTool) {
         const imageRecognitionContext = await describeImageAttachmentsWithMcp(
@@ -29758,7 +29615,6 @@ export function App() {
       let assistantChoiceRequest: ChatChoiceRequest | undefined;
       let assistantMessageVariables: Record<string, unknown> = {};
       let hasVisibleToolResult = false;
-      let piExtensionStatus: SessionRunStatus | undefined;
       let pendingMcpObservationPrompt = "";
       let pendingMcpObservationRetries = 0;
       let pendingMcpObservationPromptSent = false;
@@ -29803,16 +29659,7 @@ export function App() {
         const piReturnedToolCalls: ChatToolCall[] = [];
         const piIncompleteToolCalls = new Map<string, ChatToolCall>();
         const piToolVisualizations = new Map<string, ToolVisualization>();
-        const handlePiExtensionEvent = createPiExtensionEventHandler(
-          requestSessionId, abortSignal, undefined, options.beforePiToolMessage,
-        );
         const handlePiEvent = async (event: PiStreamEvent) => {
-          const extension = handlePiExtensionEvent(event);
-          if (extension.handled) {
-            if (extension.visible) hasVisibleToolResult = true;
-            if (extension.status) piExtensionStatus = extension.status;
-            return;
-          }
           if (event.type === "run_ready") {
             runtime.piReady = true;
             void flushSteeringInputs(requestSessionId);
@@ -29921,7 +29768,6 @@ export function App() {
             const visualization: ToolVisualization = {
               ...(previous ?? {}),
               toolCallId: event.toolCallId,
-              parentToolCallId: event.parentToolCallId,
               name: event.toolName || previous?.name || "unknown_tool",
               args: event.arguments ?? previous?.args ?? {},
               phase: "execution",
@@ -29955,8 +29801,6 @@ export function App() {
             const visualization: ToolVisualization = {
               ...(previous ?? {}),
               toolCallId: event.toolCallId ?? previous?.toolCallId,
-              parentToolCallId: event.parentToolCallId ?? previous?.parentToolCallId,
-              durationMs: event.durationMs ?? previous?.durationMs,
               name: event.toolName || previous?.name || "unknown_tool",
               args: previous?.args ?? {},
               result: event.result,
@@ -30316,7 +30160,7 @@ export function App() {
         assistantMessageId = streamingTimeline.messageId ?? assistantMessageId;
         try {
           const streamResult = await requestChatCompletion(apiMessages, {
-            includeTools: availableChatTools.length > 0 || piMcpEnabled || piExtensionsEnabled,
+            includeTools: availableChatTools.length > 0 || piMcpEnabled,
             stream: true,
             onDelta: streamingTimeline.pushContent,
             onReasoningDelta: streamingTimeline.pushReasoning,
@@ -30381,7 +30225,7 @@ export function App() {
           let completionResult;
           try {
             completionResult = await requestChatCompletion(apiMessages, {
-              includeTools: availableChatTools.length > 0 || piMcpEnabled || piExtensionsEnabled,
+              includeTools: availableChatTools.length > 0 || piMcpEnabled,
               stream: useStreamingToolCompletion,
               toolChoice: "auto",
               onDelta: streamingRound?.pushContent,
@@ -30673,7 +30517,7 @@ export function App() {
       }
       if (!hasAssistantTimelinePayload(assistantContent, assistantReasoning)) {
         if (hasVisibleToolResult) {
-          setChatStatus(piExtensionStatus ?? { status: "success", message: "工具执行完成。" });
+          setChatStatus({ status: "success", message: "工具执行完成。" });
           return;
         }
         throw new Error("响应里没有可显示的回复内容。");
@@ -40813,12 +40657,11 @@ export function App() {
       {renderDesktopWindow("studio", "人格工作室", studioWindow)}
       {(avatarCropModal ||
         roleplayGreetingSelectorModal ||
-        dataClearConfirmationModal || piExtensionDialogs.dialog) && (
+        dataClearConfirmationModal) && (
         createPortal(<div className="managed-global-overlays portfolio-desktop-shell">
           {avatarCropModal}
           {roleplayGreetingSelectorModal}
           {dataClearConfirmationModal}
-          {piExtensionDialogs.dialog}
         </div>, getDesktopWindow(focusedDesktopWindowRef.current).document.body)
       )}
     </>

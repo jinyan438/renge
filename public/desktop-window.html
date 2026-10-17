@@ -1,15 +1,5 @@
 <!doctype html>
 <html lang="zh-CN">
-  <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script>
-      // Execute in the portal window's realm so MessageEvent.source is the
-      // iframe's actual parent. React callbacks execute in the opener's realm.
-      window.__rengePostToFrame = (frame, message, targetOrigin) => {
-        if (frame instanceof HTMLIFrameElement && frame.ownerDocument === document) {
-          frame.contentWindow?.postMessage(message, targetOrigin);
-        }
-      };
-    </script>
-  </head>
+  <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
   <body></body>
 </html>

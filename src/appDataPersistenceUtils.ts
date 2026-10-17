@@ -12,32 +12,6 @@ export function createShallowReferencePatch<T extends object>(
   return patch;
 }
 
-/** A cheap lower bound: stop before allocating a huge JSON string. */
-export function exceedsJsonStringBudget(value: unknown, maxCharacters: number) {
-  const pending: unknown[] = [value];
-  const seen = new WeakSet<object>();
-  let characters = 0;
-  while (pending.length) {
-    const current = pending.pop();
-    if (typeof current === "string") characters += current.length;
-    else if (current !== null && typeof current === "object") {
-      // Shared objects count once for this lower bound. JSON's normal writer
-      // still decides how cycles, toJSON and unsupported values are handled.
-      if (seen.has(current)) continue;
-      seen.add(current);
-      const keys = Object.keys(current);
-      for (const key of keys) {
-        const child = (current as Record<string, unknown>)[key];
-        if (typeof child === "string") characters += child.length;
-        else pending.push(child);
-        if (characters > maxCharacters) return true;
-      }
-    }
-    if (characters > maxCharacters) return true;
-  }
-  return false;
-}
-
 export function createPersistentReferenceBaseline<T extends object>(
   current: T,
   persisted: Partial<T>,

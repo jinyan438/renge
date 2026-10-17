@@ -20,7 +20,6 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { startRengeServer } from "../server.mjs";
-import { configurePiAgentEnvironment } from "../pi/agent-environment.mjs";
 import {
   createCommandApprovalSessionStore,
   looksLikePackageManagerOutput,
@@ -1746,11 +1745,9 @@ function registerIpcHandlers() {
 }
 
 async function createMainWindow() {
-  const dataDir = getPersistentDataDir();
   const serverOptions = {
     host: "127.0.0.1",
-    dataDir,
-    piAgentDir: configurePiAgentEnvironment(dataDir),
+    dataDir: getPersistentDataDir(),
     temporaryFilesRoot: getTemporaryFilesRoot(),
     authorizePiTool,
   };
