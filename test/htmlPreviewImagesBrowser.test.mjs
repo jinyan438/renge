@@ -61,10 +61,19 @@ try {
   const check = async () => {
     const frame=await (await message.locator("iframe.chat-html-frame").elementHandle()).contentFrame();
     await frame.getByRole("heading",{name:"通用角色状态面板"}).waitFor();
-    await frame.waitForFunction(async()=>{
-      try { await Promise.all([...document.querySelectorAll('img')].map(img=>img.decode())); return true; }
-      catch { return false; }
-    });
+    // Await the async predicate on the host. A promise itself is truthy to a
+    // synchronous poller, and 1px srcset fixtures can have a rounded width of 0.
+    let decoded=false;
+    const deadline=Date.now()+15_000;
+    while(Date.now()<deadline){
+      decoded=await frame.evaluate(async()=>{
+        try{await Promise.all([...document.querySelectorAll('img')].map(img=>img.decode()));return true;}
+        catch{return false;}
+      });
+      if(decoded)break;
+      await new Promise(resolve=>setTimeout(resolve,50));
+    }
+    assert.ok(decoded,'all preview images decode successfully');
     assert.ok(await frame.locator('#static-image').getAttribute('srcset').then(value=>value.includes('/html-preview-image?url=')));
     assert.equal(await frame.locator('audio source').getAttribute('src'),'https://example.com/renge-fixtures/audio.ogg');
     assert.match(await frame.locator('#inline-image').getAttribute('src'),/^data:image/);
@@ -83,7 +92,15 @@ try {
   };
   await message.locator("iframe.chat-html-frame").waitFor();
   let frame=await check();
-  await frame.waitForFunction(()=>document.querySelector('.portrait').style.backgroundImage.includes('updated'));
+  await frame.waitForFunction(()=>{
+    const background=document.querySelector('.portrait').style.backgroundImage;
+    return background.includes('updated')&&background.includes('/html-preview-image?url=');
+  },undefined,{polling:50});
+  await frame.locator('.portrait').evaluate(element=>new Promise((resolve,reject)=>{
+    const image=new Image();
+    image.onload=resolve;image.onerror=reject;
+    image.src=getComputedStyle(element).backgroundImage.match(/url\("(.*?)"\)/)[1];
+  }));
   assert.equal(upstreamRequests,3,"repeated avatar and portrait URLs share cached image bytes");
   assert.equal(await frame.evaluate(async source=>{
     const response=await fetch(location.origin+'/html-preview-image?url='+encodeURIComponent(source));

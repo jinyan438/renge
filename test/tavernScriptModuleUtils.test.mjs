@@ -3,9 +3,26 @@ import test from "node:test";
 import vm from "node:vm";
 
 import {
+  requiresTavernChatDom,
   scopeTavernClassicScript,
   usesTavernModuleSyntax,
 } from "../src/tavernScriptModuleUtils.ts";
+
+test("chat DOM dependencies exclude serialized helpers, comments and ordinary data", () => {
+  assert.equal(requiresTavernChatDom("observer.observe(parent.document.getElementById('chat'), {childList:true})"), true);
+  assert.equal(requiresTavernChatDom('host.document.querySelector ( /* host */ "#chat .mes").append(node)'), true);
+  assert.equal(requiresTavernChatDom('observer.observe(document.querySelector("#chat"))'), true);
+  for (const source of [
+    `script.textContent = ${JSON.stringify("function later(){document.querySelector('#chat .mes')} ")}; parent.ready = true;`,
+    "const text = `document.getElementById('chat')`; parent.ready = true;",
+    "/* document.getElementById('chat') */ parent.ready = true;",
+    "// document.querySelector('#chat')\nparent.ready = true;",
+    "document.querySelector('#chat-settings')",
+    "document.getElementById('chat-settings')",
+    "const paint=()=>{const box=document.querySelector('#chat .mes'); if(!box)return;}; parent.ready=true;",
+    "document.getElementById('chat')?.append(node)",
+  ]) assert.equal(requiresTavernChatDom(source), false, source);
+});
 
 test("detects compact side-effect imports used by bundled character cards", () => {
   assert.equal(

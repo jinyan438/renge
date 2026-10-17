@@ -310,7 +310,9 @@ export function scheduleChatIdleWork(
 }
 
 export function createChatPreviewMountQueue(
-  schedule: ScheduleChatStreamFlush = scheduleChatIdleWork,
+  // Visible content must not wait for an idle deadline on a busy renderer.
+  // Keep serialization and scroll deferral, and yield between mounts.
+  schedule: ScheduleChatStreamFlush = scheduleChatFrameWork,
 ) {
   type MountTask = { mount: () => void; gapMs: number; cancelled: boolean };
   const tasks: MountTask[] = [];

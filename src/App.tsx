@@ -97,8 +97,7 @@ import { createStreamingCompleteBackupZip, type CompleteBackupZipEntry } from ".
 import { COMPLETE_BACKUP_MAX_EXTRACTED_BYTES, completeBackupSizeLimitError } from "./completeBackupLimits.mjs";
 import jquerySource from "jquery/dist/jquery.min.js?raw";
 import lodashSource from "lodash/lodash.min.js?raw";
-import vueSource from "vue/dist/vue.global.prod.js?raw";
-import htmlPreviewDependenciesSource from "virtual:html-preview-dependencies";
+import htmlPreviewDependenciesUrl from "virtual:html-preview-dependencies-url";
 import { HTML_PREVIEW_PARENT_BRIDGE_SOURCE } from "./htmlPreviewParentBridge";
 import { postMessageToFrame } from "./frameMessaging";
 import { buildHtmlPreviewImagesScript } from "./htmlPreviewImages";
@@ -4242,6 +4241,7 @@ const HTML_PREVIEW_HEAVY_MOUNT_GAP = 900;
 const HTML_PREVIEW_FALLBACK_LOAD_DELAY = 600;
 const HTML_PREVIEW_LAZY_ROOT_MARGIN = "240px 0px";
 const HTML_PREVIEW_FREEZE_DELAY_MS = 900;
+const TAVERN_CHAT_DOM_READY_EVENT = "renge-tavern-chat-dom-ready";
 const HTML_PREVIEW_ACTIVITY_MESSAGE = "renge-html-preview-activity";
 const HTML_PREVIEW_STREAMING_CONTEXT_INTERVAL_MS = 500;
 
@@ -4340,17 +4340,15 @@ function buildHtmlPreviewFullscreenScript(previewId: string) {
 }
 const htmlPreviewViewportMeta =
   '<meta data-renge-html-preview-viewport="true" name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover" />';
-const htmlPreviewJqueryScript = [
-  '<script data-renge-html-preview-jquery="true">',
-  jquerySource.replace(/<\/script/gi, "<\\/script"),
-  "</script>",
-].join("");
-const htmlPreviewDependenciesScript = [
-  '<script data-renge-html-preview-dependencies="true">',
-  vueSource.replace(/<\/script/gi, "<\\/script"),
-  htmlPreviewDependenciesSource.replace(/<\/script/gi, "<\\/script"),
-  "</script>",
-].join("");
+// A parser-blocking classic script keeps globals available to card <head>
+// scripts while allowing every preview to reuse the browser's resource cache.
+function buildHtmlPreviewDependenciesScript(assetBaseUrl: string) {
+  const source = new URL(htmlPreviewDependenciesUrl, window.location.href);
+  const url = source.protocol === "data:"
+    ? source.href
+    : new URL(source.pathname + source.search, assetBaseUrl).href;
+  return `<script data-renge-html-preview-dependencies="true" src=${JSON.stringify(url)}></script>`;
+}
 const htmlPreviewBootstrapScript = [
   '<script data-renge-html-preview-bootstrap="true">',
   "(() => {",
@@ -7088,12 +7086,14 @@ function buildHtmlPreviewDocument(
   const inheritedStyleInjection = inheritedStyleResources
     ? `<!-- renge-inherited-html-styles -->${inheritedStyleResources}`
     : "";
+  const previewFrameUrl = getIsolatedHtmlPreviewFrame(previewId)?.url ?? window.location.href;
   const iconBaseUrl = !window.RengeAndroidNative
-    ? getIsolatedHtmlPreviewFrame(previewId)?.url ?? window.location.href
+    ? previewFrameUrl
     : window.location.href;
   const iconStyle = `<style data-renge-html-preview-icons="true">${getTavernFontAwesomeCss(iconBaseUrl)}</style>`;
+  const htmlPreviewDependenciesScript = buildHtmlPreviewDependenciesScript(previewFrameUrl);
   const imageScript = buildHtmlPreviewImagesScript(new URL("/html-preview-image", window.location.href).href);
-  const headInjection = `${htmlPreviewViewportMeta}${imageScript}${inheritedStyleInjection}${htmlPreviewStyle}${iconStyle}${buildHtmlPreviewFullscreenScript(previewId)}${htmlPreviewJqueryScript}${htmlPreviewDependenciesScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
+  const headInjection = `${htmlPreviewViewportMeta}${imageScript}${inheritedStyleInjection}${htmlPreviewStyle}${iconStyle}${buildHtmlPreviewFullscreenScript(previewId)}${htmlPreviewDependenciesScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
     return injectHtmlPreviewHead(trimmedContent, headInjection);
   }
@@ -7134,6 +7134,8 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
   frameRegistry,
 }: ChatHtmlPreviewProps) {
   const hostWindow = useDesktopWindow();
+  const latestContextRef = useRef(context);
+  latestContextRef.current = context;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const requestHeavyMountRef = useRef<() => void>(() => {});
@@ -7279,7 +7281,9 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       {
         type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
         id: previewId,
-        context: { ...context, parentGlobals },
+        // Load-settling callbacks can outlive the render which scheduled them.
+        // Always send the latest snapshot, including after a rapid card edit.
+        context: { ...latestContextRef.current, parentGlobals },
       },
       "*",
     );
@@ -13718,6 +13722,7 @@ export function App() {
       chatLayoutCleanupRef.current = null;
       chatThreadRef.current = thread;
       if (!thread) return;
+      window.dispatchEvent(new Event(TAVERN_CHAT_DOM_READY_EVENT));
       chatScrollActivityCleanupRef.current = observeChatScrollActivity(thread);
       chatLayoutCleanupRef.current = observeChatLayoutChanges(
         thread,
@@ -19976,6 +19981,17 @@ export function App() {
     };
 
     runtime = new TavernScriptRuntime(activeTavernScripts, {
+      waitForChatReady: (signal) => new Promise<void>((resolve) => {
+        const check = () => {
+          if (!signal.aborted && !chatThreadRef.current?.isConnected) return;
+          window.removeEventListener(TAVERN_CHAT_DOM_READY_EVENT, check);
+          signal.removeEventListener("abort", check);
+          resolve();
+        };
+        window.addEventListener(TAVERN_CHAT_DOM_READY_EVENT, check);
+        signal.addEventListener("abort", check, { once: true });
+        check();
+      }),
       getMessages: () => chatMessagesRef.current as TavernRuntimeMessage[],
       setMessages: (messages) => {
         const normalized = messages.map((message) =>
@@ -20621,7 +20637,6 @@ export function App() {
       // Give React, extension hooks and resize observers a fully painted chat
       // before executing the character frontend. This is the programmatic
       // equivalent of the formerly required off -> enter -> on workaround.
-      await delay(80);
       await afterNextPaint();
       if (cancelled || activeChatSessionIdRef.current !== sessionId) return;
       setHtmlPreviewReadyMountKey(desiredMountKey);

@@ -156,18 +156,22 @@ public class MainActivity extends Activity {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
+                String previewPath = uri.getPath();
+                boolean previewDocument = "/html-preview-frame.html".equals(previewPath);
+                boolean previewLibrary = previewPath != null
+                        && previewPath.matches("/assets/html-preview-libraries-[A-Za-z0-9_-]+\\.js");
                 if (HTML_PREVIEW_HOST.equalsIgnoreCase(uri.getHost())
-                        && "/html-preview-frame.html".equals(uri.getPath())) {
+                        && (previewDocument || previewLibrary)) {
                     try {
                         WebResourceResponse response = new WebResourceResponse(
-                                "text/html",
+                                previewDocument ? "text/html" : "application/javascript",
                                 "UTF-8",
-                                getAssets().open("www/html-preview-frame.html")
+                                getAssets().open("www" + previewPath)
                         );
                         response.setStatusCodeAndReasonPhrase(200, "OK");
                         response.setResponseHeaders(Collections.singletonMap(
                                 "Cache-Control",
-                                "no-store"
+                                previewDocument ? "no-store" : "public, max-age=31536000, immutable"
                         ));
                         return response;
                     } catch (Exception ignored) {

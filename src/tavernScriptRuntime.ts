@@ -1,3 +1,5 @@
+import htmlPreviewDependenciesUrl from "virtual:html-preview-dependencies-url";
+import tavernYamlUrl from "virtual:tavern-yaml-url";
 import type { TavernScript, TavernScriptButton } from "./tavernScriptUtils";
 import {
   attachTavernSubscriptionControls,
@@ -20,6 +22,7 @@ import fontAwesomeRegularUrl from "@fortawesome/fontawesome-free/webfonts/fa-reg
 import fontAwesomeSolidUrl from "@fortawesome/fontawesome-free/webfonts/fa-solid-900.woff2?url";
 import fontAwesomeV4CompatibilityUrl from "@fortawesome/fontawesome-free/webfonts/fa-v4compatibility.woff2?url";
 import {
+  requiresTavernChatDom,
   scopeTavernClassicScript,
   usesTavernModuleSyntax,
 } from "./tavernScriptModuleUtils";
@@ -131,6 +134,7 @@ export type TavernRuntimePresetState = {
 };
 
 export type TavernScriptRuntimeAdapter = {
+  waitForChatReady?(signal: AbortSignal): Promise<void>;
   getMessages(): TavernRuntimeMessage[];
   setMessages(messages: TavernRuntimeMessage[]): void;
   getGreetingState?(): TavernGreetingState;
@@ -249,39 +253,11 @@ const TAVERN_EVENTS = Object.freeze({
 
 const TAVERN_EXTENSION_SETTINGS_VARIABLE_KEY = "__sillytavern_extension_settings__";
 
-const JQUERY_SOURCES = [
-  "https://testingcf.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js",
-  "https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js",
-  "https://unpkg.com/jquery@3.7.1/dist/jquery.min.js",
-];
-
-const LODASH_SOURCES = [
-  "https://testingcf.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js",
-  "https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js",
-  "https://unpkg.com/lodash@4.17.21/lodash.min.js",
-];
-
-const VUE_SOURCES = [
-  "https://testingcf.jsdelivr.net/npm/vue@3.5.13/dist/vue.global.prod.js",
-  "https://cdn.jsdelivr.net/npm/vue@3.5.13/dist/vue.global.prod.js",
-  "https://unpkg.com/vue@3.5.13/dist/vue.global.prod.js",
-];
-
 const VUE_ESM_BUNDLER_FEATURE_FLAGS = Object.freeze({
   __VUE_OPTIONS_API__: true,
   __VUE_PROD_DEVTOOLS__: false,
   __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: false,
 });
-
-const ZOD_SOURCES = [
-  "https://testingcf.jsdelivr.net/npm/zod@4.1.5/+esm",
-  "https://cdn.jsdelivr.net/npm/zod@4.1.5/+esm",
-];
-
-const YAML_SOURCES = [
-  "https://testingcf.jsdelivr.net/npm/yaml@2.8.1/+esm",
-  "https://cdn.jsdelivr.net/npm/yaml@2.8.1/+esm",
-];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -297,23 +273,6 @@ function installVueEsmBundlerFeatureFlags(targetWindow: RuntimeWindow) {
       writable: true,
     });
   });
-}
-
-function buildZodGlobal(zodModule: Record<string, unknown>) {
-  const zodApi = isRecord(zodModule.z)
-    ? zodModule.z
-    : isRecord(zodModule.default)
-      ? zodModule.default
-      : zodModule;
-
-  // Tavern scripts use both the normal `z.object()` API and the Zod 4
-  // module namespace shape (`z.z.ZodObject`). Keep both views available.
-  return {
-    ...zodModule,
-    ...zodApi,
-    default: zodApi,
-    z: zodApi,
-  };
 }
 
 function cloneValue<T>(value: T): T {
@@ -1639,6 +1598,7 @@ function isFrameworkScript(script: TavernScript) {
 }
 
 export class TavernScriptRuntime {
+  private readonly domReadinessAbortController = new AbortController();
   private readonly scripts: TavernScript[];
   private readonly adapter: TavernScriptRuntimeAdapter;
   private iframe: HTMLIFrameElement | null = null;
@@ -1733,9 +1693,9 @@ export class TavernScriptRuntime {
       );
     }
     this.fontAwesomeCleanups.push(...fontAwesomeSupports.map((support) => support.cleanup));
-    await Promise.all(fontAwesomeSupports.map((support) => support.ready));
     this.installCompatibilityApi();
-    await this.loadDependencies();
+    await Promise.all([this.loadDependencies(), ...fontAwesomeSupports.map((support) => support.ready)]);
+    if (this.destroyed) return;
     if (this.runtimeWindow) {
       this.parentJQueryCleanup = installParentJQueryBridge(this.runtimeWindow, window);
       this.runtimeStyleBridgeCleanup = installRuntimeStyleBridge(this.runtimeWindow, window);
@@ -1793,6 +1753,13 @@ export class TavernScriptRuntime {
     if (!script.enabled) throw new Error(`脚本「${script.name}」未启用。`);
     if (!script.content.trim()) throw new Error(`脚本「${script.name}」没有可执行内容。`);
     if (!this.runtimeWindow || !this.iframe) throw new Error("酒馆脚本运行环境尚未初始化。");
+    // Older renderers immediately observe #chat. Local libraries can now finish
+    // before that view opens; wait for its actual mount instead of a timer.
+    // Background scripts keep their original eager startup behavior.
+    if (requiresTavernChatDom(script.content)) {
+      await this.adapter.waitForChatReady?.(this.domReadinessAbortController.signal);
+      if (this.destroyed) return;
+    }
     if (this.executedScriptIds.has(script.id) && isFrameworkScript(script)) {
       this.writeLog("info", script, "脚本已经在当前会话中运行，无需重复加载。");
       return;
@@ -1898,6 +1865,7 @@ export class TavernScriptRuntime {
   }
 
   destroy() {
+    this.domReadinessAbortController.abort();
     if (this.destroyed) return;
     this.destroyed = true;
     this.ready = false;
@@ -2019,75 +1987,27 @@ export class TavernScriptRuntime {
   }
 
   private async loadDependencies() {
-    const win = this.runtimeWindow;
-    if (!win) throw new Error("酒馆脚本运行环境不存在。");
-    await this.loadClassicDependency(JQUERY_SOURCES, "jQuery", "jQuery");
-    win.$ = win.jQuery;
-    await this.loadClassicDependency(LODASH_SOURCES, "_", "Lodash");
-    await this.loadClassicDependency(VUE_SOURCES, "Vue", "Vue");
-    let zodModule: Record<string, unknown> | null = null;
-    let lastError: unknown = null;
-    const importer = win.Function("url", "return import(url)") as (
-      url: string,
-    ) => Promise<Record<string, unknown>>;
-    for (const source of ZOD_SOURCES) {
-      try {
-        zodModule = await importer(source);
-        if (zodModule) break;
-      } catch (error) {
-        lastError = error;
-      }
-    }
-    if (!zodModule) {
-      throw new Error(`Zod 4 加载失败：${toErrorMessage(lastError)}`);
-    }
-    win.z = buildZodGlobal(zodModule);
-    let yamlModule: Record<string, unknown> | null = null;
-    lastError = null;
-    for (const source of YAML_SOURCES) {
-      try {
-        yamlModule = await importer(source);
-        if (yamlModule) break;
-      } catch (error) {
-        lastError = error;
-      }
-    }
-    if (!yamlModule) {
-      throw new Error(`YAML 加载失败：${toErrorMessage(lastError)}`);
-    }
-    win.YAML = yamlModule;
+    await Promise.all([
+      this.loadLocalDependency(htmlPreviewDependenciesUrl, ["jQuery", "_", "Vue", "z"]),
+      this.loadLocalDependency(tavernYamlUrl, ["YAML"]),
+    ]);
+    if (this.runtimeWindow) this.runtimeWindow.$ = this.runtimeWindow.jQuery;
   }
 
-  private async loadClassicDependency(
-    sources: string[],
-    globalName: string,
-    displayName: string,
-  ) {
+  private async loadLocalDependency(source: string, globals: string[]) {
     const win = this.runtimeWindow;
-    const document = win?.document;
-    if (!win || !document) throw new Error("酒馆脚本运行环境不存在。");
-    if (win[globalName] != null) return;
-    let lastError: unknown = null;
-    for (const source of sources) {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const script = document.createElement("script");
-          script.src = source;
-          script.crossOrigin = "anonymous";
-          script.addEventListener("load", () => resolve(), { once: true });
-          script.addEventListener(
-            "error",
-            () => reject(new Error(`${displayName} 资源加载失败：${source}`)),
-            { once: true },
-          );
-          document.head.appendChild(script);
-        });
-        if (win[globalName] != null) return;
-      } catch (error) {
-        lastError = error;
-      }
-    }
-    throw new Error(`${displayName} 加载失败：${toErrorMessage(lastError)}`);
+    if (!win) throw new Error("酒馆脚本运行环境不存在。");
+    if (globals.every((name) => win[name] != null)) return;
+    await new Promise<void>((resolve, reject) => {
+      const script = win.document.createElement("script");
+      script.src = new URL(source, window.location.href).href;
+      script.addEventListener("load", () => {
+        if (globals.every((name) => win[name] != null)) resolve();
+        else reject(new Error(`本地兼容库缺少接口：${globals.join("、")}`));
+      }, { once: true });
+      script.addEventListener("error", () => reject(new Error("本地酒馆兼容库加载失败。")), { once: true });
+      win.document.head.appendChild(script);
+    });
   }
 
   private installCompatibilityApi() {
