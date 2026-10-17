@@ -13312,6 +13312,9 @@ export function App() {
     sendBlocked: false,
   });
   const chatThreadRef = useRef<HTMLDivElement>(null);
+  const [tavernHostWindow, setTavernHostWindow] = useState<Window | null>(() =>
+    nativeDesktopWindowsEnabled() ? null : window,
+  );
   const chatScrollActivityCleanupRef = useRef<(() => void) | null>(null);
   const chatLayoutCleanupRef = useRef<(() => void) | null>(null);
   const chatScrollFollowLatestRef = useRef(true);
@@ -13724,6 +13727,10 @@ export function App() {
       chatLayoutCleanupRef.current?.();
       chatLayoutCleanupRef.current = null;
       chatThreadRef.current = thread;
+      // Native portals mount the visible chat in a different document. Rebuild
+      // scripts there so parent.document, CSS, observers and UI share that DOM.
+      setTavernHostWindow(thread?.ownerDocument.defaultView ?? (nativeDesktopWindowsEnabled() ? null : window));
+      setHtmlPreviewReadyMountKey("");
       if (!thread) return;
       chatScrollActivityCleanupRef.current = observeChatScrollActivity(thread);
       chatLayoutCleanupRef.current = observeChatLayoutChanges(
@@ -19876,7 +19883,7 @@ export function App() {
   ]);
 
   useEffect(() => {
-    if (!appDataLoaded || !activeChatSessionId) return;
+    if (!appDataLoaded || !activeChatSessionId || !tavernHostWindow) return;
     tavernScriptRuntimeRef.current?.destroy();
     tavernScriptRuntimeRef.current = null;
     tavernRuntimeConfigurationKeyRef.current = "";
@@ -19949,7 +19956,7 @@ export function App() {
     };
 
     runtime = new TavernScriptRuntime(activeTavernScripts, {
-      isChatMounted: () => Boolean(getDesktopWindow("chat").document.getElementById("chat")),
+      isChatMounted: () => Boolean(tavernHostWindow.document.getElementById("chat")),
       getMessages: () => chatMessagesRef.current as TavernRuntimeMessage[],
       setMessages: (messages) => {
         const normalized = messages.map((message) =>
@@ -20492,7 +20499,7 @@ export function App() {
           message: title ? `${title}：${message}` : message,
         });
       },
-    });
+    }, tavernHostWindow);
     tavernScriptRuntimeRef.current = runtime;
     tavernRuntimeConfigurationKeyRef.current = tavernRuntimeConfigurationKey;
     const initializePromise = runtime.initialize();
@@ -20539,6 +20546,7 @@ export function App() {
     promptTemplateExtension?.updatedAt,
     tavernRuntimeResetRevision,
     tavernRuntimeConfigurationKey,
+    tavernHostWindow,
   ]);
 
   useEffect(() => {
@@ -20611,6 +20619,7 @@ export function App() {
     htmlPreviewDesiredMountKey,
     tavernRuntimeConfigurationKey,
     chatWindowOpen,
+    tavernHostWindow,
   ]);
 
   const emitTavernMessageEventNow = async (

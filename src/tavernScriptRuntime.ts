@@ -1668,7 +1668,10 @@ export class TavernScriptRuntime {
   private fontAwesomeCleanups: Array<() => void> = [];
   private localPlaceholderImageSources = new Map<string, string>();
 
-  constructor(scripts: TavernScript[], adapter: TavernScriptRuntimeAdapter) {
+  private readonly hostWindow: Window & typeof globalThis;
+
+  constructor(scripts: TavernScript[], adapter: TavernScriptRuntimeAdapter, hostWindow: Window = window) {
+    this.hostWindow = hostWindow as Window & typeof globalThis;
     this.scripts = scripts.map((script) => cloneValue(script));
     this.adapter = adapter;
     this.promptChatId = adapter.getChatId();
@@ -1722,12 +1725,12 @@ export class TavernScriptRuntime {
     await this.createIframe();
     if (this.destroyed) return;
     this.parentSideEffectCleanup = installParentSideEffectTracker(
-      window,
+      this.hostWindow,
       () => this.currentScriptId || this.lastScriptId,
     );
     this.refreshSillyTavernChatCache();
     const fontAwesomeSupports = [
-      installLocalFontAwesomeShadowSupport(window, window.location.href),
+      installLocalFontAwesomeShadowSupport(this.hostWindow, window.location.href),
     ];
     if (this.runtimeWindow) {
       fontAwesomeSupports.push(
@@ -1739,8 +1742,8 @@ export class TavernScriptRuntime {
     this.installCompatibilityApi();
     await this.loadDependencies();
     if (this.runtimeWindow) {
-      this.parentJQueryCleanup = installParentJQueryBridge(this.runtimeWindow, window);
-      this.runtimeStyleBridgeCleanup = installRuntimeStyleBridge(this.runtimeWindow, window);
+      this.parentJQueryCleanup = installParentJQueryBridge(this.runtimeWindow, this.hostWindow);
+      this.runtimeStyleBridgeCleanup = installRuntimeStyleBridge(this.runtimeWindow, this.hostWindow);
     }
     this.publishButtons();
 
@@ -1759,7 +1762,7 @@ export class TavernScriptRuntime {
           // SillyTavern keeps #chat mounted. A desktop home screen can initialize
           // extensions before that DOM exists, so retry its observer once the
           // user opens the chat instead of leaving the card permanently blank.
-          const mounted = this.adapter.isChatMounted?.() ?? Boolean(document.getElementById("chat"));
+          const mounted = this.adapter.isChatMounted?.() ?? Boolean(this.hostWindow.document.getElementById("chat"));
           if (mounted || !/MutationObserver.*(?:Node|parameter)|(?:Node|parameter).*MutationObserver/i.test(toErrorMessage(error))) throw error;
           await this.waitForChatMount();
           if (this.destroyed) return;
@@ -1920,7 +1923,7 @@ export class TavernScriptRuntime {
         resolve();
       };
       const check = () => {
-        if (this.destroyed || (this.adapter.isChatMounted?.() ?? Boolean(document.getElementById("chat")))) finish();
+        if (this.destroyed || (this.adapter.isChatMounted?.() ?? Boolean(this.hostWindow.document.getElementById("chat")))) finish();
       };
       timer = window.setInterval(check, 50);
       this.pendingChatMounts.add(finish);
@@ -1942,7 +1945,7 @@ export class TavernScriptRuntime {
     this.sillyTavernChatCache.splice(0);
     this.syncChatMetadata = null;
     this.adapter.onButtonsChange?.([]);
-    const parentWindow = window as Window & { Mvu?: unknown };
+    const parentWindow = this.hostWindow as Window & { Mvu?: unknown };
     if (parentWindow.Mvu) delete parentWindow.Mvu;
     this.runtimeStyleBridgeCleanup?.();
     this.runtimeStyleBridgeCleanup = null;
@@ -1964,6 +1967,7 @@ export class TavernScriptRuntime {
   }
 
   private async createIframe() {
+    const document = this.hostWindow.document;
     const iframe = document.createElement("iframe");
     iframe.title = "酒馆脚本运行环境";
     iframe.style.display = "none";
@@ -3172,7 +3176,7 @@ export class TavernScriptRuntime {
       return true;
     };
     const stopGeneration = () => this.adapter.stopGeneration?.();
-    const host = window as unknown as Record<string, unknown>;
+    const host = this.hostWindow as unknown as Record<string, unknown>;
     const hostSillyTavern = isRecord(host.SillyTavern) ? host.SillyTavern : {};
     const chatCompletionSettings: Record<string, unknown> = isRecord(host.chatCompletionSettings)
       ? host.chatCompletionSettings
@@ -3780,7 +3784,7 @@ export class TavernScriptRuntime {
     };
     this.parentApiBridge?.cleanup();
     this.parentApiBridge = installParentTavernApiBridge(
-      window,
+      this.hostWindow,
       api,
       sillyTavern,
       eventSource as unknown as Record<string, unknown>,
@@ -4277,7 +4281,7 @@ export class TavernScriptRuntime {
           return;
         }
         const runtimeValue = this.runtimeWindow?.[name];
-        const parentValue = (window as unknown as Window & Record<string, unknown>)[name];
+        const parentValue = (this.hostWindow as unknown as Window & Record<string, unknown>)[name];
         if (runtimeValue != null || parentValue != null) {
           resolve(runtimeValue ?? parentValue);
           return;
