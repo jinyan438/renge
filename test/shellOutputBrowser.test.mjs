@@ -77,8 +77,9 @@ try {
     pi({ type: "tool_end", toolCallId: id, toolName: "powershell", result: result("boot_completed=1\ncommand finished", "completed") });
     pi({ type: "tool_end", toolCallId: `${id}-poll-final`, toolName: "shell_status", result: result("boot_completed=1\ncommand finished", "completed") });
     await card.locator(".pi-tool-visualization-status").getByText("完成", { exact: true }).waitFor();
+    await card.locator(":scope > summary").click();
     assert.match(await card.locator("pre").textContent(), /command finished/);
-    assert.equal(await page.locator(".pi-tool-visualization").filter({ hasText: "emulator-check.ps1" }).count(), id === "initial" ? 1 : 2, "completion updates its original card");
+    assert.equal(await page.locator(".pi-tool-visualization").filter({ hasText: "emulator-check.ps1" }).count(), 1, "completion updates its original card; older collapsed histories are unmounted");
     finish(id === "initial" ? "命令完成，已核对输出。" : "补充验证通过，模拟器已经就绪。");
     await page.getByRole("button", { name: "发送", exact: true }).waitFor();
   }

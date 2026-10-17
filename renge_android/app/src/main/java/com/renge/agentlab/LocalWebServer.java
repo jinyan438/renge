@@ -1198,6 +1198,21 @@ public class LocalWebServer {
             return;
         }
 
+        if ("/api/pi/session-activity".equals(request.path)) {
+            if (body.optString("sessionId", "").trim().isEmpty() || !(body.opt("frozen") instanceof Boolean)) {
+                sendJson(output, 400, jsonError("缺少 sessionId 或 frozen"));
+                return;
+            }
+            // Android holds no AgentSession or extension runner between requests.
+            // Keep the passive compaction snapshot so switching preserves context.
+            JSONObject payload = new JSONObject();
+            payload.put("ok", true);
+            payload.put("released", 0);
+            payload.put("pending", 0);
+            sendJson(output, 200, payload);
+            return;
+        }
+
         if ("/api/pi/set-auto-compaction".equals(request.path)) {
             PiSessionState state = getPiSessionState(body);
             state.autoCompactionEnabled = body.optBoolean("enabled", true);

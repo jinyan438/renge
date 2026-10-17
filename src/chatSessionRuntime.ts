@@ -19,9 +19,11 @@ export function createChatSessionRuntime<Input>() {
     steering: Map<string, Input>;
     queuePaused: boolean;
     stopRequested: boolean;
+    frozen: boolean;
     continueWith?: (input: Input) => Promise<void>;
   }>();
   const owners = new WeakMap<AbortController, string>();
+  let selectedSessionId: string | null = null;
   const runtime = {
     onChange: () => {},
     get(sessionId: string) {
@@ -31,6 +33,7 @@ export function createChatSessionRuntime<Input>() {
           status: { status: "idle", message: "" }, inputMode: "queue", generationState: "idle", startedAt: 0,
           controller: null, piRunId: "", piReady: false, supportsSteering: false,
           queued: [], steering: new Map(), queuePaused: false, stopRequested: false,
+          frozen: selectedSessionId !== null && selectedSessionId !== sessionId,
         };
         sessions.set(sessionId, session);
       }
@@ -52,6 +55,16 @@ export function createChatSessionRuntime<Input>() {
       return controller;
     },
     owner(controller: AbortController) { return owners.get(controller); },
+    select(sessionId: string) {
+      selectedSessionId = sessionId;
+      for (const [id, session] of sessions) {
+        session.frozen = id !== sessionId;
+        if (session.frozen && (session.queued.length || session.steering.size)) session.queuePaused = true;
+        if (session.frozen && !session.controller) session.continueWith = undefined;
+      }
+      runtime.get(sessionId).frozen = false;
+      runtime.onChange();
+    },
     finish(controller: AbortController) {
       const sessionId = owners.get(controller);
       if (sessionId === undefined) return;
@@ -61,6 +74,10 @@ export function createChatSessionRuntime<Input>() {
       session.generationState = "idle";
       session.piReady = false;
       session.piRunId = "";
+      if (session.frozen) {
+        session.continueWith = undefined;
+        if (session.queued.length) session.queuePaused = true;
+      }
       runtime.onChange();
       return sessionId;
     },
@@ -76,7 +93,7 @@ export function createChatSessionRuntime<Input>() {
     },
     takeNext(sessionId: string) {
       const session = runtime.get(sessionId);
-      if (session.controller || session.queuePaused) return;
+      if (session.controller || session.queuePaused || session.frozen) return;
       const input = session.queued.shift();
       runtime.onChange();
       return input;

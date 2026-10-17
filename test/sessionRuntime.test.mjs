@@ -8,6 +8,26 @@ import test from "node:test";
 import { startRengeServer } from "../server.mjs";
 import { createChatSessionRuntime } from "../src/chatSessionRuntime.ts";
 
+test("inactive sessions finish their current run without draining queued inputs or retaining continuations", () => {
+  const runtime = createChatSessionRuntime();
+  runtime.select("a");
+  const controller = runtime.begin("a");
+  runtime.get("a").queued.push("next");
+  runtime.get("a").continueWith = async () => {};
+  runtime.select("b");
+  assert.equal(controller.signal.aborted, false);
+  assert.equal(runtime.get("a").frozen, true);
+  assert.equal(runtime.get("c").frozen, true, "new dormant runtimes inherit inactivity");
+  runtime.finish(controller);
+  assert.equal(runtime.takeNext("a"), undefined);
+  assert.equal(runtime.get("a").continueWith, undefined);
+  assert.deepEqual(runtime.get("a").queued, ["next"]);
+  runtime.select("a");
+  assert.equal(runtime.takeNext("a"), undefined, "returning does not silently drain the paused queue");
+  runtime.get("a").queuePaused = false;
+  assert.equal(runtime.takeNext("a"), "next");
+});
+
 test("stopping one conversation preserves the other run and pauses only its own FIFO queue", () => {
   const runtime = createChatSessionRuntime();
   const a = runtime.begin("a"), b = runtime.begin("b");

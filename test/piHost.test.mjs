@@ -1220,7 +1220,7 @@ test("Pi Host preserves an upstream length stop reason", async () => {
   }
 });
 
-test("Pi Host exposes PiDeck-compatible manual compaction controls for an idle session", async () => {
+test("Pi Host preserves manual compaction after freezing and restoring an idle session", async () => {
   const upstreamRequests = [];
   const upstream = createServer(async (request, response) => {
     let raw = "";
@@ -1245,9 +1245,19 @@ test("Pi Host exposes PiDeck-compatible manual compaction controls for an idle s
   });
 
   const dataDir = await mkdtemp(join(tmpdir(), "renge-pi-compact-test-"));
+  const shutdownMarker = join(dataDir, "shutdowns.txt");
+  const extensionDir = join(dataDir, ".pi", "agent", "extensions");
+  await mkdir(extensionDir, { recursive: true });
+  await writeFile(join(extensionDir, "lifecycle.ts"), `import { appendFileSync } from "node:fs";
+    export default function(pi) { pi.on("session_shutdown", () => appendFileSync(${JSON.stringify(shutdownMarker)}, "closed\\n")); }`);
   const upstreamPort = await listen(upstream);
   const renge = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
   try {
+    const activity = (frozen) => fetch(`${renge.url}/api/pi/session-activity`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: "manual-compact-session", frozen }),
+    });
+    assert.equal((await activity(true)).status, 200, "background completion should be released rather than cached");
     const chatResponse = await fetch(`${renge.url}/api/pi/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1274,6 +1284,10 @@ test("Pi Host exposes PiDeck-compatible manual compaction controls for an idle s
     assert.equal(chatResponse.status, 200);
     await chatResponse.text();
 
+    assert.equal((await (await activity(true)).json()).released, 0, "a run that finishes while frozen is already cold");
+    assert.equal((await readFile(shutdownMarker, "utf8")).match(/closed/g).length, 1, "extensions receive their shutdown lifecycle before disposal");
+    assert.equal((await activity(false)).status, 200);
+
     const toggleResponse = await fetch(`${renge.url}/api/pi/set-auto-compaction`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1281,6 +1295,10 @@ test("Pi Host exposes PiDeck-compatible manual compaction controls for an idle s
     });
     assert.equal(toggleResponse.status, 200);
     assert.deepEqual(await toggleResponse.json(), { ok: true, enabled: false });
+
+    assert.equal((await (await activity(true)).json()).released, 1, "the thawed AgentSession is released on the next switch");
+    assert.equal((await readFile(shutdownMarker, "utf8")).match(/closed/g).length, 2);
+    await activity(false);
 
     const compactResponse = await fetch(`${renge.url}/api/pi/compact`, {
       method: "POST",
@@ -1296,6 +1314,15 @@ test("Pi Host exposes PiDeck-compatible manual compaction controls for an idle s
     assert.equal(compactPayload.ok, true);
     assert.equal(typeof compactPayload.contextUsage?.contextWindow, "number");
     assert.equal(upstreamRequests.length >= 2, true);
+    const nextReply = await fetch(`${renge.url}/api/pi/chat`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: "manual-compact-session", apiBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+        apiKey: "test-key", apiType: "chat-completions", piCompaction: { enabled: false },
+        request: { model: "test-model", stream: true, messages: [{ role: "user", content: "continue after thaw" }] } }),
+    });
+    assert.equal(nextReply.status, 200);
+    await nextReply.text();
+    assert.equal((await readFile(shutdownMarker, "utf8")).match(/closed/g).length, 3, "each replacement also closes extensions to prevent turn-by-turn leaks");
   } finally {
     await close(renge.server);
     await close(upstream);

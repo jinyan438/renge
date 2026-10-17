@@ -160,6 +160,7 @@ export type TavernScriptRuntimeAdapter = {
   setRegexes(regexes: Array<Record<string, unknown>>): void;
   getUserName(): string;
   getChatId(): string;
+  isChatMounted?(): boolean;
   getModelId?(): string;
   getPresetNames?(): string[];
   loadPreset?(name: string): boolean;
@@ -1647,6 +1648,7 @@ export class TavernScriptRuntime {
   private lastScriptId = "";
   private destroyed = false;
   private ready = false;
+  private pendingChatMounts = new Set<() => void>();
   private executedScriptIds = new Set<string>();
   private eventHandlers = new Map<string, RuntimeEventHandler[]>();
   private eventHandlerSequence = 0;
@@ -1749,8 +1751,20 @@ export class TavernScriptRuntime {
       )
       .sort((left, right) => Number(isFrameworkScript(right)) - Number(isFrameworkScript(left)));
     for (const script of startupScripts) {
+      if (this.destroyed) return;
       try {
-        await this.executeScript(script.id);
+        try {
+          await this.executeScript(script.id);
+        } catch (error) {
+          // SillyTavern keeps #chat mounted. A desktop home screen can initialize
+          // extensions before that DOM exists, so retry its observer once the
+          // user opens the chat instead of leaving the card permanently blank.
+          const mounted = this.adapter.isChatMounted?.() ?? Boolean(document.getElementById("chat"));
+          if (mounted || !/MutationObserver.*(?:Node|parameter)|(?:Node|parameter).*MutationObserver/i.test(toErrorMessage(error))) throw error;
+          await this.waitForChatMount();
+          if (this.destroyed) return;
+          await this.executeScript(script.id);
+        }
         if (isFrameworkScript(script)) {
           await this.waitForGlobal("Mvu", 15000);
         }
@@ -1897,9 +1911,27 @@ export class TavernScriptRuntime {
     return results;
   }
 
+  private waitForChatMount() {
+    return new Promise<void>((resolve) => {
+      let timer = 0;
+      const finish = () => {
+        window.clearInterval(timer);
+        this.pendingChatMounts.delete(finish);
+        resolve();
+      };
+      const check = () => {
+        if (this.destroyed || (this.adapter.isChatMounted?.() ?? Boolean(document.getElementById("chat")))) finish();
+      };
+      timer = window.setInterval(check, 50);
+      this.pendingChatMounts.add(finish);
+      check();
+    });
+  }
+
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
+    for (const finish of this.pendingChatMounts) finish();
     this.ready = false;
     this.chatChangeEmissionVersion += 1;
     this.eventHandlers.clear();
@@ -2423,6 +2455,7 @@ export class TavernScriptRuntime {
       if (!Array.isArray(updates)) return false;
       let messages = this.adapter.getMessages().map((message) => cloneValue(message));
       let messagesChanged = false;
+      let greetingChanged = false;
       let succeeded = true;
       const reservedUpdateKeys = new Set([
         "message_id", "mesid", "id", "name", "role", "is_user", "is_system",
@@ -2444,6 +2477,7 @@ export class TavernScriptRuntime {
           }
           const selected = await this.adapter.selectGreeting(greetingSwipeIndex);
           succeeded = selected && succeeded;
+          greetingChanged = selected || greetingChanged;
           if (selected) await this.initializeMvuMessageVariables(greetingSwipeIndex);
           messages = this.adapter.getMessages().map((item) => cloneValue(item));
           continue;
@@ -2485,7 +2519,7 @@ export class TavernScriptRuntime {
       }
       if (messagesChanged) this.adapter.setMessages(messages);
       this.refreshSillyTavernChatCache();
-      if (messagesChanged) await this.adapter.flushPersistence?.();
+      if (messagesChanged || greetingChanged) await this.adapter.flushPersistence?.();
       return succeeded;
     };
 

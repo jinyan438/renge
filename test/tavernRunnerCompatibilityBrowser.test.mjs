@@ -152,7 +152,8 @@ try {
   await page.waitForFunction(() => getChatMessages(1)[0].message === 'Updated user source');
   for (let part=0; part<2; part++) {
     const frame = await (await previews.nth(part).elementHandle()).contentFrame();
-    await frame.waitForFunction(() => SillyTavern.getContext().chat[1].mes === 'Updated user source').catch(async error => {
+    // Offscreen frontends pause animation callbacks; data synchronization still works.
+    await frame.waitForFunction(() => SillyTavern.getContext().chat[1].mes === 'Updated user source', null, { polling: 100 }).catch(async error => {
       console.error('Preview sync:', await frame.evaluate(() => ({chat:SillyTavern.getContext().chat.map(m=>m.mes.slice(0,50)),api:getChatMessages(1)})));
       throw error;
     });
@@ -175,6 +176,8 @@ try {
   assert.equal(profileEntry.extra.nested.name, "Alex");
   assert.equal(saved.characterCards[0].characterBook.entries.some(entry=>entry.extra?.profile_source), false);
   await page.reload();
+  // Runtime startup may precede opening the chat after a cold reload.
+  await page.waitForTimeout(1500);
   await page.getByRole("button",{name:"打开Agent Chat",exact:true}).click();
   await page.getByRole("button",{name:"开始对话",exact:true}).last().click();
   await page.waitForFunction(() => window.__fixtureReady);

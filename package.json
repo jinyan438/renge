@@ -16,6 +16,7 @@
     "test:html-desktop": "npm run build && node test/htmlPreviewDesktopBrowser.test.mjs",
     "test:session-safety": "node --experimental-strip-types --test test/piSafetyRegression.test.mjs test/sessionPersistenceRegression.test.mjs && node test/sessionSafetyBrowser.test.mjs",
     "test:session-runtime": "node --experimental-strip-types --test test/sessionRuntime.test.mjs && node test/sessionRuntimeBrowser.test.mjs",
+    "test:session-performance": "npm run build && node --experimental-strip-types --test test/chatHistoryWindow.test.mjs && node test/sessionFreezingBrowser.test.mjs",
     "test:session-reset": "node test/sessionResetBrowser.test.mjs",
     "test:composer": "node --experimental-strip-types --test test/chatComposerStatusUtils.test.mjs && node test/chatComposerStatusBrowser.test.mjs && node test/chatComposerInputBrowser.test.mjs",
     "test:markdown": "node --experimental-strip-types --test test/syntaxHighlighting.test.mjs test/chatPerformanceUtils.test.mjs test/chatClipboardUtils.test.mjs && node test/chatMarkdownBrowser.test.mjs",

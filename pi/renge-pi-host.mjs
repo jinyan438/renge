@@ -301,10 +301,14 @@ export function createRengePiHost({
   // compaction. The next chat request replaces it, while the session file
   // remains the source of truth for normal persistence.
   const idleSessions = new Map();
+  const coldSessions = new Map();
+  const frozenOwners = new Set();
   const sessionDir = join(resolve(dataDir), ".pi", "sessions");
   const piPackageManager = createPiPackageManager({ cwd: defaultCwd, agentDir });
   const providerUsers = new Map();
+  const closingSessions = new WeakMap();
   let modelRuntimePromise;
+  let disposed = false;
 
   const getModelRuntime = () => {
     modelRuntimePromise ??= ModelRuntime.create({
@@ -319,9 +323,27 @@ export function createRengePiHost({
     run.pendingTools.clear();
   };
 
-  const releaseSessionResource = (entry) => {
+  const shutdownSession = (session, reason = "resume") => {
+    if (!session) return Promise.resolve();
+    const closing = closingSessions.get(session);
+    if (closing) return closing;
+    const operation = Promise.resolve().then(async () => {
+      try {
+        await session.extensionRunner?.emit({ type: "session_shutdown", reason });
+      } catch (error) {
+        console.warn("[pi-extension] session shutdown failed:", error instanceof Error ? error.message : String(error));
+      } finally {
+        session.dispose();
+      }
+    });
+    closingSessions.set(session, operation);
+    return operation;
+  };
+
+  const releaseSessionResource = async (entry, reason = "resume") => {
     if (!entry) return;
-    entry.session?.dispose();
+    await entry.closing;
+    await shutdownSession(entry.session, reason);
     if (entry.providerId && entry.modelRuntime) {
       const remaining = (providerUsers.get(entry.providerId) ?? 1) - 1;
       if (remaining > 0) providerUsers.set(entry.providerId, remaining);
@@ -332,9 +354,40 @@ export function createRengePiHost({
     }
   };
 
-  const invalidateIdleSessions = () => {
-    for (const entry of idleSessions.values()) releaseSessionResource(entry);
+  const invalidateIdleSessions = async (reason = "reload") => {
+    const entries = [...idleSessions.values(), ...coldSessions.values()];
     idleSessions.clear();
+    coldSessions.clear();
+    for (const entry of entries) await releaseSessionResource(entry, reason);
+  };
+
+  const suspendSession = async (sessionKey, entry) => {
+    const { session, ...metadata } = entry;
+    const model = session.model;
+    // The transcript stays in Pi's session file. Drop extensions, listeners,
+    // retry state and the AgentSession's duplicate in-memory history.
+    const cold = { ...metadata, model, closing: shutdownSession(session) };
+    coldSessions.set(sessionKey, cold);
+    try { await cold.closing; } finally { delete cold.closing; }
+  };
+
+  const handleSessionActivity = async (body) => {
+    const requestedId = String(body?.sessionId ?? "").trim();
+    if (!requestedId || typeof body?.frozen !== "boolean") {
+      return { ok: false, status: 400, error: "缺少 sessionId 或 frozen" };
+    }
+    const ownerSessionId = normalizeSessionId(requestedId);
+    let released = 0;
+    if (body.frozen) {
+      frozenOwners.add(ownerSessionId);
+      for (const [key, entry] of idleSessions) {
+        if (entry.ownerSessionId !== ownerSessionId) continue;
+        idleSessions.delete(key);
+        await suspendSession(key, entry);
+        released += 1;
+      }
+    } else frozenOwners.delete(ownerSessionId);
+    return { ok: true, status: 200, released, pending: [...runs.values()].filter((run) => run.ownerSessionId === ownerSessionId).length };
   };
 
   const contextWindowOverrides = new Map();
@@ -466,8 +519,16 @@ export function createRengePiHost({
     const previousIdleSession = idleSessions.get(sessionKey);
     if (previousIdleSession) {
       idleSessions.delete(sessionKey);
-      releaseSessionResource(previousIdleSession);
     }
+    const previousColdSession = coldSessions.get(sessionKey);
+    if (previousColdSession) {
+      coldSessions.delete(sessionKey);
+    }
+    // Reserve the new run before awaiting extension shutdown so a second request
+    // cannot enter this same session during asynchronous lifecycle cleanup.
+    const previousResourcesReleased = Promise.all([
+      releaseSessionResource(previousIdleSession, "reload"), releaseSessionResource(previousColdSession),
+    ]);
     const compaction = normalizePiCompactionConfig(body?.piCompaction);
     const additionalSkillPaths = normalizePiSkillPaths(body?.piSkillPaths)
       .map((skillPath) => resolve(skillPath));
@@ -558,6 +619,7 @@ export function createRengePiHost({
     let modelRuntime;
     let effectiveContextWindow = 0;
     try {
+      await previousResourcesReleased;
       checkCancelled();
       const contextWindow = resolveContextWindow(body, provider);
       effectiveContextWindow = contextWindow;
@@ -609,6 +671,7 @@ export function createRengePiHost({
         modelId: provider.modelId,
         lastUserPromptFallback: body?.piLastUserPromptFallback === true,
       });
+      run.compactionResources = { mcpConfig, hasMcpServers, additionalSkillPaths, systemPrompt: converted.systemPrompt };
       const settingsManager = SettingsManager.create(cwd, agentDir);
       settingsManager.applyOverrides({
         compaction,
@@ -948,18 +1011,22 @@ export function createRengePiHost({
       if (run.cancelled) await run.session?.abort();
       unsubscribe();
       settlePendingTools(run, new Error("Pi 会话已结束"));
-      if (run.session && run.sessionKey) {
-        idleSessions.set(run.sessionKey, {
+      if (run.session && run.sessionKey && !disposed) {
+        const entry = {
           session: run.session,
           providerId,
           modelRuntime,
           settingsManager: run.settingsManager,
+          compactionResources: run.compactionResources,
+          thinkingLevel: run.session.thinkingLevel,
           ownerSessionId,
           sessionScope,
           cwd,
-        });
+        };
+        if (frozenOwners.has(ownerSessionId)) await suspendSession(run.sessionKey, entry);
+        else idleSessions.set(run.sessionKey, entry);
       } else {
-        releaseSessionResource({ session: run.session, providerId, modelRuntime });
+        await releaseSessionResource({ session: run.session, providerId, modelRuntime });
       }
       runs.delete(runId);
       if (!response.destroyed && !response.writableEnded) response.end();
@@ -976,7 +1043,7 @@ export function createRengePiHost({
     return sessionFilePath(sessionDir, ownerSessionId, requestedSessionScope, cwd);
   };
 
-  const resolveIdleSession = (body) => {
+  const resolveIdleSession = async (body) => {
     const requestedSessionScope = normalizeSessionId(body?.piSessionScope || "main");
     const scopeCandidates = /-(?:text|vision)$/.test(requestedSessionScope)
       ? [requestedSessionScope]
@@ -988,19 +1055,50 @@ export function createRengePiHost({
       : resolve(defaultCwd);
     for (const scope of scopeCandidates) {
       const sessionKey = sessionFilePath(sessionDir, ownerSessionId, scope, cwd);
-      const exact = idleSessions.get(sessionKey);
-      if (exact) return { sessionKey, entry: exact };
+      const exact = idleSessions.get(sessionKey) ?? coldSessions.get(sessionKey);
+      if (exact) return { sessionKey, entry: await restoreColdSession(sessionKey, exact) };
     }
-    for (const [key, entry] of idleSessions) {
+    for (const [key, entry] of [...idleSessions, ...coldSessions]) {
       if (entry.ownerSessionId === ownerSessionId && scopeCandidates.includes(entry.sessionScope)) {
-        return { sessionKey: key, entry };
+        return { sessionKey: key, entry: await restoreColdSession(key, entry) };
       }
     }
     return { sessionKey: resolveSessionKeyFromBody(body), entry: null };
   };
 
+  const restoreColdSession = async (sessionKey, entry) => {
+    if (entry.session) return entry;
+    await entry.closing;
+    if ([...runs.values()].some((run) => run.sessionKey === sessionKey && !run.completed)) {
+      throw Object.assign(new Error("Pi 会话正在运行"), { status: 409 });
+    }
+    const resources = entry.compactionResources ?? {};
+    const resourceLoader = new DefaultResourceLoader({
+      cwd: entry.cwd, agentDir, settingsManager: entry.settingsManager,
+      additionalSkillPaths: resources.additionalSkillPaths ?? [],
+      extensionFactories: resources.hasMcpServers ? [await createPiMcpAdapter(resources.mcpConfig, { agentDir })] : [],
+      appendSystemPromptOverride: (base) => [...base, ...(resources.systemPrompt ? [appendPromptToSystemPrompt(resources.systemPrompt)] : [])],
+    });
+    await resourceLoader.reload();
+    const { session } = await createAgentSession({
+      cwd: entry.cwd,
+      modelRuntime: entry.modelRuntime,
+      model: entry.model,
+      thinkingLevel: entry.thinkingLevel,
+      settingsManager: entry.settingsManager,
+      sessionManager: SessionManager.open(sessionKey, sessionDir, entry.cwd),
+      resourceLoader,
+      tools: [],
+    });
+    await session.bindExtensions({ mode: "json" });
+    const restored = { ...entry, session };
+    coldSessions.delete(sessionKey);
+    idleSessions.set(sessionKey, restored);
+    return restored;
+  };
+
   const handleCompact = async (body) => {
-    const { entry } = resolveIdleSession(body);
+    const { entry } = await resolveIdleSession(body);
     if (!entry) return { ok: false, status: 404, error: "Pi 会话尚未建立或已被新的请求替换" };
     if (!entry.session?.isIdle) return { ok: false, status: 409, error: "Pi 会话正在运行" };
     const compaction = normalizePiCompactionConfig(body?.piCompaction);
@@ -1018,8 +1116,8 @@ export function createRengePiHost({
     }
   };
 
-  const handleSetAutoCompaction = (body) => {
-    const { entry } = resolveIdleSession(body);
+  const handleSetAutoCompaction = async (body) => {
+    const { entry } = await resolveIdleSession(body);
     if (!entry) return { ok: false, status: 404, error: "Pi 会话尚未建立或已被新的请求替换" };
     const enabled = body?.enabled === true;
     entry.session?.setAutoCompactionEnabled(enabled);
@@ -1087,51 +1185,58 @@ export function createRengePiHost({
     if (!requestedSessionId) return { ok: false, status: 400, error: "缺少 sessionId" };
     const ownerSessionId = normalizeSessionId(requestedSessionId);
     const ownerHash = createHash("sha256").update(ownerSessionId).digest("hex").slice(0, 24);
-    await rm(join(sessionDir, ownerHash), { recursive: true, force: true });
     for (const [key, entry] of idleSessions) {
       if (key.includes(`${ownerHash}`)) {
         idleSessions.delete(key);
-        releaseSessionResource(entry);
+        await releaseSessionResource(entry, "new");
       }
     }
+    for (const [key, entry] of coldSessions) {
+      if (entry.ownerSessionId !== ownerSessionId) continue;
+      coldSessions.delete(key);
+      await releaseSessionResource(entry, "new");
+    }
+    await rm(join(sessionDir, ownerHash), { recursive: true, force: true });
+    frozenOwners.delete(ownerSessionId);
     return { ok: true, status: 200 };
   };
 
   const installPiPackage = async (source) => {
     const extension = await piPackageManager.install(source);
-    invalidateIdleSessions();
+    await invalidateIdleSessions();
     return extension;
   };
 
   const updatePiPackage = async (source) => {
     const extension = await piPackageManager.update(source);
-    invalidateIdleSessions();
+    await invalidateIdleSessions();
     return extension;
   };
 
   const setPiPackageEnabled = async (source, enabled) => {
     const result = await piPackageManager.setEnabled(source, enabled);
-    invalidateIdleSessions();
+    await invalidateIdleSessions();
     return result;
   };
 
   const removePiPackage = async (source) => {
     const result = await piPackageManager.remove(source);
-    invalidateIdleSessions();
+    await invalidateIdleSessions();
     return result;
   };
 
   const dispose = async () => {
+    disposed = true;
     await Promise.all(Array.from(runs.values()).map(async (run) => {
       run.cancelled = true;
       run.shellSessions.dispose();
       settlePendingTools(run, new Error("Pi Host 已关闭"));
       await run.session?.abort();
-      run.session?.dispose();
+      await shutdownSession(run.session, "quit");
       return undefined;
     }));
-    for (const entry of idleSessions.values()) releaseSessionResource(entry);
-    idleSessions.clear();
+    await invalidateIdleSessions("quit");
+    frozenOwners.clear();
     runs.clear();
   };
 
@@ -1142,6 +1247,7 @@ export function createRengePiHost({
     handleInput,
     handleCompact,
     handleSetAutoCompaction,
+    handleSessionActivity,
     handleDeleteSession,
     installPiPackage,
     updatePiPackage,

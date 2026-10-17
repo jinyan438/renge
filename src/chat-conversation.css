@@ -13,6 +13,17 @@
   background: transparent;
 }
 
+.chat-history-navigation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px;
+  color: var(--conversation-muted);
+  font-size: 12px;
+}
+
 .chat-thread .chat-message {
   position: relative;
   width: 100%;

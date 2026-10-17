@@ -1,6 +1,9 @@
 import { createChatSessionRuntime, type ChatInputMode, type SessionRunStatus } from "./chatSessionRuntime";
 import type { ReviewSource, ReviewSnapshot, ReviewDetail, ReviewRequest, ReviewAiResult } from "./codeReviewUtils";
 import { ChatCodeContent } from "./ChatCodeContent";
+import { ChatDeferredDetails } from "./ChatDeferredDetails";
+import { CHAT_HISTORY_PAGE_SIZE, getChatHistoryWindow } from "./chatHistoryWindow";
+import { serializeJsonOffThread } from "./jsonSerialization";
 import { createUserProfile, normalizeUserProfiles, type UserProfile } from "./userProfileUtils";
 import {
   ArrowLeft,
@@ -1577,7 +1580,6 @@ type ChatApiMessage = {
 type PendingChatInput = {
   id: string; content: string; attachments: ChatAttachment[]; mode: ChatInputMode;
   sender: ChatSenderIdentity; createdAt: string; submitted?: boolean;
-  execute?: () => Promise<void>;
 };
 
 type PiStreamEvent = {
@@ -3277,6 +3279,16 @@ let lastCharacterCardsForPersistentStore: CharacterCard[] | null = null;
 let lastAppDataForPersistentStore: RengeAppData | null = null;
 let lastChatSessionsForPersistentStore: ChatSession[] = [];
 let persistentChatSessionVersions: Record<string, string> = {};
+let piSessionActivityQueue: Promise<unknown> = Promise.resolve();
+
+function notifyPiSessionActivity(sessionId: string, frozen: boolean) {
+  piSessionActivityQueue = piSessionActivityQueue.catch(() => undefined).then(() =>
+    fetch("/api/pi/session-activity", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, frozen }), keepalive: true,
+    }),
+  ).catch(() => undefined);
+}
 
 function reportAppDataSaveError(message: string) {
   window.dispatchEvent(new CustomEvent("renge-app-data-save-error", { detail: message }));
@@ -3345,7 +3357,7 @@ async function savePersistentAppData(
       const response = await fetch("/api/app-data", {
         method: patchExistingData ? "PATCH" : "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data: requestData, ...(sessionPatch ? { sessionPatch } : {}) }),
+        body: await serializeJsonOffThread({ data: requestData, ...(sessionPatch ? { sessionPatch } : {}) }),
       });
       const payload = await response.json().catch(() => ({})) as {
         error?: string; sessionVersions?: Record<string, string>;
@@ -3476,6 +3488,7 @@ function persistAppDataToLocalStores(
   data: RengeAppData,
   characterCardsAlreadyStored = false,
   characterCardsPersistenceBlocked = false,
+  cacheChatHistory = true,
 ) {
   const personas = data.personas ?? [];
   if (personas.length > 0 && lastPersonasForLocalStorage !== personas) {
@@ -3486,7 +3499,9 @@ function persistAppDataToLocalStores(
   }
   setLocalStorageJsonSafely(PROVIDER_STORAGE_KEY, data.providers ?? []);
   setLocalStorageValueSafely(ACTIVE_PROVIDER_STORAGE_KEY, data.activeProviderId ?? "");
-  setLocalStorageJsonSafely(CHAT_SESSIONS_STORAGE_KEY, data.chatSessions ?? []);
+  // The authoritative file already contains these chats. Serializing every
+  // dormant conversation into a small synchronous browser cache blocks typing.
+  if (cacheChatHistory) setLocalStorageJsonSafely(CHAT_SESSIONS_STORAGE_KEY, data.chatSessions ?? []);
   setLocalStorageValueSafely(CHAT_MODE_STORAGE_KEY, data.chatMode ?? "persona");
   setLocalStorageValueSafely(
     MULTI_AGENT_WORKFLOW_STORAGE_KEY,
@@ -12674,6 +12689,7 @@ function PortfolioDesktopWindow({
 export function App() {
   const focusedDesktopWindowRef = useRef("chat");
   const [openWindows, setOpenWindows] = useState<ManagedWindowState[]>([]);
+  const chatWindowOpen = openWindows.some((windowState) => windowState.id === "chat");
   const topWindowZIndexRef = useRef(100);
   const [desktopOverlayZIndex, setDesktopOverlayZIndex] = useState(50);
   const windowSpawnIndexRef = useRef(0);
@@ -13160,6 +13176,7 @@ export function App() {
   );
   const [chatSessions, setChatSessions] = useState<ChatSession[]>(loadChatSessions);
   const [activeChatSessionId, setActiveChatSessionId] = useState("");
+  const [chatHistoryPage, setChatHistoryPage] = useState<{ sessionId: string; start: number | null }>({ sessionId: "", start: null });
   const [selectedChatWorkspaceKey, setSelectedChatWorkspaceKey] = useState("");
   const [appDataLoaded, setAppDataLoaded] = useState(false);
   const [, refreshChatRuntimes] = useState(0);
@@ -13169,8 +13186,10 @@ export function App() {
   const chatStatus = activeChatRuntime.status;
   const setSessionChatStatus = (sessionId: string, update: SetStateAction<SessionRunStatus>) => {
     const runtime = chatRuntimesRef.current.get(sessionId);
-    runtime.status = typeof update === "function" ? update(runtime.status) : update;
-    chatRuntimesRef.current.onChange();
+    const next = typeof update === "function" ? update(runtime.status) : update;
+    if (runtime.status.status === next.status && runtime.status.message === next.message) return;
+    runtime.status = next;
+    if (sessionId === activeChatSessionIdRef.current) chatRuntimesRef.current.onChange();
   };
   const setChatStatus: Dispatch<SetStateAction<SessionRunStatus>> = (update) => {
     if (chatRuntimesRef.current.get(activeChatSessionIdRef.current).controller) return;
@@ -14052,6 +14071,13 @@ export function App() {
   }, [activeChatSessionId]);
 
   useEffect(() => {
+    if (!appDataLoaded || !activeChatSessionId) return;
+    chatRuntimesRef.current.select(activeChatSessionId);
+    notifyPiSessionActivity(activeChatSessionId, false);
+    return () => notifyPiSessionActivity(activeChatSessionId, true);
+  }, [activeChatSessionId, appDataLoaded]);
+
+  useEffect(() => {
     if (!appDataLoaded) return;
     setLocalStorageValueSafely(ACTIVE_CHAT_SESSION_STORAGE_KEY, activeChatSessionId);
   }, [activeChatSessionId, appDataLoaded]);
@@ -14819,10 +14845,12 @@ export function App() {
 
   const runNextQueuedInput = async (sessionId: string) => {
     const runtime = chatRuntimesRef.current.get(sessionId);
+    if (runtime.frozen || sessionId !== activeChatSessionIdRef.current) return;
+    runtime.continueWith ??= (input) => sendChatMessageRef.current(input.content, input.attachments, sessionId);
     if (!runtime.continueWith || !chatSessionsRef.current.some((session) => session.id === sessionId)) return;
     const input = !runtime.controller && runtime.queuePaused && !runtime.stopRequested && runtime.status.status !== "error" && runtime.queued[0]?.mode === "steer"
       ? runtime.queued.shift() : chatRuntimesRef.current.takeNext(sessionId);
-    if (input) { savePendingInputs(sessionId); await (input.execute?.() ?? runtime.continueWith(input)); }
+    if (input) { savePendingInputs(sessionId); await runtime.continueWith(input); }
   };
 
   const deliverSteeringInput = (sessionId: string, inputId?: string) => {
@@ -14871,7 +14899,6 @@ export function App() {
       id: crypto.randomUUID(), content, attachments, mode: mode ?? runtime.inputMode,
       sender: currentChatSender, createdAt: new Date().toISOString(),
     };
-    input.execute = () => sendChatMessage(input.content, input.attachments, sessionId);
     if (input.mode === "queue") runtime.queued.push(input);
     else if (!runtime.supportsSteering || attachments.length > 0) {
       // Platforms without native steering resume from the preserved transcript.
@@ -14985,6 +15012,12 @@ export function App() {
   };
 
   const showChatSession = (session: Pick<ChatSession, "id" | "messages" | "mode">) => {
+    if (session.id !== activeChatSessionIdRef.current) {
+      chatContentPartsCache.clear();
+      regexDisplayCacheRef.current.entries.clear();
+      regexDisplayCacheRef.current.context = null;
+      chatRuntimesRef.current.select(session.id);
+    }
     chatDraftsRef.current.set(activeChatSessionIdRef.current, { text: chatInputValueRef.current, attachments: chatAttachmentsLiveRef.current });
     const draft = chatDraftsRef.current.get(session.id);
     setChatInput(draft?.text ?? "");
@@ -15137,7 +15170,7 @@ export function App() {
     // Capture synchronous adapter writes before React commits its next render.
     const snapshot = buildCurrentAppData();
     const blocked = characterCardsPersistenceBlockedRef.current;
-    const cardsStored = persistAppDataToLocalStores(snapshot, false, blocked);
+    const cardsStored = persistAppDataToLocalStores(snapshot, false, blocked, !persistentStoreReadyRef.current);
     if (persistentStoreReadyRef.current) {
       if (!await savePersistentAppData(snapshot, await cardsStored, false, blocked)) {
         throw new Error("酒馆脚本数据写入磁盘失败，请重试保存。");
@@ -15728,6 +15761,7 @@ export function App() {
           snapshot,
           false,
           characterCardsPersistenceBlocked,
+          !persistentStoreReadyRef.current,
         );
         if (persistentStoreReadyRef.current) {
           void characterCardsStored.then((stored) => {
@@ -15756,6 +15790,7 @@ export function App() {
         snapshot,
         false,
         characterCardsPersistenceBlocked,
+        !persistentStoreReadyRef.current,
       );
       if (persistentStoreReadyRef.current) {
         void characterCardsStored.then((stored) => {
@@ -19896,6 +19931,7 @@ export function App() {
     };
 
     runtime = new TavernScriptRuntime(activeTavernScripts, {
+      isChatMounted: () => Boolean(getDesktopWindow("chat").document.getElementById("chat")),
       getMessages: () => chatMessagesRef.current as TavernRuntimeMessage[],
       setMessages: (messages) => {
         const normalized = messages.map((message) =>
@@ -20477,9 +20513,9 @@ export function App() {
       runtime.destroy();
     };
   }, [
-    // Session switches use CHAT_CHANGED to avoid reloading large scripts. A full
-    // session reset increments the revision to rebuild the card runtime explicitly.
-    Boolean(activeChatSessionId),
+    // Each session owns its timers, handlers and script globals. Switching away
+    // destroys that environment instead of carrying its background work forward.
+    activeChatSessionId,
     appDataLoaded,
     promptTemplateEnabled,
     promptTemplateExtension?.updatedAt,
@@ -20488,7 +20524,7 @@ export function App() {
   ]);
 
   useEffect(() => {
-    if (!appDataLoaded || !activeChatSessionId) return;
+    if (!appDataLoaded || !activeChatSessionId || !chatWindowOpen) return;
 
     let cancelled = false;
     const sessionId = activeChatSessionId;
@@ -20556,6 +20592,7 @@ export function App() {
     appDataLoaded,
     htmlPreviewDesiredMountKey,
     tavernRuntimeConfigurationKey,
+    chatWindowOpen,
   ]);
 
   const emitTavernMessageEventNow = async (
@@ -20921,10 +20958,24 @@ export function App() {
         : chatMessages.filter((message) => !isHeartbeatUiReminderMessage(message)),
     [chatHeartbeatReminderVisible, chatMessages],
   );
+  const chatHistoryWindow = getChatHistoryWindow(
+    visibleChatMessages.length,
+    chatHistoryPage.sessionId === activeChatSessionId ? chatHistoryPage.start : null,
+  );
+  const windowedChatMessages = useMemo(
+    () => visibleChatMessages.slice(chatHistoryWindow.start, chatHistoryWindow.end),
+    [visibleChatMessages, chatHistoryWindow.start, chatHistoryWindow.end],
+  );
+  const changeChatHistoryPage = (start: number | null) => {
+    chatScrollFollowLatestRef.current = start === null;
+    chatContentPartsCache.clear();
+    setChatHistoryPage({ sessionId: activeChatSessionId, start });
+  };
   const regexProcessedChatMessages = useMemo(
     () => {
       const cache = regexDisplayCacheRef.current;
       const context = [
+        activeChatSessionId,
         activePersona,
         activeSessionRoleplayCard,
         chatMode,
@@ -20952,7 +21003,8 @@ export function App() {
         chatMode === "roleplay" && activeSessionRoleplayCard
           ? getCharacterRegexTemplateConfig(activeSessionRoleplayCard.extensions)
           : null;
-      const processed = visibleChatMessages.map((message, index) => {
+      const processed = windowedChatMessages.map((message, windowIndex) => {
+        const index = chatHistoryWindow.start + windowIndex;
         if (message.role !== "assistant" || !message.content) return message;
         // Streaming messages are intentionally displayed as raw text. Running
         // character regexes and templates against the growing full response on
@@ -21016,14 +21068,11 @@ export function App() {
         });
         return result;
       });
-      while (cache.entries.size > Math.max(96, visibleChatMessages.length + 32)) {
-        const oldestMessageId = cache.entries.keys().next().value;
-        if (oldestMessageId === undefined) break;
-        cache.entries.delete(oldestMessageId);
-      }
+      const displayedIds = new Set(windowedChatMessages.map((message) => message.id));
+      for (const id of cache.entries.keys()) if (!displayedIds.has(id)) cache.entries.delete(id);
       return processed;
     },
-    [activePersona, activeSessionRoleplayCard, chatMode, effectiveRegexScripts, personas, userProfile.nickname, visibleChatMessages],
+    [activeChatSessionId, activePersona, activeSessionRoleplayCard, chatMode, effectiveRegexScripts, personas, userProfile.nickname, visibleChatMessages, windowedChatMessages, chatHistoryWindow.start],
   );
   const renderedChatItems = useMemo(
     () =>
@@ -24108,9 +24157,11 @@ export function App() {
         : undefined;
     const usableNativePiUsage =
       usableNativePiTokens === undefined ? undefined : nativePiUsage;
-    const currentChatMessageSignatures = contextMeterChatMessages.map(
-      getChatMessageContextSignature,
-    );
+    // Native Pi supplies its own usage. Do not serialize and hash every historical
+    // tool result unless a frontend compression snapshot actually needs matching.
+    const currentChatMessageSignatures = runtimeUsage
+      ? contextMeterChatMessages.map(getChatMessageContextSignature)
+      : [];
     const runtimeUsageMatchesCurrentHistory = Boolean(
       runtimeUsage &&
         runtimeUsage.compressionEnabled === contextCompressionSettings.enabled &&
@@ -24413,9 +24464,6 @@ export function App() {
       ["write", "edit", "write_file", "apply_patch"].includes(normalizedName) ||
       normalizedName.includes("write_file") ||
       normalizedName.includes("edit_file");
-    const resultText = toolVisualizationResultText(meta.result);
-    const diff = toolVisualizationDiff(meta);
-    const lines = resultText.split("\n").slice(0, 400);
     const unexecutedArguments = meta.phase === "arguments" && meta.status !== "done";
     const statusLabel = meta.status === "running"
       ? meta.phase === "arguments" ? "生成参数" : "执行中"
@@ -24440,11 +24488,11 @@ export function App() {
         ? unexecutedArguments ? "正在生成文件内容" : "文件变更"
         : isShell ? "执行脚本与命令" : isRead ? "读取文件内容" : "工具执行记录";
     return (
-      <details
+      <ChatDeferredDetails
         className={`pi-tool-visualization ${meta.status} ${isMutation ? "mutation" : ""} ${isShell ? "shell" : ""}`}
         key={key}
-        open={meta.status === "running"}
-      >
+        autoOpen={meta.status === "running"}
+        summary={
         <summary className="pi-tool-visualization-header">
           <span className="pi-tool-visualization-icon"><Icon size={21} /></span>
           <span className="chat-tool-heading">
@@ -24462,6 +24510,13 @@ export function App() {
           </span>
           <ChevronDown className="pi-tool-visualization-chevron" size={15} />
         </summary>
+        }
+      >
+        {() => {
+          const resultText = toolVisualizationResultText(meta.result);
+          const diff = isMutation ? toolVisualizationDiff(meta) : "";
+          const lines = resultText.split("\n", 400);
+          return (
         <div className="pi-tool-visualization-body">
           {path && !diff && <div className="pi-tool-visualization-path"><FileCode2 size={13} /> <code>{path}</code></div>}
           {meta.status === "error" && resultText ? (
@@ -24486,7 +24541,9 @@ export function App() {
             <pre className="pi-tool-result-preview">{resultText}</pre>
           ) : null}
         </div>
-      </details>
+          );
+        }}
+      </ChatDeferredDetails>
     );
   };
 
@@ -24624,7 +24681,7 @@ export function App() {
     return (
       <div className="chat-bubble-row" key={messageId}>
         {renderChatBubbleDot(getToolBubbleStatus(item, chatGenerationState !== "idle"))}
-        <details className={`chat-tool-run ${hasError ? "error" : ""}`} tabIndex={-1} open={autoOpen || undefined}>
+        <ChatDeferredDetails className={`chat-tool-run ${hasError ? "error" : ""}`} autoOpen={autoOpen} summary={
           <summary className="chat-tool-run-header">
             <span className="chat-tool-run-icon">
               {hasError ? <X size={23} /> : <Wrench size={23} />}
@@ -24635,6 +24692,8 @@ export function App() {
             </span>
             <span className="chat-tool-run-badge">{stepCount} 步<ChevronDown className="chat-tool-run-chevron" size={16} /></span>
           </summary>
+        }>
+          {() => (
           <div className="chat-tool-run-body">
             {visualizations.length > 0
               ? visualizations.map((visualization, index) =>
@@ -24645,7 +24704,8 @@ export function App() {
                 )}
             {groupedAttachments.length > 0 && renderChatAttachments(groupedAttachments)}
           </div>
-        </details>
+          )}
+        </ChatDeferredDetails>
       </div>
     );
   };
@@ -24656,14 +24716,14 @@ export function App() {
     options: { isNewestVisibleItem?: boolean } = {},
   ) => {
     const lastToolGroupIndex = item.toolGroups.length - 1;
-    const renderedGroups = item.toolGroups.map((toolGroup, index) =>
+    const renderGroups = () => item.toolGroups.map((toolGroup, index) =>
       renderToolRunGroup(toolGroup, `${messageId}-${index}`, {
         isNewestRun: index === lastToolGroupIndex,
         isNewestVisibleItem: Boolean(options.isNewestVisibleItem),
       }),
     );
     if (item.toolGroups.length < 2) {
-      return <div className="chat-tool-groups">{renderedGroups}</div>;
+      return <div className="chat-tool-groups">{renderGroups()}</div>;
     }
 
     const hasError = item.toolGroups.some(
@@ -24690,11 +24750,10 @@ export function App() {
       : `连续 ${item.toolGroups.length} 次工具处理正在进行`;
 
     return (
-      <details
+      <ChatDeferredDetails
         className={`chat-tool-fold ${hasError ? "error" : ""}`}
-        tabIndex={-1}
-        open={autoOpen || undefined}
-      >
+        autoOpen={autoOpen}
+        summary={
         <summary className="chat-tool-fold-header">
           <span className="chat-tool-fold-icon">
             {hasError ? <X size={16} /> : <ListTree size={16} />}
@@ -24708,8 +24767,10 @@ export function App() {
             <ChevronDown className="chat-tool-fold-chevron" size={16} />
           </span>
         </summary>
-        <div className="chat-tool-groups chat-tool-fold-body">{renderedGroups}</div>
-      </details>
+        }
+      >
+        {() => <div className="chat-tool-groups chat-tool-fold-body">{renderGroups()}</div>}
+      </ChatDeferredDetails>
     );
   };
 
@@ -29289,7 +29350,7 @@ export function App() {
       await appendRunningInput(requestSessionId, content, attachmentsToSend, runningInputMode);
       return;
     }
-    runtime.continueWith = (input) => sendChatMessage(input.content, input.attachments, requestSessionId);
+    runtime.continueWith = (input) => sendChatMessageRef.current(input.content, input.attachments, requestSessionId);
     if (chatMode === "multi") {
       await sendMultiAgentMessage(content, attachmentsToSend, requestSessionId);
       return;
@@ -38423,6 +38484,21 @@ export function App() {
               });
             }}
           >
+            {visibleChatMessages.length > CHAT_HISTORY_PAGE_SIZE && (
+              <nav className="chat-history-navigation" aria-label="会话历史分页">
+                <button type="button" className="small-action" disabled={chatHistoryWindow.start === 0}
+                  onClick={() => changeChatHistoryPage(Math.max(0, chatHistoryWindow.start - CHAT_HISTORY_PAGE_SIZE))}>
+                  查看更早的消息
+                </button>
+                <span>{chatHistoryWindow.start + 1}–{chatHistoryWindow.end} / {visibleChatMessages.length}</span>
+                <button type="button" className="small-action" disabled={chatHistoryWindow.end >= visibleChatMessages.length}
+                  onClick={() => changeChatHistoryPage(Math.min(chatHistoryWindow.latestStart, chatHistoryWindow.start + CHAT_HISTORY_PAGE_SIZE))}>
+                  查看后面的消息
+                </button>
+                <button type="button" className="small-action" disabled={chatHistoryPage.sessionId !== activeChatSessionId || chatHistoryPage.start === null}
+                  onClick={() => changeChatHistoryPage(null)}>回到最新消息</button>
+              </nav>
+            )}
             {visibleChatMessages.length === 0 ? (
               <div
                 className={`chat-empty ${
