@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { startRengeServer } from "../server.mjs";
 import { createPiExtensionUi } from "../pi/extension-ui.mjs";
-import { getPiExtensionDisplayText, normalizePiExtensionResult, normalizePiExtensionText } from "../src/piExtensionText.mjs";
+import { getPiExtensionDisplayText, isPiTerminalUiCompatibilityNotice, normalizePiExtensionResult, normalizePiExtensionText } from "../src/piExtensionText.mjs";
 
 test("terminal search output preserves safe links and removes terminal controls", () => {
   const osc = (url, text, end = "\x1b\\") => `\x1b]8;;${url}${end}${text}\x1b]8;;${end}`;
@@ -50,6 +50,23 @@ test("extension dialogs validate choices and settle on timeout, cancellation and
   assert.equal(await editor, undefined);
   assert.equal(await runConfirm, false);
   assert.equal(await ui.context.input("Aborted"), undefined);
+});
+
+test("RPC silently skips optional terminal factories while retaining attributable diagnostics", async () => {
+  const events=[], diagnostics=[];
+  const ui=createPiExtensionUi({signal:new AbortController().signal,emit:event=>events.push(event),onUnsupported:event=>diagnostics.push(event)});
+  const factory=()=>{throw new Error("A terminal factory must never execute in RPC");};
+  for(let i=0;i<2;i++)ui.context.addAutocompleteProvider(factory);
+  ui.context.setFooter(factory);ui.context.setHeader(factory);ui.context.setEditorComponent(factory);
+  ui.context.setWidget("terminal",factory);assert.equal(await ui.context.custom(factory),undefined);
+  assert.equal(events.length,0,"Optional decorations do not create notifications or assistant replies");
+  assert.deepEqual(diagnostics.map(d=>d.method),["addAutocompleteProvider","setFooter","setHeader","setEditorComponent","setWidget","custom"]);
+  assert.ok(diagnostics.every(d=>d.source.includes("piExtensionCompatibility.test.mjs")));
+  ui.context.setWidget("text",["supported"]);
+  assert.equal(events.at(-1).method,"setWidget");
+  ui.context.notify("real warning","warning");assert.equal(events.at(-1).message,"real warning");
+  assert.equal(isPiTerminalUiCompatibilityNotice("此扩展使用了终端专用组件，请使用支持 RPC 的文本界面。"),true);
+  assert.equal(isPiTerminalUiCompatibilityNotice("real warning"),false);
 });
 
 const fixtureSource = `export default function (pi) {

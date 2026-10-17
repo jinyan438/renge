@@ -537,6 +537,7 @@ export function createRengePiHost({
     run.extensionUi = createPiExtensionUi({
       signal: run.abortController.signal,
       emit: (event) => writeSse(response, piEvent(event.type, { runId, ...event })),
+      onUnsupported: ({ method, source }) => console.debug(`[pi-extension] RPC skipped terminal UI ${method}: ${source}`),
     });
     run.shellSessions = createShellSessionManager({
       onBackgroundUpdate: ({ toolCallId, toolName, result, finished, isError }) => {

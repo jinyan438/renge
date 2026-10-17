@@ -70,6 +70,7 @@ try {
   assert.equal(streams.at(-1).body.enableTools, true, "installed Pi tools remain enabled without MCP or workspace tools");
   assert.match(JSON.stringify(streams.at(-1).body.request.messages), /\/gpt-search Renge/);
   pi({ type: "extension_ui_request", method: "setStatus", statusKey: "search", statusText: "正在检索 Renge" });
+  pi({ type: "extension_ui_request", method: "notify", message: "此扩展使用了终端专用组件，请使用支持 RPC 的文本界面。", notifyType: "warning" });
   await status.getByText("正在检索 Renge", { exact: true }).waitFor();
   pi({ type: "extension_entry", entry: { id: "search-entry", customType: "gpt-search-output", data: { text: "兼容搜索结果\n\x1b]8;;https://example.com/docs\x1b\\官方文档\x1b]8;;\x1b\\" } } });
   pi({ type: "extension_ui_request", method: "notify", message: "搜索完成，共 1 条", notifyType: "info" });
@@ -78,6 +79,7 @@ try {
   await page.locator(".chat-message.assistant").filter({ hasText: "兼容搜索结果" }).waitFor();
   assert.equal(await page.getByRole("link", { name: "官方文档", exact: true }).getAttribute("href"), "https://example.com/docs");
   await status.getByText("搜索完成，共 1 条", { exact: true }).waitFor();
+  assert.equal(await page.getByText("此扩展使用了终端专用组件，请使用支持 RPC 的文本界面。",{exact:false}).count(),0,"Old hosts' terminal UI notices never become replies or status warnings");
   assert.equal(await page.getByText("响应里没有可显示的回复内容。", { exact: false }).count(), 0);
   await page.screenshot({ path: ".runtime/pi-extension-search.png" });
 

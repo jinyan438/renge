@@ -28,6 +28,10 @@ export function getPiExtensionDisplayText(value) {
   return "";
 }
 
+export function isPiTerminalUiCompatibilityNotice(value) {
+  return normalizePiExtensionText(value).trim() === "此扩展使用了终端专用组件，请使用支持 RPC 的文本界面。";
+}
+
 export function normalizePiExtensionResult(result) {
   if (!result || !Array.isArray(result.content)) return result;
   return { ...result, content: result.content.map((block) => block?.type === "text"

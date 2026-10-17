@@ -7,6 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "test:save-performance": "node --experimental-strip-types --test test/appDataPersistenceUtils.test.mjs test/appDataSaveChunks.test.mjs test/appDataSaveClient.test.mjs && node test/appDataSaveBrowser.test.mjs",
+    "test:stream-performance": "node test/chatStreamingPerformanceBrowser.test.mjs",
     "test:backup": "node --experimental-strip-types --test test/completeBackupArchive.test.mjs test/completeBackupZip.test.mjs test/serverAppData.test.mjs",
     "test:backup-browser": "node test/completeBackupBrowser.test.mjs",
     "test:backup-import-browser": "node test/completeBackupImportBrowser.test.mjs",

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 /** Pi's text/RPC UI contract. Terminal component factories require TUI mode. */
-export function createPiExtensionUi({ emit, signal }) {
+export function createPiExtensionUi({ emit, signal, onUnsupported }) {
   const pending = new Map();
   let editorText = "";
   const send = (method, fields = {}) => emit({ type: "extension_ui_request", method, ...fields });
@@ -30,9 +30,18 @@ export function createPiExtensionUi({ emit, signal }) {
       send(method, { id, ...fields });
     });
   };
-  const unsupported = () => send("notify", {
-    message: "此扩展使用了终端专用组件，请使用支持 RPC 的文本界面。", notifyType: "warning",
-  });
+  const unsupportedCalls = new Set();
+  const unsupported = (method) => () => {
+    const source = new Error().stack?.split("\n").find(line =>
+      !line.includes("extension-ui.mjs") && /node_modules|extensions|file:\/\//.test(line),
+    )?.trim() ?? "";
+    const key = `${method}\n${source}`;
+    if (unsupportedCalls.has(key)) return;
+    unsupportedCalls.add(key);
+    // Terminal decorations are optional in RPC. Keep attribution in diagnostics
+    // without inserting a synthetic assistant reply or a warning every turn.
+    try { onUnsupported?.({ method, source }); } catch { /* Diagnostics cannot fail an extension. */ }
+  };
   const plainTheme = {
     name: "renge-text", appearance: "light",
     colors: new Proxy(Object.freeze({}), { get: () => "#666666" }),
@@ -59,16 +68,16 @@ export function createPiExtensionUi({ emit, signal }) {
       setWorkingMessage: (message) => send("setWorkingMessage", { message }),
       setWidget: (widgetKey, widgetLines) => {
         if (widgetLines === undefined || Array.isArray(widgetLines)) send("setWidget", { widgetKey, widgetLines });
-        else unsupported();
+        else unsupported("setWidget")();
       },
       setEditorText(text) { editorText = text; send("set_editor_text", { text }); },
       pasteToEditor(text) { this.setEditorText(editorText + text); },
       getEditorText: () => editorText,
       onTerminalInput: () => () => {},
       setWorkingVisible() {}, setWorkingIndicator() {}, setHiddenThinkingLabel() {},
-      setFooter: unsupported, setHeader: unsupported, setTitle() {},
-      custom: async () => { unsupported(); return undefined; },
-      addAutocompleteProvider: unsupported, setEditorComponent: unsupported,
+      setFooter: unsupported("setFooter"), setHeader: unsupported("setHeader"), setTitle() {},
+      custom: async () => { unsupported("custom")(); return undefined; },
+      addAutocompleteProvider: unsupported("addAutocompleteProvider"), setEditorComponent: unsupported("setEditorComponent"),
       getEditorComponent: () => undefined,
       theme: plainTheme, getAllThemes: () => [], getTheme: () => undefined,
       setTheme: () => ({ success: false, error: "终端主题不适用于网页界面" }),

@@ -2,7 +2,7 @@ import { createChatSessionRuntime, type ChatInputMode, type SessionRunStatus } f
 import type { ReviewSource, ReviewSnapshot, ReviewDetail, ReviewRequest, ReviewAiResult } from "./codeReviewUtils";
 import { ChatCodeContent } from "./ChatCodeContent";
 import { usePiExtensionDialogs, type PiExtensionEventFields } from "./PiExtensionDialog";
-import { getPiExtensionDisplayText, normalizePiExtensionText } from "./piExtensionText.mjs";
+import { getPiExtensionDisplayText, isPiTerminalUiCompatibilityNotice, normalizePiExtensionText } from "./piExtensionText.mjs";
 import { createUserProfile, normalizeUserProfiles, type UserProfile } from "./userProfileUtils";
 import {
   ArrowLeft,
@@ -12698,6 +12698,102 @@ function PortfolioDesktopWindow({
   );
 }
 
+const PiToolVisualization = memo(function PiToolVisualization({ meta, onCopy }: {
+  meta: ToolVisualization; onCopy: (content: string) => Promise<void>;
+}) {
+    const [bodyReady, setBodyReady] = useState(meta.status === "running");
+    const showBody = bodyReady || meta.status === "running";
+    const normalizedName = meta.name.trim().toLocaleLowerCase().replace(/[\s.-]+/g, "_");
+    const args = meta.args ?? {};
+    const path = String(args.path ?? args.filePath ?? args.file_path ?? "");
+    const command = String(args.command ?? args.cmd ?? args.script ?? "");
+    const isRead =
+      ["read", "read_file", "file_read"].includes(normalizedName) ||
+      normalizedName.includes("read_file");
+    const isShell =
+      ["bash", "powershell", "shell_status", "shell_stop", "shell", "exec", "exec_command", "command"].includes(normalizedName) ||
+      normalizedName.includes("run_command") || normalizedName.includes("execute_script");
+    const isMutation =
+      ["write", "edit", "write_file", "apply_patch"].includes(normalizedName) ||
+      normalizedName.includes("write_file") ||
+      normalizedName.includes("edit_file");
+    const resultText = showBody ? normalizePiExtensionText(toolVisualizationResultText(meta.result)) : "";
+    const diff = showBody ? toolVisualizationDiff(meta) : "";
+    const lines = resultText.split("\n").slice(0, 400);
+    const unexecutedArguments = meta.phase === "arguments" && meta.status !== "done";
+    const statusLabel = meta.status === "running"
+      ? meta.phase === "arguments" ? "生成参数" : "执行中"
+      : meta.status === "error" ? unexecutedArguments ? "未执行" : "失败" : "完成";
+    const title = isRead
+      ? "读取文件"
+      : isShell
+        ? normalizedName === "shell_status" ? "查询命令" : normalizedName === "shell_stop" ? "停止命令" : "运行命令"
+        : isMutation
+          ? normalizedName.includes("write")
+            ? unexecutedArguments
+              ? meta.status === "running" ? "准备写入" : "写入未执行"
+              : "写入文件"
+            : "修改文件"
+          : meta.name;
+    const Icon = isRead ? FileCode2 : isShell ? Terminal : isMutation ? FilePenLine : Wrench;
+    const result = isObjectRecord(meta.result) ? meta.result : {};
+    const resultDetails = isObjectRecord(result.details) ? result.details : result;
+    const description = meta.status === "error"
+      ? unexecutedArguments ? "操作尚未执行" : "执行遇到问题"
+      : isMutation
+        ? unexecutedArguments ? "正在生成文件内容" : "文件变更"
+        : isShell ? "执行脚本与命令" : isRead ? "读取文件内容" : "工具执行记录";
+    return (
+      <details
+        className={`pi-tool-visualization ${meta.status} ${isMutation ? "mutation" : ""} ${isShell ? "shell" : ""}`}
+        onToggle={(event) => { if (event.currentTarget.open) setBodyReady(true); }}
+        open={meta.status === "running"}
+      >
+        <summary className="pi-tool-visualization-header">
+          <span className="pi-tool-visualization-icon"><Icon size={21} /></span>
+          <span className="chat-tool-heading">
+            <span className="chat-tool-heading-line">
+              <strong>{title}</strong>
+              <span className="pi-tool-visualization-summary" title={path || command || meta.name}>
+                {path || command || meta.name}
+              </span>
+            </span>
+            <span className="chat-tool-description">{description}</span>
+          </span>
+          <span className="pi-tool-visualization-status">
+            {meta.status === "done" ? <CircleCheck size={14} /> : meta.status === "error" ? <X size={14} /> : <LoaderCircle className="chat-status-spinner" size={14} />}
+            {statusLabel}{meta.status !== "running" && meta.durationMs !== undefined ? ` · ${(meta.durationMs / 1000).toFixed(2)} 秒` : ""}
+          </span>
+          <ChevronDown className="pi-tool-visualization-chevron" size={15} />
+        </summary>
+        {showBody && <div className="pi-tool-visualization-body">
+          {path && !diff && <div className="pi-tool-visualization-path"><FileCode2 size={13} /> <code>{path}</code></div>}
+          {meta.status === "error" && resultText ? (
+            <pre className="pi-tool-result-preview">{resultText}</pre>
+          ) : null}
+          {isMutation && diff ? (
+            <ChatToolDiffPreview
+              diff={diff}
+              path={path}
+              numbered={normalizedName === "edit" && typeof resultDetails.diff === "string"}
+              completed={meta.status === "done"}
+              onCopy={onCopy}
+            />
+          ) : isRead && resultText ? (
+            <div className="pi-tool-code-preview"><pre>{lines.map((line, index) => <span key={index}><i>{index + 1}</i>{line || " "}</span>)}</pre></div>
+          ) : isShell ? (
+            <div className="pi-tool-terminal-preview">
+              {command && <div className="command"><b>$</b>{command}</div>}
+              <pre>{resultText || (meta.status === "running" ? "等待输出…" : "无输出")}</pre>
+            </div>
+          ) : resultText && meta.status !== "error" ? (
+            <pre className="pi-tool-result-preview">{renderInlineText(resultText)}</pre>
+          ) : null}
+        </div>}
+      </details>
+    );
+});
+
 export function App() {
   const piExtensionDialogs = usePiExtensionDialogs();
   const focusedDesktopWindowRef = useRef("chat");
@@ -13860,6 +13956,7 @@ export function App() {
       if (["select", "confirm", "input", "editor"].includes(event.method ?? "")) {
         piExtensionDialogs.request(event, signal, (message) => setSessionChatStatus(sessionId, { status: "error", message }));
       } else if (event.method === "notify") {
+        if (isPiTerminalUiCompatibilityNotice(event.message)) return { handled: true };
         const text = getPiExtensionDisplayText(event.message);
         const prefix = event.notifyType === "error" ? "Pi 扩展错误" : event.notifyType === "warning" ? "Pi 扩展提示" : "Pi 扩展";
         const status: SessionRunStatus = {
@@ -23594,10 +23691,10 @@ export function App() {
     }
   };
 
-  const copyChatCodeBlock = async (content: string) => {
+  const copyChatCodeBlock = useCallback(async (content: string) => {
     await navigator.clipboard.writeText(content);
     setChatStatus({ status: "success", message: "已复制代码块。" });
-  };
+  }, []);
 
   const executeMcpTool = async (
     toolName: string,
@@ -24498,97 +24595,8 @@ export function App() {
     </header>
   );
 
-  const renderPiToolVisualization = (meta: ToolVisualization, key: string) => {
-    const normalizedName = meta.name.trim().toLocaleLowerCase().replace(/[\s.-]+/g, "_");
-    const args = meta.args ?? {};
-    const path = String(args.path ?? args.filePath ?? args.file_path ?? "");
-    const command = String(args.command ?? args.cmd ?? args.script ?? "");
-    const isRead =
-      ["read", "read_file", "file_read"].includes(normalizedName) ||
-      normalizedName.includes("read_file");
-    const isShell =
-      ["bash", "powershell", "shell_status", "shell_stop", "shell", "exec", "exec_command", "command"].includes(normalizedName) ||
-      normalizedName.includes("run_command") || normalizedName.includes("execute_script");
-    const isMutation =
-      ["write", "edit", "write_file", "apply_patch"].includes(normalizedName) ||
-      normalizedName.includes("write_file") ||
-      normalizedName.includes("edit_file");
-    const resultText = normalizePiExtensionText(toolVisualizationResultText(meta.result));
-    const diff = toolVisualizationDiff(meta);
-    const lines = resultText.split("\n").slice(0, 400);
-    const unexecutedArguments = meta.phase === "arguments" && meta.status !== "done";
-    const statusLabel = meta.status === "running"
-      ? meta.phase === "arguments" ? "生成参数" : "执行中"
-      : meta.status === "error" ? unexecutedArguments ? "未执行" : "失败" : "完成";
-    const title = isRead
-      ? "读取文件"
-      : isShell
-        ? normalizedName === "shell_status" ? "查询命令" : normalizedName === "shell_stop" ? "停止命令" : "运行命令"
-        : isMutation
-          ? normalizedName.includes("write")
-            ? unexecutedArguments
-              ? meta.status === "running" ? "准备写入" : "写入未执行"
-              : "写入文件"
-            : "修改文件"
-          : meta.name;
-    const Icon = isRead ? FileCode2 : isShell ? Terminal : isMutation ? FilePenLine : Wrench;
-    const result = isObjectRecord(meta.result) ? meta.result : {};
-    const resultDetails = isObjectRecord(result.details) ? result.details : result;
-    const description = meta.status === "error"
-      ? unexecutedArguments ? "操作尚未执行" : "执行遇到问题"
-      : isMutation
-        ? unexecutedArguments ? "正在生成文件内容" : "文件变更"
-        : isShell ? "执行脚本与命令" : isRead ? "读取文件内容" : "工具执行记录";
-    return (
-      <details
-        className={`pi-tool-visualization ${meta.status} ${isMutation ? "mutation" : ""} ${isShell ? "shell" : ""}`}
-        key={key}
-        open={meta.status === "running"}
-      >
-        <summary className="pi-tool-visualization-header">
-          <span className="pi-tool-visualization-icon"><Icon size={21} /></span>
-          <span className="chat-tool-heading">
-            <span className="chat-tool-heading-line">
-              <strong>{title}</strong>
-              <span className="pi-tool-visualization-summary" title={path || command || meta.name}>
-                {path || command || meta.name}
-              </span>
-            </span>
-            <span className="chat-tool-description">{description}</span>
-          </span>
-          <span className="pi-tool-visualization-status">
-            {meta.status === "done" ? <CircleCheck size={14} /> : meta.status === "error" ? <X size={14} /> : <LoaderCircle className="chat-status-spinner" size={14} />}
-            {statusLabel}{meta.status !== "running" && meta.durationMs !== undefined ? ` · ${(meta.durationMs / 1000).toFixed(2)} 秒` : ""}
-          </span>
-          <ChevronDown className="pi-tool-visualization-chevron" size={15} />
-        </summary>
-        <div className="pi-tool-visualization-body">
-          {path && !diff && <div className="pi-tool-visualization-path"><FileCode2 size={13} /> <code>{path}</code></div>}
-          {meta.status === "error" && resultText ? (
-            <pre className="pi-tool-result-preview">{resultText}</pre>
-          ) : null}
-          {isMutation && diff ? (
-            <ChatToolDiffPreview
-              diff={diff}
-              path={path}
-              numbered={normalizedName === "edit" && typeof resultDetails.diff === "string"}
-              completed={meta.status === "done"}
-              onCopy={copyChatCodeBlock}
-            />
-          ) : isRead && resultText ? (
-            <div className="pi-tool-code-preview"><pre>{lines.map((line, index) => <span key={`${key}-read-${index}`}><i>{index + 1}</i>{line || " "}</span>)}</pre></div>
-          ) : isShell ? (
-            <div className="pi-tool-terminal-preview">
-              {command && <div className="command"><b>$</b>{command}</div>}
-              <pre>{resultText || (meta.status === "running" ? "等待输出…" : "无输出")}</pre>
-            </div>
-          ) : resultText && meta.status !== "error" ? (
-            <pre className="pi-tool-result-preview">{renderInlineText(resultText)}</pre>
-          ) : null}
-        </div>
-      </details>
-    );
-  };
+  const renderPiToolVisualization = (meta: ToolVisualization, key: string) =>
+    <PiToolVisualization key={key} meta={meta} onCopy={copyChatCodeBlock} />;
 
   const renderToolProgressBlock = (block: ChatToolProgressBlock, messageId: string) => {
     const linkLabels = new Set(block.links.map((link) => stripMarkdownLinks(link.label).trim()));
