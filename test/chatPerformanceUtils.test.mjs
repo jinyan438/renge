@@ -353,7 +353,7 @@ test("layout-driven scroll events do not interrupt automatic following", (contex
     scrollTop: 0,
     scrollHeight: 2000,
     clientHeight: 500,
-    querySelectorAll: () => [{ contentWindow: { postMessage: (payload) => previews.push(payload) } }],
+    querySelectorAll: () => [{ ownerDocument: { defaultView: globalThis.window }, contentWindow: { postMessage: (payload) => previews.push(payload) } }],
   });
   context.mock.method(globalThis, "setTimeout", timers.schedule);
   const previousWindow = globalThis.window;
