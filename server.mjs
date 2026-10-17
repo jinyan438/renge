@@ -3132,8 +3132,23 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
 
       if (request.method === "DELETE" && !operation) {
         const body = await readJsonBody(request);
-        if (body.piPackageSource) await piHost.removePiPackage(body.piPackageSource);
-        await rm(extensionDirectory, { recursive: true, force: true });
+        const storedData = await readAppData(dataFilePath);
+        const storedExtension = Array.isArray(storedData.extensions)
+          ? storedData.extensions.find((extension) => extension?.id === extensionId)
+          : undefined;
+        const piPackageSource = body.piPackageSource || (storedExtension?.compatibility === "pi"
+          ? storedExtension.piPackageSource || storedExtension.sourceUrl
+          : "");
+        if (piPackageSource) await piHost.removePiPackage(piPackageSource);
+        await rm(extensionDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+        // Complete the persistent deletion before reporting success. Waiting for
+        // the renderer's debounced autosave lets a reload restore stale cards.
+        await writeAppData(dataFilePath, (currentData) => ({
+          ...currentData,
+          extensions: Array.isArray(currentData.extensions)
+            ? currentData.extensions.filter((extension) => extension?.id !== extensionId)
+            : [],
+        }));
         sendJson(response, 200, { ok: true, id: extensionId });
         return;
       }

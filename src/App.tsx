@@ -18604,7 +18604,11 @@ export function App() {
       const response = await fetch(`/api/extensions/${encodeURIComponent(extension.id)}`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ piPackageSource: extension.piPackageSource }),
+        body: JSON.stringify({
+          piPackageSource: extension.compatibility === "pi"
+            ? extension.piPackageSource || extension.sourceUrl
+            : undefined,
+        }),
       });
       const payload = (await response.json()) as { error?: string };
       if (!response.ok || payload.error) {
@@ -32634,6 +32638,7 @@ export function App() {
                         type="button"
                         className="extension-delete-action"
                         title="删除扩展"
+                        disabled={extensionStatus.status === "loading"}
                         onClick={() => void deleteInstalledExtension(extension)}
                       >
                         <Trash2 size={16} />

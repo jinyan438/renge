@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { readFile, rm, stat } from "node:fs/promises";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import {
   DefaultPackageManager,
   DefaultResourceLoader,
@@ -335,7 +335,21 @@ export function createPiPackageManager({ cwd = process.cwd(), agentDir }) {
       return withMutation(async () => {
         const source = normalizePiPackageSource(rawSource);
         const { manager, settingsManager } = createManager();
-        await manager.removeAndPersist(source);
+        const installedPath = manager.getInstalledPath(source, "user");
+        try {
+          await manager.removeAndPersist(source);
+        } catch (error) {
+          const gitRoot = join(resolvedAgentDir, "git");
+          const gitRelativePath = installedPath ? relative(gitRoot, installedPath) : "";
+          if (!["EPERM", "EBUSY", "ENOTEMPTY"].includes(error?.code) ||
+            !gitRelativePath || gitRelativePath.startsWith("..") || isAbsolute(gitRelativePath)) {
+            throw error;
+          }
+          // Pi removes Git checkouts synchronously without retries. On Windows,
+          // loaded files and antivirus scans can briefly make that fail with EPERM.
+          await rm(installedPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+          await manager.removeAndPersist(source);
+        }
         await settingsManager.flush();
         return { ok: true, source };
       });

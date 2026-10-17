@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { DefaultPackageManager } from "@earendil-works/pi-coding-agent";
 import { startRengeServer } from "../server.mjs";
 import { createHttpGitServer } from "./helpers/httpGitServer.mjs";
+import { createPiRemovalFixture } from "./helpers/piRemovalFixture.mjs";
 import {
   createPiPackageManager,
   isPiPackageSource,
@@ -156,6 +158,73 @@ test("rejects updating a Pi package that is not installed", async (t) => {
     () => manager.update("@renge-test/pi-never-installed"),
     /未安装/,
   );
+});
+
+test("deleting disabled npm and Git Pi packages persists before success and survives restart", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "renge-pi-remove-"));
+  const fixture = await createPiRemovalFixture(root);
+  let renge = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir: fixture.dataDir });
+  t.after(async () => {
+    await new Promise((resolve) => renge.server.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  });
+  const originalRemove = DefaultPackageManager.prototype.remove;
+  let windowsFailureCount = 0;
+  t.mock.method(DefaultPackageManager.prototype, "remove", async function (source, options) {
+    if (source === fixture.gitSource && this.getInstalledPath(source, "user")) {
+      windowsFailureCount += 1;
+      throw Object.assign(new Error("Windows checkout is busy"), { code: "EPERM" });
+    }
+    return originalRemove.call(this, source, options);
+  });
+  for (const extension of fixture.targets) {
+    const response = await fetch(`${renge.url}/api/extensions/${extension.id}`, {
+      method: "DELETE", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    assert.equal(response.status, 200, JSON.stringify(await response.json()));
+    const data = JSON.parse(await readFile(join(fixture.dataDir, "app-data.json"), "utf8"));
+    assert.ok(!data.extensions.some((entry) => entry.id === extension.id));
+    assert.ok(data.extensions.some((entry) => entry.id === fixture.kept.id));
+    assert.equal(data.userProfile.nickname, "保留的用户资料");
+    // Repeating a deletion must also clear an already absent installation.
+    assert.equal((await fetch(`${renge.url}/api/extensions/${extension.id}`, {
+      method: "DELETE", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ piPackageSource: extension.sourceUrl }),
+    })).status, 200);
+  }
+  assert.equal(windowsFailureCount, 1);
+  assert.equal(await stat(fixture.npmPath).catch(() => null), null);
+  assert.equal(await stat(fixture.gitPath).catch(() => null), null);
+  assert.equal(await readFile(join(fixture.localPath, "keep.txt"), "utf8"), "keep local source");
+  const settings = JSON.parse(await readFile(join(fixture.agentDir, "settings.json"), "utf8"));
+  assert.deepEqual(settings.packages.map((entry) => entry.source), [fixture.localPath]);
+  await new Promise((resolve) => renge.server.close(resolve));
+  renge = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir: fixture.dataDir });
+  const restored = (await (await fetch(`${renge.url}/api/app-data`)).json()).data;
+  assert.deepEqual(restored.extensions.map((entry) => entry.id), [fixture.kept.id]);
+});
+
+test("failed Pi uninstall keeps the installed card and configuration for a retry", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "renge-pi-remove-error-"));
+  const fixture = await createPiRemovalFixture(root);
+  const renge = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir: fixture.dataDir });
+  t.after(async () => {
+    await new Promise((resolve) => renge.server.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  });
+  t.mock.method(DefaultPackageManager.prototype, "remove", async () => {
+    throw Object.assign(new Error("Uninstall permission denied"), { code: "EACCES" });
+  });
+  const response = await fetch(`${renge.url}/api/extensions/${fixture.targets[1].id}`, {
+    method: "DELETE", headers: { "Content-Type": "application/json" }, body: "{}",
+  });
+  assert.equal(response.status, 500);
+  assert.match((await response.json()).error, /permission denied/);
+  assert.ok((await stat(fixture.gitPath)).isDirectory());
+  const data = (await (await fetch(`${renge.url}/api/app-data`)).json()).data;
+  assert.deepEqual(data.extensions.map((entry) => entry.id), [...fixture.targets, fixture.kept].map((entry) => entry.id));
+  const settings = JSON.parse(await readFile(join(fixture.agentDir, "settings.json"), "utf8"));
+  assert.ok(settings.packages.some((entry) => entry.source === fixture.gitSource));
 });
 
 test("updates an installed Tavern Git extension through the HTTP API", async (t) => {
