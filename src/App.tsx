@@ -313,8 +313,10 @@ import {
   createPersistentReferenceBaseline,
   createChatSessionPatch,
   createShallowReferencePatch,
+  exceedsJsonStringBudget,
   hasMeaningfulPatchChanges,
 } from "./appDataPersistenceUtils";
+import { sendAppDataSave } from "./appDataSaveClient";
 import {
   compactToolCallForReplay,
   formatCodexDuration,
@@ -3359,15 +3361,11 @@ async function savePersistentAppData(
         lastChatSessionsForPersistentStore = data.chatSessions ?? [];
         return true;
       }
-      const response = await fetch("/api/app-data", {
-        method: patchExistingData ? "PATCH" : "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data: requestData, ...(sessionPatch ? { sessionPatch } : {}) }),
-      });
-      const payload = await response.json().catch(() => ({})) as {
-        error?: string; sessionVersions?: Record<string, string>;
-      };
-      if (response.ok) {
+      const { ok, status, payload } = await sendAppDataSave(
+        patchExistingData ? "PATCH" : "PUT",
+        { data: requestData, ...(sessionPatch ? { sessionPatch } : {}) },
+      );
+      if (ok) {
         lastCharacterCardsForPersistentStore = characterCards;
         lastAppDataForPersistentStore = data;
         lastChatSessionsForPersistentStore = data.chatSessions ?? [];
@@ -3382,9 +3380,9 @@ async function savePersistentAppData(
         for (const { id } of sessionPatch?.deletes ?? []) delete persistentChatSessionVersions[id];
         reportAppDataSaveError("");
       } else {
-        reportAppDataSaveError(payload.error || `应用数据保存失败（${response.status}），请先导出本页备份。`);
+        reportAppDataSaveError(payload.error || `应用数据保存失败（${status}），请先导出本页备份。`);
       }
-      return response.ok;
+      return ok;
     } catch (error) {
       // The app can still run with localStorage when the persistence API is unavailable.
       reportAppDataSaveError(error instanceof Error ? `应用数据保存失败：${error.message}` : "应用数据保存失败，请先导出本页备份。");
@@ -3440,6 +3438,13 @@ function setLocalStorageJsonSafely(key: string, value: unknown) {
   if (blockedLocalStorageJsonKeys.has(key)) return false;
   let stored = false;
   try {
+    // localStorage cannot hold multi-megabyte history archives. Counting string
+    // lengths first avoids building a huge JSON only to hit QuotaExceededError.
+    if (exceedsJsonStringBudget(value, 8 * 1024 * 1024)) {
+      blockedLocalStorageJsonKeys.add(key);
+      localStorageJsonAttemptByKey.set(key, { value, stored: false });
+      return false;
+    }
     localStorage.setItem(key, JSON.stringify(value));
     stored = true;
   } catch {

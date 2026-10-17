@@ -7,8 +7,19 @@ import {
   compactCharacterCardsForPersistentStore,
   createPersistentReferenceBaseline,
   createShallowReferencePatch,
+  exceedsJsonStringBudget,
   hasMeaningfulPatchChanges,
 } from "../src/appDataPersistenceUtils.ts";
+
+test("large string budgets stop early without serializing or changing shared/cyclic objects", () => {
+  const value = { text:"x".repeat(100), toJSON:() => { throw new Error("must not serialize"); } };
+  assert.equal(exceedsJsonStringBudget({value},50), true);
+  const small = {text:"small"};
+  assert.equal(exceedsJsonStringBudget([small,small,null,undefined],50), false);
+  const cyclic = {text:"small"}; cyclic.self = cyclic;
+  assert.equal(exceedsJsonStringBudget(cyclic,50), false);
+  assert.equal(exceedsJsonStringBudget([null,undefined,true,1,new Date()],50), false);
+});
 
 test("Tavern settings retain their exported root across restore and repeated saves", () => {
   const store = createTavernSettingsStore({ __userscripts: { database: { model: "legacy" } } });
