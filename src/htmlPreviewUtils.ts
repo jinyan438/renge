@@ -91,10 +91,6 @@ export function injectHtmlPreviewHead(documentContent: string, headInjection: st
   return `<head>${headInjection}</head>${normalizedContent}`;
 }
 
-const TAVERN_PROSE_WRAPPER_PATTERN =
-  /<\s*content(?:\s[^<>]*?)?\s*>[\s\S]*?<\s*\/\s*content\s*>/i;
-const TAVERN_PROSE_WRAPPER_TAG_PATTERN =
-  /<\s*(?:content(?:\s[^<>]*?)?|\/\s*content)\s*>/gi;
 const LOCALIZED_QUOTE_PAIR_PATTERN =
   /(["＂])(“[^”\n]+”|〝[^〞\n]+〞|「[^」\n]+」|｢[^｣\n]+｣|『[^』\n]+』)\1/g;
 
@@ -148,9 +144,99 @@ export function isHtmlPreviewRootTag(
     (blockRootTags.has(normalizedTagName) || !standardTags.has(normalizedTagName));
 }
 
-export function unwrapTavernProseWrappers(content: string) {
-  if (!TAVERN_PROSE_WRAPPER_PATTERN.test(content)) return content;
-  return content.replace(TAVERN_PROSE_WRAPPER_TAG_PATTERN, "");
+export function unwrapTavernProseWrappers(content: string, standardTags: ReadonlySet<string>) {
+  type Wrapper = {
+    name: string;
+    start: number;
+    openEnd: number;
+    closeStart: number;
+    end: number;
+    prose: boolean;
+    transparent: boolean;
+    comments: Array<[number, number]>;
+    children: Wrapper[];
+  };
+  const roots: Wrapper[] = [];
+  const stack: Wrapper[] = [];
+  // Scan source instead of parsing/reserializing HTML, preserving Markdown,
+  // entities and script payloads exactly. Code examples are opaque to this pass.
+  const tokens = /<!--[\s\S]*?(?:-->|$)|^[ \t]*(?<fence>`{3,}|~{3,})[^\r\n]*(?:\r?\n|$)|(?<inline>`+)[\s\S]*?\k<inline>(?!`)|<\s*(?<isClosing>\/\s*)?(?<tag>[A-Za-z][\w:-]*)(?:\s+(?:[^<>"']|"[^"]*"|'[^']*')*)?\s*\/?>/gm;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = tokens.exec(content))) {
+    const parent = stack[stack.length - 1];
+    if (parent && content.slice(cursor, match.index).trim()) parent.prose = true;
+    const { fence, inline, tag, isClosing } = match.groups ?? {};
+    if (fence) {
+      const closing = new RegExp(`^[ \\t]*${fence[0]}{${fence.length},}[ \\t]*(?:\\r?\\n|$)`, "gm");
+      closing.lastIndex = tokens.lastIndex;
+      const end = closing.exec(content);
+      tokens.lastIndex = end ? closing.lastIndex : content.length;
+      if (parent) parent.prose = true;
+    } else if (inline) {
+      if (parent) parent.prose = true;
+    } else if (match[0].startsWith("<!--")) {
+      parent?.comments.push([match.index, tokens.lastIndex]);
+    } else if (tag) {
+      const name = tag.toLowerCase();
+      if (isClosing) {
+        // Only balanced wrappers qualify. Mismatched/unfinished markup keeps
+        // its original HTML recovery behavior.
+        if (parent?.name === name) {
+          parent.closeStart = match.index;
+          parent.end = tokens.lastIndex;
+          stack.pop();
+          const outer = stack[stack.length - 1];
+          if (outer) {
+            outer.prose ||= parent.prose;
+            if (outer.name !== "content" && !parent.transparent) outer.transparent = false;
+          }
+        } else if (parent) {
+          parent.transparent = false;
+        }
+      } else if (isTavernInlinePlaceholder(match[0], standardTags)) {
+        // Inert illustration/status slots may occur between prose paragraphs.
+      } else {
+        const transparent = name === "content" ||
+          (!standardTags.has(name) && /^[A-Za-z]\w*$/.test(tag) &&
+            new RegExp(`^<\\s*${tag}\\s*>$`, "i").test(match[0]));
+        if (parent && parent.name !== "content" && !transparent) parent.transparent = false;
+        if (/\/\s*>$/.test(match[0]) || /^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/.test(name)) {
+          // Standard void elements are HTML, not prose boundary markers.
+        } else if (/^(?:script|style|pre|code|textarea|title)$/.test(name)) {
+          const closing = new RegExp(`</${name}\\s*>`, "gi");
+          closing.lastIndex = tokens.lastIndex;
+          tokens.lastIndex = closing.exec(content) ? closing.lastIndex : content.length;
+        } else {
+          const wrapper: Wrapper = {
+            name, start: match.index, openEnd: tokens.lastIndex, closeStart: -1, end: -1,
+            prose: false, transparent, comments: [], children: [],
+          };
+          (parent?.children ?? roots).push(wrapper);
+          stack.push(wrapper);
+        }
+      }
+    }
+    cursor = tokens.lastIndex;
+  }
+  const removals: Array<[number, number]> = [];
+  const collect = (wrapper: Wrapper) => {
+    if (!wrapper.transparent || wrapper.end < 0 || !wrapper.prose) return;
+    removals.push([wrapper.start, wrapper.openEnd], [wrapper.closeStart, wrapper.end]);
+    // Comments were invisible in HTML and must stay invisible when the body
+    // switches to Markdown. Comments inside code/real HTML remain untouched.
+    removals.push(...wrapper.comments);
+    wrapper.children.forEach(collect);
+  };
+  roots.forEach(collect);
+  let result = content;
+  removals.sort((a, b) => b[0] - a[0]).forEach(([start, end]) => {
+    // Adjacent wrappers must not concatenate the last and first paragraphs.
+    const separator = content.startsWith("<!--", start) ||
+      (content[start - 1] === "\n" && content[end] === "\n") ? "" : "\n\n";
+    result = result.slice(0, start) + separator + result.slice(end);
+  });
+  return result;
 }
 
 export function normalizeRedundantTavernQuotePairs(content: string) {

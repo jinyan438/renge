@@ -6161,8 +6161,6 @@ function parsePlainChatContent(
   let normalized = content.replace(/\r\n/g, "\n");
   // 隐藏服务端为识图 MCP 注入的本地路径注释（不影响发回模型的 message.content 原文）
   normalized = stripHiddenImageAnnotations(normalized);
-  // <content> 是酒馆预设常用的正文边界，不是需要独立挂载的 HTML 组件。
-  normalized = unwrapTavernProseWrappers(normalized);
   // 酒馆角色卡常用正则只替换 XML 风格包装标签的开头，并把原闭标签留在消息里。
   // 这些孤立闭标签不应作为正文显示；真正的 HTML 容器会在下方提取时补齐。
   normalized = stripStandaloneOrphanCustomClosingTags(normalized);
@@ -6423,6 +6421,9 @@ function parseChatContentParts(
   content: string,
   audioRenderingEnabled: boolean,
 ): ChatContentPart[] {
+  // Bare custom tags around prose are preset boundaries, not HTML frontends.
+  // Normalize before splitting fences so a wrapper may also contain code.
+  content = unwrapTavernProseWrappers(content, htmlStandardTags);
   return (
     parseRecoverableHtmlWrapper(content, audioRenderingEnabled) ??
     parseFencedHtmlDocuments(content, audioRenderingEnabled) ??

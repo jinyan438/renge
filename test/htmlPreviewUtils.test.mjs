@@ -97,13 +97,59 @@ test("treats paired Tavern wrapper tags as HTML preview roots", () => {
 });
 
 test("unwraps Tavern content blocks so prose keeps Markdown layout", () => {
+  const standardTags = new Set(["details", "summary"]);
   const source = `<content>\n第一段。\n\n*第二段斜体。*\n</content>`;
 
-  assert.equal(unwrapTavernProseWrappers(source), "\n第一段。\n\n*第二段斜体。*\n");
+  assert.equal(unwrapTavernProseWrappers(source, standardTags).trim(), "第一段。\n\n*第二段斜体。*");
+  assert.equal(unwrapTavernProseWrappers('< content type="prose">\n正文。\n< / content >', standardTags).trim(), "正文。");
   assert.equal(
-    unwrapTavernProseWrappers("<catsay><details>点评</details></catsay>"),
+    unwrapTavernProseWrappers("<catsay><details>点评</details></catsay>", standardTags),
     "<catsay><details>点评</details></catsay>",
   );
+});
+
+const proseStandardTags = new Set(["div", "p", "span", "details", "summary", "script", "style", "pre", "code", "img", "br", "html", "body"]);
+
+test("recognizes arbitrary bare prose boundaries, including nested and adjacent wrappers", () => {
+  for (const name of ["scenario", "story", "narrative", "SceneText", "custom_prose"]) {
+    const body = "第一段。\n\n“第二段对白。”\n\n*第三段。*";
+    assert.equal(unwrapTavernProseWrappers(`<${name}>\n${body}\n</${name}>`, proseStandardTags).trim(), body);
+  }
+  const nested = "<story>\n<story>\n第一段。\n</story>\n\n第二段。\n</story><narrative>第三段。</narrative>";
+  const result = unwrapTavernProseWrappers(nested, proseStandardTags);
+  assert.doesNotMatch(result, /<\/?(?:story|narrative)>/);
+  assert.match(result, /第二段。\s*\n\n第三段。/);
+  assert.equal(unwrapTavernProseWrappers(result, proseStandardTags), result);
+});
+
+test("hides prose comments and preserves placeholders, code and opaque examples", () => {
+  const body = '<!-- example: <scenario>not markup</scenario> -->\n第一段 &amp; 原文。\n\n<IllustrationImpl ref="scene > window" />\n\n`<scenario>inline</scenario>`\n\n```xml\n<story>code</story>\n```\n\n最后一段。';
+  assert.equal(unwrapTavernProseWrappers(`<scenario>\n${body}\n</scenario>`, proseStandardTags).trim(), body.replace(/<!--.*?-->\n/, ""));
+  for (const source of [
+    '`<scenario>inline</scenario>`',
+    '``<story>inline ` quote</story>``',
+    '```xml\n<story>example</story>\n```',
+    '~~~xml\n<story>example</story>\n~~~',
+    '<!-- <story>comment</story> -->',
+  ]) assert.equal(unwrapTavernProseWrappers(source, proseStandardTags), source);
+});
+
+test("keeps real HTML, custom frontends and malformed markup intact", () => {
+  for (const source of [
+    '<div>\n<story>real HTML</story>\n</div>',
+    '<story><details><summary>摘要</summary>状态面板</details></story>',
+    '<story>面板标题<div>HTML content</div></story>',
+    '<story class="card">styled frontend</story>',
+    '<story style="white-space:pre-line">styled frontend</story>',
+    '<story data-kind="card">frontend</story>',
+    '<story-panel>custom element</story-panel>',
+    '<StatusPlaceHolderImpl/>',
+    '<script>const example = "<story>keep</story>";</script>',
+    '<style>story::before {content: "<story>keep</story>"}</style>',
+    '<pre><story>keep</story></pre>',
+    '<scenario>unfinished',
+    '<story><narrative>mismatched</story></narrative>',
+  ]) assert.equal(unwrapTavernProseWrappers(source, proseStandardTags), source);
 });
 
 test("removes redundant straight quotes around localized dialogue quotes", () => {
