@@ -15,6 +15,7 @@ Renge Agent Lab 是一个本地优先的 AI Agent 工作台。它把 **Pi 编码
 - **可恢复写入**：Pi 原生 `write` 被替换为带偏移校验的分块式 `write` 工具（`pi/resumable-write-tool.mjs`），本地网关截断长流时不会留下永久运行的写入调用。
 - **持续重试**：`pi/continuous-retry.mjs` 在内核层接管重试，配合 `flushIncompleteStreamingToolCalls` 清理未执行完的工具预览。
 - **原生压缩**：按上下文窗口和保留 Token 自动执行 Pi 的 `compact()`；网关谎报用量时使用本地估算兜底，并在首次超限报错后从错误信息中解析真实窗口并重试同一轮。
+- **请求体超限恢复**：模型接口返回 HTTP 413 时，按实际 JSON 字节大小缩减较早的图片、过长工具输出和完整历史消息组，并有限次自动重试；保留当前用户消息、最新工具调用及其结果和原始会话记录。当前附件或系统提示词仍过大时显示处理建议。回归：`npm run test:request-body`。
 - **Pi 原生扩展**：`pi/pi-package-manager.mjs` 让扩展中心可以直接安装、更新、启停和卸载 npm 上的 Pi 包，以及 `pi:` 前缀的 Git / 本地包。
 
 ### 右侧栏工具组

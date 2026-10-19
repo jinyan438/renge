@@ -15,6 +15,7 @@ import { Type } from "typebox";
 import { createPiMcpAdapter, normalizePiMcpConfig } from "./pi-mcp-adapter-bridge.mjs";
 import { createPiPackageManager } from "./pi-package-manager.mjs";
 import { installContinuousPiRetry } from "./continuous-retry.mjs";
+import { createPiRequestBodyRecoveryFetch } from "./request-body-recovery.mjs";
 import { createPermissionCheckedPiTools } from "./permission-tools.mjs";
 import { createShellSessionManager } from "./shell-sessions.mjs";
 import {
@@ -306,6 +307,7 @@ export function createRengePiHost({
   const sessionDir = join(resolve(dataDir), ".pi", "sessions");
   const piPackageManager = createPiPackageManager({ cwd: defaultCwd, agentDir });
   const providerUsers = new Map();
+  const requestBodyLimits = new Map();
   const closingSessions = new WeakMap();
   let modelRuntimePromise;
   let disposed = false;
@@ -756,6 +758,15 @@ export function createRengePiHost({
         sessionManager,
       });
       run.session = session;
+      const streamFunction = session.agent.streamFunction;
+      session.agent.streamFunction = (requestModel, context, options) => streamFunction(requestModel, context, {
+        ...options,
+        fetch: createPiRequestBodyRecoveryFetch({
+          fetchImpl: options?.fetch ?? globalThis.fetch,
+          limits: requestBodyLimits,
+          providerKey: `${providerId}\u0000${provider.modelId}`,
+        }),
+      });
       checkCancelled();
       if (allowDynamicExtensionTools) {
         session.setActiveToolsByName(initialActiveToolNames);
