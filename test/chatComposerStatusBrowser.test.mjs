@@ -81,8 +81,14 @@ try {
 
   await send("验证实时阶段");
   pi({ type: "run_start" });
+  pi({ type: "context_usage", usage: { tokens: 1_000, contextWindow: 10_000, percent: 10 } });
+  await page.locator(".context-token-ring").getByText("10%", { exact: true }).waitFor();
+  assert.match(await page.locator(".context-token-trigger").getAttribute("title"), /实时估算/);
   delta({ reasoning_content: "先分析问题。" });
   await expectStatus("AI 正在思考…");
+  pi({ type: "context_usage", usage: { tokens: 8_000, contextWindow: 10_000, percent: 80 } });
+  await page.locator(".context-token-ring").getByText("80%", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "停止输出", exact: true }).isVisible(), true);
   await page.waitForFunction(() => document.querySelector(".chat-status-elapsed")?.textContent !== "0:00");
   const elapsed = await status.locator(".chat-status-elapsed").textContent();
   await page.locator(".chat-composer").screenshot({ path: ".runtime/composer-thinking.png" });
@@ -111,6 +117,8 @@ try {
   pi({ type: "compaction_start" });
   await status.getByText(/正在压缩会话上下文/).waitFor();
   pi({ type: "compaction_end" });
+  pi({ type: "context_usage", usage: { tokens: 3_000, contextWindow: 10_000, percent: 30 } });
+  await page.locator(".context-token-ring").getByText("30%", { exact: true }).waitFor();
   delta({ content: "这是完整回复。" });
   await expectStatus("AI 正在回复…");
   await page.locator(".chat-composer").screenshot({ path: ".runtime/composer-replying.png" });

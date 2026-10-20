@@ -24369,7 +24369,7 @@ export function App() {
         ? "自动摘要已关闭，但发送安全窗口已生效"
         : "上下文压缩当前已关闭";
     const usageNote = contextTokenMeter.nativePiContext
-      ? "按 Pi 内核原生上下文估算"
+      ? "按当前上下文实时估算，结合接口用量校正；生成、工具执行及压缩后持续更新"
       : contextTokenMeter.usesActualRequestTokens
       ? contextTokenMeter.compressed
         ? `按最后一次实际发送的压缩上下文计数；窗口化超长 assistant 历史 ${contextTokenMeter.assistantWindowedMessageCount} 条，高压缩工具/日志 ${contextTokenMeter.machineCompressedMessageCount} 条，AST 剪枝代码 ${contextTokenMeter.astPrunedMessageCount} 条，摘要替换较早消息 ${contextTokenMeter.removedMessageCount} 条；被缩减原文仍保留在聊天记录中但未进入本次生成请求${
@@ -39808,7 +39808,7 @@ export function App() {
                             </div>
                           ))}
                         </dl>
-                        <p>各项为估算值，总量由模型服务提供。</p>
+                        <p>{contextTokenMeter.nativePiContext ? "各项为估算值；总量结合接口用量与本地上下文估算，随任务运行刷新。" : "各项为估算值，总量由模型服务提供。"}</p>
                       </section>
                       <dl>
                         <div>
@@ -39821,7 +39821,7 @@ export function App() {
                         </div>
                         <div>
                           <dt>计数方式</dt>
-                          <dd>{contextTokenMeter.usesActualRequestTokens ? "按最近一次请求" : "发送前估算"}</dd>
+                          <dd>{contextTokenMeter.nativePiContext ? "实时上下文估算" : contextTokenMeter.usesActualRequestTokens ? "按最近一次请求" : "发送前估算"}</dd>
                         </div>
                         {contextTokenMeter.compressed && (
                           <div>

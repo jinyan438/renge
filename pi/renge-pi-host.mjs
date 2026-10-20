@@ -16,6 +16,7 @@ import { createPiMcpAdapter, normalizePiMcpConfig } from "./pi-mcp-adapter-bridg
 import { createPiPackageManager } from "./pi-package-manager.mjs";
 import { installContinuousPiRetry } from "./continuous-retry.mjs";
 import { createPiRequestBodyRecoveryFetch } from "./request-body-recovery.mjs";
+import { getReliableContextUsage, installPiLiveContext } from "./live-context.mjs";
 import { createPermissionCheckedPiTools } from "./permission-tools.mjs";
 import { createShellSessionManager } from "./shell-sessions.mjs";
 import {
@@ -36,41 +37,6 @@ const TOOL_RESULT_TIMEOUT_MS = 10 * 60 * 1000;
 // Match PiDeck's default model budget. Reasoning-heavy local models such as
 // Qwen3.8 can consume 16k tokens before they reach the first tool call.
 const DEFAULT_PI_MODEL_MAX_TOKENS = 65_536;
-
-function estimateSessionContextTokens(session) {
-  const messageTokens = Array.isArray(session?.messages)
-    ? session.messages.reduce((total, message) => total + estimateTokens(message), 0)
-    : 0;
-  const systemPromptTokens = Math.ceil(String(session?.systemPrompt ?? "").length / 4);
-  let toolDefinitionTokens = 0;
-  try {
-    toolDefinitionTokens = Math.ceil(JSON.stringify(session?.getAllTools?.() ?? []).length / 4);
-  } catch {
-    // Tool schemas are best-effort accounting data and must not break a run.
-  }
-  return Math.max(0, messageTokens + systemPromptTokens + toolDefinitionTokens);
-}
-
-function getReliableContextUsage(session) {
-  const usage = session?.getContextUsage?.() ?? null;
-  const contextWindow = Number(usage?.contextWindow ?? session?.model?.contextWindow ?? 0);
-  const reportedTokens = usage?.tokens === null ? null : Number(usage?.tokens);
-  const estimatedTokens = estimateSessionContextTokens(session);
-  // Gateways frequently report only the latest completion's usage. That value
-  // is not a safe representation of the complete prompt, so never let a
-  // smaller reported value suppress our local session estimate.
-  const reliableTokens = Math.max(
-    Number.isFinite(reportedTokens) && reportedTokens > 0 ? reportedTokens : 0,
-    estimatedTokens,
-  );
-  if (reliableTokens <= 0) return usage;
-  return {
-    ...(usage ?? {}),
-    tokens: reliableTokens,
-    contextWindow,
-    percent: contextWindow > 0 ? (reliableTokens / contextWindow) * 100 : null,
-  };
-}
 
 function estimatePendingPromptTokens(prompt) {
   const text = String(prompt?.text ?? "");
@@ -617,6 +583,7 @@ export function createRengePiHost({
     }));
 
     let unsubscribe = () => {};
+    let liveContext;
     let providerId = "";
     let modelRuntime;
     let effectiveContextWindow = 0;
@@ -772,6 +739,11 @@ export function createRengePiHost({
         session.setActiveToolsByName(initialActiveToolNames);
       }
       installContinuousPiRetry(session);
+      liveContext = installPiLiveContext(session, {
+        onUsage: (usage) => {
+          if (!run.cancelled) writeSse(response, piEvent("context_usage", { runId, usage }));
+        },
+      });
       await session.bindExtensions({
         mode: "json",
         onError: (extensionError) => {
@@ -799,6 +771,7 @@ export function createRengePiHost({
       });
 
       unsubscribe = session.subscribe((event) => {
+        liveContext.handleEvent(event);
         if (event.type === "message_start" && event.message?.role === "user") {
           const input = run.inputs.get(event.message.rengeInputId);
           if (input && !input.delivered) {
@@ -1003,10 +976,7 @@ export function createRengePiHost({
       // Some local gateways report zero usage, so the SDK cannot run its
       // post-turn threshold check. Re-check Pi's own message estimator here.
       if (!run.cancelled) await maybeAutoCompact(session, compaction);
-      writeSse(response, piEvent("context_usage", {
-        runId,
-        usage: getReliableContextUsage(session),
-      }));
+      liveContext.flush();
       writeSse(response, completionChunk(runId, {}, finishReason));
       writeSse(response, "[DONE]");
     } catch (error) {
@@ -1017,6 +987,7 @@ export function createRengePiHost({
     } finally {
       run.acceptingInput = false;
       run.completed = true;
+      liveContext?.dispose();
       await run.shellSessions.dispose();
       response.off("close", abortRun);
       if (run.cancelled) await run.session?.abort();
