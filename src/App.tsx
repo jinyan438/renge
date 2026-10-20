@@ -1,3 +1,5 @@
+import { ContextTokenMeter } from "./ContextTokenMeter";
+import { createPiContextUsageStore, createNativeContextTokenMeter, hasUsablePiContextUsage, type ContextTokenMeterSnapshot } from "./contextTokenMeterUtils";
 import { createChatSessionRuntime, type ChatInputMode, type SessionRunStatus } from "./chatSessionRuntime";
 import type { ReviewSource, ReviewSnapshot, ReviewDetail, ReviewRequest, ReviewAiResult } from "./codeReviewUtils";
 import { ChatCodeContent } from "./ChatCodeContent";
@@ -834,13 +836,6 @@ type ContextRuntimeUsage = {
   updatedAt: number;
 };
 
-type PiContextUsage = {
-  tokens: number | null;
-  contextWindow: number;
-  percent: number | null;
-  updatedAt: number;
-};
-
 function getContextRuntimeUsageKey(sessionId: string, modelId: string) {
   return `${sessionId}\u0000${modelId.trim().toLowerCase()}`;
 }
@@ -1630,6 +1625,7 @@ type PiStreamEvent = {
     tokens: number | null;
     contextWindow: number;
     percent: number | null;
+    breakdown?: { label: string; tokens: number }[];
   } | null;
 };
 
@@ -13107,9 +13103,7 @@ export function App() {
   const [contextRuntimeUsageByKey, setContextRuntimeUsageByKey] = useState<
     Record<string, ContextRuntimeUsage>
   >({});
-  const [piContextUsageByKey, setPiContextUsageByKey] = useState<
-    Record<string, PiContextUsage>
-  >({});
+  const [piContextUsageStore] = useState(createPiContextUsageStore);
   const [piCompactionPending, setPiCompactionPending] = useState(false);
   const [chatPersonalization, setChatPersonalization] =
     useState<ChatPersonalizationSettings>(loadChatPersonalization);
@@ -13569,25 +13563,8 @@ export function App() {
     modelId: string,
     usage: PiStreamEvent["usage"],
   ) => {
-    if (!sessionId || !modelId.trim() || !usage) return;
-    const contextWindow = Number(usage.contextWindow);
-    if (!Number.isFinite(contextWindow) || contextWindow <= 0) return;
-    const tokens = usage.tokens === null ? null : Number(usage.tokens);
-    // Local gateways can return an all-zero usage object even though Pi has a
-    // complete session history. Keep the meter on its local estimate instead
-    // of persisting zero and making the context appear empty.
-    if (tokens !== null && (!Number.isFinite(tokens) || tokens <= 0)) return;
-    const percent = usage.percent === null ? null : Number(usage.percent);
-    const normalizedUsage: PiContextUsage = {
-      tokens: Number.isFinite(tokens) ? tokens : null,
-      contextWindow,
-      percent: Number.isFinite(percent) ? percent : null,
-      updatedAt: Date.now(),
-    };
-    setPiContextUsageByKey((current) => ({
-      ...current,
-      [getContextRuntimeUsageKey(sessionId, modelId)]: normalizedUsage,
-    }));
+    if (!sessionId || !modelId.trim()) return;
+    piContextUsageStore.update(getContextRuntimeUsageKey(sessionId, modelId), usage);
   };
   const setPiAutoCompaction = async (enabled: boolean) => {
     setContextCompressionSettings((current) => ({
@@ -23937,9 +23914,10 @@ export function App() {
     ];
   };
 
-  const contextTokenMeter = useMemo(() => {
+  const contextTokenMeter = useMemo<ContextTokenMeterSnapshot>(() => {
     if (!appDataLoaded) {
       return {
+        usageKey: "",
         currentTokens: 0,
         thresholdTokens: null,
         usageRatio: null,
@@ -24026,6 +24004,13 @@ export function App() {
     const sendImageAttachmentsToProvider = meterProvider
       ? canProviderReceiveImageUrl(meterProvider, meterModelId)
       : false;
+    const usageKey = getContextRuntimeUsageKey(activeChatSession?.id ?? activeChatSessionId, meterModelId);
+    const nativePiUsage = piContextUsageStore.getSnapshot(usageKey);
+    // Native usage already includes the effective history and tool output.
+    // Never reconstruct the full request just to repaint its live counter.
+    if (hasUsablePiContextUsage(nativePiUsage)) {
+      return createNativeContextTokenMeter(usageKey, meterModelId, nativePiUsage, distinctModelIds);
+    }
     const baseMessages = contextMeterChatMessages.map((message) =>
       buildChatMessageForApi(message, personas, userProfile, meterPersona, {
         sendImageAttachmentsToProvider,
@@ -24173,18 +24158,6 @@ export function App() {
       contextRuntimeUsageByKey[
         getContextRuntimeUsageKey(activeChatSession?.id ?? activeChatSessionId, meterModelId)
       ];
-    const nativePiUsage =
-      piContextUsageByKey[
-        getContextRuntimeUsageKey(activeChatSession?.id ?? activeChatSessionId, meterModelId)
-      ];
-    const usableNativePiTokens =
-      nativePiUsage?.tokens !== null &&
-      Number.isFinite(nativePiUsage?.tokens) &&
-      Number(nativePiUsage?.tokens) > 0
-        ? Number(nativePiUsage?.tokens)
-        : undefined;
-    const usableNativePiUsage =
-      usableNativePiTokens === undefined ? undefined : nativePiUsage;
     // Native Pi supplies its own usage. Do not serialize and hash every historical
     // tool result unless a frontend compression snapshot actually needs matching.
     const currentChatMessageSignatures = runtimeUsage
@@ -24228,10 +24201,8 @@ export function App() {
       runtimeUsage && runtimeUsageMatchesCurrentHistory
         ? runtimeUsage.currentTokens + appendedTokens + mutableMessageDeltaTokens
         : estimatedCurrentTokens;
-    const currentTokens = usableNativePiTokens ?? estimatedRuntimeTokens;
-    const thresholdTokens = usableNativePiUsage
-      ? usableNativePiUsage.contextWindow
-      : limitingBudget?.budget.maxContextTokens ?? null;
+    const currentTokens = estimatedRuntimeTokens;
+    const thresholdTokens = limitingBudget?.budget.maxContextTokens ?? null;
     const estimateMessageCollectionTokens = (messages: ChatApiMessage[]) =>
       messages.length > 0 ? Math.max(0, estimateContextMessagesTokens(messages) - 2) : 0;
     const systemPromptTokens = estimateMessageCollectionTokens(
@@ -24278,16 +24249,17 @@ export function App() {
     });
 
     return {
+      usageKey,
       currentTokens,
       thresholdTokens,
       usageRatio: thresholdTokens ? currentTokens / thresholdTokens : null,
-      limitingModelId: usableNativePiUsage?.contextWindow ? meterModelId : limitingBudget?.modelId ?? "",
+      limitingModelId: limitingBudget?.modelId ?? meterModelId,
       modelIds: distinctModelIds,
-      missingModelIds: usableNativePiUsage?.contextWindow ? [] : missingModelIds,
+      missingModelIds,
       usesActualRequestTokens: Boolean(
-        usableNativePiUsage || (runtimeUsage && runtimeUsageMatchesCurrentHistory),
+        runtimeUsage && runtimeUsageMatchesCurrentHistory,
       ),
-      nativePiContext: Boolean(usableNativePiUsage),
+      nativePiContext: false,
       compressed: Boolean(
         runtimeUsage && runtimeUsageMatchesCurrentHistory && runtimeUsage.compressed,
       ),
@@ -24329,7 +24301,7 @@ export function App() {
     contextMeterChatMessages,
     contextCompressionSettings,
     contextRuntimeUsageByKey,
-    piContextUsageByKey,
+    piContextUsageStore,
     currentChatSender.kind,
     effectiveChatModelId,
     enabledMcpServers,
@@ -24345,63 +24317,6 @@ export function App() {
     userProfile,
     worldBooks,
   ]);
-
-  const contextTokenMeterTitle = (() => {
-    const current = contextTokenMeter.currentTokens.toLocaleString("zh-CN");
-    if (contextTokenMeter.modelIds.length === 0) {
-      return `当前上下文约 ${current} Token；当前模型尚未配置。点击打开 LLM 设置。`;
-    }
-    if (contextTokenMeter.missingModelIds.length > 0) {
-      return `当前上下文约 ${current} Token；模型 ${contextTokenMeter.missingModelIds.join("、")} 尚未配置上下文上限。点击打开 LLM 设置。`;
-    }
-    const threshold = contextTokenMeter.thresholdTokens?.toLocaleString("zh-CN") ?? "未配置";
-    const modelNote =
-      contextTokenMeter.modelIds.length > 1
-        ? `多 Agent 按最小阈值模型 ${contextTokenMeter.limitingModelId} 计算`
-        : `模型 ${contextTokenMeter.limitingModelId}`;
-    const compressionNote = contextTokenMeter.nativePiContext
-      ? contextCompressionSettings.enabled
-        ? "Pi 原生自动压缩已开启"
-        : "Pi 原生自动压缩已关闭"
-      : contextCompressionSettings.enabled
-        ? "上下文压缩已开启"
-      : contextTokenMeter.assistantWindowedMessageCount > 0
-        ? "自动摘要已关闭，但发送安全窗口已生效"
-        : "上下文压缩当前已关闭";
-    const usageNote = contextTokenMeter.nativePiContext
-      ? "按当前上下文实时估算，结合接口用量校正；生成、工具执行及压缩后持续更新"
-      : contextTokenMeter.usesActualRequestTokens
-      ? contextTokenMeter.compressed
-        ? `按最后一次实际发送的压缩上下文计数；窗口化超长 assistant 历史 ${contextTokenMeter.assistantWindowedMessageCount} 条，高压缩工具/日志 ${contextTokenMeter.machineCompressedMessageCount} 条，AST 剪枝代码 ${contextTokenMeter.astPrunedMessageCount} 条，摘要替换较早消息 ${contextTokenMeter.removedMessageCount} 条；被缩减原文仍保留在聊天记录中但未进入本次生成请求${
-            contextTokenMeter.appendedMessageCount > 0
-              ? `，另计后续新增 ${contextTokenMeter.appendedMessageCount} 条消息`
-              : ""
-          }`
-        : "按最后一次实际发送的上下文计数"
-      : "当前尚无可复用的实际请求记录，使用发送前估算";
-    return `当前上下文约 ${current} Token；${modelNote}，上下文上限 ${threshold} Token；${compressionNote}；${usageNote}。点击打开 LLM 设置。`;
-  })();
-  const contextUsagePercent =
-    contextTokenMeter.usageRatio === null
-      ? null
-      : Math.round(Math.max(0, contextTokenMeter.usageRatio) * 100);
-  const contextRingProgress =
-    contextTokenMeter.usageRatio === null
-      ? 0
-      : Math.min(1, Math.max(0, contextTokenMeter.usageRatio)) * 100;
-  const contextTokenRingStyle = {
-    "--context-progress": `${contextRingProgress}%`,
-  } as CSSProperties;
-  const contextUsageTone =
-    contextTokenMeter.usageRatio === null
-      ? "usage-unknown"
-      : contextTokenMeter.usageRatio >= 0.9
-        ? "usage-critical"
-        : contextTokenMeter.usageRatio >= 0.75
-          ? "usage-high"
-          : contextTokenMeter.usageRatio >= 0.5
-            ? "usage-medium"
-            : "usage-low";
 
   const executeChatCommandBlock = async (content: string) => {
     if (!localWorkspaceHandle || !localToolsEnabled) {
@@ -37917,9 +37832,7 @@ export function App() {
     const withoutSessionUsage = (usage: Record<string, ContextRuntimeUsage>) =>
       Object.fromEntries(Object.entries(usage).filter(([key]) => !key.startsWith(`${sessionId}\u0000`)));
     setContextRuntimeUsageByKey(withoutSessionUsage);
-    setPiContextUsageByKey((usage) =>
-      Object.fromEntries(Object.entries(usage).filter(([key]) => !key.startsWith(`${sessionId}\u0000`))),
-    );
+    piContextUsageStore.clearSession(sessionId);
     contextSummaryCacheRef.current.clear();
     setPiCompactionPending(false);
     setTavernRuntimeLogs([]);
@@ -39774,105 +39687,20 @@ export function App() {
                       ) : null}
                     </div>
                   </details>
-                  <details
-                    className={`context-token-menu ${
-                      contextCompressionSettings.enabled ? "compression-enabled" : "compression-disabled"
-                    } ${contextUsageTone}`}
-                  >
-                    <summary
-                      className="context-token-trigger"
-                      title={contextTokenMeterTitle}
-                      aria-label={contextTokenMeterTitle}
-                    >
-                      <span className="context-token-ring" style={contextTokenRingStyle}>
-                        <span>{contextUsagePercent === null ? "--" : `${contextUsagePercent}%`}</span>
-                      </span>
-                    </summary>
-                    <div className="context-token-panel">
-                      <header>
-                        <strong>上下文用量</strong>
-                        <span>
-                          {contextTokenMeter.currentTokens.toLocaleString("zh-CN")} / {contextTokenMeter.thresholdTokens?.toLocaleString("zh-CN") ?? "未配置"} Token
-                        </span>
-                      </header>
-                      <div className="context-token-progress" aria-hidden="true">
-                        <span style={contextTokenRingStyle} />
-                      </div>
-                      <section className="context-token-breakdown">
-                        <header>估算构成</header>
-                        <dl>
-                          {contextTokenMeter.contextBreakdown.map((item) => (
-                            <div key={item.label}>
-                              <dt>{item.label}</dt>
-                              <dd>~{item.tokens.toLocaleString("zh-CN")}</dd>
-                            </div>
-                          ))}
-                        </dl>
-                        <p>{contextTokenMeter.nativePiContext ? "各项为估算值；总量结合接口用量与本地上下文估算，随任务运行刷新。" : "各项为估算值，总量由模型服务提供。"}</p>
-                      </section>
-                      <dl>
-                        <div>
-                          <dt>模型</dt>
-                          <dd>{contextTokenMeter.limitingModelId || "未配置"}</dd>
-                        </div>
-                        <div>
-                          <dt>压缩</dt>
-                          <dd>{contextCompressionSettings.enabled ? "自动压缩已开启" : "自动压缩已关闭"}</dd>
-                        </div>
-                        <div>
-                          <dt>计数方式</dt>
-                          <dd>{contextTokenMeter.nativePiContext ? "实时上下文估算" : contextTokenMeter.usesActualRequestTokens ? "按最近一次请求" : "发送前估算"}</dd>
-                        </div>
-                        {contextTokenMeter.compressed && (
-                          <div>
-                            <dt>最近压缩</dt>
-                            <dd>
-                              移除 {contextTokenMeter.removedMessageCount} 条消息
-                              {contextTokenMeter.appendedMessageCount > 0
-                                ? `，新增 ${contextTokenMeter.appendedMessageCount} 条`
-                                : ""}
-                            </dd>
-                          </div>
-                        )}
-                      </dl>
-                      {contextTokenMeter.missingModelIds.length > 0 && (
-                        <p className="context-token-note">模型 {contextTokenMeter.missingModelIds.join("、")} 尚未配置上下文上限。</p>
-                      )}
-                      <div className="context-token-panel-actions">
-                        <label className="context-token-compression-toggle">
-                          <span>自动压缩</span>
-                          <input
-                            type="checkbox"
-                            checked={contextCompressionSettings.enabled}
-                            onChange={(event) => void setPiAutoCompaction(event.target.checked)}
-                          />
-                        </label>
-                        <button
-                          type="button"
-                          className="ghost-action"
-                          disabled={piCompactionPending || chatStatus.status === "loading"}
-                          onClick={() => void compactActivePiSession()}
-                          title="调用 Pi 原生压缩当前会话"
-                        >
-                          <RefreshCw size={14} />
-                          {piCompactionPending ? "压缩中..." : "立即压缩"}
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost-action"
-                          onClick={(event) => {
-                            setLlmContextSettingsMode(chatMode === "multi" ? "persona" : chatMode);
-                            setSettingsTab("llm");
-                            openWindow("settings");
-                            event.currentTarget.closest("details")?.removeAttribute("open");
-                          }}
-                        >
-                          <Settings2 size={14} />
-                          上下文设置
-                        </button>
-                      </div>
-                    </div>
-                  </details>
+                  <ContextTokenMeter
+                    snapshot={contextTokenMeter}
+                    usageStore={piContextUsageStore}
+                    compressionEnabled={contextCompressionSettings.enabled}
+                    compactionPending={piCompactionPending}
+                    busy={chatStatus.status === "loading"}
+                    onAutoCompaction={setPiAutoCompaction}
+                    onCompact={compactActivePiSession}
+                    onSettings={() => {
+                      setLlmContextSettingsMode(chatMode === "multi" ? "persona" : chatMode);
+                      setSettingsTab("llm");
+                      openWindow("settings");
+                    }}
+                  />
                   {chatMode !== "multi" && (
                     <details
                       className="composer-select-menu model composer-model-config"

@@ -100,6 +100,34 @@ test("between-turn compaction uses the reliable count, respects settings and res
   assert.equal(session.agent.prepareRequest, original);
 });
 
+test("streaming refreshes reuse history/usage/schema snapshots and add only the arriving deltas", async () => {
+  const session = fixtureSession();
+  const updates = [];
+  let projections = 0, schemas = 0;
+  session.getContextUsage = () => { projections += 1; return { tokens: 2_000, contextWindow: 10_000 }; };
+  session.agent.state.tools = [{ name: "tool", parameters: { toJSON() { schemas += 1; return {}; } } }];
+  const live = installPiLiveContext(session, { onUsage: (usage) => updates.push(usage), intervalMs: 5 });
+  session.agent.state.streamingMessage = { role: "assistant", content: [{ type: "text", text: "" }] };
+  live.handleEvent({ type: "message_start", message: { role: "assistant" } });
+  await Promise.resolve();
+  const baseline = { projections, schemas };
+  for (let index = 0; index < 8; index += 1) {
+    session.agent.state.streamingMessage.content[0].text += "x".repeat(400);
+    live.handleEvent({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "x".repeat(400) } });
+    await delay(10);
+  }
+  assert.equal(projections, baseline.projections, "streaming ticks must not rebuild session projections");
+  assert.equal(schemas, baseline.schemas, "streaming ticks must not serialize tool schemas");
+  assert.equal(updates.at(-1).tokens, 2_800);
+  assert.equal(updates.at(-1).breakdown.reduce((sum, part) => sum + part.tokens, 0), 2_800);
+  session.messages.push(session.agent.state.streamingMessage);
+  session.agent.state.streamingMessage = undefined;
+  live.handleEvent({ type: "message_end" });
+  await Promise.resolve();
+  assert.equal(projections, baseline.projections + 1);
+  live.dispose();
+});
+
 const send = (response, payload) => response.write(`data: ${JSON.stringify(payload)}\n\n`);
 function reply(response, delta, finishReason = "stop", end = true) {
   const base = { id: "live-context", object: "chat.completion.chunk", model: "fixture" };
