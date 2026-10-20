@@ -274,6 +274,76 @@ function createRenderFixture(options = {}) {
   return { applied, queue, get paints() { return paints; } };
 }
 
+function createProgressClock() {
+  const timers = new Set();
+  return {
+    scheduleProgress(callback, delayMs) {
+      assert.equal(delayMs, 100);
+      timers.add(callback);
+      return () => timers.delete(callback);
+    },
+    tick() { for (const callback of [...timers]) { timers.delete(callback); callback(); } },
+    get pending() { return timers.size; },
+  };
+}
+
+test("coalesces tool arguments across network reads and flushes execution without waiting for a timer", async () => {
+  const clock = createProgressClock();
+  const { applied, queue } = createRenderFixture(clock);
+  queue.enqueuePiEvent({ type: "tool_call_start", toolCallId: "write" });
+  await queue.waitForIdle();
+  for (let index = 0; index < 100; index += 1) {
+    queue.enqueuePiEvent({ type: "tool_call_delta", toolCallId: "write", delta: "文🚀" });
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(applied.map(({ type }) => type), ["tool_call_start"]);
+  assert.equal(clock.pending, 1);
+  clock.tick();
+  await queue.waitForIdle();
+  assert.equal(applied[1].delta, "文🚀".repeat(100));
+
+  queue.enqueuePiEvent({ type: "tool_call_delta", toolCallId: "write", delta: "final" });
+  queue.enqueuePiEvent({ type: "tool_call_end", toolCallId: "write" });
+  queue.enqueuePiEvent({ type: "tool_request", toolCallId: "write" });
+  await queue.waitForIdle();
+  assert.equal(clock.pending, 0);
+  assert.deepEqual(applied.slice(2).map(({ type, delta }) => delta ?? type), ["final", "tool_call_end", "tool_request"]);
+});
+
+test("bounds cumulative tool output refreshes and keeps the final result in order", async () => {
+  const clock = createProgressClock();
+  const { applied, queue } = createRenderFixture(clock);
+  for (const result of ["a", "ab", "abc"]) {
+    queue.enqueuePiEvent({ type: "tool_update", toolCallId: "shell", result });
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(applied.length, 0);
+  clock.tick();
+  await queue.waitForIdle();
+  assert.equal(applied[0].result, "abc");
+  queue.enqueuePiEvent({ type: "tool_update", toolCallId: "shell", result: "abcd" });
+  queue.enqueuePiEvent({ type: "tool_end", toolCallId: "shell", result: "complete" });
+  queue.enqueueContent("answer");
+  await queue.waitForIdle();
+  assert.deepEqual(applied.slice(1).map(({ result, delta }) => result ?? delta), ["abcd", "complete", "answer"]);
+  assert.equal(clock.pending, 0);
+});
+
+test("aborting cancels a pending progress refresh even after an earlier idle", async () => {
+  const controller = new AbortController();
+  const clock = createProgressClock();
+  const { applied, queue } = createRenderFixture({ ...clock, signal: controller.signal });
+  queue.enqueueContent("keep");
+  await queue.waitForIdle();
+  queue.enqueuePiEvent({ type: "tool_call_delta", toolCallId: "write", delta: "stale" });
+  assert.equal(clock.pending, 1);
+  controller.abort();
+  clock.tick();
+  await queue.waitForIdle();
+  assert.deepEqual(applied, [{ type: "content", delta: "keep" }]);
+  assert.equal(clock.pending, 0);
+});
+
 test("renders large buffered writes without creating an animation backlog", async () => {
   const fixture = createRenderFixture();
   const argumentsText = JSON.stringify({ path: "index.html", content: "内容🚀".repeat(100000) });

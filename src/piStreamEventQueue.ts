@@ -18,6 +18,28 @@ type PiStreamRenderEvent<Event> =
   | { kind: "content"; delta: string }
   | { kind: "reasoning"; delta: string };
 
+export const PI_TOOL_PROGRESS_INTERVAL_MS = 100;
+
+function mergeToolProgress<Event extends ToolCallDeltaEvent>(previous: Event, next: Event): Event | undefined {
+  if (!previous.toolCallId || previous.toolCallId !== next.toolCallId || previous.type !== next.type) return undefined;
+  // tool_update carries a complete result snapshot, not an output fragment.
+  if (next.type === "tool_update") return next;
+  if (next.type !== "tool_call_delta") return undefined;
+  const argumentsText = next.argumentsText ?? (
+    previous.argumentsText === undefined ? undefined : previous.argumentsText + (next.delta ?? "")
+  );
+  return {
+    ...previous, ...next,
+    delta: (previous.delta ?? "") + (next.delta ?? ""),
+    ...(argumentsText === undefined ? {} : { argumentsText }),
+  };
+}
+
+function scheduleToolProgress(callback: () => void, delayMs: number) {
+  const timer = setTimeout(callback, delayMs);
+  return () => clearTimeout(timer);
+}
+
 export function createPiStreamEventQueue<Event>({
   dispatch,
   shouldPaintAfter,
@@ -105,12 +127,14 @@ export function createPiStreamRenderQueue<Event extends ToolCallDeltaEvent>({
   dispatchReasoning,
   waitForPaint,
   signal,
+  scheduleProgress = scheduleToolProgress,
 }: {
   dispatchPiEvent: (event: Event) => void | Promise<void>;
   dispatchContent: (delta: string) => void;
   dispatchReasoning: (delta: string) => void;
   waitForPaint: () => Promise<void>;
   signal?: AbortSignal;
+  scheduleProgress?: (callback: () => void, delayMs: number) => () => void;
 }) {
   const queue = createPiStreamEventQueue<PiStreamRenderEvent<Event>>({
     dispatch(item) {
@@ -128,44 +152,64 @@ export function createPiStreamRenderQueue<Event extends ToolCallDeltaEvent>({
       if (previous.kind === "reasoning" && next.kind === "reasoning") {
         return { kind: "reasoning", delta: previous.delta + next.delta };
       }
-      if (
-        previous.kind !== "pi" || next.kind !== "pi" ||
-        previous.event.type !== "tool_call_delta" ||
-        next.event.type !== "tool_call_delta" ||
-        !previous.event.toolCallId ||
-        previous.event.toolCallId !== next.event.toolCallId
-      ) return undefined;
-
-      const argumentsText = next.event.argumentsText ?? (
-        previous.event.argumentsText === undefined
-          ? undefined
-          : previous.event.argumentsText + (next.event.delta ?? "")
-      );
-      return {
-        kind: "pi",
-        event: {
-          ...previous.event,
-          ...next.event,
-          delta: (previous.event.delta ?? "") + (next.event.delta ?? ""),
-          ...(argumentsText === undefined ? {} : { argumentsText }),
-        },
-      };
+      if (previous.kind !== "pi" || next.kind !== "pi") return undefined;
+      const event = mergeToolProgress(previous.event, next.event);
+      return event === undefined ? undefined : { kind: "pi", event };
     },
     waitForPaint,
     signal,
   });
 
+  let pendingProgress: Event | undefined;
+  let cancelProgress: (() => void) | undefined;
+  let cancelled = signal?.aborted ?? false;
+  const flushProgress = () => {
+    cancelProgress?.();
+    cancelProgress = undefined;
+    const event = pendingProgress;
+    pendingProgress = undefined;
+    if (event && !cancelled) queue.enqueue({ kind: "pi", event });
+  };
+  const cancel = () => {
+    cancelled = true;
+    cancelProgress?.();
+    cancelProgress = undefined;
+    pendingProgress = undefined;
+    queue.cancel();
+    signal?.removeEventListener("abort", cancel);
+  };
+  if (!cancelled) signal?.addEventListener("abort", cancel, { once: true });
+
   return {
     enqueuePiEvent(event: Event) {
+      if (cancelled) return;
+      if (event.toolCallId && ["tool_call_delta", "tool_update"].includes(event.type)) {
+        const merged = pendingProgress && mergeToolProgress(pendingProgress, event);
+        if (pendingProgress && !merged) flushProgress();
+        pendingProgress = merged ?? event;
+        // Network reads may deliver just one tiny fragment each. Paint pacing
+        // alone does not bound the repeated argument parsing and App renders.
+        cancelProgress ??= scheduleProgress(flushProgress, PI_TOOL_PROGRESS_INTERVAL_MS);
+        return;
+      }
+      // Lifecycle events and tool requests flush immediately, in wire order.
+      flushProgress();
       queue.enqueue({ kind: "pi", event });
     },
     enqueueContent(delta: string) {
-      if (delta) queue.enqueue({ kind: "content", delta });
+      if (!delta || cancelled) return;
+      flushProgress();
+      queue.enqueue({ kind: "content", delta });
     },
     enqueueReasoning(delta: string) {
-      if (delta) queue.enqueue({ kind: "reasoning", delta });
+      if (!delta || cancelled) return;
+      flushProgress();
+      queue.enqueue({ kind: "reasoning", delta });
     },
-    waitForIdle: queue.waitForIdle,
-    cancel: queue.cancel,
+    async waitForIdle() {
+      flushProgress();
+      await queue.waitForIdle();
+    },
+    cancel,
   };
 }

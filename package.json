@@ -14,6 +14,7 @@
     "test:request-body": "node --test test/piRequestBodyRecovery.test.mjs",
     "test:live-context": "node --experimental-strip-types --test test/piLiveContext.test.mjs test/contextTokenMeterUtils.test.mjs",
     "test:live-context-performance": "node test/liveContextPerformanceBrowser.test.mjs",
+    "test:chat-stream-performance": "node test/chatStreamingPerformanceBrowser.test.mjs",
     "test:shell": "node --test test/shellSessions.test.mjs test/piShellRuntime.test.mjs && node test/shellOutputBrowser.test.mjs",
     "test:desktop-windows": "node test/desktopWindowsBrowser.test.mjs && node test/desktopDialogsBrowser.test.mjs && node test/htmlPreviewDesktopBrowser.test.mjs && node test/tavernVisualDecorationsDesktop.test.mjs",
     "test:html-desktop": "npm run build && node test/htmlPreviewDesktopBrowser.test.mjs",

@@ -3,6 +3,7 @@ import { createPiContextUsageStore, createNativeContextTokenMeter, hasUsablePiCo
 import { createChatSessionRuntime, type ChatInputMode, type SessionRunStatus } from "./chatSessionRuntime";
 import type { ReviewSource, ReviewSnapshot, ReviewDetail, ReviewRequest, ReviewAiResult } from "./codeReviewUtils";
 import { ChatCodeContent } from "./ChatCodeContent";
+import { ChatMessageTime } from "./ChatMessageTime";
 import { ChatDeferredDetails } from "./ChatDeferredDetails";
 import { CHAT_HISTORY_PAGE_SIZE, getChatHistoryWindow } from "./chatHistoryWindow";
 import { serializeJsonOffThread } from "./jsonSerialization";
@@ -9652,6 +9653,13 @@ function decodePartialJsonString(value: string) {
   try {
     return JSON.parse(`"${value}"`) as string;
   } catch {
+    // A network fragment can stop inside an escape. Keep the complete prefix
+    // exact, especially Windows paths whose backslashes must not become \n.
+    const incompleteEscape = /\\(?:u[\da-fA-F]{0,3})?$/.exec(value);
+    if (incompleteEscape) {
+      try { return JSON.parse(`"${value.slice(0, incompleteEscape.index)}"`) as string; }
+      catch { /* Fall back to a best-effort preview for malformed arguments. */ }
+    }
     return value
       .replace(/\\n/g, "\n")
       .replace(/\\r/g, "\r")
@@ -9671,24 +9679,18 @@ function extractPartialJsonStringField(source: string, key: string) {
   while (/\s/.test(source[quoteIndex] ?? "")) quoteIndex += 1;
   if (source[quoteIndex] !== '"') return undefined;
 
-  let escaped = false;
-  let value = "";
-  for (let index = quoteIndex + 1; index < source.length; index += 1) {
-    const character = source[index];
-    if (escaped) {
-      value += `\\${character}`;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\") {
-      value += character;
-      escaped = true;
-      continue;
-    }
-    if (character === '"') return decodePartialJsonString(value);
-    value += character;
+  const start = quoteIndex + 1;
+  let end = source.indexOf('"', start);
+  while (end >= 0) {
+    let slashCount = 0;
+    for (let index = end - 1; index >= start && source[index] === "\\"; index -= 1) slashCount += 1;
+    if (slashCount % 2 === 0) return decodePartialJsonString(source.slice(start, end));
+    end = source.indexOf('"', end + 1);
   }
-  return decodePartialJsonString(value);
+  // Slice the original JSON bytes. Rebuilding them character by character used
+  // to double backslashes, turning every newline into a literal "\\n" and
+  // bypassing the diff's line limit with one enormous line during generation.
+  return decodePartialJsonString(source.slice(start));
 }
 
 function parsePartialToolCallArguments(argumentsText: string | undefined) {
@@ -11201,6 +11203,13 @@ function useThrottledValue<T>(value: T, intervalMs: number): T {
   latestValueRef.current = value;
 
   useEffect(() => {
+    if (intervalMs <= 0) {
+      cancelScheduledRef.current?.();
+      cancelScheduledRef.current = null;
+      lastUpdatedAtRef.current = 0;
+      return;
+    }
+    if (Object.is(value, throttledValue)) return;
     const now = performance.now();
     const elapsed = now - lastUpdatedAtRef.current;
     if (cancelScheduledRef.current) return;
@@ -11220,7 +11229,9 @@ function useThrottledValue<T>(value: T, intervalMs: number): T {
     [],
   );
 
-  return throttledValue;
+  // Disabled throttling must be synchronous. Scheduling a second state update
+  // here doubles the large App tree's work on every ordinary stream fragment.
+  return intervalMs <= 0 || lastUpdatedAtRef.current === 0 ? value : throttledValue;
 }
 
 function createStreamingAssistantMessage(
@@ -14146,6 +14157,8 @@ export function App() {
   }, [activeChatPresetId, activePersonaId, activeWorldBookIds, characterCards, chatPresetEnabled, chatPresets, chatSessions, personas, regexScripts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
 
   useEffect(() => {
+    // Avoid scheduling even a no-op state update for every streamed fragment.
+    if (!chatPersonalization.aiAvatarSettings.images.some((image) => image.archived)) return;
     setChatPersonalization((current) => {
       if (!current.aiAvatarSettings.images.some((image) => image.archived)) return current;
       const referencedImageIds = new Set<string>();
@@ -14170,7 +14183,7 @@ export function App() {
         ? current
         : { ...current, aiAvatarSettings };
     });
-  }, [chatMessages, chatSessions]);
+  }, [chatMessages, chatSessions, chatPersonalization.aiAvatarSettings.images]);
 
   useEffect(() => {
     tavernScriptRuntimeRef.current?.syncPresetCompatibility();
@@ -24381,9 +24394,7 @@ export function App() {
         <strong>{name}</strong>
         <div className="chat-message-metadata">
           {duration && <><span>{duration}</span><span aria-hidden="true">·</span></>}
-          <time dateTime={message.createdAt}>
-            {new Date(message.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
-          </time>
+          <ChatMessageTime createdAt={message.createdAt} />
         </div>
       </div>
       <button type="button" className="chat-message-more" title="消息操作" aria-label={`${name}的消息操作`} onClick={(event) => openChatMessageMenu(message.id, event)}>
