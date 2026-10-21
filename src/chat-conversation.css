@@ -593,6 +593,15 @@
   padding: 0 0 6px;
 }
 
+.pi-tool-output-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--conversation-muted);
+  font-size: 11px;
+}
+
 .chat-thread .pi-tool-visualization:not([open]) > .pi-tool-visualization-body,
 .chat-thread .chat-tool-card:not([open]) > :not(summary) {
   display: none;

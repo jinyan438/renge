@@ -253,7 +253,6 @@ try {
   await waitFor(() => resets.length === 1, "background continuation reconciled its own history");
   assert.equal(resets[0].sessionId, "A", "continuation must not reset the newly selected conversation");
   assert.equal(streams[8].response.writableEnded, false, "A completion does not end B's stream");
-  const runningBStatus = await status.locator(".chat-status-message").textContent();
   await selectSession("A");
   await page.locator(".chat-message.assistant").filter({ hasText: "A后台完成的续写" }).waitFor();
   assert.equal(await status.locator(".chat-status-message").textContent(), "续写已完成。", "background completion status belongs to A");
@@ -268,13 +267,24 @@ try {
   const newSessionId = streams[10].body.sessionId;
   assert.ok(newSessionId && newSessionId !== "A" && newSessionId !== "B");
   assert.equal(await page.locator(".chat-session-running").count(), 3, "all three running sessions are visible in the sidebar");
+  // Even a reused tool-call ID must be isolated by its owning conversation.
+  const toolId = "concurrent-tool";
+  for (const index of [8, 9]) write(streams[index], { pi: { type: "tool_start", toolCallId: toolId, toolName: "powershell", arguments: { command: `fixture-${index}` } } });
+  await delay(150);
+  const stoppedOutput = "B工具完整日志\n".repeat(5_000) + "B工具最后进度";
+  write(streams[8], { pi: { type: "tool_update", toolCallId: toolId, toolName: "powershell", result: { content: [{ type: "text", text: stoppedOutput }] } } });
+  write(streams[9], { pi: { type: "tool_update", toolCallId: toolId, toolName: "powershell", result: { content: [{ type: "text", text: "A工具后台进度" }] } } });
+  await delay(150);
   await selectSession("B");
-  assert.equal(await status.locator(".chat-status-message").textContent(), runningBStatus);
+  await page.locator(".pi-tool-terminal-preview pre").filter({ hasText: "B工具最后进度" }).waitFor();
+  assert.equal(await page.locator(".pi-tool-terminal-preview pre").filter({ hasText: "A工具后台进度" }).count(), 0);
+  await input.fill("");
   await page.getByRole("button", { name: "停止输出", exact: true }).click();
   await status.getByText("已停止输出。", { exact: true }).waitFor();
   assert.equal(aborted.at(-1), streams[8].runId, "stop targets B's run");
   assert.equal(streams[9].response.writableEnded, false, "stopping B leaves A running");
   assert.equal(streams[10].response.writableEnded, false, "stopping B leaves the new conversation running");
+  write(streams[9], { pi: { type: "tool_end", toolCallId: toolId, toolName: "powershell", result: { content: [{ type: "text", text: "A工具后台完成" }] } } });
   text(streams[9], "A没有被停止"); finish(streams[9]);
   text(streams[10], "新会话C独立完成"); finish(streams[10]);
   await selectSession("A");
@@ -283,6 +293,16 @@ try {
   await page.locator(".chat-session-item").filter({ hasText: "新会话C的任务" }).locator("button").first().click();
   await page.locator(".chat-message.assistant").filter({ hasText: "新会话C独立完成" }).waitFor();
   assert.equal(await page.locator(".chat-message").filter({ hasText: "A没有被停止" }).count(), 0);
+  let savedStoppedTool, savedCompletedTool;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const sessions = (await (await fetch(`${server.url}/api/app-data`)).json()).data.chatSessions;
+    const toolIn = (id) => sessions.find((session) => session.id === id)?.messages.find((message) => message.toolVisualization?.toolCallId === toolId)?.toolVisualization;
+    savedStoppedTool = toolIn("B"); savedCompletedTool = toolIn("A");
+    if (savedStoppedTool?.status !== "running" && savedCompletedTool?.status === "done") break;
+    await delay(100);
+  }
+  assert.equal(savedStoppedTool?.result?.content?.[0]?.text, stoppedOutput, "stopping saves all pending output, including hidden preview lines");
+  assert.equal(savedCompletedTool?.result?.content?.[0]?.text, "A工具后台完成", "background completion saves the correct session's live overlay");
   assert.deepEqual(errors, []);
   console.log("Session runtime browser regression passed: three concurrent conversations, new conversation during generation, scoped stop, background continuation, independent progress/timers, drafts, queue, steering, recovery, Android fallback, persistence, narrow layout, single action button.");
 } catch (error) {

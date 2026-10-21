@@ -4,6 +4,9 @@ import { createChatSessionRuntime, type ChatInputMode, type SessionRunStatus } f
 import type { ReviewSource, ReviewSnapshot, ReviewDetail, ReviewRequest, ReviewAiResult } from "./codeReviewUtils";
 import { ChatCodeContent } from "./ChatCodeContent";
 import { ChatMessageTime } from "./ChatMessageTime";
+import { ChatLiveToolVisualization } from "./ChatLiveToolVisualization";
+import { ChatToolOutputPreview } from "./ChatToolOutputPreview";
+import { createLiveToolVisualizationStore } from "./liveToolVisualizationStore";
 import { ChatDeferredDetails } from "./ChatDeferredDetails";
 import { CHAT_HISTORY_PAGE_SIZE, getChatHistoryWindow } from "./chatHistoryWindow";
 import { serializeJsonOffThread } from "./jsonSerialization";
@@ -9568,10 +9571,13 @@ function appendAssistantTimelineMessage(
 }
 
 function updateAssistantToolVisualization(
-  setChatMessages: Dispatch<SetStateAction<ChatMessage[]>>,
+  setChatMessages: Dispatch<SetStateAction<ChatMessage[]>> & {
+    updateToolVisualization?: (toolCallId: string, update: (previous: ToolVisualization) => ToolVisualization) => boolean;
+  },
   toolCallId: string,
   update: (visualization: ToolVisualization) => ToolVisualization,
 ) {
+  if (setChatMessages.updateToolVisualization?.(toolCallId, update)) return;
   setChatMessages((current) => current.map((message) => {
     if (message.toolVisualization?.toolCallId !== toolCallId) return message;
     return {
@@ -13115,6 +13121,7 @@ export function App() {
     Record<string, ContextRuntimeUsage>
   >({});
   const [piContextUsageStore] = useState(createPiContextUsageStore);
+  const [liveToolVisualizations] = useState(() => createLiveToolVisualizationStore<ToolVisualization>());
   const [piCompactionPending, setPiCompactionPending] = useState(false);
   const [chatPersonalization, setChatPersonalization] =
     useState<ChatPersonalizationSettings>(loadChatPersonalization);
@@ -13761,9 +13768,9 @@ export function App() {
   };
 
   const commitChatMessages: Dispatch<SetStateAction<ChatMessage[]>> = (update) => {
-    const currentMessages = chatMessagesRef.current;
+    const currentMessages = getMessagesForSession(activeChatSessionIdRef.current);
     const nextMessages =
-      typeof update === "function" ? update(chatMessagesRef.current) : update;
+      typeof update === "function" ? update(currentMessages) : update;
     const decoratedMessages = attachAiIdentityToNewAssistantMessages(
       currentMessages,
       nextMessages,
@@ -13772,6 +13779,7 @@ export function App() {
     const syncedMessages = syncPocketPhoneFromContext(activeChatSessionIdRef.current, currentMessages, decoratedMessages);
     chatMessagesRef.current = syncedMessages;
     setChatMessages(syncedMessages);
+    liveToolVisualizations.clearSession(activeChatSessionIdRef.current);
   };
 
   const commitMessagesForSession = (sessionId: string, update: SetStateAction<ChatMessage[]>) => {
@@ -13790,9 +13798,26 @@ export function App() {
       chatMessagesRef.current = messages;
       setChatMessages(messages);
     }
+    // All pending progress was materialized into this canonical snapshot.
+    liveToolVisualizations.clearSession(sessionId);
   };
   const createSessionBindings = (sessionId: string) => ({
-    commitChatMessages: (update: SetStateAction<ChatMessage[]>) => commitMessagesForSession(sessionId, update),
+    commitChatMessages: Object.assign(
+      (update: SetStateAction<ChatMessage[]>) => commitMessagesForSession(sessionId, update),
+      { updateToolVisualization: (toolCallId: string, update: (previous: ToolVisualization) => ToolVisualization) => {
+        const previous = liveToolVisualizations.getSnapshot(sessionId, toolCallId) ??
+          getMessagesForSession(sessionId).find((message) => message.toolVisualization?.toolCallId === toolCallId)?.toolVisualization;
+        if (!previous) return false;
+        const visualization = update(previous);
+        if (visualization.status === "running") {
+          liveToolVisualizations.update(sessionId, toolCallId, visualization);
+        } else {
+          commitMessagesForSession(sessionId, (messages) => messages.map((message) =>
+            message.toolVisualization?.toolCallId === toolCallId ? { ...message, toolVisualization: visualization } : message));
+        }
+        return true;
+      } },
+    ),
     setChatStatus: (update: SetStateAction<SessionRunStatus>) => setSessionChatStatus(sessionId, update),
     chatMessagesRef: {
       get current() { return getMessagesForSession(sessionId); },
@@ -13873,10 +13898,9 @@ export function App() {
   };
 
   const getMessagesForSession = (sessionId: string) => {
-    if (activeChatSessionIdRef.current === sessionId) return chatMessagesRef.current;
-    return (
-      chatSessionsRef.current.find((candidate) => candidate.id === sessionId)?.messages ?? []
-    );
+    const messages = activeChatSessionIdRef.current === sessionId ? chatMessagesRef.current :
+      chatSessionsRef.current.find((candidate) => candidate.id === sessionId)?.messages ?? [];
+    return liveToolVisualizations.materialize(sessionId, messages);
   };
 
   const commitStatusBarPatchForSession = (
@@ -15097,9 +15121,14 @@ export function App() {
     }), [pcServerUrl, pcTransferWorkspace]);
   const buildCurrentAppData = useCallback((): RengeAppData => {
     const liveSessionId = activeChatSessionIdRef.current;
-    const liveMessages = chatMessagesRef.current;
+    const liveMessages = liveToolVisualizations.materialize(liveSessionId, chatMessagesRef.current);
     const snapshotUpdatedAt = new Date().toISOString();
-    let snapshotChatSessions = chatSessionsRef.current;
+    const materializedSessions = chatSessionsRef.current.map((session) => {
+      const messages = liveToolVisualizations.materialize(session.id, session.messages);
+      return messages === session.messages ? session : { ...session, messages };
+    });
+    let snapshotChatSessions = materializedSessions.every((session, index) => session === chatSessionsRef.current[index])
+      ? chatSessionsRef.current : materializedSessions;
     const liveSessionIndex = snapshotChatSessions.findIndex((session) => session.id === liveSessionId);
     const liveSession = snapshotChatSessions[liveSessionIndex];
     if (liveSession && liveSession.messages !== liveMessages) {
@@ -24403,7 +24432,7 @@ export function App() {
     </header>
   );
 
-  const renderPiToolVisualization = (meta: ToolVisualization, key: string) => {
+  const renderPiToolVisualizationBody = (meta: ToolVisualization, key: string) => {
     const normalizedName = meta.name.trim().toLocaleLowerCase().replace(/[\s.-]+/g, "_");
     const args = meta.args ?? {};
     const path = String(args.path ?? args.filePath ?? args.file_path ?? "");
@@ -24453,7 +24482,7 @@ export function App() {
             <span className="chat-tool-heading-line">
               <strong>{title}</strong>
               <span className="pi-tool-visualization-summary" title={path || command || meta.name}>
-                {path || command || meta.name}
+                {(path || command || meta.name).slice(0, 240)}
               </span>
             </span>
             <span className="chat-tool-description">{description}</span>
@@ -24469,12 +24498,11 @@ export function App() {
         {() => {
           const resultText = toolVisualizationResultText(meta.result);
           const diff = isMutation ? toolVisualizationDiff(meta) : "";
-          const lines = resultText.split("\n", 400);
           return (
         <div className="pi-tool-visualization-body">
           {path && !diff && <div className="pi-tool-visualization-path"><FileCode2 size={13} /> <code>{path}</code></div>}
           {meta.status === "error" && resultText ? (
-            <pre className="pi-tool-result-preview">{resultText}</pre>
+            <ChatToolOutputPreview text={resultText} mode="result" onCopy={copyChatCodeBlock} />
           ) : null}
           {isMutation && diff ? (
             <ChatToolDiffPreview
@@ -24485,14 +24513,11 @@ export function App() {
               onCopy={copyChatCodeBlock}
             />
           ) : isRead && resultText ? (
-            <div className="pi-tool-code-preview"><pre>{lines.map((line, index) => <span key={`${key}-read-${index}`}><i>{index + 1}</i>{line || " "}</span>)}</pre></div>
+            <ChatToolOutputPreview text={resultText} mode="read" onCopy={copyChatCodeBlock} />
           ) : isShell ? (
-            <div className="pi-tool-terminal-preview">
-              {command && <div className="command"><b>$</b>{command}</div>}
-              <pre>{resultText || (meta.status === "running" ? "等待输出…" : "无输出")}</pre>
-            </div>
+            <ChatToolOutputPreview text={resultText} mode="shell" command={command} waiting={meta.status === "running"} onCopy={copyChatCodeBlock} />
           ) : resultText && meta.status !== "error" ? (
-            <pre className="pi-tool-result-preview">{resultText}</pre>
+            <ChatToolOutputPreview text={resultText} mode="result" onCopy={copyChatCodeBlock} />
           ) : null}
         </div>
           );
@@ -24500,6 +24525,12 @@ export function App() {
       </ChatDeferredDetails>
     );
   };
+
+  const renderPiToolVisualization = (meta: ToolVisualization, key: string) => (
+    <ChatLiveToolVisualization key={key} store={liveToolVisualizations} sessionId={activeChatSessionId} initial={meta}>
+      {(visualization) => renderPiToolVisualizationBody(visualization, key)}
+    </ChatLiveToolVisualization>
+  );
 
   const renderToolProgressBlock = (block: ChatToolProgressBlock, messageId: string) => {
     const linkLabels = new Set(block.links.map((link) => stripMarkdownLinks(link.label).trim()));
@@ -37844,6 +37875,7 @@ export function App() {
       Object.fromEntries(Object.entries(usage).filter(([key]) => !key.startsWith(`${sessionId}\u0000`)));
     setContextRuntimeUsageByKey(withoutSessionUsage);
     piContextUsageStore.clearSession(sessionId);
+    liveToolVisualizations.clearSession(sessionId);
     contextSummaryCacheRef.current.clear();
     setPiCompactionPending(false);
     setTavernRuntimeLogs([]);

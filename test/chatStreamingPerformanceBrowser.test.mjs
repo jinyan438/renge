@@ -185,7 +185,7 @@ try {
   if (!baseline) {
     assert.equal(metrics.timeFormats, 0, "stable message timestamps must not be formatted again for every stream fragment");
     assert.equal(metrics.largeSerializations, 0, "streaming must not serialize full tool histories on the UI thread");
-    assert.ok(metrics.appRenders < 180, `tool argument refreshes must stay bounded (${metrics.appRenders} App renders)`);
+    assert.ok(metrics.appRenders < 15, `tool fragments must update their card without redrawing App (${metrics.appRenders} App renders)`);
     assert.ok(Math.max(...latencies) < 1_000, "typing remains responsive while streaming large tool arguments");
     assert.ok(Math.max(0, ...metrics.longTasks) < taskBudgetMs, "streaming must stay within the CPU-work budget");
   }
@@ -200,6 +200,62 @@ try {
   await codePane.locator("code").filter({ hasText: "const value_0 = 0;" }).waitFor();
   pi({ type: "tool_end", toolCallId: id, toolName: "write", result: { content: "fixture write finished" } });
   await page.locator(".pi-tool-visualization.mutation.done").waitFor();
+
+  // Cumulative terminal output must stay local to the card, retain its full
+  // transcript, and keep a bounded DOM even while the command is still running.
+  const shellId = "streaming-shell";
+  pi({ type: "tool_start", toolCallId: shellId, toolName: "powershell", arguments: { command: "fixture-output" } });
+  const shellCard = page.locator(".pi-tool-visualization.shell").filter({ hasText: "fixture-output" });
+  await shellCard.locator(".pi-tool-terminal-preview").waitFor();
+  await page.waitForTimeout(800);
+  await page.evaluate(() => {
+    window.__contextPerf.appRenders = 0;
+    window.__contextPerf.longTasks = [];
+    window.__contextPerf.changedStates = {};
+    window.__contextPerf.active = true;
+  });
+  const shellOutput = Array.from({ length: 6_000 }, (_, index) => `line ${index}: 中文持续日志 ${"output ".repeat(5)}\n`).join("") + "OUTPUT_DONE";
+  const shellProducer = (async () => {
+    for (let end = 4_096; end < shellOutput.length + 4_096; end += 4_096) {
+      pi({ type: "tool_update", toolCallId: shellId, toolName: "powershell", result: { content: [{ type: "text", text: shellOutput.slice(0, end) }] } });
+      await delay(20);
+    }
+  })();
+  const shellLatencies = [];
+  for (let index = 0; index < 8; index += 1) {
+    await delay(180);
+    const started = Date.now();
+    await input.fill(`工具输出中输入 ${index}`);
+    shellLatencies.push(Date.now() - started);
+    await shellCard.locator("pre").evaluate((pre, iteration) => { pre.scrollTop = iteration % 2 ? 0 : pre.scrollHeight; }, index);
+  }
+  await shellProducer;
+  await shellCard.locator("pre").filter({ hasText: "OUTPUT_DONE" }).waitFor();
+  const shellMetrics = await page.evaluate(() => { window.__contextPerf.active = false; return window.__contextPerf; });
+  console.log(JSON.stringify({ phase: "shell", appRenders: shellMetrics.appRenders, longestTaskMs: Math.round(Math.max(0, ...shellMetrics.longTasks)), inputLatenciesMs: shellLatencies }));
+  if (!baseline) {
+    assert.equal(shellMetrics.appRenders, 0, "running tool output must not update App state");
+    assert.equal(shellMetrics.largeSerializations, 0);
+    assert.ok((await shellCard.locator("pre").textContent()).length <= 32_000, "terminal DOM text must stay bounded");
+    assert.ok(Math.max(...shellLatencies) < 1_000, "typing remains responsive during cumulative terminal output");
+    assert.ok(Math.max(0, ...shellMetrics.longTasks) < taskBudgetMs);
+    await shellCard.getByRole("button", { name: "复制完整工具输出", exact: true }).click();
+    assert.equal((await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, "\n"), shellOutput);
+    // Pagehide/export snapshots must also include progress that has never been
+    // copied into App state or finalized by a tool_end event.
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide")));
+    let runningOutput;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const saved = (await (await fetch(`${server.url}/api/app-data`)).json()).data;
+      runningOutput = saved.chatSessions.find((session) => session.id === "performance")?.messages.find((message) => message.toolVisualization?.toolCallId === shellId)?.toolVisualization;
+      if (runningOutput?.result?.content?.[0]?.text === shellOutput) break;
+      await delay(100);
+    }
+    assert.equal(runningOutput?.status, "running");
+    assert.equal(runningOutput?.result?.content?.[0]?.text, shellOutput, "pagehide saves the full live overlay before completion");
+  }
+  pi({ type: "tool_end", toolCallId: shellId, toolName: "powershell", result: { content: [{ type: "text", text: shellOutput }] } });
+  await page.locator(".pi-tool-visualization.shell.done").waitFor();
 
   // Exercise normal reply streaming too: a disabled preview throttle used to
   // schedule an additional App render for every new content frame.
@@ -235,6 +291,16 @@ try {
   }
   assert.deepEqual(errors, []);
   stream.end("data: [DONE]\n\n");
+  const saveDeadline = Date.now() + 15_000;
+  let savedTools = [];
+  while (Date.now() < saveDeadline) {
+    const saved = await (await fetch(`${server.url}/api/app-data`)).json();
+    savedTools = saved.data?.chatSessions?.find((session) => session.id === "performance")?.messages?.map((message) => message.toolVisualization).filter(Boolean) ?? [];
+    if (savedTools.some((tool) => tool.toolCallId === shellId && tool.status === "done")) break;
+    await delay(100);
+  }
+  assert.equal(savedTools.find((tool) => tool.toolCallId === id)?.args?.content, code, "saving retains complete streamed file arguments");
+  assert.equal(savedTools.find((tool) => tool.toolCallId === shellId)?.result?.content?.[0]?.text, shellOutput, "saving retains hidden terminal output");
 } finally {
   stream?.destroy();
   await browser?.close();
