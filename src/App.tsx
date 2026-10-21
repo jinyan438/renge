@@ -1,4 +1,5 @@
 import { ContextTokenMeter } from "./ContextTokenMeter";
+import { ContextLimitInput } from "./ContextLimitInput";
 import { createPiContextUsageStore, createNativeContextTokenMeter, hasUsablePiContextUsage, type ContextTokenMeterSnapshot } from "./contextTokenMeterUtils";
 import { createChatSessionRuntime, type ChatInputMode, type SessionRunStatus } from "./chatSessionRuntime";
 import type { ReviewSource, ReviewSnapshot, ReviewDetail, ReviewRequest, ReviewAiResult } from "./codeReviewUtils";
@@ -34336,25 +34337,12 @@ export function App() {
                                 }
                               />
                             </label>
-                            <label>
-                              <span>上下文上限（Token）</span>
-                              <input
-                                type="number"
-                                min={512}
-                                max={4_000_000}
-                                step={1_024}
-                                value={limit.maxContextTokens}
-                                onChange={(event) => {
-                                  if (!Number.isFinite(event.target.valueAsNumber)) return;
-                                  updateContextCompressionModelLimit(limit.id, {
-                                    maxContextTokens: Math.min(
-                                      4_000_000,
-                                      Math.max(512, Math.floor(event.target.valueAsNumber)),
-                                    ),
-                                  });
-                                }}
-                              />
-                            </label>
+                            <ContextLimitInput
+                              value={limit.maxContextTokens}
+                              onChange={(maxContextTokens) =>
+                                updateContextCompressionModelLimit(limit.id, { maxContextTokens })
+                              }
+                            />
                             <button
                               type="button"
                               className="icon-action danger context-compression-delete"
@@ -34379,7 +34367,8 @@ export function App() {
                     </div>
                   )}
                   <p className="context-compression-note">
-                    这里的上限会作为 Pi 模型的 contextWindow。Pi 根据上下文用量、16,384 Token 输出预留和
+                    按 K 输入，1 K = 1000 Token，支持小数。这里的上限会作为 Pi 模型的 contextWindow。
+                    Pi 根据上下文用量、16,384 Token 输出预留和
                     20,000 Token 最近历史保留量决定压缩时机；压缩结果写入 Pi 会话树，不会改写 Renge 聊天记录。
                   </p>
                 </div>

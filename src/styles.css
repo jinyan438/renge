@@ -2475,6 +2475,11 @@ summary:focus-visible {
   font-size: 11px;
 }
 
+.context-compression-input-error {
+  color: #b54708;
+  font-size: 11px;
+}
+
 .context-compression-empty {
   padding: 14px;
   border: 1px dashed #cfd6e2;

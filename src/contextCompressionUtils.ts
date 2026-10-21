@@ -53,8 +53,6 @@ export type ContextAssistantWindowResult<T extends ContextCompressionMessage> = 
   windowedMessageCount: number;
 };
 
-export const MIN_CONTEXT_LIMIT_TOKENS = 512;
-export const MAX_CONTEXT_LIMIT_TOKENS = 4_000_000;
 export const DEFAULT_CONTEXT_COMPRESSION_SETTINGS: ContextCompressionSettings = {
   enabled: true,
   astPruningEnabled: false,
@@ -74,10 +72,9 @@ function normalizeModelId(value: unknown) {
   return String(value ?? "").trim().toLowerCase();
 }
 
-function clampContextLimit(value: unknown, fallback = 128_000) {
+function normalizeContextLimit(value: unknown, fallback = 128_000) {
   const parsed = Math.floor(Number(value));
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(MAX_CONTEXT_LIMIT_TOKENS, Math.max(MIN_CONTEXT_LIMIT_TOKENS, parsed));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 export function normalizeContextCompressionSettings(
@@ -102,7 +99,7 @@ export function normalizeContextCompressionSettings(
     normalizedLimits.unshift({
       id: String(rawLimit.id ?? `context-model-${index + 1}`),
       modelId,
-      maxContextTokens: clampContextLimit(
+      maxContextTokens: normalizeContextLimit(
         rawLimit.maxContextTokens ?? rawLimit.max_context_tokens ?? rawLimit.maxContext,
       ),
     });
@@ -127,7 +124,7 @@ export function resolveContextCompressionLimit(
   for (let index = settings.modelLimits.length - 1; index >= 0; index -= 1) {
     const limit = settings.modelLimits[index];
     if (normalizeModelId(limit.modelId) !== normalizedId) continue;
-    return clampContextLimit(limit.maxContextTokens);
+    return normalizeContextLimit(limit.maxContextTokens);
   }
   return null;
 }

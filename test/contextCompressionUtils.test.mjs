@@ -70,6 +70,18 @@ test("normalizes limits, removes duplicate model IDs, and matches IDs case-insen
   );
 });
 
+test("preserves positive context limits outside the old range when loading and resolving", () => {
+  for (const maxContextTokens of [1, 100, 511, 63_107, 4_000_001, 12_345_678]) {
+    const normalized = normalizeContextCompressionSettings(settings("demo/model", maxContextTokens));
+    assert.equal(normalized.modelLimits[0].maxContextTokens, maxContextTokens);
+    assert.equal(resolveContextCompressionLimit(normalized, "demo/model"), maxContextTokens);
+  }
+  for (const maxContextTokens of [0, -1, NaN, Infinity, "invalid"]) {
+    const normalized = normalizeContextCompressionSettings(settings("demo/model", maxContextTokens));
+    assert.equal(normalized.modelLimits[0].maxContextTokens, 128_000);
+  }
+});
+
 test("calculates the same input safety threshold used by compression", () => {
   assert.deepEqual(getContextCompressionTokenBudget(settings(), "DEMO/MODEL"), {
     maxContextTokens: 2_048,
