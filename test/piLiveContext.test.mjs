@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
-import { startRengeServer } from "../server.mjs";
+import { startRengeServer } from "./piTestServer.mjs";
 import { getReliableContextUsage, installPiLiveContext } from "../pi/live-context.mjs";
 
 function fixtureSession() {

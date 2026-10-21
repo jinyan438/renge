@@ -315,6 +315,8 @@ npm test
 | `npm run test:preset` | 预设工具测试（经 tsx） |
 | `npm run test:tavern` | 浏览器端酒馆运行时回归测试 |
 | `npm run test:task-responsiveness` | 构建后运行：使用约 215 MB 隔离历史、连续工具调用、输入、滚动和保存，对比运行中与结束后的帧耗时；覆盖浏览器、原生桌面及大图片结果，报告写入 `.runtime/task-responsiveness-*.json` |
+| `npm run test:task-startup` | 构建后运行：真实加载约 48 MB Pi 历史，测量主循环阻塞及桌面启动帧耗时，验证鼠标和回车发送期间连续输入、焦点保持与主动移开焦点；使用隔离数据与本地模型响应 |
+| `npm run test:pi-worker` | 在独立 Pi 线程中验证原生工具、授权、停止、断开、压缩、会话恢复及本地扩展包操作 |
 
 酒馆浏览器回归测试需要先构建前端并安装 Playwright 浏览器：
 

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { createRengePiHost } from "../pi/renge-pi-host.mjs";
 import { createPermissionCheckedPiTools } from "../pi/permission-tools.mjs";
-import { startRengeServer } from "../server.mjs";
+import { startRengeServer } from "./piTestServer.mjs";
 
 class Response extends EventEmitter {
   destroyed = false; writableEnded = false; headersSent = false; chunks = [];

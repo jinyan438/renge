@@ -152,9 +152,44 @@ try {
   const idle = await measure();
   console.log("Measured idle responsiveness");
   await input.fill("开始验收任务");
-  await page.getByRole("button", { name: "发送", exact: true }).click();
+  const startupClient = await context.newCDPSession(home ?? page);
+  await startupClient.send("Profiler.enable"); await startupClient.send("Profiler.start");
+  await page.waitForTimeout(500);
+  for (const target of [page, ...(home ? [home] : [])]) await target.evaluate(() => {
+    Object.assign(window.__responsiveness, { frames: [], gaps: [], longTasks: [], copies: [], active: true });
+  });
+  await input.evaluate((node) => {
+    window.__startupInput = node;
+    window.__startupFocusEvents = [];
+    document.addEventListener("focusout", (event) => {
+      if (event.target === node) window.__startupFocusEvents.push({ at: performance.now(), target: event.relatedTarget?.outerHTML?.slice(0, 180) });
+    });
+  });
+  const startupAt = Date.now();
+  await page.locator("#send_but").click();
+  const sendClickMs = Date.now() - startupAt;
   for (let attempt = 0; !stream && attempt < 300; attempt++) await delay(20);
   assert.ok(stream);
+  await page.waitForTimeout(400);
+  const startupFocus = await input.evaluate((node) => ({ focused: node.ownerDocument.activeElement === node, sameNode: node === window.__startupInput, active: node.ownerDocument.activeElement?.outerHTML.slice(0, 200), events: window.__startupFocusEvents }));
+  const startupMetrics = await page.evaluate(() => { window.__responsiveness.active = false; return window.__responsiveness; });
+  if (home) {
+    const main = await home.evaluate(() => { window.__responsiveness.active = false; return window.__responsiveness; });
+    startupMetrics.frames.push(...main.frames); startupMetrics.longTasks.push(...main.longTasks); startupMetrics.copies.push(...main.copies);
+  }
+  const { profile: startupProfile } = await startupClient.send("Profiler.stop");
+  await mkdir(".runtime", { recursive: true });
+  const startupReport = { sendClickMs, readyMs: Date.now() - startupAt, longestFrame: Math.max(0, ...startupMetrics.frames), longestTask: Math.max(0, ...startupMetrics.longTasks), longestCopy: Math.max(0, ...startupMetrics.copies), focus: startupFocus };
+  await writeFile(`.runtime/task-startup${desktop ? "-desktop" : ""}.json`, JSON.stringify(startupReport, null, 2));
+  await writeFile(`.runtime/task-startup${desktop ? "-desktop" : ""}.cpuprofile`, JSON.stringify(startupProfile));
+  console.log("Startup:", JSON.stringify(startupReport));
+  if (!baseline) {
+    assert.equal(startupFocus.focused, true, "sending keeps the native composer focused");
+    assert.equal(startupFocus.sameNode, true, "starting a task must not replace the composer");
+    assert.equal(startupFocus.events.length, 0, "mouse send must not blur and refocus the native input context");
+    assert.ok(startupReport.longestTask < 50, "sending must not block the UI thread");
+    assert.ok(startupReport.longestCopy < 10, "starting a task must not copy unchanged history");
+  }
   const pi = (event) => stream.write(`data: ${JSON.stringify({ pi: event })}\n\n`);
   pi({ type: "context_usage", usage: { tokens: 10_000, contextWindow: 100_000, percent: 10 } });
   await page.locator(".context-token-ring").getByText("10%", { exact: true }).waitFor();

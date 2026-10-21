@@ -40007,6 +40007,9 @@ export function App() {
                   <button
                     id="send_but" ref={chatSendButtonRef} type="button" className={`send-button${chatComposerShowsStop ? " stop" : ""}`}
                     disabled={chatComposerButtonDisabled}
+                    onMouseDown={(event) => {
+                      if (event.button === 0 && event.currentTarget.ownerDocument.activeElement === chatInputRef.current) event.preventDefault();
+                    }}
                     onClick={() => {
                       if (chatGenerationState !== "idle" && !chatInputHasContentRef.current && chatAttachmentsLiveRef.current.length === 0) stopChatGeneration();
                       else requestChatComposerSend();

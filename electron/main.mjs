@@ -1768,6 +1768,7 @@ async function createMainWindow() {
     dataDir: getPersistentDataDir(),
     temporaryFilesRoot: getTemporaryFilesRoot(),
     authorizePiTool,
+    isolatePiHost: true,
   };
   try {
     serverController = await startRengeServer({
@@ -1917,8 +1918,10 @@ if (!singleInstanceLockAcquired) {
     if (persistentBrowserDataFlushed || !app.isReady()) return;
     event.preventDefault();
     persistentBrowserDataFlushed = true;
-    void flushPersistentSidebarBrowserData()
-      .catch(() => undefined)
+    void Promise.allSettled([
+      flushPersistentSidebarBrowserData(),
+      serverController?.disposePiHost(),
+    ])
       .finally(() => app.quit());
   });
 

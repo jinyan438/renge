@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { startRengeServer } from "../server.mjs";
+import { startRengeServer } from "./piTestServer.mjs";
 
 const shell = process.platform === "win32" ? "powershell" : "bash";
 const quote = (value) => `'${value.replaceAll("'", process.platform === "win32" ? "''" : "'\\''")}'`;

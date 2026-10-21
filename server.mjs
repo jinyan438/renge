@@ -21,6 +21,7 @@ import {
   normalizeProviderApiType,
 } from "./src/responsesApiUtils.mjs";
 import { createRengePiHost } from "./pi/renge-pi-host.mjs";
+import { createRengePiWorkerHost } from "./pi/host-worker-client.mjs";
 import { isPiPackageSource } from "./pi/pi-package-manager.mjs";
 import {
   callPiMcpTool,
@@ -3055,7 +3056,7 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
     }
 
     if (pathname === "/api/pi/tool-result") {
-      const result = piHost.handleToolResult(body);
+      const result = await piHost.handleToolResult(body);
       sendJson(response, result.status, result.ok ? { ok: true } : { error: result.error });
       return;
     }
@@ -3676,7 +3677,8 @@ export function startRengeServer(options = {}) {
     ? resolve(options.temporaryFilesRoot)
     : "";
   const piAgentDir = resolve(options.piAgentDir ?? join(dataDir, ".pi", "agent"));
-  const piHost = createRengePiHost({ defaultCwd: __dirname, dataDir, agentDir: piAgentDir, authorizeTool: options.authorizePiTool });
+  const createPiHost = options.isolatePiHost ? createRengePiWorkerHost : createRengePiHost;
+  const piHost = createPiHost({ defaultCwd: __dirname, dataDir, agentDir: piAgentDir, authorizeTool: options.authorizePiTool });
   const directImageDispatcher = createHtmlPreviewImageDispatcher();
   const serveHtmlPreviewImage = createHtmlPreviewImageHandler({ fetchImage: async (url, options) => {
     // Public image hosts may fail through the system proxy. Try the direct
@@ -3799,9 +3801,11 @@ export function startRengeServer(options = {}) {
 
     await serveStatic(request, response, url.pathname);
   });
+  let piHostDisposal;
+  const disposePiHost = () => piHostDisposal ??= Promise.resolve().then(() => piHost.dispose());
   server.once("close", () => {
     if (dataStoreRetained) releaseAppDataStore(dataFilePath);
-    void piHost.dispose();
+    void disposePiHost().catch(() => undefined);
     void directImageDispatcher.close();
   });
 
@@ -3820,6 +3824,7 @@ export function startRengeServer(options = {}) {
         url: `http://127.0.0.1:${actualPort}`,
         dataDir,
         dataFile: dataFilePath,
+        disposePiHost,
       });
     });
   });
