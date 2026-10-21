@@ -338,6 +338,8 @@ test("Pi Host resumes partial reasoning as execution without starting the plan o
     assert.equal(upstreamRequests.length, 2);
     assert.equal(upstreamRequests[0].reasoning_effort, "max");
     assert.equal(upstreamRequests[1].reasoning_effort, "none");
+    assert.ok(upstreamRequests.every((request) => !("tool_choice" in request)),
+      "tool-free conversations and continuations must not send tool_choice");
     const resumedAssistant = upstreamRequests[1].messages.find(
       (message) => message.role === "assistant",
     );
@@ -445,6 +447,8 @@ test("Pi Host closes an interrupted write preview and resumes with the chunk pro
       /8000|8,000|at most \d+ characters/i,
     );
     assert.equal(upstreamRequests[0].max_completion_tokens, 48_000);
+    assert.ok(upstreamRequests.every((request) => request.tool_choice === "auto"),
+      "native tools and retries must retain automatic tool selection");
     assert.match(JSON.stringify(upstreamRequests[1].messages), /UNEXECUTED_PARTIAL_PREFIX/);
     assert.match(JSON.stringify(upstreamRequests[1].messages), /该工具尚未执行/);
     assert.match(JSON.stringify(upstreamRequests[1].messages), /首块 overwrite/);
@@ -456,13 +460,20 @@ test("Pi Host closes an interrupted write preview and resumes with the chunk pro
   }
 });
 
-test("Pi Host bridges a Renge-only tool result and continues the model loop", async () => {
+test("Pi Host sends automatic tool choice through a gateway and continues after a bridged tool result", async () => {
   const upstreamRequests = [];
   const upstream = createServer(async (request, response) => {
     let raw = "";
     for await (const chunk of request) raw += chunk;
     const body = JSON.parse(raw);
     upstreamRequests.push(body);
+    // Reproduce gateways that cannot route a tool request without an explicit
+    // tool_choice. Return a non-retryable rejection so a regression fails fast.
+    if (body.tools?.length && body.tool_choice !== "auto") {
+      response.writeHead(400, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "tool_choice must be auto for this model" } }));
+      return;
+    }
     response.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -923,6 +934,7 @@ test("Pi Host exposes native Skill metadata and read without other tools", async
     assert.match(streamText, /Skill ready/);
     assert.equal(upstreamRequests.length, 1);
     const upstreamRequest = upstreamRequests[0];
+    assert.equal(upstreamRequest.tool_choice, "auto", "Skill read tools also need automatic selection");
     assert.deepEqual(
       upstreamRequest.tools.map((tool) => tool.function.name),
       ["read"],

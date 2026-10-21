@@ -11700,6 +11700,9 @@ function formatPiRuntimeStatus(event: PiStreamEvent) {
     return "Pi 已完成上下文压缩，正在继续生成...";
   }
   if (event.type === "auto_retry_start") {
+    const availabilityHint = /model_not_found|no available channel/i.test(event.errorMessage ?? "")
+      ? "供应商暂无该模型可用通道；"
+      : "";
     if (event.continuous) {
       const delaySeconds = Math.max(0, Math.round((event.delayMs ?? 0) / 1_000));
       const action = event.resumeFromToolCall
@@ -11707,11 +11710,11 @@ function formatPiRuntimeStatus(event: PiStreamEvent) {
         : event.resumeFromProgress
           ? "从已有思维断点继续执行"
           : "持续重试模型请求";
-      return `Pi 正在${action}（第 ${event.attempt ?? 1} 次${
+      return `${availabilityHint}Pi 正在${action}（第 ${event.attempt ?? 1} 次${
         delaySeconds > 0 ? `，约 ${delaySeconds} 秒后` : ""
       }，可点击停止）...`;
     }
-    return `Pi 正在重试模型请求（${event.attempt ?? 1}/${event.maxAttempts ?? "?"}）...`;
+    return `${availabilityHint}Pi 正在重试模型请求（${event.attempt ?? 1}/${event.maxAttempts ?? "?"}）...`;
   }
   if (event.type === "auto_retry_end") return "Pi 已完成模型请求重试，正在继续生成...";
   return "";

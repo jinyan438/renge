@@ -12,6 +12,7 @@ import {
   normalizePiProviderConfig,
   PI_KERNEL_ID,
   shouldEnablePiTools,
+  withPiDefaultToolChoice,
 } from "../src/piBridgeUtils.mjs";
 import { removeAssistantPrefillAfterLatestUser } from "../src/piRoleplayPromptUtils.ts";
 
@@ -20,6 +21,21 @@ const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.me
 const tool = (name) => ({
   type: "function",
   function: { name, description: name, parameters: { type: "object", properties: {} } },
+});
+
+test("Pi final tool payloads default to auto without changing explicit choices or tool-free requests", () => {
+  for (const tools of [[tool("read")], [{ type: "function", name: "read", parameters: {} }]]) {
+    const payload = { tools, messages: [] };
+    assert.deepEqual(withPiDefaultToolChoice(payload), { ...payload, tool_choice: "auto" });
+    assert.equal("tool_choice" in payload, false, "do not mutate the extension payload");
+    for (const choice of ["auto", "none", "required", { type: "function", function: { name: "read" } }]) {
+      const explicit = { ...payload, tool_choice: choice };
+      assert.equal(withPiDefaultToolChoice(explicit), explicit);
+    }
+  }
+  for (const payload of [{ messages: [] }, { tools: [] }, { input: [] }, undefined]) {
+    assert.equal(withPiDefaultToolChoice(payload), payload);
+  }
 });
 
 test("Pi sampling params leave token-limit field selection to the provider adapter", () => {

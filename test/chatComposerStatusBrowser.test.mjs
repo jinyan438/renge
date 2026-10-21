@@ -111,6 +111,9 @@ try {
   await expectStatus("AI 正在思考…");
   pi({ type: "auto_retry_start", attempt: 2, maxAttempts: 3 });
   await status.getByText(/正在重试模型请求/).waitFor();
+  pi({ type: "auto_retry_start", attempt: 3, continuous: true, delayMs: 4_000,
+    errorMessage: '503: {"code":"model_not_found","message":"No available channel for model gemini-4-argon"}' });
+  await expectStatus("供应商暂无该模型可用通道；Pi 正在持续重试模型请求（第 3 次，约 4 秒后，可点击停止）...");
   pi({ type: "auto_retry_end" });
   delta({ reasoning_content: "继续思考。" });
   await expectStatus("AI 正在思考…");

@@ -31,6 +31,7 @@ import {
   PI_KERNEL_ID,
   serializePiToolResult,
   shouldEnablePiTools,
+  withPiDefaultToolChoice,
 } from "../src/piBridgeUtils.mjs";
 
 const TOOL_RESULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -728,6 +729,10 @@ export function createRengePiHost({
       const streamFunction = session.agent.streamFunction;
       session.agent.streamFunction = (requestModel, context, options) => streamFunction(requestModel, context, {
         ...options,
+        onPayload: async (payload, model) => {
+          const transformed = await options?.onPayload?.(payload, model);
+          return withPiDefaultToolChoice(transformed === undefined ? payload : transformed);
+        },
         fetch: createPiRequestBodyRecoveryFetch({
           fetchImpl: options?.fetch ?? globalThis.fetch,
           limits: requestBodyLimits,

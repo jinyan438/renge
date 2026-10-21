@@ -302,6 +302,15 @@ export function getPiSamplingParams(request) {
   );
 }
 
+export function withPiDefaultToolChoice(payload) {
+  // Pi declares native/Skill/MCP tools after the renderer request is built.
+  // Resolve this on the final payload so summaries and tool-free roleplay do
+  // not acquire a tool_choice field, and provider extensions keep their choice.
+  if (!payload || !Array.isArray(payload.tools) || payload.tools.length === 0 ||
+      payload.tool_choice !== undefined) return payload;
+  return { ...payload, tool_choice: "auto" };
+}
+
 const PI_REASONING_LEVELS = new Set([
   "minimal",
   "low",
