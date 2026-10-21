@@ -524,3 +524,36 @@ export function splitSseFrames(buffer: string, flush = false) {
   }
   return { frames, rest: tail };
 }
+
+/** Scan each network chunk once. Repeatedly scanning and flattening a growing
+ * base64 frame makes large tool results quadratic in the number of chunks. */
+export function createSseFrameDecoder() {
+  let parts: string[] = [];
+  let boundary = "";
+  return (chunk: string, flush = false) => {
+    const input = boundary + chunk;
+    const frames: string[] = [];
+    const separator = /\r?\n\r?\n/g;
+    let cursor = 0;
+    let match: RegExpExecArray | null;
+    while ((match = separator.exec(input))) {
+      parts.push(input.slice(cursor, match.index));
+      frames.push(parts.join(""));
+      parts = [];
+      cursor = match.index + match[0].length;
+    }
+    const tail = input.slice(cursor);
+    // A CRLF separator can straddle two network chunks by up to 3 characters.
+    const boundaryStart = Math.max(0, tail.length - 3);
+    if (boundaryStart) parts.push(tail.slice(0, boundaryStart));
+    boundary = tail.slice(boundaryStart);
+    if (flush) {
+      parts.push(boundary);
+      const rest = parts.join("");
+      if (rest.trim()) frames.push(rest);
+      parts = [];
+      boundary = "";
+    }
+    return frames;
+  };
+}

@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { getCodeReviewSnapshot, getCodeReviewFile } from "./code-review.mjs";
-import { applyChatSessionPatch, getChatSessionVersions } from "./app-data-session-patch.mjs";
+import { readAppData, writeAppData, clearAppData, requestAppDataStore, retainAppDataStore, releaseAppDataStore } from "./app-data-store-client.mjs";
 import { createReadStream, createWriteStream } from "node:fs";
 import { copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { execFileSync, spawn } from "node:child_process";
@@ -32,7 +32,7 @@ const distDir = resolve(__dirname, "dist");
 const defaultPort = Number(process.env.PORT ?? 5190);
 const windowsInternetSettingsKey = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
 const appDataFileName = "app-data.json";
-const appDataBackupCount = 3;
+
 const completeBackupManagedRoots = [
   ".pi",
   "extensions",
@@ -42,8 +42,6 @@ const completeBackupManagedRoots = [
   "tavern-files",
   "tavern-script-assets",
 ];
-const appDataWriteQueues = new Map();
-const validatedAppDataFiles = new Map();
 const tavernModuleProxyVersion = "2";
 const tavernModuleProxyCache = new Map();
 
@@ -468,6 +466,17 @@ async function readJsonBody(request) {
   }
 }
 
+async function readAppDataRequestBytes(request) {
+  const chunks = [];
+  let length = 0;
+  for await (const chunk of request) { chunks.push(chunk); length += chunk.length; }
+  // Own the ArrayBuffer so transferring it cannot detach a pooled HTTP buffer.
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+  return bytes;
+}
+
 function compactError(error) {
   return error instanceof Error ? error.message : String(error ?? "Unknown error");
 }
@@ -494,201 +503,11 @@ function isMissingFileError(error) {
   return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
 }
 
-function parseAppDataContent(content) {
-  if (!content.trim()) throw new Error("应用数据文件为空");
-  const parsed = JSON.parse(content);
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("应用数据必须是 JSON 对象");
-  }
-  return parsed;
-}
-
-function getAppDataBackupPath(dataFilePath, index) {
-  return join(dirname(dataFilePath), `app-data.backup-${index}.json`);
-}
-
-async function readAppDataFile(dataFilePath) {
-  const parsed = parseAppDataContent(await readFile(dataFilePath, "utf8"));
-  validatedAppDataFiles.set(dataFilePath, await getAppDataFileSignature(dataFilePath));
-  return parsed;
-}
-
 export function normalizeTavernFileName(value) {
   const name = String(value ?? "").replace(/^\/?(?:user\/)?files\//, "");
   if (!name || name.length > 200 || /[\\/<>:"|?*\x00-\x1f]/.test(name) || /^\./.test(name) || /[. ]$/.test(name)) return null;
   if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) return null;
   return name;
-}
-
-async function getAppDataFileSignature(dataFilePath) {
-  const fileStat = await stat(dataFilePath);
-  return `${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`;
-}
-
-async function ensureAppDataFileValidated(dataFilePath) {
-  const signature = await getAppDataFileSignature(dataFilePath);
-  if (validatedAppDataFiles.get(dataFilePath) === signature) return signature;
-  await readAppDataFile(dataFilePath);
-  return validatedAppDataFiles.get(dataFilePath);
-}
-
-function serializeAppData(payload) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new Error("应用数据必须是 JSON 对象");
-  }
-  const serialized = JSON.stringify(payload, null, 2);
-  if (!serialized) throw new Error("应用数据无法序列化");
-  return serialized;
-}
-
-async function writeSerializedAppDataAtomically(dataFilePath, serialized) {
-  await mkdir(dirname(dataFilePath), { recursive: true });
-  const temporaryPath = `${dataFilePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  try {
-    await writeFile(temporaryPath, serialized, "utf8");
-    await rename(temporaryPath, dataFilePath);
-    validatedAppDataFiles.set(dataFilePath, await getAppDataFileSignature(dataFilePath));
-  } finally {
-    await rm(temporaryPath, { force: true }).catch(() => undefined);
-  }
-}
-
-async function writeAppDataFileAtomically(dataFilePath, payload) {
-  await writeSerializedAppDataAtomically(dataFilePath, serializeAppData(payload));
-}
-
-async function copyAppDataFileAtomically(sourcePath, destinationPath) {
-  await mkdir(dirname(destinationPath), { recursive: true });
-  const temporaryPath = `${destinationPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  try {
-    await copyFile(sourcePath, temporaryPath);
-    await rm(destinationPath, { force: true });
-    await rename(temporaryPath, destinationPath);
-    validatedAppDataFiles.set(
-      destinationPath,
-      await getAppDataFileSignature(destinationPath),
-    );
-  } finally {
-    await rm(temporaryPath, { force: true }).catch(() => undefined);
-  }
-}
-
-async function rotateAppDataBackups(dataFilePath) {
-  try {
-    await ensureAppDataFileValidated(dataFilePath);
-  } catch {
-    return;
-  }
-  for (let index = appDataBackupCount; index >= 2; index -= 1) {
-    const sourcePath = getAppDataBackupPath(dataFilePath, index - 1);
-    const destinationPath = getAppDataBackupPath(dataFilePath, index);
-    try {
-      await ensureAppDataFileValidated(sourcePath);
-      await rm(destinationPath, { force: true });
-      await rename(sourcePath, destinationPath);
-      validatedAppDataFiles.delete(sourcePath);
-      validatedAppDataFiles.set(
-        destinationPath,
-        await getAppDataFileSignature(destinationPath),
-      );
-    } catch (error) {
-      validatedAppDataFiles.delete(sourcePath);
-      if (!isMissingFileError(error)) {
-        // Invalid backups cannot replace an older valid recovery generation.
-      }
-    }
-  }
-  try {
-    await copyAppDataFileAtomically(dataFilePath, getAppDataBackupPath(dataFilePath, 1));
-  } catch (error) {
-    if (!isMissingFileError(error)) {
-      // A failed backup must not prevent the new primary snapshot from being saved.
-    }
-  }
-}
-
-async function readAppData(dataFilePath) {
-  let primaryError = null;
-  try {
-    return await readAppDataFile(dataFilePath);
-  } catch (error) {
-    primaryError = error;
-  }
-
-  for (let index = 1; index <= appDataBackupCount; index += 1) {
-    try {
-      const backup = await readAppDataFile(getAppDataBackupPath(dataFilePath, index));
-      await writeAppDataFileAtomically(dataFilePath, backup).catch(() => undefined);
-      return backup;
-    } catch {
-      // Try the next backup generation.
-    }
-  }
-
-  if (isMissingFileError(primaryError)) return {};
-  throw primaryError;
-}
-
-async function writeAppData(dataFilePath, payloadOrUpdater) {
-  const previousWrite = appDataWriteQueues.get(dataFilePath) ?? Promise.resolve();
-  const operation = previousWrite
-    .catch(() => undefined)
-    .then(async () => {
-      const payload = typeof payloadOrUpdater === "function"
-        ? await payloadOrUpdater(await readAppData(dataFilePath))
-        : payloadOrUpdater;
-      const serialized = serializeAppData(payload);
-      await rotateAppDataBackups(dataFilePath);
-      await writeSerializedAppDataAtomically(dataFilePath, serialized);
-    });
-  appDataWriteQueues.set(dataFilePath, operation);
-  try {
-    await operation;
-  } finally {
-    if (appDataWriteQueues.get(dataFilePath) === operation) {
-      appDataWriteQueues.delete(dataFilePath);
-    }
-  }
-}
-
-async function clearAppData(dataFilePath) {
-  const previousWrite = appDataWriteQueues.get(dataFilePath) ?? Promise.resolve();
-  const operation = previousWrite
-    .catch(() => undefined)
-    .then(async () => {
-      const dataDirectory = dirname(dataFilePath);
-      const ownedFiles = [
-        dataFilePath,
-        ...Array.from({ length: appDataBackupCount }, (_, index) =>
-          getAppDataBackupPath(dataFilePath, index + 1),
-        ),
-        join(dataDirectory, "app-data.previous.json"),
-        join(dataDirectory, "app-data.previous.json.bak"),
-        `${dataFilePath}.bak`,
-        join(dataDirectory, "desktop-project-positions.json"),
-      ];
-      const dataDirectoryEntries = await readdir(dataDirectory).catch(() => []);
-      dataDirectoryEntries
-        .filter((name) => name.startsWith("app-data") && name.includes(".tmp-"))
-        .forEach((name) => ownedFiles.push(join(dataDirectory, name)));
-      await Promise.all(
-        ownedFiles.map((filePath) => rm(filePath, { force: true })),
-      );
-      ownedFiles.forEach((filePath) => validatedAppDataFiles.delete(filePath));
-      await Promise.all(
-        ["app-data-assets", ...completeBackupManagedRoots].map((name) =>
-          rm(join(dataDirectory, name), { recursive: true, force: true }),
-        ),
-      );
-    });
-  appDataWriteQueues.set(dataFilePath, operation);
-  try {
-    await operation;
-  } finally {
-    if (appDataWriteQueues.get(dataFilePath) === operation) {
-      appDataWriteQueues.delete(dataFilePath);
-    }
-  }
 }
 
 function normalizeCompleteBackupManagedFilePath(value) {
@@ -2964,12 +2783,7 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
         return;
       }
       const body = await readJsonBody(request);
-      const data = await readAppData(dataFilePath);
-      const card = data?.characterCards?.find((entry) =>
-        entry.avatarDataUrl === body.avatar_url || `${entry.id}.png` === body.avatar_url,
-      );
-      const chats = card ? (data.chatSessions ?? []).filter((entry) => entry.roleplayCharacterCardId === card.id) : [];
-      sendJson(response, 200, chats.map((entry) => ({ file_name: `${entry.id}.jsonl` })));
+      sendJson(response, 200, await requestAppDataStore(dataFilePath, "characterChats", body.avatar_url));
       return;
     }
 
@@ -3132,7 +2946,7 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
 
       if (request.method === "DELETE" && !operation) {
         const body = await readJsonBody(request);
-        const storedData = await readAppData(dataFilePath);
+        const storedData = await readAppData(dataFilePath, ["extensions"]);
         const storedExtension = Array.isArray(storedData.extensions)
           ? storedData.extensions.find((extension) => extension?.id === extensionId)
           : undefined;
@@ -3143,12 +2957,7 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
         await rm(extensionDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
         // Complete the persistent deletion before reporting success. Waiting for
         // the renderer's debounced autosave lets a reload restore stale cards.
-        await writeAppData(dataFilePath, (currentData) => ({
-          ...currentData,
-          extensions: Array.isArray(currentData.extensions)
-            ? currentData.extensions.filter((extension) => extension?.id !== extensionId)
-            : [],
-        }));
+        await requestAppDataStore(dataFilePath, "removeExtension", extensionId);
         sendJson(response, 200, { ok: true, id: extensionId });
         return;
       }
@@ -3184,39 +2993,15 @@ async function handleApi(request, response, pathname, dataFilePath, piHost) {
 
     if (pathname === "/api/app-data") {
       if (request.method === "GET") {
-        const data = await readAppData(dataFilePath);
-        sendJson(response, 200, {
-          dataDir: dirname(dataFilePath),
-          dataFile: dataFilePath,
-          data,
-          sessionVersions: getChatSessionVersions(data.chatSessions),
-        });
+        const bytes = await requestAppDataStore(dataFilePath, "httpRead");
+        response.writeHead(200, { "Content-Type": "application/json;charset=utf-8", "Cache-Control": "no-store" });
+        response.end(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
         return;
       }
 
       if (request.method === "PUT" || request.method === "POST" || request.method === "PATCH") {
-        const body = await readJsonBody(request);
-        const payload = body && typeof body === "object" && "data" in body ? body.data : body;
-        let sessionVersions;
-        if (request.method === "PATCH" || body.sessionPatch) {
-          const patch = payload && typeof payload === "object" && !Array.isArray(payload)
-            ? payload
-            : {};
-          if (Object.hasOwn(patch, "chatSessions")) {
-            throw Object.assign(new Error("请使用带版本校验的会话增量保存，刷新页面后重试。"), { status: 409 });
-          }
-          await writeAppData(dataFilePath, (currentData) => {
-            const sessions = body.sessionPatch
-              ? applyChatSessionPatch(currentData.chatSessions, body.sessionPatch)
-              : undefined;
-            const next = { ...currentData, ...patch, ...(sessions ? { chatSessions: sessions } : {}) };
-            sessionVersions = getChatSessionVersions(next.chatSessions);
-            return next;
-          });
-        } else {
-          await writeAppData(dataFilePath, payload ?? {});
-          sessionVersions = getChatSessionVersions(payload?.chatSessions);
-        }
+        const bytes = await readAppDataRequestBytes(request);
+        const sessionVersions = await requestAppDataStore(dataFilePath, "httpWrite", { method: request.method, body: bytes }, [bytes.buffer]);
         sendJson(response, 200, {
           ok: true,
           sessionVersions,
@@ -3882,6 +3667,7 @@ async function serveTemporaryFilePreview(
 }
 
 export function startRengeServer(options = {}) {
+  let dataStoreRetained = false;
   const host = options.host ?? "::";
   const port = options.port ?? defaultPort;
   const dataDir = resolve(options.dataDir ?? getDefaultDataDir());
@@ -4014,6 +3800,7 @@ export function startRengeServer(options = {}) {
     await serveStatic(request, response, url.pathname);
   });
   server.once("close", () => {
+    if (dataStoreRetained) releaseAppDataStore(dataFilePath);
     void piHost.dispose();
     void directImageDispatcher.close();
   });
@@ -4021,6 +3808,8 @@ export function startRengeServer(options = {}) {
   return new Promise((resolveServer, rejectServer) => {
     server.once("error", rejectServer);
     server.listen(port, host, () => {
+      retainAppDataStore(dataFilePath);
+      dataStoreRetained = true;
       server.off("error", rejectServer);
       const address = server.address();
       const actualPort = typeof address === "object" && address ? address.port : port;

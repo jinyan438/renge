@@ -645,6 +645,14 @@ test("rejects app-data payloads that are not JSON objects", async (t) => {
 
   assert.equal(response.status, 500);
   assert.match((await response.json()).error, /JSON 对象/);
+
+  await fetch(`${controller.url}/api/app-data`, { method: "PUT", body: JSON.stringify({ data: { keep: "保留完整数据🚀" } }) });
+  for (const body of ["null", "{invalid JSON", JSON.stringify({ data: ["invalid"] })]) {
+    const rejected = await fetch(`${controller.url}/api/app-data`, { method: "PUT", body });
+    assert.equal(rejected.status, 500);
+    const saved = await (await fetch(`${controller.url}/api/app-data`)).json();
+    assert.deepEqual(saved.data, { keep: "保留完整数据🚀" }, "invalid transferred request bytes cannot replace a valid snapshot");
+  }
 });
 
 test("backup rotation preserves an older generation when an intermediate file is missing", async (t) => {

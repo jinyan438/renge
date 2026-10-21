@@ -200,7 +200,7 @@ npm run desktop
 - 运行项目中已有的 npm script 和安全白名单命令（`npm`、`pnpm`、`yarn`、`node`、`git`）
 - 查看 Git 状态与 Git diff，高风险 Git 操作（`reset`、`clean`、`push`、`rebase` 等）额外弹窗确认
 - 侧栏浏览器（独立分区与 Cookie 配置）和基于 `node-pty` 的交互式终端
-- 原生右键文本菜单、窗口吸附预览、硬件加速自动降级（Linux X11 + NVIDIA 默认关闭）
+- 原生右键文本菜单、窗口吸附预览、渲染兼容策略（Linux X11 + NVIDIA 默认关闭硬件加速；Windows 虚拟显示驱动环境使用软件窗口合成，保留 WebGL 与视频 GPU 加速）
 
 如果 Windows 环境无法在线下载 Electron Runtime，可以准备官方 Windows x64 运行时压缩包：
 
@@ -314,6 +314,7 @@ npm test
 | `npm run test:mcp` | Pi MCP 适配器桥接测试 |
 | `npm run test:preset` | 预设工具测试（经 tsx） |
 | `npm run test:tavern` | 浏览器端酒馆运行时回归测试 |
+| `npm run test:task-responsiveness` | 构建后运行：使用约 215 MB 隔离历史、连续工具调用、输入、滚动和保存，对比运行中与结束后的帧耗时；覆盖浏览器、原生桌面及大图片结果，报告写入 `.runtime/task-responsiveness-*.json` |
 
 酒馆浏览器回归测试需要先构建前端并安装 Playwright 浏览器：
 
@@ -346,7 +347,7 @@ npm run android:apk
 | `RENGE_DATA_DIR` | `%APPDATA%\Renge Agent Lab` | 设置持久化数据目录 |
 | `RENGE_PC_FILES` | 启用 | 设为 `0` 可关闭电脑文件服务 API |
 | `RENGE_ELECTRON_CACHE_DIR` | `%LOCALAPPDATA%\Renge Agent Lab\ElectronCache` | 设置 Electron 缓存目录 |
-| `RENGE_HARDWARE_ACCELERATION` | 自动 | `1` 强制启用，`0` 强制关闭 Electron 硬件加速；Linux X11 + NVIDIA 默认关闭 |
+| `RENGE_HARDWARE_ACCELERATION` | 自动 | `1` 强制启用完整 GPU 路径，`0` 强制关闭 Electron 硬件加速；Linux X11 + NVIDIA 默认关闭；Windows 检测到虚拟显示驱动时默认只关闭 GPU 窗口合成，保留 WebGL 与视频 GPU 加速 |
 | `PLAYWRIGHT_CHANNEL` | 空 | 设为 `chrome` 时酒馆浏览器测试使用本机 Chrome |
 | `TAVERN_SCRIPT_FILE` | 空 | 指定酒馆脚本 JSON，让回归测试加载真实脚本 |
 

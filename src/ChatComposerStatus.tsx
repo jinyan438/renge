@@ -1,6 +1,7 @@
-import { CircleCheck, CircleAlert, Info, LoaderCircle, TriangleAlert, X } from "lucide-react";
+import { CircleCheck, CircleAlert, Info, TriangleAlert, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { formatComposerElapsed } from "./chatComposerStatusUtils";
+import { ChatStatusSpinner } from "./ChatStatusSpinner";
 
 export function ChatComposerStatus({ status, message, persistent = false, runStartedAt, onDismiss }: {
   status: "idle" | "loading" | "success" | "error" | "info" | "warning";
@@ -29,14 +30,13 @@ export function ChatComposerStatus({ status, message, persistent = false, runSta
     return () => window.clearTimeout(timer);
   }, [status, message, persistent, onDismiss]);
 
-  const Icon = loading ? LoaderCircle
-    : status === "success" ? CircleCheck
+  const Icon = status === "success" ? CircleCheck
     : status === "error" ? CircleAlert
     : status === "warning" ? TriangleAlert : Info;
 
   return (
     <div className={`chat-status ${status}`}>
-      <Icon size={15} className={loading ? "chat-status-spinner" : undefined} aria-hidden="true" />
+      {loading ? <ChatStatusSpinner size={15} aria-hidden="true" /> : <Icon size={15} aria-hidden="true" />}
       <span className="chat-status-message" role={status === "error" ? "alert" : "status"} aria-live={status === "error" ? "assertive" : "polite"} aria-atomic="true">
         {message}
       </span>

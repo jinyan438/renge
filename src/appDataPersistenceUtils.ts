@@ -85,7 +85,7 @@ export function hasMeaningfulPatchChanges<T extends object>(
 }
 
 export type ChatSessionPatch<T> = {
-  upserts: Array<{ session: T; expectedVersion: string | null }>;
+  upserts: Array<{ session: T; expectedVersion: string | null; messagesPatch?: { order: string[]; upserts: Array<{ id: string }> } }>;
   deletes: Array<{ id: string; expectedVersion: string | null }>;
 };
 
@@ -93,12 +93,27 @@ export function createChatSessionPatch<T extends { id: string }>(
   current: readonly T[],
   previous: readonly T[],
   versions: Readonly<Record<string, string>>,
+  { messageDeltas = false } = {},
 ): ChatSessionPatch<T> {
   const oldById = new Map(previous.map((session) => [session.id, session]));
   const currentIds = new Set(current.map((session) => session.id));
   return {
     upserts: current.filter((session) => !areJsonValuesEqual(session, oldById.get(session.id)))
-      .map((session) => ({ session, expectedVersion: versions[session.id] ?? null })),
+      .map((session) => {
+        const change: ChatSessionPatch<T>["upserts"][number] = { session, expectedVersion: versions[session.id] ?? null };
+        const messages = (session as { messages?: unknown }).messages;
+        const previousMessages = (oldById.get(session.id) as { messages?: unknown } | undefined)?.messages;
+        // Existing messages keep stable IDs and references. Send just additions,
+        // edits and ordering; never clone a 136 MB history to save one new line.
+        const hasIds = (items: unknown): items is Array<{ id: string }> => Array.isArray(items) &&
+          items.every((item) => item && typeof item.id === "string" && item.id) && new Set(items.map((item) => item.id)).size === items.length;
+        if (messageDeltas && hasIds(messages) && hasIds(previousMessages)) {
+          const previousById = new Map(previousMessages.map((message) => [message.id, message]));
+          change.session = { ...session, messages: [] };
+          change.messagesPatch = { order: messages.map((message) => message.id), upserts: messages.filter((message) => !areJsonValuesEqual(message, previousById.get(message.id))) };
+        }
+        return change;
+      }),
     deletes: previous.filter((session) => !currentIds.has(session.id))
       .map((session) => ({ id: session.id, expectedVersion: versions[session.id] ?? null })),
   };

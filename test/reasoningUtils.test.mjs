@@ -16,6 +16,7 @@ import {
   shouldUseResponsesApiForLocalQwen,
   shouldRetryReasoningOnlyToolCompletion,
   splitSseFrames,
+  createSseFrameDecoder,
 } from "../src/reasoningUtils.ts";
 
 const deepSeekV4Provider = {
@@ -436,4 +437,17 @@ test("splits LF and CRLF SSE frames and flushes a final unterminated frame", () 
     frames: ["data: two"],
     rest: "",
   });
+});
+
+test("incremental SSE decoding preserves mixed separators, split boundaries and large Unicode frames", () => {
+  const wire = `data: first\r\n\r\n\n\ndata: ${"中文🚀".repeat(10_000)}\n\r\ndata: final\n`;
+  const expected = splitSseFrames(wire, true).frames;
+  for (const size of [1, 2, 3, 4, 7, 64, 65_536]) {
+    const decode = createSseFrameDecoder();
+    const frames = [];
+    for (let offset = 0; offset < wire.length; offset += size) frames.push(...decode(wire.slice(offset, offset + size)));
+    frames.push(...decode("", true));
+    assert.deepEqual(frames, expected, `network chunks of ${size} characters`);
+    assert.deepEqual(decode("data: reused\n\n"), ["data: reused"]);
+  }
 });

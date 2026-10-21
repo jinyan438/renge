@@ -422,6 +422,7 @@ test("observes chat message height and child-list changes", (context) => {
   const secondChild = {};
   const thread = { children: [firstChild] };
   const observed = [];
+  const unobserved = [];
   let resizeCallback;
   let mutationCallback;
   let resizeDisconnected = false;
@@ -430,6 +431,7 @@ test("observes chat message height and child-list changes", (context) => {
   globalThis.ResizeObserver = class {
     constructor(callback) { resizeCallback = callback; }
     observe(target) { observed.push(target); }
+    unobserve(target) { unobserved.push(target); }
     disconnect() { resizeDisconnected = true; }
   };
   globalThis.MutationObserver = class {
@@ -451,8 +453,13 @@ test("observes chat message height and child-list changes", (context) => {
   assert.equal(changes, 1);
   thread.children = [firstChild, secondChild];
   mutationCallback();
+  assert.equal(changes, 1, "child-list mutation does not force layout before the browser measures it");
+  assert.deepEqual(observed, [thread, firstChild, secondChild], "existing message observers remain subscribed");
+  resizeCallback();
   assert.equal(changes, 2);
-  assert.deepEqual(observed.slice(-3), [thread, firstChild, secondChild]);
+  thread.children = [secondChild];
+  mutationCallback();
+  assert.deepEqual(unobserved, [firstChild]);
   dispose();
   assert.equal(resizeDisconnected, true);
   assert.equal(mutationDisconnected, true);

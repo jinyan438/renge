@@ -8,7 +8,7 @@ import {
   createPiStreamEventQueue,
 } from "../src/piStreamEventQueue.ts";
 import { createPiStreamingTimeline } from "../src/piStreamingTimeline.ts";
-import { getFirstReasoningText, mergeReasoningStreamChunk, splitSseFrames } from "../src/reasoningUtils.ts";
+import { getFirstReasoningText, mergeReasoningStreamChunk, createSseFrameDecoder } from "../src/reasoningUtils.ts";
 import { extractResponsesApiStreamEvent, getResponsesApiErrorMessage } from "../src/responsesApiUtils.mjs";
 
 const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
@@ -20,7 +20,7 @@ function loadStreamReader(waitForToolProgressPaint) {
   }).outputText;
   return vm.runInNewContext(`${code}\nreadChatStream`, {
     createPiStreamRenderQueue, waitForToolProgressPaint, TextDecoder,
-    getFirstReasoningText, mergeReasoningStreamChunk, splitSseFrames,
+    getFirstReasoningText, mergeReasoningStreamChunk, createSseFrameDecoder,
     extractResponsesApiStreamEvent, getResponsesApiErrorMessage,
     isObjectRecord: (value) => Boolean(value && typeof value === "object" && !Array.isArray(value)),
     throwIfChatAborted: (signal) => signal?.throwIfAborted(),
@@ -539,5 +539,23 @@ test("an SSE failure discards pending animation updates and releases the stream 
   releasePaint();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(applied, ["tool_call_start"]);
+  assert.equal(response.body.locked, false);
+});
+
+test("fragmented large SSE results preserve Unicode and wire order through the reader", async () => {
+  const readChatStream = loadStreamReader(async () => {});
+  const output = "跨分片内容🚀".repeat(100_000);
+  const wire = new TextEncoder().encode(sse({ pi: { type: "tool_end", toolCallId: "large", result: output } }) +
+    sse({ choices: [{ delta: { content: "完成" }, finish_reason: "stop" }] }) + "data: [DONE]\n\n");
+  let position = 0;
+  const response = new Response(new ReadableStream({ pull(controller) {
+    if (position === wire.length) { controller.close(); return; }
+    const end = Math.min(position + 65_537, wire.length);
+    controller.enqueue(wire.slice(position, end));
+    position = end;
+  } }), { headers: { "content-type": "text/event-stream" } });
+  const received = [];
+  await readChatStream(response, (text) => received.push(text), undefined, undefined, (event) => { received.push(event.result); });
+  assert.deepEqual(received, [output, "完成"]);
   assert.equal(response.body.locked, false);
 });

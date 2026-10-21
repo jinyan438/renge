@@ -185,19 +185,19 @@ export function centerChatBubble(dot: HTMLElement) {
   return true;
 }
 
-export function scheduleChatFrameWork(callback: () => void, delayMs = 0) {
+export function scheduleChatFrameWork(callback: () => void, delayMs = 0, view: Window = window) {
   return chatScrollScheduler.schedule(callback, (attempt, delay) => {
     let frameId: number | null = null;
-    const timerId = window.setTimeout(() => {
-      if (document.visibilityState === "visible") {
-        frameId = window.requestAnimationFrame(attempt);
+    const timerId = view.setTimeout(() => {
+      if ((view.document ?? document).visibilityState === "visible") {
+        frameId = view.requestAnimationFrame(attempt);
       } else {
         attempt();
       }
     }, delay);
     return () => {
-      window.clearTimeout(timerId);
-      if (frameId !== null) window.cancelAnimationFrame(frameId);
+      view.clearTimeout(timerId);
+      if (frameId !== null) view.cancelAnimationFrame(frameId);
     };
   }, delayMs);
 }
@@ -270,14 +270,16 @@ export function observeChatLayoutChanges(
   }
 
   const resizeObserver = new ResizeObserver(onLayoutChange);
+  const observed = new Set<Element>();
   const observeLayout = () => {
-    resizeObserver.disconnect();
-    resizeObserver.observe(thread);
-    Array.from(thread.children).forEach((child) => resizeObserver.observe(child));
+    const targets = new Set<Element>([thread, ...Array.from(thread.children)]);
+    for (const target of observed) if (!targets.has(target)) { resizeObserver.unobserve(target); observed.delete(target); }
+    for (const target of targets) if (!observed.has(target)) { resizeObserver.observe(target); observed.add(target); }
   };
   const mutationObserver = new MutationObserver(() => {
     observeLayout();
-    onLayoutChange();
+    // The new target's ResizeObserver callback runs after layout. Reading its
+    // scrollHeight in this mutation microtask forces the entire chat to reflow.
   });
 
   observeLayout();
@@ -286,6 +288,29 @@ export function observeChatLayoutChanges(
     resizeObserver.disconnect();
     mutationObserver.disconnect();
   };
+}
+
+/** Resolve the tool fonts during chat initialization, before the first running
+ * tool needs Windows' synchronous fallback-font service. The temporary layout
+ * is isolated, outside normal flow, and contains no conversation data. */
+export function warmChatToolLayout(thread: HTMLElement) {
+  const view = thread.ownerDocument.defaultView;
+  if (!view) return () => undefined;
+  const warm = () => {
+    if (!thread.isConnected) return;
+    const node = thread.ownerDocument.createElement("div");
+    node.setAttribute("aria-hidden", "true");
+    node.style.cssText = "position:fixed;left:-10000px;top:0;width:800px;visibility:hidden;pointer-events:none;contain:layout style paint";
+    node.innerHTML = '<details class="pi-tool-visualization running shell" open><summary class="pi-tool-visualization-header"><span class="chat-tool-heading"><span class="chat-tool-heading-line"><strong>运行命令 读取文件 修改文件</strong><span class="pi-tool-visualization-summary">command path</span></span><span class="chat-tool-description">执行脚本与命令</span></span><span class="pi-tool-visualization-status">执行中 完成</span></summary><div class="pi-tool-visualization-body"><div class="pi-tool-terminal-preview"><div class="command"><b>$</b>command</div><pre>等待输出… 输出内容 output 0123456789</pre></div><div class="pi-tool-code-preview"><pre><span><i>1</i>文件内容 source</span></pre></div></div></details>';
+    thread.append(node);
+    try { void node.offsetHeight; } finally { node.remove(); }
+  };
+  if (typeof view.requestIdleCallback === "function") {
+    const id = view.requestIdleCallback(warm, { timeout: 1_200 });
+    return () => view.cancelIdleCallback(id);
+  }
+  const id = view.setTimeout(warm, 0);
+  return () => view.clearTimeout(id);
 }
 
 export function scheduleChatIdleWork(

@@ -7,6 +7,14 @@ export function getPastedTextPreview(text: string) {
 }
 
 export function resizeChatComposerInput(input: HTMLTextAreaElement) {
+  if (input.ownerDocument?.defaultView?.CSS?.supports("field-sizing", "content")) {
+    // Native sizing avoids collapsing the textarea and synchronously laying
+    // out every open tool card on each keystroke (and again on React onChange).
+    input.style.setProperty("field-sizing", "content");
+    input.style.height = "auto";
+    input.style.overflowY = "auto";
+    return;
+  }
   const style = getComputedStyle(input);
   const minHeight = parseFloat(style.minHeight) || 0;
   const maxHeight = parseFloat(style.maxHeight) || Infinity;

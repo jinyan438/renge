@@ -15,7 +15,7 @@ import {
 } from "electron";
 import { mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync, mkdirSync } from "node:fs";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -55,7 +55,7 @@ import {
   writeSidebarTextFile,
 } from "./sidebar-files.mjs";
 import { createSidebarTerminalManager } from "./sidebar-terminal.mjs";
-import { shouldDisableHardwareAcceleration } from "./hardware-acceleration.mjs";
+import { hasVirtualDisplayAdapter, shouldDisableGpuCompositing, shouldDisableHardwareAcceleration } from "./hardware-acceleration.mjs";
 import { createTextContextMenuTemplate } from "./text-context-menu.mjs";
 import { createDesktopWindowManager } from "./desktop-windows.mjs";
 
@@ -424,6 +424,17 @@ function configureElectronRendering() {
     // NVIDIA's X11 compositor can corrupt Chromium surfaces and hit testing when
     // a fractionally scaled window is maximized. Software rendering is stable.
     app.disableHardwareAcceleration();
+    return;
+  }
+  if (shouldDisableGpuCompositing({ virtualDisplayAdapterPresent: true })) {
+    try {
+      const names = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+        "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"],
+      { encoding: "utf8", windowsHide: true, timeout: 3_000, stdio: ["ignore", "pipe", "ignore"] }).split(/\r?\n/);
+      if (hasVirtualDisplayAdapter(names)) app.commandLine.appendSwitch("disable-gpu-compositing");
+    } catch {
+      // Keep the configured renderer if Windows cannot enumerate adapters.
+    }
   }
 }
 

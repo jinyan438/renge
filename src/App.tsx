@@ -5,11 +5,12 @@ import type { ReviewSource, ReviewSnapshot, ReviewDetail, ReviewRequest, ReviewA
 import { ChatCodeContent } from "./ChatCodeContent";
 import { ChatMessageTime } from "./ChatMessageTime";
 import { ChatLiveToolVisualization } from "./ChatLiveToolVisualization";
+import { ChatStatusSpinner } from "./ChatStatusSpinner";
 import { ChatToolOutputPreview } from "./ChatToolOutputPreview";
 import { createLiveToolVisualizationStore } from "./liveToolVisualizationStore";
 import { ChatDeferredDetails } from "./ChatDeferredDetails";
 import { CHAT_HISTORY_PAGE_SIZE, getChatHistoryWindow } from "./chatHistoryWindow";
-import { serializeJsonOffThread } from "./jsonSerialization";
+import { sendJsonOffThread } from "./jsonSerialization";
 import { createUserProfile, normalizeUserProfiles, type UserProfile } from "./userProfileUtils";
 import {
   ArrowLeft,
@@ -71,7 +72,6 @@ import {
   UserRound,
   Users,
   Wrench,
-  LoaderCircle,
   X,
 } from "lucide-react";
 import {
@@ -306,6 +306,7 @@ import {
   isChatScrollInteractionActive,
   markChatInputActivity,
   observeChatLayoutChanges,
+  warmChatToolLayout,
   observeChatScrollActivity,
   resolveChatFollowLatest,
   ROLEPLAY_CHAT_STREAM_RENDER_INTERVAL_MS,
@@ -330,7 +331,7 @@ import {
   resolveToolProgressTiming,
   stripMarkdownLinks,
   toolActionTitleMap,
-  waitForToolProgressPaint,
+  waitForToolProgressPaint as waitForScheduledToolPaint,
   type ChatToolProgressBlock,
   type ToolProgressTimingEntry,
 } from "./chatToolProgressUtils";
@@ -378,7 +379,7 @@ import {
   shouldHideEmptyAssistantBubble,
   shouldUseResponsesApiForLocalQwen,
   shouldRetryReasoningOnlyToolCompletion,
-  splitSseFrames,
+  createSseFrameDecoder,
   type ProviderReasoningEffort,
   type ReasoningProviderConfig,
   type ReasoningMessageStreamMode,
@@ -1172,6 +1173,7 @@ type PersistentAppDataLoadResult = {
   available: boolean;
   data: RengeAppData | null;
   sessionVersions?: Record<string, string>;
+  messagePatches?: boolean;
   error?: string;
 };
 
@@ -3262,12 +3264,13 @@ async function loadPersistentAppData(): Promise<PersistentAppDataLoadResult> {
       return { available: false, data: null, error: errorPayload.error || `主数据读取失败（${response.status}）。` };
     }
 
-    const payload = (await response.json()) as { data?: RengeAppData; sessionVersions?: Record<string, string> };
+    const payload = (await response.json()) as { data?: RengeAppData; sessionVersions?: Record<string, string>; messagePatches?: boolean };
     if (!isObjectRecord(payload.data)) return { available: false, data: null, error: "数据服务未返回有效的应用主数据。" };
     return {
       available: true,
       data: payload.data && typeof payload.data === "object" ? payload.data : null,
       sessionVersions: payload.sessionVersions,
+      messagePatches: payload.messagePatches === true,
     };
   } catch (error) {
     return { available: false, data: null, error: error instanceof Error ? error.message : "无法读取应用主数据。" };
@@ -3279,6 +3282,7 @@ let lastCharacterCardsForPersistentStore: CharacterCard[] | null = null;
 let lastAppDataForPersistentStore: RengeAppData | null = null;
 let lastChatSessionsForPersistentStore: ChatSession[] = [];
 let persistentChatSessionVersions: Record<string, string> = {};
+let persistentMessagePatchesSupported = false;
 let piSessionActivityQueue: Promise<unknown> = Promise.resolve();
 
 function notifyPiSessionActivity(sessionId: string, frozen: boolean) {
@@ -3339,6 +3343,7 @@ async function savePersistentAppData(
       const patchExistingData = !replaceExistingData;
       const sessionPatch = patchExistingData ? createChatSessionPatch(
         data.chatSessions ?? [], lastChatSessionsForPersistentStore, persistentChatSessionVersions,
+        { messageDeltas: persistentMessagePatchesSupported },
       ) : undefined;
       if (patchExistingData) delete requestData.chatSessions;
       if (
@@ -3354,12 +3359,10 @@ async function savePersistentAppData(
         lastChatSessionsForPersistentStore = data.chatSessions ?? [];
         return true;
       }
-      const response = await fetch("/api/app-data", {
-        method: patchExistingData ? "PATCH" : "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: await serializeJsonOffThread({ data: requestData, ...(sessionPatch ? { sessionPatch } : {}) }),
+      const response = await sendJsonOffThread("/api/app-data", patchExistingData ? "PATCH" : "PUT", {
+        data: requestData, ...(sessionPatch ? { sessionPatch } : {}),
       });
-      const payload = await response.json().catch(() => ({})) as {
+      const payload = response.payload as {
         error?: string; sessionVersions?: Record<string, string>;
       };
       if (response.ok) {
@@ -11189,6 +11192,11 @@ function createChatAbortError() {
   return new DOMException("AI 输出已停止。", "AbortError");
 }
 
+function waitForToolProgressPaint() {
+  const view = getDesktopWindow("chat");
+  return waitForScheduledToolPaint((callback) => view.requestAnimationFrame(callback));
+}
+
 function isChatAbortError(error: unknown) {
   if (error instanceof DOMException && error.name === "AbortError") return true;
   return error instanceof Error && error.name === "AbortError";
@@ -11416,7 +11424,7 @@ async function readChatStream(
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
+  const decodeFrames = createSseFrameDecoder();
   let fullContent = "";
   let fullReasoning = "";
   let reasoningMessageMode: ReasoningMessageStreamMode = "unknown";
@@ -11571,14 +11579,10 @@ async function readChatStream(
       throwIfChatAborted(signal);
       if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      const parsed = splitSseFrames(buffer);
-      buffer = parsed.rest;
-      parsed.frames.forEach(applySseFrame);
+      decodeFrames(decoder.decode(value, { stream: true })).forEach(applySseFrame);
     }
 
-    buffer += decoder.decode();
-    splitSseFrames(buffer, true).frames.forEach(applySseFrame);
+    decodeFrames(decoder.decode(), true).forEach(applySseFrame);
     await renderQueue.waitForIdle();
     throwIfChatAborted(signal);
   } finally {
@@ -13333,7 +13337,7 @@ export function App() {
   const chatScrollFollowLatestRef = useRef(true);
   const chatReadingFocusRef = useRef(false);
   const chatScrollFrameRef = useRef<(() => void) | null>(null);
-  const chatScrollStateFrameRef = useRef<number | null>(null);
+  const chatScrollStateFrameRef = useRef<(() => void) | null>(null);
   const renderedEditingDraftRef = useRef<{ messageId: string; content: string } | null>(null);
   const renderedEditingFocusRef = useRef<{
     messageId: string;
@@ -13406,7 +13410,7 @@ export function App() {
 
     const input = chatInputRef.current;
     if (input && input.value !== next) input.value = next;
-    if (input) resizeChatComposerInput(input);
+    if (input && next !== previous) resizeChatComposerInput(input);
 
     const hasContent = Boolean(next.trim());
     if (hasContent !== chatInputHasContentRef.current) {
@@ -13713,7 +13717,7 @@ export function App() {
       const thread = chatThreadRef.current;
       if (!thread || !chatScrollFollowLatestRef.current) return;
       scrollChatToLatest(thread);
-    });
+    }, 0, chatThreadRef.current?.ownerDocument.defaultView ?? window);
   }, []);
 
   const setChatThreadRef = useCallback(
@@ -13729,10 +13733,14 @@ export function App() {
       setHtmlPreviewReadyMountKey("");
       if (!thread) return;
       chatScrollActivityCleanupRef.current = observeChatScrollActivity(thread);
-      chatLayoutCleanupRef.current = observeChatLayoutChanges(
+      const stopObservingLayout = observeChatLayoutChanges(
         thread,
-        scheduleChatScrollToLatest,
+        () => {
+          if (chatThreadRef.current === thread && chatScrollFollowLatestRef.current) scrollChatToLatest(thread);
+        },
       );
+      const cancelToolWarmup = warmChatToolLayout(thread);
+      chatLayoutCleanupRef.current = () => { stopObservingLayout(); cancelToolWarmup(); };
       chatReadingFocusRef.current = false;
       chatScrollFollowLatestRef.current = true;
       scheduleChatScrollToLatest();
@@ -13751,7 +13759,7 @@ export function App() {
         chatScrollFrameRef.current = null;
       }
       if (chatScrollStateFrameRef.current !== null) {
-        window.cancelAnimationFrame(chatScrollStateFrameRef.current);
+        chatScrollStateFrameRef.current();
         chatScrollStateFrameRef.current = null;
       }
     };
@@ -15234,6 +15242,7 @@ export function App() {
       const persistentData = persistentResult.data;
       lastChatSessionsForPersistentStore = persistentData?.chatSessions ?? [];
       persistentChatSessionVersions = persistentResult.sessionVersions ?? {};
+      persistentMessagePatchesSupported = persistentResult.messagePatches === true;
       let pendingPersistentStoreBaseline: {
         persistedData: RengeAppData;
         dirtyKeys: ReadonlySet<keyof RengeAppData>;
@@ -21144,16 +21153,6 @@ export function App() {
     scheduleChatScrollToLatest();
   }, [activeChatSessionId, scheduleChatScrollToLatest]);
 
-  useEffect(() => {
-    scheduleChatScrollToLatest();
-  }, [
-    chatGenerationState,
-    chatReasoningVisible,
-    regexProcessedChatMessages,
-    scheduleChatScrollToLatest,
-    visibleChatMessages,
-  ]);
-
   const htmlPreviewSourceMessages = useThrottledValue(
     chatMessages,
     chatMode === "roleplay" && chatGenerationState !== "idle"
@@ -23590,10 +23589,10 @@ export function App() {
     }
   };
 
-  const copyChatCodeBlock = async (content: string) => {
+  const copyChatCodeBlock = useCallback(async (content: string) => {
     await navigator.clipboard.writeText(content);
     setChatStatus({ status: "success", message: "已复制代码块。" });
-  };
+  }, []);
 
   const executeMcpTool = async (
     toolName: string,
@@ -24432,7 +24431,7 @@ export function App() {
     </header>
   );
 
-  const renderPiToolVisualizationBody = (meta: ToolVisualization, key: string) => {
+  const renderPiToolVisualizationBody = useCallback((meta: ToolVisualization, key: string) => {
     const normalizedName = meta.name.trim().toLocaleLowerCase().replace(/[\s.-]+/g, "_");
     const args = meta.args ?? {};
     const path = String(args.path ?? args.filePath ?? args.file_path ?? "");
@@ -24488,7 +24487,7 @@ export function App() {
             <span className="chat-tool-description">{description}</span>
           </span>
           <span className="pi-tool-visualization-status">
-            {meta.status === "done" ? <CircleCheck size={14} /> : meta.status === "error" ? <X size={14} /> : <LoaderCircle className="chat-status-spinner" size={14} />}
+            {meta.status === "done" ? <CircleCheck size={14} /> : meta.status === "error" ? <X size={14} /> : <ChatStatusSpinner size={14} />}
             {statusLabel}
           </span>
           <ChevronDown className="pi-tool-visualization-chevron" size={15} />
@@ -24524,12 +24523,10 @@ export function App() {
         }}
       </ChatDeferredDetails>
     );
-  };
+  }, [copyChatCodeBlock]);
 
   const renderPiToolVisualization = (meta: ToolVisualization, key: string) => (
-    <ChatLiveToolVisualization key={key} store={liveToolVisualizations} sessionId={activeChatSessionId} initial={meta}>
-      {(visualization) => renderPiToolVisualizationBody(visualization, key)}
-    </ChatLiveToolVisualization>
+    <ChatLiveToolVisualization key={key} store={liveToolVisualizations} sessionId={activeChatSessionId} initial={meta} render={renderPiToolVisualizationBody} renderKey={key} />
   );
 
   const renderToolProgressBlock = (block: ChatToolProgressBlock, messageId: string) => {
@@ -24562,7 +24559,7 @@ export function App() {
             {summaryPath && <span className="chat-tool-summary-path" title={summaryPath}>{summaryPath}</span>}
           </span>
           <span className="chat-tool-badge">
-            {block.variant === "success" ? <CircleCheck size={14} /> : block.variant === "error" ? <X size={14} /> : <LoaderCircle className="chat-status-spinner" size={14} />}
+            {block.variant === "success" ? <CircleCheck size={14} /> : block.variant === "error" ? <X size={14} /> : <ChatStatusSpinner size={14} />}
             {block.badge}
           </span>
           <ChevronDown className="chat-tool-chevron" size={15} />
@@ -30742,6 +30739,9 @@ export function App() {
       return;
     }
     void sendChatMessage();
+    // Keep typing in the same native input context after a mouse send, just as
+    // when sending with Enter. Refocusing during the next tool update is costly.
+    chatInputRef.current?.focus({ preventScroll: true });
   };
   const sendRunningComposerInput = (mode: ChatInputMode) => {
     const sessionId = chatRunningInputMenuSessionId;
@@ -33496,7 +33496,7 @@ export function App() {
                     onClick={() => void generateCharacterAlternateGreeting()}
                   >
                     {characterGreetingGenerationDialog.status === "loading" ? (
-                      <LoaderCircle className="chat-status-spinner" size={15} />
+                      <ChatStatusSpinner size={15} />
                     ) : (
                       <Sparkles size={15} />
                     )}
@@ -38285,7 +38285,7 @@ export function App() {
                       <FolderOpen size={17} />
                       <span>{group.name}</span>
                       {hasBackgroundRun ? (
-                        <LoaderCircle size={14} className="chat-status-spinner chat-workspace-running" role="img" aria-label="有后台会话正在运行" />
+                        <ChatStatusSpinner size={14} className="chat-workspace-running" role="img" aria-label="有后台会话正在运行" />
                       ) : group.key === activeChatSession?.workspaceKey ? <i aria-label="当前工作区" /> : null}
                     </button>
                   );
@@ -38330,7 +38330,7 @@ export function App() {
                           closeMobileSidebar();
                         }}
                       >
-                        {chatRuntimesRef.current.get(session.id).controller ? <LoaderCircle size={14} className="chat-status-spinner" /> : <MessageSquare size={14} />}
+                        {chatRuntimesRef.current.get(session.id).controller ? <ChatStatusSpinner size={14} /> : <MessageSquare size={14} />}
                         <span>{session.title}</span>
                         {chatRuntimesRef.current.get(session.id).controller && <small className="chat-session-running">运行中</small>}
                       </button>
@@ -38461,7 +38461,8 @@ export function App() {
               if (chatMessageMenu) setChatMessageMenu(null);
               const thread = event.currentTarget;
               if (chatScrollStateFrameRef.current !== null) return;
-              chatScrollStateFrameRef.current = window.requestAnimationFrame(() => {
+              const view = thread.ownerDocument.defaultView ?? window;
+              const frame = view.requestAnimationFrame(() => {
                 chatScrollStateFrameRef.current = null;
                 if (chatReadingFocusRef.current) return;
                 chatScrollFollowLatestRef.current = resolveChatFollowLatest({
@@ -38472,6 +38473,7 @@ export function App() {
                   interactionActive: isChatScrollInteractionActive(),
                 });
               });
+              chatScrollStateFrameRef.current = () => view.cancelAnimationFrame(frame);
             }}
           >
             {visibleChatMessages.length > CHAT_HISTORY_PAGE_SIZE && (
