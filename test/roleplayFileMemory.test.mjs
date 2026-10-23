@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { archiveRoleplayMessages, createMemoryTools, memoryPath, memoryScope, normalizeRoleplayFileMemory,
+import { createMemoryTools, memoryPath, memoryScope, normalizeRoleplayFileMemory,
   recentRoleplayBody, reconcileMemoryHistory, recordMemoryRevision, runMemoryAgent, writeMemoryFile } from "../src/roleplayFileMemory.ts";
 import { workspaceFileOperation } from "../workspace-files-store.mjs";
 import { commitMemoryFiles, loadMemoryFiles, prepareMemoryFileTool, roleplayMemoryRoot } from "../src/roleplayMemoryStorage.ts";
@@ -36,25 +36,50 @@ test("only three body messages count, with tools and hidden turns excluded", () 
   assert.deepEqual(recentRoleplayBody(turns).map(turn => turn.id), ["u", "a", "new"]);
 });
 
-test("archives are searchable on demand and remove discarded history", () => {
-  const memory = archiveRoleplayMessages(fresh(), [message("old", "旧港口的钥匙在阿莉娅手中"), message("new")]);
-  const tools = createMemoryTools(memory, false);
-  assert.deepEqual(tools.execute("memory_list", {}).entries.map(entry => entry.path), ["剧情原文"]);
-  const hit = tools.execute("memory_search", { query: "钥匙" }).matches[0];
-  assert.ok(hit.path.endsWith("old.md"));
+test("history is searched and read on demand without creating transcript files", () => {
+  const memory = fresh();
+  const tools = createMemoryTools(memory, false, [message("old", "旧港口的钥匙在阿莉娅手中", "user"), message("new")]);
+  assert.deepEqual(tools.execute("memory_list", {}).entries, []);
+  const hit = tools.execute("memory_history_search", { query: "钥匙" }).matches[0];
+  assert.equal(hit.id, "old");
+  assert.equal(hit.turn, 1);
+  assert.equal(hit.role, "user");
   assert.equal(tools.context(), "", "search snippets are not automatically injected into prose");
-  tools.execute("memory_read", { path: hit.path });
+  tools.execute("memory_history_read", { id: hit.id });
   assert.match(tools.context(), /旧港口/);
+  assert.match(tools.context(), /第 1 条 · 用户/);
   assert.throws(() => tools.execute("memory_write", { path: "人物/a.md", content: "x" }), /只允许检索/);
-  archiveRoleplayMessages(memory, [message("new")]);
-  assert.equal(Object.values(memory.files).some(file => file.content.includes("钥匙")), false);
+  assert.equal(Object.keys(memory.files).length, 0);
+  assert.deepEqual(memory.directories, []);
+  const regenerated = createMemoryTools(memory, false, [message("new")]);
+  assert.equal(regenerated.execute("memory_history_search", { query: "钥匙" }).total, 0);
+  assert.throws(() => regenerated.execute("memory_history_read", { id: "old" }), /不存在/);
 });
 
-test("file-sidebar edits to an archive are kept when history is archived again", () => {
-  const memory = archiveRoleplayMessages(fresh(), [message("scene", "旧港口")]);
-  const path = Object.keys(memory.files)[0];
-  memory.files[path] = { ...memory.files[path], content: "用户更正：钟楼", userEdited: true };
-  archiveRoleplayMessages(memory, [message("scene", "旧港口")]);
+test("history lookup excludes hidden, tool, failed and other-session turns", () => {
+  const tools = createMemoryTools(fresh(), false, [message("visible", "钥匙在铜门边"),
+    { ...message("hidden", "钥匙秘密"), hidden: true }, { ...message("tool", "钥匙工具"), toolVisualization: {} },
+    { ...message("failed", "钥匙错误"), outputStatus: "error" }, message("system", "钥匙规则", "system"),
+    { ...message("partial", "尚未确认的钥匙去向"), outputStatus: "incomplete" }]);
+  assert.deepEqual(tools.execute("memory_history_search", { query: "钥匙" }).matches.map(hit => hit.id), ["visible", "partial"]);
+  for (const id of ["hidden", "tool", "failed", "system", "other-session"]) {
+    assert.throws(() => tools.execute("memory_history_read", { id }), /不存在/);
+  }
+  assert.match(tools.execute("memory_history_read", { id: "partial" }).content, /未完成.*不能当作已确认剧情/);
+});
+
+test("legacy transcript files stay readable and are preserved without new copies", async () => {
+  const path = "剧情原文/000001-scene.md";
+  const memory = normalizeRoleplayFileMemory({ ...fresh(), files: {
+    [path]: { content: "用户更正：钟楼", updatedAt: "old", userEdited: true },
+  } }, scope);
+  const tools = createMemoryTools(memory, true);
+  assert.equal(tools.execute("memory_list", {}).entries[0].readOnly, true);
+  assert.equal(tools.execute("memory_read", { path }).content, "用户更正：钟楼");
+  assert.throws(() => tools.execute("memory_edit", { path, oldText: "钟楼", newText: "港口" }), /只读/);
+  await runMemoryAgent({ memory, writable: true, history: [message("new", "新正文")], reference: "新正文",
+    signal: new AbortController().signal, request: async () => reply([], "NO_CHANGES") });
+  assert.deepEqual(Object.keys(memory.files), [path]);
   assert.equal(memory.files[path].content, "用户更正：钟楼");
 });
 
@@ -72,10 +97,10 @@ test("nested Markdown edits require reading and preserve unrelated facts", () =>
   assert.match(memory.files["物品/钱包/金币.md"].content, /装备/);
 });
 
-test("paths are sandboxed and raw archives cannot be overwritten", () => {
+test("paths are sandboxed and legacy archives cannot be overwritten", () => {
   for (const path of ["../secret.md", "/root.md", "C:/secret.md", "a//b.md", "a/../b.md", "a.txt", "CON.md", "a./b.md", "a\u0000.md"]) assert.throws(() => memoryPath(path));
   const memory = fresh();
-  assert.throws(() => writeMemoryFile(memory, "剧情原文/x.md", "fake"), /应用维护/);
+  assert.throws(() => writeMemoryFile(memory, "剧情原文/x.md", "fake"), /只读/);
   assert.throws(() => writeMemoryFile(memory, "a.md", "x".repeat(80_001)), /拆分/);
   writeMemoryFile(memory, "a.md", "file");
   assert.throws(() => writeMemoryFile(memory, "a.md/b.md", "bad"), /冲突/);
@@ -88,6 +113,16 @@ test("reads are bounded even for large files", () => {
   assert.equal(tools.execute("memory_read", { path: "长篇.md" }).content.length, 12_000);
   for (let i = 0; i < 3; i++) tools.execute("memory_read", { path: "长篇.md" });
   assert.throws(() => tools.execute("memory_read", { path: "长篇.md" }), /预算/);
+});
+
+test("history and file reads share the same bounded retrieval budget", () => {
+  const memory = fresh(); writeMemoryFile(memory, "参考.md", "f".repeat(20_000));
+  const tools = createMemoryTools(memory, false, [message("long", "h".repeat(70_000))]);
+  assert.equal(tools.execute("memory_history_read", { id: "long" }).content.length, 12_000);
+  assert.equal(tools.execute("memory_read", { path: "参考.md" }).content.length, 12_000);
+  tools.execute("memory_history_read", { id: "long" });
+  assert.equal(tools.execute("memory_history_read", { id: "long" }).content.length, 4_000);
+  assert.throws(() => tools.execute("memory_read", { path: "参考.md" }), /预算/);
 });
 
 test("regeneration rolls back AI facts while protecting manual file edits", () => {
@@ -133,6 +168,28 @@ test("agent loop retrieves only tool-read data and uses a separate write phase",
   assert.match(result, /她有钥匙/); assert.doesNotMatch(result, /不相关秘密/);
   assert.ok(!JSON.stringify(requests[0]).includes("她有钥匙"));
   assert.match(JSON.stringify(requests[1]), /她有钥匙/);
+});
+
+test("older conversations are available to the agent only through explicit history tools", async () => {
+  const memory = fresh();
+  const history = [message("old", "旧约定：铜门只能在黎明开启。"), message("unrelated", "不相关的漫长正文"), message("a"), message("b")];
+  let round = 0;
+  const context = await runMemoryAgent({ memory, writable: false, history, reference: "尝试打开铜门", signal: new AbortController().signal,
+    request: async messages => {
+      round++;
+      assert.doesNotMatch(JSON.stringify(messages), /不相关的漫长正文/);
+      if (round === 1) {
+        assert.doesNotMatch(JSON.stringify(messages), /铜门只能在黎明开启/);
+        return reply([call("memory_history_search", { query: "铜门" })]);
+      }
+      if (round === 2) {
+        const result = JSON.parse(messages.at(-1).content);
+        return reply([call("memory_history_read", { id: result.matches[0].id })]);
+      }
+      return reply();
+    } });
+  assert.match(context, /铜门只能在黎明开启/);
+  assert.equal(Object.keys(memory.files).length, 0);
 });
 
 test("failed or cancelled write drafts can be discarded atomically", async () => {

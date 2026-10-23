@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -58,11 +58,12 @@ try {
       }
       return;
     }
-    const calls = previousTools.length ? [] : writable ? [
+    const calls = previousTools.length ? (!writable && previousTools.length === 2
+      ? [call("memory_history_read", { id: JSON.parse(previousTools[1].content).matches[0].id })] : []) : writable ? [
       call("memory_read", { path: "人物/守门人.md" }),
       call("memory_edit", { path: "人物/守门人.md", oldText: "当前在旧港口", newText: "当前在钟楼" }),
       call("memory_write", { path: "时间线/第一章/进入钟楼.md", content: "守门人带用户进入钟楼，铜钥匙仍由守门人保管。" }),
-    ] : [call("memory_read", { path: "人物/守门人.md" })];
+    ] : [call("memory_read", { path: "人物/守门人.md" }), call("memory_history_search", { query: "A_BODY_0" })];
     await route.fulfill({ json: { choices: [{ message: { role: "assistant", content: calls.length ? "" : "READY", ...(calls.length ? { tool_calls: calls } : {}) }, finish_reason: calls.length ? "tool_calls" : "stop" }] } });
   });
   await page.route("**/api/pi/chat", async route => {
@@ -89,19 +90,23 @@ try {
   await page.goto(server.url); await enter(); await selectSession("A");
   await send("请带我进入钟楼");
   const persisted = await saved(data => data.chatSessions.find(session => session.id === "A")?.fileMemory?.files["时间线/第一章/进入钟楼.md"]);
-  assert.deepEqual(order, ["read", "read", "story", "write", "write"]);
+  assert.deepEqual(order, ["read", "read", "read", "story", "write", "write"]);
   assert.equal(storyRequests[0].piHistoryMode, "replace", "persistent Pi history cannot bypass the three-turn window");
   const actual = storyRequests[0].request.messages;
   const bodies = actual.filter(message => message.role === "user" || message.role === "assistant");
   assert.equal(bodies.length, 3);
   assert.match(JSON.stringify(actual), /A_BODY_4/); assert.match(JSON.stringify(actual), /A_BODY_5/);
-  assert.doesNotMatch(JSON.stringify(actual), /A_BODY_[0-3]|B_ONLY_SECRET/);
+  assert.doesNotMatch(JSON.stringify(bodies), /A_BODY_[0-3]/);
+  assert.match(JSON.stringify(actual), /按需查证的会话记录.*A-0/);
+  assert.doesNotMatch(JSON.stringify(actual), /A_BODY_[1-3]|B_ONLY_SECRET/);
   assert.match(JSON.stringify(actual), /守门人持有铜钥匙/);
   assert.match(JSON.stringify(actual), /SYSTEM_PROMPT_KEPT/); assert.match(JSON.stringify(actual), /WORLDBOOK_KEPT/);
   assert.match(JSON.stringify(actual), /CHARACTER_CARD_KEPT/);
   assert.equal(persisted.chatSessions.find(session => session.id === "B").fileMemory.files["人物/守门人.md"].content, "B_ONLY_SECRET");
   const mirror = join(root, "temporary-files", "角色记忆", "会话-%41");
   assert.match(await readFile(join(mirror, "时间线/第一章/进入钟楼.md"), "utf8"), /钟楼/);
+  assert.equal((await readdir(mirror)).includes("剧情原文"), false, "generation never creates transcript folders");
+  assert.equal(Object.keys(persisted.chatSessions.find(session => session.id === "A").fileMemory.files).some(path => path.startsWith("剧情原文/")), false);
   // The existing file module is the only memory editor, and its writes go
   // straight to the physical temporary folder used by generation.
   await selectSession("B");
@@ -121,7 +126,7 @@ try {
   assert.match(await readFile(join(mirror, "人物/守门人.md"), "utf8"), /手动设定/);
   await saved(data => data.chatSessions.find(session => session.id === "A")?.fileMemory?.files["人物/守门人.md"].content.startsWith("手动设定"));
   await files.screenshot({ path: ".runtime/roleplay-file-memory-sidebar.png" });
-  // Fail after a successful staged mutation: prose and archive survive, while
+  // Fail after a successful staged mutation: prose and earlier memories survive, while
   // the half-written category file never reaches session storage or disk.
   failWrite = true;
   await page.getByRole("button", { name: "发送", exact: true }).waitFor();
@@ -129,7 +134,9 @@ try {
   const failed = await saved(data => data.chatSessions.find(session => session.id === "A")?.fileMemory?.lastError);
   const failedSession = failed.chatSessions.find(session => session.id === "A");
   assert.equal(failedSession.fileMemory.files["测试/未提交.md"], undefined);
-  assert.ok(Object.values(failedSession.fileMemory.files).some(file => file.content.includes("测试记忆更新失败")));
+  assert.ok(failedSession.messages.some(message => message.content === "测试记忆更新失败"));
+  assert.equal(Object.values(failedSession.fileMemory.files).some(file => file.content.includes("测试记忆更新失败")), false, "failed memory updates do not fall back to copying prose");
+  assert.equal((await readdir(mirror)).includes("剧情原文"), false);
   assert.match(failedSession.messages.at(-1).content, /走进钟楼/);
   assert.match(failedSession.fileMemory.lastError, /fixture memory update failure/);
   assert.match(JSON.stringify(storyRequests[1].request.messages), /手动设定：守门人携带铜钥匙/);
