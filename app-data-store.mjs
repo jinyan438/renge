@@ -3,6 +3,7 @@ import { createWriteStream } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { dirname, join } from "node:path";
+import { syncRoleplayMemoryFiles } from "./roleplay-memory-store.mjs";
 const appDataBackupCount = 3;
 const completeBackupManagedRoots = [".pi", "extensions", "generated-images", "session-images", "skills", "tavern-files", "tavern-script-assets"];
 const appDataWriteQueues = new Map();
@@ -196,6 +197,9 @@ export async function writeAppData(dataFilePath, payloadOrUpdater) {
       validateAppData(payload);
       await rotateAppDataBackups(dataFilePath);
       await writeAppDataFileAtomically(dataFilePath, payload);
+      await syncRoleplayMemoryFiles(dataFilePath, payload).catch(error => {
+        console.warn("[roleplay-memory] Markdown 文件副本未能同步，会话内记忆已保存：", error.message);
+      });
     });
   appDataWriteQueues.set(dataFilePath, operation);
   try {
@@ -233,7 +237,7 @@ export async function clearAppData(dataFilePath) {
       ownedFiles.forEach((filePath) => validatedAppDataFiles.delete(filePath));
       primarySnapshots.delete(dataFilePath);
       await Promise.all(
-        ["app-data-assets", ...completeBackupManagedRoots].map((name) =>
+        ["app-data-assets", "roleplay-memory", ...completeBackupManagedRoots].map((name) =>
           rm(join(dataDirectory, name), { recursive: true, force: true }),
         ),
       );

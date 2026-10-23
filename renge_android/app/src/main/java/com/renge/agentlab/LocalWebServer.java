@@ -1934,7 +1934,7 @@ public class LocalWebServer {
         if (runId.isEmpty()) runId = "android-pi-" + System.nanoTime();
         JSONObject streamingRequest = new JSONObject(requestBody.toString());
         PiSessionState state = getPiSessionState(body);
-        if (state.compactedContext != null) {
+        if (state.compactedContext != null && !"replace".equals(body.optString("piHistoryMode"))) {
             streamingRequest.put("messages", state.compactedContext.apply(streamingRequest.optJSONArray("messages")));
         }
         streamingRequest.put("stream", true);

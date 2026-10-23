@@ -23,6 +23,7 @@ test("uses tool-rich defaults outside roleplay and lean defaults for roleplay", 
     browserTools: false,
     terminalTools: false,
     mcpTools: false,
+    fileMemory: false,
   });
 });
 
@@ -46,4 +47,12 @@ test("updates one mode and source immutably", () => {
   assert.equal(original.roleplay.terminalTools, false);
   assert.equal(updated.roleplay.terminalTools, true);
   assert.deepEqual(updated.ai, original.ai);
+});
+
+
+test("file memory is opt-in and limited to roleplay", () => {
+  const settings = normalizeLlmContextSettings({ ai: { fileMemory: true }, roleplay: { fileMemory: true } });
+  assert.equal(settings.roleplay.fileMemory, true);
+  assert.equal(settings.ai.fileMemory, undefined);
+  assert.equal(normalizeLlmContextSettings({ roleplay: { fileMemory: "true" } }).roleplay.fileMemory, false);
 });

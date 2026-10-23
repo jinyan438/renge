@@ -10,7 +10,7 @@ export const LLM_CONTEXT_SOURCES = [
 ] as const;
 export type LlmContextSource = (typeof LLM_CONTEXT_SOURCES)[number];
 
-export type LlmContextModeSettings = Record<LlmContextSource, boolean>;
+export type LlmContextModeSettings = Record<LlmContextSource, boolean> & { fileMemory?: boolean };
 export type LlmContextSettings = Record<LlmContextMode, LlmContextModeSettings>;
 
 const ENABLED_CONTEXT: LlmContextModeSettings = {
@@ -33,7 +33,7 @@ export const DEFAULT_LLM_CONTEXT_SETTINGS: LlmContextSettings = {
   ai: { ...ENABLED_CONTEXT },
   persona: { ...ENABLED_CONTEXT },
   multi: { ...ENABLED_CONTEXT },
-  roleplay: { ...DISABLED_CONTEXT },
+  roleplay: { ...DISABLED_CONTEXT, fileMemory: false },
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -48,14 +48,17 @@ export function normalizeLlmContextSettings(value: unknown): LlmContextSettings 
       const defaults = DEFAULT_LLM_CONTEXT_SETTINGS[mode];
       return [
         mode,
-        Object.fromEntries(
-          LLM_CONTEXT_SOURCES.map((contextSource) => [
-            contextSource,
-            typeof modeSource[contextSource] === "boolean"
-              ? modeSource[contextSource]
-              : defaults[contextSource],
-          ]),
-        ) as LlmContextModeSettings,
+        {
+          ...Object.fromEntries(
+            LLM_CONTEXT_SOURCES.map((contextSource) => [
+              contextSource,
+              typeof modeSource[contextSource] === "boolean"
+                ? modeSource[contextSource]
+                : defaults[contextSource],
+            ]),
+          ),
+          ...(mode === "roleplay" ? { fileMemory: modeSource.fileMemory === true } : {}),
+        } as LlmContextModeSettings,
       ];
     }),
   ) as LlmContextSettings;
