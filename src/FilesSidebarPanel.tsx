@@ -748,7 +748,7 @@ export function FilesSidebarPanel({
                     <span>{preview.entry.name}</span>
                   </div>
                 ) : editing ? (
-                  <textarea className="files-text-editor" aria-label="文件编辑内容" value={editorContent} disabled={saving} onChange={event => {
+                  <textarea autoFocus className="files-text-editor" aria-label="文件编辑内容" value={editorContent} disabled={saving} onChange={event => {
                     setEditorContent(event.target.value);
                     draftsRef.current.set(`${source.id}:${preview.entry.path}`, event.target.value);
                   }} />
