@@ -15,6 +15,8 @@ import {
   FolderOpen,
   FolderSearch,
   MoreHorizontal,
+  Pencil,
+  Save,
   RefreshCw,
   Search,
   Upload,
@@ -58,6 +60,8 @@ export type FileBrowserSource = {
   listDirectory(path: string): Promise<unknown>;
   readText(path: string): Promise<unknown>;
   readBinary(path: string): Promise<unknown>;
+  writeText?(path: string, content: string, expectedContent: string): Promise<void>;
+  revision?: number;
   importFiles?(): Promise<unknown>;
   runSystemAction?(path: string, action: FileBrowserSystemAction): Promise<unknown>;
 };
@@ -301,6 +305,11 @@ export function FilesSidebarPanel({
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
   const [preview, setPreview] = useState<FilePreviewState | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [editorContent, setEditorContent] = useState("");
+  const [saving, setSaving] = useState(false);
+  const draftsRef = useRef(new Map<string, string>());
+  const revisionRef = useRef({ id: source?.id, revision: source?.revision });
   const [searchQuery, setSearchQuery] = useState("");
   const [resolvedRootPath, setResolvedRootPath] = useState(source?.rootPath ?? "");
   const [statusMessage, setStatusMessage] = useState("");
@@ -344,6 +353,7 @@ export function FilesSidebarPanel({
     setExpandedPaths(new Set());
     setLoadingPaths(new Set());
     setPreview(null);
+    setEditing(false);
     setSearchQuery("");
     setResolvedRootPath(source?.rootPath ?? "");
     setStatusMessage("");
@@ -366,7 +376,14 @@ export function FilesSidebarPanel({
     }).finally(() => {
       if (requestVersionRef.current === version) setLoadingPaths(new Set());
     });
-  }, [source]);
+  }, [source?.id]);
+
+  useEffect(() => {
+    const previous = revisionRef.current;
+    revisionRef.current = { id: source?.id, revision: source?.revision };
+    if (!source || previous.id !== source.id || previous.revision === source.revision) return;
+    for (const path of ["", ...expandedPaths]) void loadDirectory(path, true);
+  }, [source?.id, source?.revision]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -391,6 +408,7 @@ export function FilesSidebarPanel({
   const openPreview = useCallback(async (entry: FileBrowserEntry) => {
     if (!source || entry.kind !== "file") return;
     const kind = getFileBrowserPreviewKind(entry.path);
+    setEditing(false);
     const version = ++requestVersionRef.current;
     setPreview({ entry, kind, status: "loading" });
     setError("");
@@ -431,6 +449,25 @@ export function FilesSidebarPanel({
       });
     }
   }, [source]);
+
+  const saveText = async () => {
+    if (!source?.writeText || !preview || preview.content === undefined || saving) return;
+    const sourceId = source.id;
+    const currentPreview = preview;
+    const previewVersion = requestVersionRef.current;
+    setSaving(true);
+    setError("");
+    try {
+      await source.writeText(currentPreview.entry.path, editorContent, currentPreview.content!);
+      draftsRef.current.delete(`${sourceId}:${currentPreview.entry.path}`);
+      if (sourceIdRef.current !== sourceId || requestVersionRef.current !== previewVersion) return;
+      setPreview({ ...currentPreview, content: editorContent });
+      setEditing(false);
+      setStatusMessage("文件已保存，下次生成将读取最新内容");
+    } catch (saveError) {
+      if (sourceIdRef.current === sourceId) setError(saveError instanceof Error ? saveError.message : "文件保存失败");
+    } finally { setSaving(false); }
+  };
 
   const toggleDirectory = async (entry: FileBrowserEntry) => {
     const expanded = expandedPaths.has(entry.path);
@@ -647,7 +684,7 @@ export function FilesSidebarPanel({
               {source.kind === "temporary" ? (
                 <div className="files-temporary-notice">
                   <span>未连接工作区</span>
-                  <small>这里显示存放在系统临时目录中的文件。</small>
+                  <small>这里显示当前临时文件夹中的文件。</small>
                   {onChooseWorkspace ? <button onClick={() => void onChooseWorkspace()} type="button">选择工作区</button> : null}
                 </div>
               ) : null}
@@ -687,6 +724,16 @@ export function FilesSidebarPanel({
                   <ExternalLink size={14} /> 打开
                 </button>
               ) : null}
+              {preview?.status === "ready" && ["text", "markdown"].includes(preview.kind) && !preview.truncated && source.writeText ? (
+                editing ? <>
+                  <button className="files-preview-open" type="button" disabled={saving} onClick={() => void saveText()}><Save size={14} />保存文件</button>
+                  <button className="files-preview-open" type="button" disabled={saving} onClick={() => {
+                    draftsRef.current.delete(`${source.id}:${preview.entry.path}`); setEditing(false);
+                  }}>取消</button>
+                </> : <button className="files-preview-open" type="button" onClick={() => {
+                  setEditorContent(draftsRef.current.get(`${source.id}:${preview.entry.path}`) ?? preview.content ?? ""); setEditing(true);
+                }}><Pencil size={14} />编辑文件</button>
+              ) : null}
             </header>
             <div className="files-preview-content">
               {!preview ? (
@@ -700,6 +747,11 @@ export function FilesSidebarPanel({
                     <img alt={preview.entry.name} src={preview.imageUrl} />
                     <span>{preview.entry.name}</span>
                   </div>
+                ) : editing ? (
+                  <textarea className="files-text-editor" aria-label="文件编辑内容" value={editorContent} disabled={saving} onChange={event => {
+                    setEditorContent(event.target.value);
+                    draftsRef.current.set(`${source.id}:${preview.entry.path}`, event.target.value);
+                  }} />
                 ) : preview.kind === "markdown" ? (
                   <MarkdownPreview content={preview.content ?? ""} />
                 ) : preview.kind === "text" ? (

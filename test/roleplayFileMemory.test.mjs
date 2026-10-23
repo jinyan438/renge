@@ -5,13 +5,20 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { archiveRoleplayMessages, createMemoryTools, memoryPath, memoryScope, normalizeRoleplayFileMemory,
   recentRoleplayBody, reconcileMemoryHistory, recordMemoryRevision, runMemoryAgent, writeMemoryFile } from "../src/roleplayFileMemory.ts";
-import { roleplayMemoryDirectory, syncRoleplayMemoryFiles } from "../roleplay-memory-store.mjs";
+import { workspaceFileOperation } from "../workspace-files-store.mjs";
+import { commitMemoryFiles, loadMemoryFiles, prepareMemoryFileTool, roleplayMemoryRoot } from "../src/roleplayMemoryStorage.ts";
 
 const scope = memoryScope("workspace-a", "session-a");
 const fresh = () => normalizeRoleplayFileMemory(null, scope);
 const message = (id, content = id, role = "assistant") => ({ id, role, content });
 const call = (name, args) => ({ id: `call-${name}`, type: "function", function: { name, arguments: JSON.stringify(args) } });
 const reply = (calls = [], content = "READY") => ({ content, toolCalls: calls, finishReason: "stop" });
+
+test("session folder names remain distinct on case-insensitive filesystems", () => {
+  assert.notEqual(roleplayMemoryRoot("A").toLowerCase(), roleplayMemoryRoot("a").toLowerCase());
+  assert.notEqual(roleplayMemoryRoot("scene.").toLowerCase(), roleplayMemoryRoot("scene").toLowerCase());
+  assert.ok(!roleplayMemoryRoot("../outside").split("/").includes(".."));
+});
 
 test("session/workspace scopes survive persistence and reject copied memory", () => {
   const memory = fresh();
@@ -41,6 +48,14 @@ test("archives are searchable on demand and remove discarded history", () => {
   assert.throws(() => tools.execute("memory_write", { path: "人物/a.md", content: "x" }), /只允许检索/);
   archiveRoleplayMessages(memory, [message("new")]);
   assert.equal(Object.values(memory.files).some(file => file.content.includes("钥匙")), false);
+});
+
+test("file-sidebar edits to an archive are kept when history is archived again", () => {
+  const memory = archiveRoleplayMessages(fresh(), [message("scene", "旧港口")]);
+  const path = Object.keys(memory.files)[0];
+  memory.files[path] = { ...memory.files[path], content: "用户更正：钟楼", userEdited: true };
+  archiveRoleplayMessages(memory, [message("scene", "旧港口")]);
+  assert.equal(memory.files[path].content, "用户更正：钟楼");
 });
 
 test("nested Markdown edits require reading and preserve unrelated facts", () => {
@@ -138,30 +153,85 @@ test("ignoring tools is reported and explicit no-change is accepted", async () =
   await runMemoryAgent({ memory, writable: true, reference: "", signal: new AbortController().signal, request: async () => reply([], "NO_CHANGES") });
 });
 
-test("ordinary Markdown directories are materialized independently and safely", async () => {
-  const root = await mkdtemp(join(tmpdir(), "renge-memory-"));
+function fileAccess(root) {
+  const operation = (operation, path, extra = {}) => workspaceFileOperation(root, { operation, path, ...extra });
+  return {
+    list: async path => (await operation("list", path)).entries,
+    read: async path => (await operation("read", path)).content,
+    mkdir: async path => { await operation("mkdir", path); },
+    write: async (path, content, expectedContent) => { await operation("write", path, { content, expectedContent }); },
+    remove: async (path, expectedContent) => { await operation("delete", path, { expectedContent }); },
+  };
+}
+
+test("memory migrates into session workspace folders and uses physical edits as truth", async () => {
+  const root = await mkdtemp(join(tmpdir(), "renge-memory-workspace-"));
   try {
-    const dataFile = join(root, "app-data.json");
-    const memory = fresh(); writeMemoryFile(memory, "人物/阿莉娅/身份.md", "守门人");
-    const session = { id: "session-a", workspaceKey: "workspace-a", fileMemory: memory };
-    await syncRoleplayMemoryFiles(dataFile, { chatSessions: [session] });
-    const directory = roleplayMemoryDirectory(dataFile, session.workspaceKey, session.id);
+    const access = fileAccess(root), memory = fresh();
+    writeMemoryFile(memory, "人物/阿莉娅/身份.md", "守门人");
+    const directory = join(root, roleplayMemoryRoot("session-a"));
+    const loaded = await loadMemoryFiles(access, "session-a", memory);
     assert.equal(await readFile(join(directory, "人物/阿莉娅/身份.md"), "utf8"), "守门人");
-    assert.notEqual(directory, roleplayMemoryDirectory(dataFile, "workspace-b", session.id));
-    await writeFile(join(directory, "手动.md"), "用户文件");
-    delete memory.files["人物/阿莉娅/身份.md"];
-    memory.files["../outside.md"] = { content: "bad" };
-    await syncRoleplayMemoryFiles(dataFile, { chatSessions: [session] });
-    await assert.rejects(readFile(join(directory, "人物/阿莉娅/身份.md")), /ENOENT/);
-    assert.equal(await readFile(join(directory, "手动.md"), "utf8"), "用户文件");
-    await assert.rejects(readFile(join(directory, "../outside.md")), /ENOENT/);
-    // Windows directory junctions need no symlink privilege.
+    await writeFile(join(directory, "人物/阿莉娅/身份.md"), "用户通过文件模块改为骑士");
+    const reloaded = await loadMemoryFiles(access, "session-a", loaded);
+    assert.equal(reloaded.files["人物/阿莉娅/身份.md"].content, "用户通过文件模块改为骑士");
+    await access.remove(`${roleplayMemoryRoot("session-a")}/人物/阿莉娅/身份.md`, "用户通过文件模块改为骑士");
+    assert.equal((await loadMemoryFiles(access, "session-a", reloaded)).files["人物/阿莉娅/身份.md"], undefined, "deleted files must not be resurrected from session JSON");
+    const b = normalizeRoleplayFileMemory(null, memoryScope("workspace-a", "session-b"));
+    const other = await loadMemoryFiles(access, "session-b", b);
+    assert.equal(Object.keys(other.files).length, 0);
+    const second = join(root, "second-workspace"); await access.mkdir("second-workspace");
+    assert.equal(Object.keys((await loadMemoryFiles(fileAccess(second), "session-a", fresh())).files).length, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("migration preserves existing Markdown and staged commits preserve concurrent edits", async () => {
+  const root = await mkdtemp(join(tmpdir(), "renge-memory-conflict-"));
+  try {
+    const access = fileAccess(root), base = fresh(); writeMemoryFile(base, "前置.md", "原值"); writeMemoryFile(base, "人物.md", "旧缓存");
+    await access.mkdir(roleplayMemoryRoot("session-a"));
+    await access.write(`${roleplayMemoryRoot("session-a")}/人物.md`, "已有磁盘内容", null);
+    const loaded = await loadMemoryFiles(access, "session-a", base);
+    assert.equal(loaded.files["人物.md"].content, "已有磁盘内容");
+    const draft = normalizeRoleplayFileMemory(loaded, scope);
+    writeMemoryFile(draft, "前置.md", "写入一半的内容");
+    writeMemoryFile(draft, "新文件.md", "本轮新事实"); writeMemoryFile(draft, "人物.md", "AI更新");
+    await access.write(`${roleplayMemoryRoot("session-a")}/人物.md`, "生成期间的手动编辑", "已有磁盘内容");
+    await assert.rejects(commitMemoryFiles(access, "session-a", loaded, draft), /已被修改/);
+    assert.equal(await access.read(`${roleplayMemoryRoot("session-a")}/人物.md`), "生成期间的手动编辑");
+    assert.equal(await access.read(`${roleplayMemoryRoot("session-a")}/前置.md`), "原值", "partial writes roll back without touching the concurrent edit");
+    await assert.rejects(access.read(`${roleplayMemoryRoot("session-a")}/新文件.md`), /不存在/);
+    await assert.rejects(access.write("../escape.md", "bad", null), /越出/);
     const outside = await mkdtemp(join(tmpdir(), "renge-memory-outside-"));
     try {
-      await symlink(outside, join(directory, "链接"), process.platform === "win32" ? "junction" : "dir");
-      memory.files["链接/escape.md"] = { content: "bad" };
-      await assert.rejects(syncRoleplayMemoryFiles(dataFile, { chatSessions: [session] }), /符号链接/);
+      await symlink(outside, join(root, "链接"), process.platform === "win32" ? "junction" : "dir");
+      await assert.rejects(access.write("链接/escape.md", "bad", null), /符号链接/);
       await assert.rejects(readFile(join(outside, "escape.md")), /ENOENT/);
     } finally { await rm(outside, { recursive: true, force: true }); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("filesystem initialization lists names and tool reads load only requested Markdown", async () => {
+  const root = await mkdtemp(join(tmpdir(), "renge-memory-lazy-"));
+  try {
+    const access = fileAccess(root), memory = fresh();
+    writeMemoryFile(memory, "人物/守门人.md", "旧人物内容"); writeMemoryFile(memory, "世界/秘密.md", "不相关世界内容");
+    const first = await loadMemoryFiles(access, "session-a", memory);
+    await access.write(`${roleplayMemoryRoot("session-a")}/人物/守门人.md`, "磁盘修改后的内容", "旧人物内容");
+    const reads = [];
+    const tracked = { ...access, read: async path => { reads.push(path); return access.read(path); } };
+    const baseline = await loadMemoryFiles(tracked, "session-a", first, true);
+    assert.ok(reads.every(path => !path.endsWith(".md")), "initial discovery never reads all Markdown contents");
+    const draft = normalizeRoleplayFileMemory(baseline, scope);
+    await prepareMemoryFileTool(tracked, "session-a", draft, baseline, "memory_read", { path: "人物/守门人.md" });
+    assert.equal(draft.files["人物/守门人.md"].content, "磁盘修改后的内容");
+    assert.equal(baseline.files["人物/守门人.md"].content, "磁盘修改后的内容");
+    assert.equal(draft.files["世界/秘密.md"].unloaded, true);
+    assert.equal(reads.filter(path => path.endsWith(".md")).length, 1);
+    writeMemoryFile(draft, "人物/守门人.md", "本轮修改");
+    await prepareMemoryFileTool(tracked, "session-a", draft, baseline, "memory_read", { path: "人物/守门人.md" });
+    assert.equal(draft.files["人物/守门人.md"].content, "本轮修改", "subsequent tool reads see staged edits");
+    await commitMemoryFiles(access, "session-a", baseline, draft);
+    assert.equal(await access.read(`${roleplayMemoryRoot("session-a")}/人物/守门人.md`), "本轮修改");
   } finally { await rm(root, { recursive: true, force: true }); }
 });

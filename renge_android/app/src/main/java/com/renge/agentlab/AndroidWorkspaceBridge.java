@@ -521,7 +521,7 @@ public class AndroidWorkspaceBridge {
             if (rootWorkspace) return listRootFiles(path, recursive).toString();
             JSONArray results = new JSONArray();
             String docId = resolveDocumentId(path);
-            listFilesInto(docId, normalizePath(path), recursive, results, 240);
+            listFilesInto(docId, normalizePath(path), recursive, results, recursive ? 240 : 10000);
             return results.toString();
         } catch (Exception error) {
             return errorJson(error);

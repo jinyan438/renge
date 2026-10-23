@@ -1,3 +1,4 @@
+import { commitMemoryFiles, httpWorkspaceFileAccess, loadMemoryFiles, prepareMemoryFileTool, roleplayMemoryRoot, type WorkspaceFileAccess } from "./roleplayMemoryStorage";
 import { RoleplayMemorySettings } from "./RoleplayMemorySettings";
 import { archiveRoleplayMessages, runMemoryAgent, reconcileMemoryHistory, recordMemoryRevision, memoryScope, normalizeRoleplayFileMemory, recentRoleplayBody, type RoleplayFileMemory } from "./roleplayFileMemory";
 import { ContextTokenMeter } from "./ContextTokenMeter";
@@ -432,6 +433,7 @@ import { StatusBarSidebar } from "./StatusBarSidebar";
 import type { FileBrowserSource, FileBrowserSystemAction } from "./FilesSidebarPanel";
 import {
   normalizeTextFileWriteArguments,
+  normalizeFileBrowserEntries,
   scopeWorkspaceHandleToSession,
 } from "./fileBrowserUtils";
 import {
@@ -13289,6 +13291,8 @@ export function App() {
   >(null);
   const [localToolsEnabled, setLocalToolsEnabled] = useState(false);
   const [temporaryFilesRevision, setTemporaryFilesRevision] = useState(0);
+  const memoryMigrationTasksRef = useRef(new Map<string, Promise<void>>());
+  const memoryWorkspaceHandlesRef = useRef(new Map<string, NonNullable<typeof localWorkspaceHandle>>());
   const [personas, setPersonas] = useState<AgentPersona[]>([]);
   const [activePersonaId, setActivePersonaId] = useState<string>(
     () => localStorage.getItem(ACTIVE_PERSONA_STORAGE_KEY) ?? "",
@@ -18301,6 +18305,72 @@ export function App() {
       : activeLocalToolsSystemPrompt;
   const activeLlmContextSettings = llmContextSettings[chatMode];
   const workspaceInfo = getWorkspaceInfo(localWorkspaceHandle);
+  if (localWorkspaceHandle) memoryWorkspaceHandlesRef.current.set(getWorkspaceInfo(localWorkspaceHandle).key, localWorkspaceHandle);
+  const getMemoryFileAccess = (session: Pick<ChatSession, "workspaceKey" | "workspacePath">): WorkspaceFileAccess => {
+    if (session.workspaceKey === DEFAULT_WORKSPACE_KEY) return httpWorkspaceFileAccess({ scope: "temporary" });
+    const handle = memoryWorkspaceHandlesRef.current.get(session.workspaceKey);
+    if (handle?.kind === "pc") return httpWorkspaceFileAccess({ scope: "workspace", workspacePath: handle.path, baseUrl: handle.baseUrl });
+    if (handle?.kind === "android") {
+      const api = window.rengeAndroid;
+      if (!api) throw new Error("Android 文件工具不可用。");
+      const check = async () => {
+        const status = await api.getWorkspaceStatus();
+        if (status.uri !== handle.uri) throw new Error("会话工作区已切换，请恢复原工作区后重试记忆操作。");
+      };
+      const read = async (path: string) => { await check(); const result = await api.readFile({ path });
+        if (!isObjectRecord(result) || typeof result.content !== "string") throw new Error("记忆文件读取失败。"); return result.content; };
+      const compare = async (path: string, expected: string | null) => {
+        const parent = path.split("/").slice(0, -1).join("/");
+        const entries = await api.listFiles({ path: parent, recursive: false });
+        const exists = normalizeFileBrowserEntries(entries).some(entry => entry.path === path);
+        const actual = exists ? await read(path) : null;
+        if (actual !== expected) throw new Error("文件已被修改，请刷新后重试。");
+      };
+      return {
+        list: async path => { await check(); return normalizeFileBrowserEntries(await api.listFiles({ path, recursive: false })); }, read,
+        mkdir: async path => { await check(); await api.createDirectory({ path }); },
+        write: async (path, content, expected) => { await check(); await api.createDirectory({ path: path.split("/").slice(0, -1).join("/") }); await compare(path, expected); await api.writeFile({ path, content }); },
+        remove: async (path, expected) => { await check(); await compare(path, expected); await api.deletePath({ path }); },
+      };
+    }
+    if (handle?.kind === "directory") {
+      const compare = async (path: string, expected: string | null) => {
+        let actual: string | null;
+        try { actual = await readLocalTextFile(handle, path); }
+        catch (error) { if (!(error instanceof DOMException) || error.name !== "NotFoundError") throw error; actual = null; }
+        if (actual !== expected) throw new Error("文件已被修改，请刷新后重试。");
+      };
+      return {
+        list: path => listLocalFiles(handle, path, false, 10_000), read: path => readLocalTextFile(handle, path),
+        mkdir: async path => { await createLocalDirectory(handle, path); },
+        write: async (path, content, expected) => { await compare(path, expected); await writeLocalTextFile(handle, path, content); },
+        remove: async (path, expected) => { await compare(path, expected); const target = await getLocalParentDirectory(handle, path); await target.directory.removeEntry(target.name); },
+      };
+    }
+    if (handle?.kind === "electron" || (session.workspacePath && !session.workspaceKey.startsWith("pc:") && !session.workspaceKey.startsWith("android:") && !session.workspaceKey.startsWith("browser:"))) {
+      return httpWorkspaceFileAccess({ scope: "workspace", workspacePath: handle?.kind === "electron" ? handle.path : session.workspacePath });
+    }
+    throw new Error("请先恢复此会话的工作区，再读取或保存文件记忆。");
+  };
+  const cacheSessionMemory = (sessionId: string, memory: RoleplayFileMemory) => {
+    const sessions = chatSessionsRef.current.map(session => session.id === sessionId && memoryScope(session.workspaceKey, session.id) === memory.scope
+      ? { ...session, fileMemory: memory, updatedAt: new Date().toISOString() } : session);
+    chatSessionsRef.current = sessions;
+    setChatSessions(sessions);
+  };
+  useEffect(() => {
+    const session = activeChatSession;
+    if (!appDataLoaded || session?.mode !== "roleplay" || !session.fileMemory || session.fileMemory.filesystemReady
+      || chatRuntimesRef.current.get(session.id).controller || memoryMigrationTasksRef.current.has(session.id)) return;
+    const task = (async () => {
+      const files = await loadMemoryFiles(getMemoryFileAccess(session), session.id,
+        normalizeRoleplayFileMemory(session.fileMemory, memoryScope(session.workspaceKey, session.id)));
+      if (!chatRuntimesRef.current.get(session.id).controller) cacheSessionMemory(session.id, files);
+      setTemporaryFilesRevision(current => current + 1);
+    })().catch(error => setSessionChatStatus(session.id, { status: "warning", message: `记忆目录迁移失败：${error instanceof Error ? error.message : error}` }))
+      .finally(() => memoryMigrationTasksRef.current.delete(session.id));
+    memoryMigrationTasksRef.current.set(session.id, task);
+  }, [appDataLoaded, activeChatSession?.id, activeChatSession?.workspaceKey, activeLocalWorkspaceHandle]);
   const fileBrowserSource = useMemo<FileBrowserSource | null>(() => {
     if (activeLocalWorkspaceHandle?.kind === "electron") {
       const desktopApi = window.rengeDesktop;
@@ -18308,6 +18378,8 @@ export function App() {
       const scope = "workspace" as const;
       return {
         id: `electron:${activeLocalWorkspaceHandle.path}`,
+        revision: temporaryFilesRevision,
+        writeText: (path, content, expected) => getMemoryFileAccess(activeChatSession!).write(path, content, expected),
         kind: "workspace",
         name: activeLocalWorkspaceHandle.name,
         rootPath: activeLocalWorkspaceHandle.path,
@@ -18324,6 +18396,8 @@ export function App() {
       if (!androidApi?.isAndroid) return null;
       return {
         id: `android:${activeLocalWorkspaceHandle.uri}`,
+        revision: temporaryFilesRevision,
+        writeText: (path, content, expected) => getMemoryFileAccess(activeChatSession!).write(path, content, expected),
         kind: "workspace",
         name: activeLocalWorkspaceHandle.name,
         rootPath: activeLocalWorkspaceHandle.uri,
@@ -18354,6 +18428,8 @@ export function App() {
       };
       return {
         id: `pc:${activeLocalWorkspaceHandle.baseUrl}:${activeLocalWorkspaceHandle.path}`,
+        revision: temporaryFilesRevision,
+        writeText: (path, content, expected) => getMemoryFileAccess(activeChatSession!).write(path, content, expected),
         kind: "workspace",
         name: activeLocalWorkspaceHandle.name,
         rootPath: activeLocalWorkspaceHandle.path,
@@ -18374,6 +18450,8 @@ export function App() {
     if (activeLocalWorkspaceHandle?.kind === "directory") {
       return {
         id: `browser:${activeLocalWorkspaceHandle.name}`,
+        revision: temporaryFilesRevision,
+        writeText: (path, content, expected) => getMemoryFileAccess(activeChatSession!).write(path, content, expected),
         kind: "workspace",
         name: activeLocalWorkspaceHandle.name,
         listDirectory: (path) => listLocalFiles(activeLocalWorkspaceHandle, path, false, 1000),
@@ -18387,10 +18465,23 @@ export function App() {
 
     if (activeWorkspaceKey !== DEFAULT_WORKSPACE_KEY) return null;
     const desktopApi = window.rengeDesktop;
-    if (!desktopApi?.isElectron) return null;
+    if (!desktopApi?.isElectron) {
+      const access = httpWorkspaceFileAccess({ scope: "temporary" });
+      return { id: "server:temporary-files", revision: temporaryFilesRevision, kind: "temporary", name: "临时文件",
+        listDirectory: async path => ({ entries: await access.list(path) }),
+        readText: async path => ({ path, content: await access.read(path) }),
+        writeText: access.write,
+        readBinary: async path => {
+          const response = await fetch("/api/workspace-files", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope: "temporary", operation: "readBinary", path }) });
+          const result = await response.json(); if (!response.ok || result.error) throw new Error(result.error || "文件读取失败。"); return result;
+        },
+      };
+    }
     const scope = "temporary" as const;
     return {
-      id: `electron:temporary-files:${temporaryFilesRevision}`,
+      id: "electron:temporary-files",
+      revision: temporaryFilesRevision,
+      writeText: httpWorkspaceFileAccess({ scope: "temporary" }).write,
       kind: "temporary",
       name: "临时文件",
       listDirectory: (path) => desktopApi.listSidebarFiles({ scope, path }),
@@ -18401,6 +18492,24 @@ export function App() {
         desktopApi.runSidebarFileAction({ scope, path, action }),
     };
   }, [activeLocalWorkspaceHandle, activeWorkspaceKey, temporaryFilesRevision]);
+  const editableFileBrowserSource = useMemo<FileBrowserSource | null>(() => {
+    if (!fileBrowserSource?.writeText) return fileBrowserSource;
+    const source = fileBrowserSource;
+    const workspaceKey = activeWorkspaceKey;
+    return { ...source, writeText: async (path, content, expected) => {
+      await source.writeText!(path, content, expected);
+      const sessions = chatSessionsRef.current.map(session => {
+        if (session.workspaceKey !== workspaceKey || !path.toLowerCase().endsWith(".md")) return session;
+        const prefix = `${roleplayMemoryRoot(session.id)}/`;
+        if (!path.startsWith(prefix)) return session;
+        const memory = normalizeRoleplayFileMemory(session.fileMemory, memoryScope(workspaceKey, session.id));
+        memory.files[path.slice(prefix.length)] = { content, updatedAt: new Date().toISOString(), userEdited: true };
+        return { ...session, fileMemory: memory, updatedAt: new Date().toISOString() };
+      });
+      chatSessionsRef.current = sessions;
+      setChatSessions(sessions);
+    } };
+  }, [fileBrowserSource, activeWorkspaceKey]);
   const codeReviewSource = useMemo<ReviewSource | null>(() => {
     const handle = activeLocalWorkspaceHandle;
     if (!handle || (handle.kind !== "electron" && handle.kind !== "pc")) return null;
@@ -25938,18 +26047,33 @@ export function App() {
         && requestContextSettings.fileMemory === true && !isImageGenerationRequest;
       const memorySession = chatSessionsRef.current.find(session => session.id === requestSessionId);
       const fileMemoryScope = memoryScope(memorySession?.workspaceKey ?? DEFAULT_WORKSPACE_KEY, requestSessionId);
-      const saveFileMemory = (memory: RoleplayFileMemory) => {
-        const sessions = chatSessionsRef.current.map(session => session.id === requestSessionId
-          && memoryScope(session.workspaceKey, session.id) === memory.scope
-          ? { ...session, fileMemory: memory, updatedAt: new Date().toISOString() } : session);
-        chatSessionsRef.current = sessions;
-        setChatSessions(sessions);
+      await memoryMigrationTasksRef.current.get(requestSessionId);
+      const memoryAccess = fileMemoryEnabled && memorySession ? getMemoryFileAccess(memorySession) : null;
+      let diskMemory = memoryAccess ? await loadMemoryFiles(memoryAccess, requestSessionId,
+        normalizeRoleplayFileMemory(memorySession?.fileMemory, fileMemoryScope), true) : null;
+      if (memoryAccess && diskMemory) {
+        // Load only files that an undo would touch so external edits can be
+        // protected before reconciling a regenerated/deleted story branch.
+        const probe = reconcileMemoryHistory(normalizeRoleplayFileMemory(diskMemory, fileMemoryScope), nextMessages);
+        for (const path of Object.keys(diskMemory.files)) {
+          if (diskMemory.files[path].unloaded && diskMemory.files[path].content !== probe.files[path]?.content) {
+            await prepareMemoryFileTool(memoryAccess, requestSessionId, diskMemory, diskMemory, "memory_read", { path });
+          }
+        }
+      }
+      const saveFileMemory = async (memory: RoleplayFileMemory) => {
+        if (memoryAccess && diskMemory) {
+          await commitMemoryFiles(memoryAccess, requestSessionId, diskMemory, memory);
+          diskMemory = normalizeRoleplayFileMemory(memory, memory.scope);
+          setTemporaryFilesRevision(current => current + 1);
+        }
+        cacheSessionMemory(requestSessionId, normalizeRoleplayFileMemory(memory, memory.scope));
       };
-      let requestFileMemory: RoleplayFileMemory | null = fileMemoryEnabled
-        ? archiveRoleplayMessages(reconcileMemoryHistory(normalizeRoleplayFileMemory(memorySession?.fileMemory, fileMemoryScope),
+      let requestFileMemory: RoleplayFileMemory | null = diskMemory
+        ? archiveRoleplayMessages(reconcileMemoryHistory(normalizeRoleplayFileMemory(diskMemory, fileMemoryScope),
           nextMessages.filter(message => !isTavernHiddenMessage(message))),
           nextMessages.filter(message => !isTavernHiddenMessage(message))) : null;
-      if (requestFileMemory) saveFileMemory(requestFileMemory);
+      if (requestFileMemory) await saveFileMemory(requestFileMemory);
       const runMemoryPhase = async (memory: RoleplayFileMemory, writable: boolean, context: ChatApiMessage[]) => {
         const runtime = chatRuntimesRef.current.get(requestSessionId);
         const previousSteering = runtime.supportsSteering;
@@ -25962,6 +26086,8 @@ export function App() {
                 : isDialogueRewrite || isLocalRewrite ? "正在修改同一条正文；以最终版本修正记忆，不要把替换前的内容当作新事件。" : "生成新一轮剧情。",
               messages: context.map(message => ({ role: message.role, content: getChatApiMessageText(message) })),
             }, signal: abortSignal,
+            beforeTool: (name, args) => memoryAccess && diskMemory
+              ? prepareMemoryFileTool(memoryAccess, requestSessionId, memory, diskMemory, name, args) : Promise.resolve(),
             onTool: (_name, args) => setChatStatus({ status: "loading", message:
               `${writable ? "更新文件记忆" : "检索文件记忆"}：${String(args.path ?? args.query ?? args.from ?? "目录")}` }),
             request: async (messages, tools) => {
@@ -28264,16 +28390,16 @@ export function App() {
         const completedMessages = nextMessages.filter(message => message.id !== finalAssistantMessage.id && !isTavernHiddenMessage(message));
         completedMessages.push(finalAssistantMessage);
         requestFileMemory = archiveRoleplayMessages(requestFileMemory, completedMessages);
-        saveFileMemory(requestFileMemory);
-        const draft = normalizeRoleplayFileMemory(requestFileMemory, fileMemoryScope);
         try {
+          await saveFileMemory(requestFileMemory);
+          const draft = normalizeRoleplayFileMemory(requestFileMemory, fileMemoryScope);
           await runMemoryPhase(draft, true, [...apiMessages, { role: "assistant", content: finalAssistantMessage.content }]);
           delete draft.lastError;
-          recordMemoryRevision(requestFileMemory, draft, completedMessages);
-          saveFileMemory(draft);
+          recordMemoryRevision(diskMemory ?? requestFileMemory, draft, completedMessages);
+          await saveFileMemory(draft);
         } catch (error) {
           fileMemoryError = error instanceof Error ? error.message : "记忆更新失败";
-          saveFileMemory({ ...requestFileMemory, lastError: fileMemoryError });
+          cacheSessionMemory(requestSessionId, { ...(diskMemory ?? requestFileMemory), lastError: fileMemoryError });
           if (isChatAbortError(error)) fileMemoryError = "记忆更新已停止";
         }
       }
@@ -28282,7 +28408,7 @@ export function App() {
           fileMemoryError || continuationReachedLimit || dialogueRewriteReachedLimit || localRewriteReachedLimit
             ? "warning"
             : "success",
-        message: fileMemoryError ? `正文已保存，但文件记忆未更新：${fileMemoryError}。原文已归档。` : continuationReachedLimit
+        message: fileMemoryError ? `正文已保留，但文件记忆未更新：${fileMemoryError}。` : continuationReachedLimit
           ? `已连续续写 ${MAX_CHAT_CONTINUATION_ROUNDS} 次，但上游仍报告长度截断。`
           : dialogueRewriteReachedLimit
             ? `已自动重写 ${MAX_CHAT_DIALOGUE_REWRITE_ROUNDS} 轮，仍有 ${dialogueRewriteRemainingCount} 处对白待填充，可再次右键重写。`
@@ -34276,19 +34402,8 @@ export function App() {
                 </div>
               </article>
               <RoleplayMemorySettings
-                key={activeChatSession?.id ?? "no-session"}
                 enabled={llmContextSettings.roleplay.fileMemory === true}
                 onEnabledChange={enabled => setLlmContextSettings(current => ({ ...current, roleplay: { ...current.roleplay, fileMemory: enabled } }))}
-                memory={activeChatSession?.mode === "roleplay"
-                  ? normalizeRoleplayFileMemory(activeChatSession.fileMemory, memoryScope(activeChatSession.workspaceKey, activeChatSession.id)) : null}
-                sessionTitle={activeChatSession?.mode === "roleplay" ? activeChatSession.title : undefined}
-                busy={chatGenerationState !== "idle"}
-                onChange={memory => {
-                  const sessions = chatSessionsRef.current.map(session => memoryScope(session.workspaceKey, session.id) === memory.scope
-                    ? { ...session, fileMemory: memory, updatedAt: new Date().toISOString() } : session);
-                  chatSessionsRef.current = sessions;
-                  setChatSessions(sessions);
-                }}
               />
               <article className="llm-setting-card llm-context-settings-card">
                 <div className="llm-setting-copy">
@@ -40154,7 +40269,7 @@ export function App() {
           onPresetsChange={setStatusBarPresets}
           manualUpdateDisabled={chatGenerationState !== "idle"}
           manualUpdateRunning={manualStatusBarUpdateRunning}
-          fileBrowserSource={fileBrowserSource}
+          fileBrowserSource={editableFileBrowserSource}
           onChooseWorkspace={authorizeLocalWorkspace}
           pcConnection={{
             serverUrl: pcServerUrl,

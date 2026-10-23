@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright";
 import { startRengeServer } from "../server.mjs";
-import { roleplayMemoryDirectory } from "../roleplay-memory-store.mjs";
 
 // Run after npm run build. No live provider, credentials or personal data.
 const root = await mkdtemp(join(tmpdir(), "renge-file-memory-browser-"));
@@ -24,7 +23,7 @@ async function saved(predicate) {
 }
 try {
   await mkdir(".runtime", { recursive: true });
-  server = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir: root });
+  server = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir: root, temporaryFilesRoot: join(root, "temporary-files") });
   const provider = { id: "fixture", name: "Fixture", apiBaseUrl: "http://127.0.0.1/v1", apiKey: "fixture-key", apiType: "chat-completions", modelId: "fixture", models: ["fixture"], updatedAt: now };
   const sessions = ["A", "B"].map(id => ({ id, title: `会话${id}`, mode: "roleplay", roleplayCharacterCardId: "card", workspaceKey: "default", workspaceName: "默认工作区",
     fileMemory: memory("default", id, id === "A" ? "守门人持有铜钥匙，当前在旧港口。" : "B_ONLY_SECRET"),
@@ -101,8 +100,27 @@ try {
   assert.match(JSON.stringify(actual), /SYSTEM_PROMPT_KEPT/); assert.match(JSON.stringify(actual), /WORLDBOOK_KEPT/);
   assert.match(JSON.stringify(actual), /CHARACTER_CARD_KEPT/);
   assert.equal(persisted.chatSessions.find(session => session.id === "B").fileMemory.files["人物/守门人.md"].content, "B_ONLY_SECRET");
-  const mirror = roleplayMemoryDirectory(join(root, "app-data.json"), "default", "A");
+  const mirror = join(root, "temporary-files", "角色记忆", "会话-%41");
   assert.match(await readFile(join(mirror, "时间线/第一章/进入钟楼.md"), "utf8"), /钟楼/);
+  // The existing file module is the only memory editor, and its writes go
+  // straight to the physical temporary folder used by generation.
+  await selectSession("B");
+  await saved(data => data.chatSessions.find(session => session.id === "B")?.fileMemory?.filesystemReady);
+  await selectSession("A");
+  const expand = page.getByRole("button", { name: "展开右侧栏", exact: true });
+  if (await expand.isVisible()) await expand.click();
+  await page.getByRole("button", { name: /文件.*浏览工作区/ }).click();
+  const files = page.locator(".files-sidebar-panel");
+  for (const path of ["角色记忆", "角色记忆/会话-%41", "角色记忆/会话-%41/人物", "角色记忆/会话-%41/人物/守门人.md"]) {
+    await files.locator(`.files-tree-row[title="${path}"]`).click();
+  }
+  await files.getByRole("button", { name: "编辑文件", exact: true }).click();
+  await files.getByLabel("文件编辑内容").fill("手动设定：守门人携带铜钥匙，当前在钟楼。");
+  await files.getByRole("button", { name: "保存文件", exact: true }).click();
+  await files.getByText("文件已保存，下次生成将读取最新内容", { exact: true }).waitFor();
+  assert.match(await readFile(join(mirror, "人物/守门人.md"), "utf8"), /手动设定/);
+  await saved(data => data.chatSessions.find(session => session.id === "A")?.fileMemory?.files["人物/守门人.md"].content.startsWith("手动设定"));
+  await files.screenshot({ path: ".runtime/roleplay-file-memory-sidebar.png" });
   // Fail after a successful staged mutation: prose and archive survive, while
   // the half-written category file never reaches session storage or disk.
   failWrite = true;
@@ -114,23 +132,16 @@ try {
   assert.ok(Object.values(failedSession.fileMemory.files).some(file => file.content.includes("测试记忆更新失败")));
   assert.match(failedSession.messages.at(-1).content, /走进钟楼/);
   assert.match(failedSession.fileMemory.lastError, /fixture memory update failure/);
+  assert.match(JSON.stringify(storyRequests[1].request.messages), /手动设定：守门人携带铜钥匙/);
+  assert.match(await readFile(join(mirror, "人物/守门人.md"), "utf8"), /手动设定/);
   failWrite = false;
   await page.getByRole("button", { name: "发送", exact: true }).waitFor();
   await openSettings();
   assert.equal(await page.getByRole("checkbox", { name: "角色扮演文件记忆", exact: true }).isChecked(), true);
   const panel = page.locator(".rp-memory-card");
-  await panel.locator(".rp-memory-manager > summary").click();
-  await panel.locator(".rp-memory-directory > summary").filter({ hasText: "人物/" }).click();
-  await panel.getByRole("button", { name: "守门人.md", exact: true }).click();
-  assert.match(await panel.getByLabel("记忆文件内容").inputValue(), /当前在钟楼/);
-  await panel.getByLabel("记忆文件内容").fill("手动设定：守门人携带铜钥匙，当前在钟楼。");
-  await panel.getByRole("button", { name: "保存记忆文件", exact: true }).click();
-  await saved(data => data.chatSessions.find(session => session.id === "A")?.fileMemory?.files["人物/守门人.md"].content.startsWith("手动设定"));
+  assert.equal(await panel.locator("textarea, .rp-memory-manager").count(), 0, "LLM settings only contain the toggle and explanation");
+  assert.equal(await panel.getByRole("button").count(), 0);
   await panel.screenshot({ path: ".runtime/roleplay-file-memory-settings.png" });
-  // Export consists of real Markdown files at the nested paths shown in UI.
-  const downloadPromise = page.waitForEvent("download");
-  await panel.getByRole("button", { name: "导出 Markdown 目录", exact: true }).click();
-  assert.equal((await downloadPromise).suggestedFilename(), "角色扮演文件记忆.zip");
   await page.getByRole("checkbox", { name: "角色扮演文件记忆", exact: true }).uncheck();
   await saved(data => data.llmContextSettings.roleplay.fileMemory === false);
   await page.getByLabel("关闭设置窗口", { exact: true }).click();

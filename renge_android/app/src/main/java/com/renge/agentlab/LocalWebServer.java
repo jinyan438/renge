@@ -1154,6 +1154,11 @@ public class LocalWebServer {
             serveAppDataAsset(request.path, output);
             return;
         }
+        if ("/api/workspace-files".equals(request.path)) {
+            if (!"POST".equals(request.method)) { sendJson(output, 405, jsonError("Method not allowed")); return; }
+            handleTemporaryWorkspaceFiles(parseJson(request.body), output);
+            return;
+        }
         if ("/api/app-data".equals(request.path)) {
             handleAppData(request, output);
             return;
@@ -1370,6 +1375,51 @@ public class LocalWebServer {
                 || lower.endsWith(".heif")
                 || lower.endsWith(".tif")
                 || lower.endsWith(".tiff");
+    }
+
+    private synchronized void handleTemporaryWorkspaceFiles(JSONObject body, OutputStream output) throws IOException, JSONException {
+        if (!"temporary".equals(body.optString("scope"))) throw new IOException("请通过已授权的 Android 工作区访问文件。");
+        File root = new File(context.getCacheDir(), "Temporary Files").getCanonicalFile();
+        if (!root.exists() && !root.mkdirs()) throw new IOException("无法创建临时文件夹。");
+        String path = body.optString("path", "").replace('\\', '/');
+        if (path.startsWith("/") || path.matches("^[a-zA-Z]:.*") || Arrays.asList(path.split("/")).contains("..")) throw new IOException("路径不能越出临时文件夹。");
+        File target = path.isEmpty() ? root : new File(root, path).getCanonicalFile();
+        if (!target.equals(root) && !target.getPath().startsWith(root.getPath() + File.separator)) throw new IOException("路径不能越出临时文件夹。");
+        String operation = body.optString("operation");
+        JSONObject result = new JSONObject();
+        if ("list".equals(operation)) {
+            File[] children = target.listFiles();
+            if (children == null) throw new IOException("无法列出目录。");
+            Arrays.sort(children, (a, b) -> a.getName().compareTo(b.getName()));
+            JSONArray entries = new JSONArray();
+            for (File child : children) {
+                JSONObject entry = new JSONObject(); entry.put("name", child.getName());
+                entry.put("path", path.isEmpty() ? child.getName() : path + "/" + child.getName());
+                entry.put("kind", child.isDirectory() ? "directory" : "file"); entry.put("size", child.length()); entries.put(entry);
+            }
+            result.put("entries", entries); result.put("rootPath", root.getPath());
+        } else if ("read".equals(operation) || "readBinary".equals(operation)) {
+            if (!target.isFile()) throw new IOException("文件不存在。");
+            byte[] bytes; try (InputStream input = new FileInputStream(target)) { bytes = readAll(input); }
+            if ("read".equals(operation)) result.put("content", new String(bytes, StandardCharsets.UTF_8));
+            else result.put("base64", Base64.encodeToString(bytes, Base64.NO_WRAP));
+        } else {
+            if (target.equals(root)) throw new IOException("操作必须指向子目录或文件。");
+            if ("mkdir".equals(operation)) {
+                if (!target.isDirectory() && !target.mkdirs()) throw new IOException("无法创建目录。");
+            } else if ("write".equals(operation) || "delete".equals(operation)) {
+                String actual = null;
+                if (target.isFile()) try (InputStream input = new FileInputStream(target)) { actual = new String(readAll(input), StandardCharsets.UTF_8); }
+                if (body.has("expectedContent")) {
+                    String expected = body.isNull("expectedContent") ? null : body.optString("expectedContent");
+                    if (actual == null ? expected != null : !actual.equals(expected)) throw new IOException("文件已被修改，请刷新后重试。");
+                }
+                if ("write".equals(operation)) writeJsonAtomically(target, body.optString("content", ""));
+                else if (!target.isFile() || !target.delete()) throw new IOException("无法删除文件。");
+            } else throw new IOException("未知文件操作。");
+            result.put("ok", true);
+        }
+        sendJson(output, 200, result);
     }
 
     private void writeJsonAtomically(File file, String content) throws IOException {

@@ -776,3 +776,17 @@
     animation: none;
   }
 }
+.files-text-editor {
+  display: block;
+  width: 100%;
+  min-height: 360px;
+  height: 100%;
+  resize: vertical;
+  border: 0;
+  padding: 14px;
+  outline: none;
+  box-sizing: border-box;
+  font: 13px/1.65 monospace;
+  color: inherit;
+  background: transparent;
+}

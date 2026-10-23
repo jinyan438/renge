@@ -1,6 +1,6 @@
-// A session-owned Markdown filesystem. It is persisted with the session on every
-// platform, so it does not need access to the user's coding workspace.
-export type MemoryFile = { content: string; updatedAt: string };
+// Session snapshots retain backups/undo metadata; workspace Markdown files are
+// loaded as the source of truth before each generation.
+export type MemoryFile = { content: string; updatedAt: string; unloaded?: boolean; userEdited?: boolean };
 export type RoleplayFileMemory = {
   version: 1;
   scope: string;
@@ -8,6 +8,7 @@ export type RoleplayFileMemory = {
   files: Record<string, MemoryFile>;
   updatedAt: string;
   lastError?: string;
+  filesystemReady?: boolean;
   revisions?: MemoryRevision[];
 };
 type MemoryRevision = {
@@ -59,6 +60,8 @@ export function normalizeRoleplayFileMemory(value: unknown, scope: string): Role
       const path = memoryPath(key);
       if (file && typeof file.content === "string") result.files[path] = {
         content: file.content, updatedAt: String(file.updatedAt ?? result.updatedAt),
+        ...(file.unloaded ? { unloaded: true } : {}),
+        ...(file.userEdited ? { userEdited: true } : {}),
       };
     } catch { /* Ignore invalid imported paths. */ }
   }
@@ -68,6 +71,7 @@ export function normalizeRoleplayFileMemory(value: unknown, scope: string): Role
   result.directories = [...new Set([...result.directories, ...Object.keys(result.files).flatMap(parents)])]
     .filter(path => path && !result.files[path]).sort();
   if (typeof raw.lastError === "string") result.lastError = raw.lastError;
+  if (raw.filesystemReady === true) result.filesystemReady = true;
   if (Array.isArray(raw.revisions)) result.revisions = raw.revisions.filter(revision =>
     revision && Array.isArray(revision.sources) && Array.isArray(revision.changes)).map(revision => ({
     sources: revision.sources.filter(source => typeof source?.id === "string" && typeof source.signature === "string"),
@@ -145,7 +149,7 @@ export function archiveRoleplayMessages(memory: RoleplayFileMemory, messages: Me
     active.add(path);
     const incomplete = message.outputStatus === "incomplete" || message.outputStatus === "running";
     const content = `# ${message.role === "user" ? "用户" : "角色"} · ${number}\n\n${incomplete ? "> 未完成的生成片段，仅供参考，不能当作已确认剧情。\n\n" : ""}${message.content}`;
-    if (memory.files[path]?.content !== content) memory.files[path] = { content, updatedAt: new Date().toISOString() };
+    if (!memory.files[path]?.userEdited && memory.files[path]?.content !== content) memory.files[path] = { content, updatedAt: new Date().toISOString() };
   }
   for (const path of Object.keys(memory.files)) {
     if (path.startsWith(`${ARCHIVE}/`) && !active.has(path)) delete memory.files[path];
@@ -296,6 +300,7 @@ export async function runMemoryAgent(options: {
     content: string; reasoning?: string; toolCalls: MemoryToolCall[]; finishReason: string;
   }>;
   onTool?: (name: string, args: Record<string, unknown>) => void;
+  beforeTool?: (name: string, args: Record<string, unknown>) => Promise<void>;
 }) {
   const tools = createMemoryTools(options.memory, options.writable);
   const messages: MemoryApiMessage[] = [
@@ -334,6 +339,7 @@ export async function runMemoryAgent(options: {
         const args = JSON.parse(call.function.arguments);
         if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("记忆工具参数必须是对象。");
         options.onTool?.(call.function.name, args);
+        await options.beforeTool?.(call.function.name, args);
         value = tools.execute(call.function.name, args);
         lastFailed = false;
       } catch (error) {

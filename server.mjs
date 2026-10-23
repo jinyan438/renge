@@ -21,6 +21,7 @@ import {
   normalizeProviderApiType,
 } from "./src/responsesApiUtils.mjs";
 import { createRengePiHost } from "./pi/renge-pi-host.mjs";
+import { workspaceFileOperation } from "./workspace-files-store.mjs";
 import { createRengePiWorkerHost } from "./pi/host-worker-client.mjs";
 import { isPiPackageSource } from "./pi/pi-package-manager.mjs";
 import {
@@ -2615,8 +2616,19 @@ async function proxyStream({ url, apiKey, body, response, headers = {} }) {
   }
 }
 
-async function handleApi(request, response, pathname, dataFilePath, piHost) {
+async function handleApi(request, response, pathname, dataFilePath, piHost, temporaryFilesRoot) {
   try {
+    if (pathname === "/api/workspace-files" && request.method !== "OPTIONS") {
+      if (request.method !== "POST") { sendJson(response, 405, { error: "Method not allowed" }); return; }
+      const body = await readJsonBody(request);
+      if (body.scope !== "temporary" && body.scope !== "workspace") throw new Error("无效的文件范围。");
+      const root = body.scope === "temporary" ? temporaryFilesRoot : String(body.workspacePath ?? "").trim();
+      if (!root) throw new Error("没有可用的会话工作区。");
+      if (body.scope === "temporary") await mkdir(root, { recursive: true });
+      else { assertPcFileAccessEnabled(); if (!isAbsolute(root) || !(await stat(root)).isDirectory()) throw new Error("工作区目录不可用。"); }
+      sendJson(response, 200, await workspaceFileOperation(root, body));
+      return;
+    }
     if (request.method === "OPTIONS") {
       sendOptions(response);
       return;
@@ -3675,7 +3687,7 @@ export function startRengeServer(options = {}) {
   const dataFilePath = resolve(dataDir, appDataFileName);
   const temporaryFilesRoot = options.temporaryFilesRoot
     ? resolve(options.temporaryFilesRoot)
-    : "";
+    : join(dataDir, "temporary-files");
   const piAgentDir = resolve(options.piAgentDir ?? join(dataDir, ".pi", "agent"));
   const createPiHost = options.isolatePiHost ? createRengePiWorkerHost : createRengePiHost;
   const piHost = createPiHost({ defaultCwd: __dirname, dataDir, agentDir: piAgentDir, authorizeTool: options.authorizePiTool });
@@ -3774,7 +3786,7 @@ export function startRengeServer(options = {}) {
     }
 
     if (url.pathname.startsWith("/api/")) {
-      await handleApi(request, response, url.pathname, dataFilePath, piHost);
+      await handleApi(request, response, url.pathname, dataFilePath, piHost, temporaryFilesRoot);
       return;
     }
 
