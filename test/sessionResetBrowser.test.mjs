@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -21,6 +21,8 @@ try {
     pendingInputs: [{ id: `queued-${id}`, content: "old-queued-input", attachments: [], mode: "queue", sender: "user", createdAt: oldTime }],
     heartbeat: { enabled: false, event: "old-heartbeat", intervalMinutes: 42, loopLimit: 9, runCount: 3, updatedAt: oldTime },
     memoryPersonaIds: ["old-persona"], scriptVariables: { oldVariable: true },
+    fileMemory: { version: 1, scope: JSON.stringify(["default", id]), directories: ["信息"],
+      files: { "信息/旧记录.md": { content: `old-memory-${id}`, updatedAt: oldTime } }, filesystemReady: true, updatedAt: oldTime },
     tavernMetadata: { oldMetadata: true }, characterWorldBookOverrides: { "old-book": null },
     statusBar: { enabled: true, values: { oldStatus: "old status" } },
     createdAt: oldTime, updatedAt: oldTime,
@@ -36,8 +38,24 @@ try {
   };
   const read = async () => (await (await fetch(`${server.url}/api/app-data`)).json()).data;
   const errors = [], requests = [], resets = [];
-  let failReset = false, holdReset = true, databaseReads = 0, confirmReset = true;
+  let failReset = false, failMemoryCleanup = false, holdReset = true, databaseReads = 0, confirmReset = true;
   const confirmations = [];
+  const memoryDirectory = (id, workspace = join(root, "temporary-files")) => join(workspace, "角色记忆", `会话-${id}`);
+  async function seedMemory(id, workspace = join(root, "temporary-files"), workspaceKey = "default") {
+    const directory = memoryDirectory(id, workspace);
+    await mkdir(join(directory, "信息", "空子目录"), { recursive: true });
+    await writeFile(join(directory, ".memory.json"), JSON.stringify({ version: 1, scope: JSON.stringify([workspaceKey, id]) }));
+    await writeFile(join(directory, "信息", "旧记录.md"), `old-memory-${id}`);
+    await writeFile(join(directory, "附件.bin"), "old attachment");
+  }
+  async function memoryRemoved(id, workspace) {
+    for (let index = 0; index < 100; index++) {
+      try { await access(memoryDirectory(id, workspace)); }
+      catch (error) { if (error.code === "ENOENT") return; throw error; }
+      await delay(50);
+    }
+    assert.fail(`memory directory still exists: ${id}`);
+  }
   async function openChat(id) {
     page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     page.setDefaultTimeout(15_000);
@@ -55,6 +73,11 @@ try {
       resets.push(route.request().postDataJSON());
       if (holdReset) await new Promise(resolve => { releaseReset = resolve; });
       await route.fulfill(failReset ? { status: 500, json: { error: "fixture reset failure" } } : { json: { ok: true } });
+    });
+    await page.route("**/api/workspace-files", async route => {
+      if (failMemoryCleanup && route.request().postDataJSON().operation === "deleteDirectory") {
+        await route.fulfill({ status: 500, json: { error: "fixture memory cleanup failure" } });
+      } else await route.continue();
     });
     await page.route("**/api/pi/chat", async route => {
       requests.push(route.request().postDataJSON());
@@ -79,6 +102,7 @@ try {
     assert.notEqual(saved.createdAt, oldTime);
     assert.deepEqual(saved.pendingInputs ?? [], []);
     assert.deepEqual(saved.memoryPersonaIds, []);
+    assert.equal(saved.fileMemory, undefined);
     assert.deepEqual(saved.scriptVariables, variables);
     assert.deepEqual(saved.tavernMetadata, {});
     assert.equal(saved.characterWorldBookOverrides, undefined);
@@ -90,6 +114,7 @@ try {
   }
 
   await seed([session("reset-ai"), { ...session("other-chat"), pendingInputs: [] }]);
+  await seedMemory("reset-ai"); await seedMemory("other-chat");
   const imagePath = join(root, "session-images", "reset-ai", "old.png");
   const otherImage = join(root, "session-images", "other-chat", "keep.png");
   for (const id of ["reset-ai", "other-chat"]) await mkdir(join(root, "session-images", id), { recursive: true });
@@ -123,6 +148,7 @@ try {
   await page.getByLabel("待处理消息", { exact: true }).getByText("old-queued-input", { exact: true }).waitFor();
   assert.deepEqual((await read()).chatSessions.find(candidate => candidate.id === "reset-ai"), sessionBeforeCancel);
   await access(imagePath);
+  await access(memoryDirectory("reset-ai"));
   confirmReset = true;
   await page.getByRole("button", { name: "重置当前会话", exact: true }).click();
   await page.getByText("会话已清空。", { exact: true }).waitFor({ timeout: 2000 });
@@ -140,6 +166,8 @@ try {
   assert.equal(await page.locator(".pocket-panel").getByText("Old phone contact", { exact: true }).count(), 0, "mounted phone must discard its old in-memory copy");
   assert.ok(await page.evaluate(() => localStorage.getItem("renge_pocket_phone_v1:other-chat")));
   await assert.rejects(access(imagePath)); await access(otherImage);
+  await memoryRemoved("reset-ai");
+  assert.equal(await readFile(join(memoryDirectory("other-chat"), "信息", "旧记录.md"), "utf8"), "old-memory-other-chat");
 
   await input.fill("new input after reset");
   await page.getByRole("button", { name: "发送", exact: true }).click();
@@ -157,6 +185,7 @@ try {
 
   const roleSession = { ...session("reset-role", "roleplay"), roleplayCharacterCardId: card.id, roleplayGreetingIndex: 1 };
   await seed([roleSession, { ...session("other-role", "roleplay"), pendingInputs: [] }], "roleplay");
+  await seedMemory("reset-role");
   await openChat("reset-role");
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "重置当前会话", exact: true }).click();
@@ -169,6 +198,7 @@ try {
   assert.equal(savedRole.roleplayGreetingIndex, 0);
   assert.equal(savedRole.messages.length, 1);
   assert.equal(savedRole.messages[0].source, "roleplay-greeting");
+  await memoryRemoved("reset-role");
   await page.reload();
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
   await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
@@ -204,7 +234,38 @@ try {
   assert.equal(requests.length, requestCount + 1);
   await page.close();
 
+  // Failed filesystem cleanup must not let a reset session load old memory,
+  // including after a reload; a later generation can retry the cleanup.
+  await seed([session("reset-memory-failure")]);
+  await seedMemory("reset-memory-failure");
+  await openChat("reset-memory-failure");
+  failMemoryCleanup = true;
+  await page.getByRole("button", { name: "重置当前会话", exact: true }).click();
+  await page.getByText(/后台清理或保存失败：fixture memory cleanup failure/).waitFor();
+  const beforeMemoryFailure = requests.length;
+  await page.getByPlaceholder("输入消息，可粘贴图片").fill("must not load old memory");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await page.locator(".chat-composer .chat-status").getByText(/fixture memory cleanup failure/).waitFor();
+  assert.equal(requests.length, beforeMemoryFailure);
+  await page.reload();
+  await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
+  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
+  await page.getByPlaceholder("输入消息，可粘贴图片").fill("reload must still clean old memory");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await page.locator(".chat-composer .chat-status").getByText(/fixture memory cleanup failure/).waitFor();
+  assert.equal(requests.length, beforeMemoryFailure);
+  await access(memoryDirectory("reset-memory-failure"));
+  failMemoryCleanup = false;
+  await page.getByPlaceholder("输入消息，可粘贴图片").fill("retry cleanup then generate");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await page.getByText("fresh fixture reply", { exact: true }).waitFor();
+  await memoryRemoved("reset-memory-failure");
+  assert.doesNotMatch(JSON.stringify(requests.at(-1).request.messages), /old-memory-reset-memory-failure|old-history-reset-memory-failure/);
+  assert.equal(await page.evaluate(() => localStorage.getItem("renge_roleplay_memory_cleanup_pending:reset-memory-failure")), null);
+  await page.close();
+
   await seed(["delete-current", "delete-other"].map(id => ({ ...session(id), pendingInputs: [] })));
+  await seedMemory("delete-current"); await seedMemory("delete-other");
   for (const id of ["delete-current", "delete-other"]) {
     await mkdir(join(root, "session-images", id), { recursive: true });
     await writeFile(join(root, "session-images", id, "saved.png"), "saved image");
@@ -221,6 +282,7 @@ try {
   assert.equal(resets.length, cleanupCount, "cancel deletion must not clear backend history");
   assert.deepEqual((await read()).chatSessions, deletionBaseline, "cancel deletion preserves both saved conversations");
   await access(join(root, "session-images", "delete-other", "saved.png"));
+  await access(memoryDirectory("delete-other"));
   confirmReset = true;
   const otherImageDeletion = page.waitForResponse(response => response.url().endsWith("/api/session-images/delete-other") && response.request().method() === "DELETE");
   await deleteOther.click();
@@ -229,6 +291,7 @@ try {
   await assert.rejects(access(join(root, "session-images", "delete-other", "saved.png")));
   assert.equal(await page.evaluate(() => localStorage.getItem("renge_active_chat_session")), "delete-current", "deleting a background conversation preserves the selected conversation");
   await access(join(root, "session-images", "delete-current", "saved.png"));
+  await memoryRemoved("delete-other"); await access(memoryDirectory("delete-current"));
 
   const deleteCurrent = page.locator(".chat-session-item").filter({ hasText: "delete-current" }).getByTitle("删除会话", { exact: true });
   const currentTitle = (await page.locator(".chat-session-item").filter({ hasText: "delete-current" }).locator("button").first().textContent()).trim();
@@ -247,6 +310,7 @@ try {
   await assert.rejects(access(join(root, "session-images", "delete-current", "saved.png")));
   assert.equal(await page.locator(".chat-session-item").count(), 1, "deleting the last conversation creates a usable replacement");
   assert.notEqual(await page.evaluate(() => localStorage.getItem("renge_active_chat_session")), "delete-current");
+  await memoryRemoved("delete-current");
   let savedAfterDeletion;
   for (let index = 0; index < 100; index++) {
     savedAfterDeletion = (await read()).chatSessions;
@@ -255,9 +319,33 @@ try {
   }
   assert.equal(savedAfterDeletion.length, 1);
   assert.ok(savedAfterDeletion.every(candidate => !candidate.id.startsWith("delete-")), "confirmed deletion reaches persistence");
+  await page.close();
+
+  const project = join(root, "project"), otherProject = join(root, "other-project");
+  await mkdir(project); await mkdir(otherProject);
+  await writeFile(join(project, "keep.txt"), "ordinary workspace file");
+  const projectSession = id => ({ ...session(id), workspaceKey: project, workspaceName: "待删除工作区", workspacePath: project, fileMemory: undefined, pendingInputs: [] });
+  await seed([{ ...session("workspace-keep"), pendingInputs: [] }, projectSession("workspace-a"), projectSession("workspace-b"),
+    { ...session("workspace-other"), workspaceKey: otherProject, workspaceName: "保留工作区", workspacePath: otherProject, fileMemory: undefined, pendingInputs: [] }]);
+  await seedMemory("workspace-keep");
+  await seedMemory("workspace-a", project, project); await seedMemory("workspace-b", project, project);
+  await seedMemory("workspace-other", otherProject, otherProject);
+  await openChat("workspace-keep");
+  const workspaceButton = page.locator(".chat-workspace-item").filter({ hasText: "待删除工作区" });
+  confirmReset = false;
+  await workspaceButton.click({ button: "right" });
+  await access(memoryDirectory("workspace-a", project));
+  assert.match(confirmations.at(-1).message, /角色记忆文件夹/);
+  confirmReset = true;
+  await workspaceButton.click({ button: "right" });
+  await workspaceButton.waitFor({ state: "hidden" });
+  await memoryRemoved("workspace-a", project); await memoryRemoved("workspace-b", project);
+  await assert.rejects(access(join(project, "角色记忆")), /ENOENT/);
+  assert.equal(await readFile(join(project, "keep.txt"), "utf8"), "ordinary workspace file");
+  await access(memoryDirectory("workspace-keep")); await access(memoryDirectory("workspace-other", otherProject));
   assert.deepEqual(errors, []);
-  assert.ok(resets.every(reset => ["reset-ai", "reset-role", "reset-failure", "delete-current", "delete-other"].includes(reset.sessionId)));
-  console.log("Session reset browser regression passed: reset/delete confirmation and cancellation, immediate reset after confirmation, ID preservation, defaults, greeting, queues, drafts, images, phone stores, slow/failed cleanup, scoped generation, retry, persistence, mobile layout and last-conversation replacement.");
+  assert.ok(resets.every(reset => ["reset-ai", "reset-role", "reset-failure", "reset-memory-failure", "delete-current", "delete-other"].includes(reset.sessionId)));
+  console.log("Session reset browser regression passed: reset/delete confirmation and cancellation, workspace deletion, scoped memory-folder cleanup, failed cleanup across reloads, retry, immediate reset, ID preservation, defaults, greeting, queues, drafts, images, phone stores, scoped generation, persistence, mobile layout and last-conversation replacement.");
 } catch (error) {
   if (page && !page.isClosed()) {
     console.error("Visible statuses:", await page.locator(".chat-status").allTextContents());

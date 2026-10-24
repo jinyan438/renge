@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { listSidebarFiles, readSidebarBinaryFile, resolveSidebarFilePath } from "./electron/sidebar-files.mjs";
 
@@ -33,6 +33,19 @@ export async function workspaceFileOperation(rootPath, body) {
     if (body.operation === "readBinary") return readSidebarBinaryFile(root, path);
     if (!path || target === root) throw new Error("操作必须指向工作区内的文件或子目录。");
     if (body.operation === "mkdir") { await mkdir(target, { recursive: true }); return { ok: true }; }
+    if (body.operation === "deleteDirectory") {
+      try {
+        if (!(await lstat(target)).isDirectory()) throw new Error("删除目标必须是目录。");
+      } catch (error) { if (error.code === "ENOENT") return { ok: true }; throw error; }
+      // target is an absolute child of root, checked above for traversal and links.
+      await rm(target, { recursive: true, force: true });
+      return { ok: true };
+    }
+    if (body.operation === "pruneDirectory") {
+      try { await rmdir(target); }
+      catch (error) { if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(error.code)) throw error; }
+      return { ok: true };
+    }
     if (body.operation !== "write" && body.operation !== "delete") throw new Error("未知文件操作。");
     if (Object.hasOwn(body, "expectedContent") && await read() !== body.expectedContent) {
       throw Object.assign(new Error("文件已被修改，请刷新后重试。"), { code: "CONFLICT" });

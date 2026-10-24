@@ -6,6 +6,8 @@ export type WorkspaceFileAccess = {
   write(path: string, content: string, expectedContent: string | null): Promise<void>;
   mkdir(path: string): Promise<void>;
   remove(path: string, expectedContent: string): Promise<void>;
+  removeDirectory(path: string): Promise<void>;
+  removeEmptyDirectory?(path: string): Promise<void>;
 };
 
 export function roleplayMemoryRoot(sessionId: string) {
@@ -17,6 +19,25 @@ export function roleplayMemoryRoot(sessionId: string) {
 }
 
 const MARKER = ".memory.json";
+export async function deleteMemoryFiles(access: WorkspaceFileAccess, sessionId: string, scope: string) {
+  const parent = "角色记忆";
+  const root = roleplayMemoryRoot(sessionId);
+  const parentEntry = (await access.list("")).find(entry => entry.path === parent);
+  if (!parentEntry) return;
+  if (parentEntry.kind !== "directory") throw new Error("角色记忆路径不是目录，已停止删除。");
+  const entry = (await access.list(parent)).find(entry => entry.path === root);
+  if (!entry) return;
+  if (entry.kind !== "directory") throw new Error("会话记忆路径不是目录，已停止删除。");
+  const entries = await access.list(root);
+  if (entries.some(entry => entry.path === `${root}/${MARKER}`)
+    && JSON.parse(await access.read(`${root}/${MARKER}`)).scope !== scope) {
+    throw new Error("记忆目录属于其他工作区或会话，已停止删除。");
+  }
+  await access.removeDirectory(root);
+  // Only adapters with an atomic empty-directory operation prune the shared root.
+  await access.removeEmptyDirectory?.(parent);
+}
+
 export async function loadMemoryFiles(access: WorkspaceFileAccess, sessionId: string, cached: RoleplayFileMemory, lazy = false) {
   const root = roleplayMemoryRoot(sessionId);
   await access.mkdir(root);
@@ -126,5 +147,7 @@ export function httpWorkspaceFileAccess(options: { scope: "temporary" | "workspa
     write: async (path, content, expectedContent) => { await request("write", path, { content, expectedContent }); },
     mkdir: async path => { await request("mkdir", path); },
     remove: async (path, expectedContent) => { await request("delete", path, { expectedContent }); },
+    removeDirectory: async path => { await request("deleteDirectory", path); },
+    removeEmptyDirectory: async path => { await request("pruneDirectory", path); },
   };
 }

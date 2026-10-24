@@ -1,4 +1,4 @@
-import { commitMemoryFiles, httpWorkspaceFileAccess, loadMemoryFiles, prepareMemoryFileTool, roleplayMemoryRoot, type WorkspaceFileAccess } from "./roleplayMemoryStorage";
+import { commitMemoryFiles, deleteMemoryFiles, httpWorkspaceFileAccess, loadMemoryFiles, prepareMemoryFileTool, roleplayMemoryRoot, type WorkspaceFileAccess } from "./roleplayMemoryStorage";
 import { RoleplayMemorySettings } from "./RoleplayMemorySettings";
 import { runMemoryAgent, reconcileMemoryHistory, recordMemoryRevision, memoryScope, normalizeRoleplayFileMemory, recentRoleplayBody, type RoleplayFileMemory } from "./roleplayFileMemory";
 import { ContextTokenMeter } from "./ContextTokenMeter";
@@ -1646,6 +1646,7 @@ const ACTIVE_PROVIDER_STORAGE_KEY = "renge_active_provider";
 const CHAT_SESSIONS_STORAGE_KEY = "renge_chat_sessions";
 const ACTIVE_CHAT_SESSION_STORAGE_KEY = "renge_active_chat_session";
 const PI_SESSION_RESET_PENDING_STORAGE_PREFIX = "renge_pi_session_reset_pending:";
+const MEMORY_CLEANUP_PENDING_STORAGE_PREFIX = "renge_roleplay_memory_cleanup_pending:";
 const CHAT_MODE_STORAGE_KEY = "renge_chat_mode";
 const MULTI_AGENT_WORKFLOW_STORAGE_KEY = "renge_multi_agent_workflow";
 const MULTI_AGENT_PERSONAS_STORAGE_KEY = "renge_multi_agent_personas";
@@ -13292,6 +13293,8 @@ export function App() {
   const [localToolsEnabled, setLocalToolsEnabled] = useState(false);
   const [temporaryFilesRevision, setTemporaryFilesRevision] = useState(0);
   const memoryMigrationTasksRef = useRef(new Map<string, Promise<void>>());
+  const memoryCleanupTasksRef = useRef(new Map<string, Promise<void>>());
+  const memoryDeletionSessionsRef = useRef(new Set<string>());
   const memoryWorkspaceHandlesRef = useRef(new Map<string, NonNullable<typeof localWorkspaceHandle>>());
   const [personas, setPersonas] = useState<AgentPersona[]>([]);
   const [activePersonaId, setActivePersonaId] = useState<string>(
@@ -18310,6 +18313,11 @@ export function App() {
     if (session.workspaceKey === DEFAULT_WORKSPACE_KEY) return httpWorkspaceFileAccess({ scope: "temporary" });
     const handle = memoryWorkspaceHandlesRef.current.get(session.workspaceKey);
     if (handle?.kind === "pc") return httpWorkspaceFileAccess({ scope: "workspace", workspacePath: handle.path, baseUrl: handle.baseUrl });
+    if (session.workspaceKey.startsWith("pc:") && session.workspacePath && session.workspaceKey.endsWith(`:${session.workspacePath}`)) {
+      const baseUrl = session.workspaceKey.slice(3, -session.workspacePath.length - 1);
+      if (!/^https?:\/\//i.test(baseUrl)) throw new Error("电脑工作区连接地址无效。");
+      return httpWorkspaceFileAccess({ scope: "workspace", workspacePath: session.workspacePath, baseUrl });
+    }
     if (handle?.kind === "android") {
       const api = window.rengeAndroid;
       if (!api) throw new Error("Android 文件工具不可用。");
@@ -18331,6 +18339,7 @@ export function App() {
         mkdir: async path => { await check(); await api.createDirectory({ path }); },
         write: async (path, content, expected) => { await check(); await api.createDirectory({ path: path.split("/").slice(0, -1).join("/") }); await compare(path, expected); await api.writeFile({ path, content }); },
         remove: async (path, expected) => { await check(); await compare(path, expected); await api.deletePath({ path }); },
+        removeDirectory: async path => { await check(); await api.deletePath({ path, recursive: true }); },
       };
     }
     if (handle?.kind === "directory") {
@@ -18345,12 +18354,58 @@ export function App() {
         mkdir: async path => { await createLocalDirectory(handle, path); },
         write: async (path, content, expected) => { await compare(path, expected); await writeLocalTextFile(handle, path, content); },
         remove: async (path, expected) => { await compare(path, expected); const target = await getLocalParentDirectory(handle, path); await target.directory.removeEntry(target.name); },
+        removeDirectory: async path => { const target = await getLocalParentDirectory(handle, path); await target.directory.removeEntry(target.name, { recursive: true }); },
+        removeEmptyDirectory: async path => {
+          const target = await getLocalParentDirectory(handle, path);
+          try { await target.directory.removeEntry(target.name); }
+          catch (error) { if (!(error instanceof DOMException) || !["InvalidModificationError", "NotFoundError"].includes(error.name)) throw error; }
+        },
       };
     }
     if (handle?.kind === "electron" || (session.workspacePath && !session.workspaceKey.startsWith("pc:") && !session.workspaceKey.startsWith("android:") && !session.workspaceKey.startsWith("browser:"))) {
       return httpWorkspaceFileAccess({ scope: "workspace", workspacePath: handle?.kind === "electron" ? handle.path : session.workspacePath });
     }
     throw new Error("请先恢复此会话的工作区，再读取或保存文件记忆。");
+  };
+  const clearSessionMemoryFiles = (session: Pick<ChatSession, "id" | "workspaceKey" | "workspacePath">, durable = false): Promise<void> => {
+    const existing = memoryCleanupTasksRef.current.get(session.id);
+    if (existing) return existing;
+    const pendingKey = `${MEMORY_CLEANUP_PENDING_STORAGE_PREFIX}${session.id}`;
+    if (durable && !setLocalStorageJsonSafely(pendingKey, {
+      id: session.id, workspaceKey: session.workspaceKey, workspacePath: session.workspacePath,
+    })) throw new Error("无法保存记忆清理进度，请恢复本地存储后重试。");
+    // Capture the original workspace before deletion can switch the visible one.
+    let access: WorkspaceFileAccess;
+    try { access = getMemoryFileAccess(session); }
+    catch (error) { return Promise.reject(error); }
+    const task = (async () => {
+      await memoryMigrationTasksRef.current.get(session.id);
+      await deleteMemoryFiles(access, session.id, memoryScope(session.workspaceKey, session.id));
+      const sessions = chatSessionsRef.current.map(current => {
+        if (current.id !== session.id || current.workspaceKey !== session.workspaceKey || !current.fileMemory) return current;
+        const { fileMemory: _removedMemory, ...rest } = current;
+        return { ...rest, updatedAt: new Date().toISOString() };
+      });
+      chatSessionsRef.current = sessions;
+      setChatSessions(sessions);
+      removeLocalStorageValueSafely(pendingKey);
+      if (durable && localStorage.getItem(pendingKey)) throw new Error("无法清除记忆清理进度，请恢复本地存储后重试。");
+      setTemporaryFilesRevision(current => current + 1);
+    })().finally(() => memoryCleanupTasksRef.current.delete(session.id));
+    memoryCleanupTasksRef.current.set(session.id, task);
+    return task;
+  };
+  const waitForMemoryCleanup = async (sessionId: string) => {
+    const task = memoryCleanupTasksRef.current.get(sessionId);
+    await task;
+    if (memoryDeletionSessionsRef.current.has(sessionId)) throw new Error("会话正在删除，已停止生成。");
+    const pending = localStorage.getItem(`${MEMORY_CLEANUP_PENDING_STORAGE_PREFIX}${sessionId}`);
+    if (pending) {
+      const session = JSON.parse(pending) as Pick<ChatSession, "id" | "workspaceKey" | "workspacePath">;
+      if (session.id !== sessionId || typeof session.workspaceKey !== "string") throw new Error("记忆清理记录无效，请重试重置会话。");
+      await clearSessionMemoryFiles(session, true);
+    }
+    if ((task || pending) && !chatSessionsRef.current.some(session => session.id === sessionId)) throw new Error("会话已删除，已停止生成。");
   };
   const cacheSessionMemory = (sessionId: string, memory: RoleplayFileMemory) => {
     const sessions = chatSessionsRef.current.map(session => session.id === sessionId && memoryScope(session.workspaceKey, session.id) === memory.scope
@@ -18361,11 +18416,14 @@ export function App() {
   useEffect(() => {
     const session = activeChatSession;
     if (!appDataLoaded || session?.mode !== "roleplay" || !session.fileMemory || session.fileMemory.filesystemReady
-      || chatRuntimesRef.current.get(session.id).controller || memoryMigrationTasksRef.current.has(session.id)) return;
+      || chatRuntimesRef.current.get(session.id).controller || memoryMigrationTasksRef.current.has(session.id)
+      || memoryCleanupTasksRef.current.has(session.id)
+      || localStorage.getItem(`${MEMORY_CLEANUP_PENDING_STORAGE_PREFIX}${session.id}`)) return;
     const task = (async () => {
       const files = await loadMemoryFiles(getMemoryFileAccess(session), session.id,
         normalizeRoleplayFileMemory(session.fileMemory, memoryScope(session.workspaceKey, session.id)));
-      if (!chatRuntimesRef.current.get(session.id).controller) cacheSessionMemory(session.id, files);
+      if (!chatRuntimesRef.current.get(session.id).controller && !memoryCleanupTasksRef.current.has(session.id)
+        && chatSessionsRef.current.some(current => current.id === session.id && current.createdAt === session.createdAt)) cacheSessionMemory(session.id, files);
       setTemporaryFilesRevision(current => current + 1);
     })().catch(error => setSessionChatStatus(session.id, { status: "warning", message: `记忆目录迁移失败：${error instanceof Error ? error.message : error}` }))
       .finally(() => memoryMigrationTasksRef.current.delete(session.id));
@@ -22376,21 +22434,29 @@ export function App() {
     setChatStatus({ status: "idle", message: "" });
   };
 
-  const deleteChatSession = (sessionId: string) => {
+  const deleteChatSession = async (sessionId: string) => {
+    if (memoryCleanupTasksRef.current.has(sessionId) || memoryDeletionSessionsRef.current.has(sessionId)) return;
     if (chatRuntimesRef.current.get(sessionId).controller) {
       setSessionChatStatus(sessionId, { status: "loading", message: "请先停止此会话的任务，再删除会话。" });
       return;
     }
-    const deletedSession = chatSessions.find((session) => session.id === sessionId);
+    const deletedSession = chatSessionsRef.current.find((session) => session.id === sessionId);
     if (!deletedSession || !getActiveDesktopWindow().confirm(
-      `确定删除会话「${deletedSession.title}」？\n\n会话记录、生成图片和相关记忆绑定将被删除。此操作无法撤销。`,
+      `确定删除会话「${deletedSession.title}」？\n\n会话记录、生成图片、角色记忆文件夹和相关记忆绑定将被删除。此操作无法撤销。`,
     )) return;
+    memoryDeletionSessionsRef.current.add(sessionId);
+    try { await clearSessionMemoryFiles(deletedSession); }
+    catch (error) {
+      memoryDeletionSessionsRef.current.delete(sessionId);
+      setChatStatus({ status: "warning", message: `角色记忆目录清理失败，会话尚未删除：${error instanceof Error ? error.message : error}` });
+      return;
+    }
     // 后端清理该会话目录下持久化的生成图片，fire-and-forget
     void fetch(`/api/session-images/${encodeURIComponent(sessionId)}`, { method: "DELETE" }).catch(() => undefined);
     // Keep Pi's persisted session tree aligned with Renge session deletion.
     void resetPiSession(sessionId).catch(() => undefined);
     const remaining = deleteChatSessionsWithMemoryCleanup(
-      chatSessions,
+      chatSessionsRef.current,
       (session) => session.id === sessionId,
     );
     const workspaceHasRemainingSessions = deletedSession
@@ -22419,16 +22485,19 @@ export function App() {
     chatSessionsRef.current = safeRemaining;
     setChatSessions(safeRemaining);
 
-    if (sessionId === activeChatSessionId) {
+    if (sessionId === activeChatSessionIdRef.current) {
       const fallback =
         safeRemaining.find((session) => session.workspaceKey === deletedSession?.workspaceKey) ??
         safeRemaining[0];
       showChatSession(fallback);
     }
-    setChatStatus({ status: "idle", message: "会话已删除，相关记忆已取消。" });
+    setChatStatus({ status: "idle", message: "会话和对应角色记忆目录已删除。" });
+    memoryDeletionSessionsRef.current.delete(sessionId);
   };
 
-  const deleteWorkspaceSessions = (workspaceKey: string, workspaceName: string) => {
+  const deleteWorkspaceSessions = async (workspaceKey: string, workspaceName: string) => {
+    if (chatSessionsRef.current.some(session => session.workspaceKey === workspaceKey
+      && (memoryCleanupTasksRef.current.has(session.id) || memoryDeletionSessionsRef.current.has(session.id)))) return;
     if (chatSessionsRef.current.some((session) => session.workspaceKey === workspaceKey && chatRuntimesRef.current.get(session.id).controller)) {
       setChatStatus({ status: "warning", message: "此工作区还有任务正在运行，请先停止任务再删除会话。" });
       return;
@@ -22442,32 +22511,39 @@ export function App() {
       (session) => session.workspaceKey === workspaceKey && session.memoryPersonaIds.length > 0,
     ).length;
     const confirmed = getActiveDesktopWindow().confirm(
-      `删除「${workspaceName}」下的 ${workspaceSessionCount} 个会话？\n只会删除会话记录，不会删除工作区文件。${
+      `删除「${workspaceName}」下的 ${workspaceSessionCount} 个会话？\n会同时删除这些会话的角色记忆文件夹，保留工作区内的其他文件。${
         workspaceMemoryCount > 0 ? `\n其中 ${workspaceMemoryCount} 个会话的记忆也会取消。` : ""
       }`,
     );
     if (!confirmed) return;
+    const deletedSessions = chatSessionsRef.current.filter(session => session.workspaceKey === workspaceKey);
+    const deletedIds = new Set(deletedSessions.map(session => session.id));
+    for (const id of deletedIds) memoryDeletionSessionsRef.current.add(id);
+    const cleanup = await Promise.allSettled(deletedSessions.map(session => clearSessionMemoryFiles(session)));
+    const failures = cleanup.flatMap(result => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : String(result.reason)] : []);
+    if (failures.length) {
+      for (const id of deletedIds) memoryDeletionSessionsRef.current.delete(id);
+      setChatStatus({ status: "warning", message: `部分角色记忆目录清理失败，工作区会话已保留，请重试：${failures.join("；")}` });
+      return;
+    }
 
     // 后端清理该工作区下所有会话目录的生成图片
-    for (const session of chatSessions) {
-      if (session.workspaceKey === workspaceKey) {
-        void fetch(`/api/session-images/${encodeURIComponent(session.id)}`, { method: "DELETE" }).catch(() => undefined);
-      }
+    for (const session of deletedSessions) {
+      void fetch(`/api/session-images/${encodeURIComponent(session.id)}`, { method: "DELETE" }).catch(() => undefined);
     }
     const remaining = deleteChatSessionsWithMemoryCleanup(
-      chatSessions,
-      (session) => session.workspaceKey === workspaceKey,
+      chatSessionsRef.current,
+      (session) => deletedIds.has(session.id),
     );
     const safeRemaining = remaining.length > 0
       ? remaining
       : [createChatSession(undefined, undefined, undefined, undefined, chatMode)];
-    const activeWasDeleted = chatSessions.some(
-      (session) => session.workspaceKey === workspaceKey && session.id === activeChatSessionId,
-    );
+    const activeWasDeleted = deletedIds.has(activeChatSessionIdRef.current);
 
+    chatSessionsRef.current = safeRemaining;
     setChatSessions(safeRemaining);
 
-    if (workspaceInfo.key === workspaceKey) {
+    if (activeWasDeleted) {
       setLocalWorkspaceHandle(null);
       setLocalToolsEnabled(false);
       restoredWorkspacePathRef.current = "";
@@ -22479,7 +22555,8 @@ export function App() {
         safeRemaining[0];
       showChatSession(fallback);
     }
-    setChatStatus({ status: "idle", message: "工作区会话已删除，相关记忆已取消。" });
+    setChatStatus({ status: "idle", message: "工作区会话和对应角色记忆目录已删除。" });
+    for (const id of deletedIds) memoryDeletionSessionsRef.current.delete(id);
   };
 
   const activateWorkspaceSessions = (
@@ -26043,6 +26120,7 @@ export function App() {
         false,
       );
       setChatStatus({ status: "loading", message: options.statusMessage ?? "正在重新生成回复..." });
+      await waitForMemoryCleanup(requestSessionId);
       const fileMemoryEnabled = responseMode === "roleplay" && requestContextMode === "roleplay"
         && requestContextSettings.fileMemory === true && !isImageGenerationRequest;
       const memorySession = chatSessionsRef.current.find(session => session.id === requestSessionId);
@@ -28954,6 +29032,7 @@ export function App() {
     commitChatMessages(accumulatedMessages);
     if (activeChatSessionIdRef.current === requestSessionId) { setChatInput(""); setChatAttachments([]); }
     try {
+      await waitForMemoryCleanup(requestSessionId);
       setChatStatus({ status: "loading", message: "正在运行发送前酒馆脚本..." });
       const prepared = await runTavernPreSendHooks(userMessage, content, requestSessionId);
       accumulatedMessages = prepared.messages;
@@ -29595,6 +29674,7 @@ export function App() {
     let streamingMessageUpdates: ReturnType<typeof createChatStreamUpdateBatcher> | null = null;
 
     try {
+      await waitForMemoryCleanup(requestSessionId);
       setChatStatus({ status: "loading", message: "正在运行发送前酒馆脚本..." });
       const prepared = await runTavernPreSendHooks(userMessage, content, requestSessionId);
       effectiveContent = prepared.content;
@@ -38039,7 +38119,8 @@ export function App() {
   const clearActiveChatSession = () => {
     const sessionId = activeChatSessionIdRef.current;
     const currentSession = chatSessionsRef.current.find((session) => session.id === sessionId);
-    if (!currentSession || chatSessionResetTasksRef.current.has(sessionId)) return;
+    if (!currentSession || chatSessionResetTasksRef.current.has(sessionId) || memoryCleanupTasksRef.current.has(sessionId)
+      || memoryDeletionSessionsRef.current.has(sessionId)) return;
     const runtime = chatRuntimesRef.current.get(sessionId);
     if (runtime.controller || runtime.generationState !== "idle" ||
       runtime.status.status === "loading" || getSessionRunData(sessionId).manualStatusBar ||
@@ -38048,8 +38129,14 @@ export function App() {
       return;
     }
     if (!getActiveDesktopWindow().confirm(
-      "确定重置当前会话？\n\n将清空该会话的所有数据，角色卡恢复到开场白，会话 ID 保持不变。此操作无法撤销。",
+      "确定重置当前会话？\n\n将清空该会话的所有数据和角色记忆文件夹，角色卡恢复到开场白，会话 ID 保持不变。此操作无法撤销。",
     )) return;
+    let memoryCleanup: Promise<void>;
+    try { memoryCleanup = clearSessionMemoryFiles(currentSession, true); }
+    catch (error) {
+      setSessionChatStatus(sessionId, { status: "warning", message: error instanceof Error ? error.message : "无法开始清理角色记忆目录。" });
+      return;
+    }
 
     const roleplayCard = characterCardsRef.current.find(
       (card) => card.id === currentSession.roleplayCharacterCardId,
@@ -38140,7 +38227,7 @@ export function App() {
         }, reject);
       }, 0);
     });
-    const task = Promise.allSettled([piCleanup, imageCleanup, persistence]).then((results) => {
+    const task = Promise.allSettled([piCleanup, imageCleanup, memoryCleanup, persistence]).then((results) => {
       const failures = [...localErrors, ...results.flatMap((result) => result.status === "rejected"
         ? [result.reason instanceof Error ? result.reason.message : String(result.reason)] : [])];
       if (failures.length) {
