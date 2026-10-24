@@ -4,7 +4,7 @@ export function RoleplayMemorySettings(props: {
   return <article className="llm-setting-card rp-memory-card">
     <div className="llm-setting-copy">
       <h3>角色扮演文件记忆</h3>
-      <p>仅在角色扮演模式生效。生成前按需检索记忆，生成后按剧情需要提炼更新；AI 可随剧情持续新增目录和多级子目录，不生成正文副本。正文只注入最近 3 条（用户与角色合计），预设、角色卡、世界书等其他注入保持原规则。</p>
+      <p>仅在角色扮演模式生效。生成前按需检索记忆，生成后只提炼事实、状态和必要结论，禁止剧情复述和分章摘要；AI 可持续新增目录和多级子目录。正文只注入最近 3 条（用户与角色合计），预设、角色卡、世界书等其他注入保持原规则。</p>
     </div>
     <label className="tool-toggle llm-feature-toggle">
       <input type="checkbox" aria-label="角色扮演文件记忆" checked={props.enabled}

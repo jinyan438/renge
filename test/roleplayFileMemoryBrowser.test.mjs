@@ -11,6 +11,7 @@ const root = await mkdtemp(join(tmpdir(), "renge-file-memory-browser-"));
 let server, browser, page;
 let failWrite = false;
 const memoryRequests = [], storyRequests = [], order = [], errors = [];
+const initialMemoryPath = "钟楼通行/当前状态.md";
 const now = new Date().toISOString();
 const file = content => ({ content, updatedAt: now });
 const memory = (workspace, id, content) => ({ version: 1, scope: JSON.stringify([workspace, id]),
@@ -47,6 +48,12 @@ try {
     assert.match(body.request.messages[0].content, /文件记忆管理员/);
     assert.doesNotMatch(JSON.stringify(body.request.messages), /B_ONLY_SECRET/);
     const writable = body.request.tools.some(tool => tool.function.name === "memory_write");
+    const reference = JSON.parse(body.request.messages[1].content).reference;
+    assert.equal(reference.messages.length, 3, "memory extraction receives only the latest canonical dialogue");
+    assert.ok(reference.messages.every(message => message.role === "user" || message.role === "assistant"));
+    assert.equal(reference.messages.at(-1).role, writable ? "assistant" : "user");
+    assert.doesNotMatch(JSON.stringify(reference), /SYSTEM_PROMPT_KEPT|WORLDBOOK_KEPT|CHARACTER_CARD_KEPT/,
+      "story presets and roleplay writing instructions must not steer memory extraction");
     const previousTools = body.request.messages.filter(message => message.role === "tool");
     const phase = writable ? "write" : "read";
     order.push(phase);
@@ -61,7 +68,7 @@ try {
     const writeCalls = storyRequests.length === 1 ? [
       call("memory_read", { path: "人物/守门人.md" }),
       call("memory_edit", { path: "人物/守门人.md", oldText: "当前在旧港口", newText: "当前在钟楼" }),
-      call("memory_write", { path: "时间线/第一章/进入钟楼.md", content: "守门人带用户进入钟楼，铜钥匙仍由守门人保管。" }),
+      call("memory_write", { path: initialMemoryPath, content: "- 当前位置：钟楼。\n- 铜钥匙持有人：守门人。" }),
     ] : [
       call("memory_mkdir", { path: "钟楼之约/生效条件" }),
       call("memory_write", { path: "钟楼之约/生效条件/开门时刻.md", content: "通行约定仅在黎明生效。" }),
@@ -96,7 +103,7 @@ try {
   }
   await page.goto(server.url); await enter(); await selectSession("A");
   await send("请带我进入钟楼");
-  const persisted = await saved(data => data.chatSessions.find(session => session.id === "A")?.fileMemory?.files["时间线/第一章/进入钟楼.md"]);
+  const persisted = await saved(data => data.chatSessions.find(session => session.id === "A")?.fileMemory?.files[initialMemoryPath]);
   assert.deepEqual(order, ["read", "read", "read", "story", "write", "write"]);
   assert.equal(storyRequests[0].piHistoryMode, "replace", "persistent Pi history cannot bypass the three-turn window");
   const actual = storyRequests[0].request.messages;
@@ -111,7 +118,7 @@ try {
   assert.match(JSON.stringify(actual), /CHARACTER_CARD_KEPT/);
   assert.equal(persisted.chatSessions.find(session => session.id === "B").fileMemory.files["人物/守门人.md"].content, "B_ONLY_SECRET");
   const mirror = join(root, "temporary-files", "角色记忆", "会话-%41");
-  assert.match(await readFile(join(mirror, "时间线/第一章/进入钟楼.md"), "utf8"), /钟楼/);
+  assert.equal(await readFile(join(mirror, initialMemoryPath), "utf8"), "- 当前位置：钟楼。\n- 铜钥匙持有人：守门人。");
   assert.equal((await readdir(mirror)).includes("剧情原文"), false, "generation never creates transcript folders");
   assert.equal(Object.keys(persisted.chatSessions.find(session => session.id === "A").fileMemory.files).some(path => path.startsWith("剧情原文/")), false);
   // The existing file module is the only memory editor, and its writes go
