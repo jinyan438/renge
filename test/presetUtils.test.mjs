@@ -11,6 +11,7 @@ import {
   importSillyTavernPreset,
   normalizeChatPresetPrompt,
   normalizeFavoriteChatPresetPrompts,
+  reorderChatPresetPrompts,
 } from "../src/presetUtils.ts";
 
 function createPreset(prompts) {
@@ -46,6 +47,29 @@ const macroContext = {
 function text(messages) {
   return messages.map((message) => `${message.role}:${message.content}`);
 }
+
+test("drag insertion handles both directions, end gaps and adjacent no-op gaps", () => {
+  const prompts = createPreset([
+    { identifier: "a", content: "A" }, { identifier: "b", content: "B", enabled: false },
+    { identifier: "c", content: "C", position: 2, depth: 3, order: 42 }, { identifier: "d", content: "D" },
+  ]).prompts;
+  const ids = (items) => items.map((prompt) => prompt.identifier);
+  assert.deepEqual(ids(reorderChatPresetPrompts(prompts, "a", 3)), ["b", "c", "a", "d"]);
+  assert.deepEqual(ids(reorderChatPresetPrompts(prompts, "d", 1)), ["a", "d", "b", "c"]);
+  assert.deepEqual(ids(reorderChatPresetPrompts(prompts, "a", 4)), ["b", "c", "d", "a"]);
+  assert.deepEqual(ids(reorderChatPresetPrompts(prompts, "d", 0)), ["d", "a", "b", "c"]);
+  assert.equal(reorderChatPresetPrompts(prompts, "b", 1), prompts);
+  assert.equal(reorderChatPresetPrompts(prompts, "b", 2), prompts);
+  assert.equal(reorderChatPresetPrompts(prompts, "missing", 1), prompts);
+  assert.equal(reorderChatPresetPrompts(prompts, "a", NaN), prompts);
+  const reordered = reorderChatPresetPrompts(prompts, "c", 0);
+  assert.equal(reordered[0], prompts[2], "moving preserves the module and its injection settings");
+  assert.equal(reordered[2].enabled, false);
+  assert.deepEqual(ids(prompts), ["a", "b", "c", "d"], "the original list is unchanged");
+  const preset = { ...createDefaultChatPreset(), prompts: reorderChatPresetPrompts(prompts, "d", 1) };
+  const exported = JSON.parse(exportSillyTavernPresetJson(preset));
+  assert.deepEqual(exported.prompt_order[0].order.map((entry) => entry.identifier), ["a", "d", "b", "c"]);
+});
 
 test("favorite copies preserve injection settings, survive identifier collisions and stay independent", () => {
   const saved = normalizeChatPresetPrompt({

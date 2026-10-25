@@ -2677,10 +2677,42 @@ summary:focus-visible {
 .preset-prompt-list {
   display: grid;
   align-content: start;
-  gap: 7px;
+  gap: 0;
   max-height: 620px;
   overflow: auto;
   padding: 9px;
+  overscroll-behavior: contain;
+}
+
+.preset-prompt-list.is-dragging {
+  cursor: grabbing;
+  user-select: none;
+  overflow-anchor: none;
+}
+
+.preset-prompt-drop-slot {
+  position: relative;
+  height: 9px;
+}
+
+.preset-prompt-drop-slot::after {
+  position: absolute;
+  content: "";
+  top: 3px;
+  right: 0;
+  left: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: transparent;
+}
+
+.preset-prompt-drop-slot.active::after {
+  background: #0666dd;
+  box-shadow: 0 0 0 2px #eaf3ff;
+}
+
+.preset-prompt-item.dragging {
+  opacity: 0.4;
 }
 
 .preset-prompt-item {
@@ -2736,19 +2768,28 @@ summary:focus-visible {
   font-weight: 700;
 }
 
-.preset-prompt-order-actions {
-  display: flex;
-  gap: 3px;
-}
-
-.preset-prompt-order-actions button {
-  width: 26px;
-  height: 26px;
+.preset-prompt-drag-handle {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 34px;
   padding: 0;
   border: 1px solid #d9dee8;
   border-radius: 6px;
   color: #475569;
   background: #ffffff;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.preset-prompt-drag-handle:active {
+  cursor: grabbing;
+}
+
+.preset-prompt-drag-handle:disabled {
+  cursor: default;
+  opacity: 0.35;
 }
 
 .preset-prompt-editor {

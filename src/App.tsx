@@ -3,6 +3,7 @@ import { RoleplayMemorySettings } from "./RoleplayMemorySettings";
 import { runMemoryAgent, reconcileMemoryHistory, recordMemoryRevision, memoryScope, normalizeRoleplayFileMemory, recentRoleplayBody, type RoleplayFileMemory } from "./roleplayFileMemory";
 import { ContextTokenMeter } from "./ContextTokenMeter";
 import { ContextLimitInput } from "./ContextLimitInput";
+import { PresetPromptList } from "./PresetPromptList";
 import { createPiContextUsageStore, createNativeContextTokenMeter, hasUsablePiContextUsage, type ContextTokenMeterSnapshot } from "./contextTokenMeterUtils";
 import { createChatSessionRuntime, type ChatInputMode, type SessionRunStatus } from "./chatSessionRuntime";
 import type { ReviewSource, ReviewSnapshot, ReviewDetail, ReviewRequest, ReviewAiResult } from "./codeReviewUtils";
@@ -165,6 +166,7 @@ import {
   loadFavoriteChatPresetPromptsFromStorage,
   normalizeChatPreset,
   normalizeFavoriteChatPresetPrompts,
+  reorderChatPresetPrompts,
   type ChatPreset,
   type ChatPresetPrompt,
   type FavoriteChatPresetPrompt,
@@ -17368,16 +17370,11 @@ export function App() {
     setSelectedChatPresetPromptId(identifier);
   };
 
-  const moveChatPresetPrompt = (identifier: string, direction: -1 | 1) => {
+  const moveChatPresetPrompt = (identifier: string, insertionIndex: number) => {
     if (!activeChatPreset) return;
-    const currentIndex = activeChatPreset.prompts.findIndex(
-      (prompt) => prompt.identifier === identifier,
-    );
-    const targetIndex = currentIndex + direction;
-    if (currentIndex < 0 || targetIndex < 0 || targetIndex >= activeChatPreset.prompts.length) return;
-    const prompts = [...activeChatPreset.prompts];
-    [prompts[currentIndex], prompts[targetIndex]] = [prompts[targetIndex], prompts[currentIndex]];
-    updateActiveChatPreset({ prompts });
+    const prompts = reorderChatPresetPrompts(activeChatPreset.prompts, identifier, insertionIndex);
+    if (prompts !== activeChatPreset.prompts) updateActiveChatPreset({ prompts });
+    setSelectedChatPresetPromptId(identifier);
   };
 
   const toggleChatPresetPromptFavorite = () => {
@@ -35548,8 +35545,8 @@ export function App() {
                       <div>
                         <h3>提示词注入</h3>
                         <p>
-                          模块顺序会直接影响注入顺序；main 放置现有系统提示，chatHistory
-                          放置当前会话历史。
+                          拖动模块右侧手柄，在模块间的插入线处松开即可排序；拖到列表边缘可自动滚动。
+                          main 放置现有系统提示，chatHistory 放置当前会话历史。
                         </p>
                       </div>
                       <button type="button" className="small-action" onClick={addChatPresetPrompt}>
@@ -35559,57 +35556,14 @@ export function App() {
                     </div>
 
                     <div className="preset-prompt-workspace">
-                      <div className="preset-prompt-list">
-                        {activeChatPreset.prompts.length === 0 ? (
-                          <div className="preset-empty-state">当前预设没有提示词模块。</div>
-                        ) : (
-                          activeChatPreset.prompts.map((prompt, index) => (
-                            <div
-                              className={`preset-prompt-item ${
-                                prompt.identifier === selectedChatPresetPrompt?.identifier ? "active" : ""
-                              } ${prompt.enabled ? "" : "disabled"}`}
-                              key={prompt.identifier}
-                            >
-                              <input
-                                type="checkbox"
-                                aria-label={`启用 ${prompt.name}`}
-                                checked={prompt.enabled}
-                                onChange={(event) =>
-                                  updateChatPresetPrompt(prompt.identifier, { enabled: event.target.checked })
-                                }
-                              />
-                              <button
-                                type="button"
-                                className="preset-prompt-select"
-                                onClick={() => setSelectedChatPresetPromptId(prompt.identifier)}
-                              >
-                                <strong>{prompt.name}</strong>
-                                <span>
-                                  {prompt.role} · {prompt.marker ? "占位符" : prompt.injectionPosition === 2 ? `聊天深度 ${prompt.injectionDepth}` : "相对注入"}
-                                </span>
-                              </button>
-                              <div className="preset-prompt-order-actions">
-                                <button
-                                  type="button"
-                                  title="上移"
-                                  disabled={index === 0}
-                                  onClick={() => moveChatPresetPrompt(prompt.identifier, -1)}
-                                >
-                                  ↑
-                                </button>
-                                <button
-                                  type="button"
-                                  title="下移"
-                                  disabled={index === activeChatPreset.prompts.length - 1}
-                                  onClick={() => moveChatPresetPrompt(prompt.identifier, 1)}
-                                >
-                                  ↓
-                                </button>
-                              </div>
-                            </div>
-                          ))
-                        )}
-                      </div>
+                      <PresetPromptList
+                        key={activeChatPreset.id}
+                        prompts={activeChatPreset.prompts}
+                        selectedIdentifier={selectedChatPresetPrompt?.identifier}
+                        onSelect={setSelectedChatPresetPromptId}
+                        onToggle={(identifier, enabled) => updateChatPresetPrompt(identifier, { enabled })}
+                        onMove={moveChatPresetPrompt}
+                      />
 
                       {selectedChatPresetPrompt ? (
                         <div className="preset-prompt-editor">

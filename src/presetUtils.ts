@@ -244,6 +244,22 @@ export function normalizeFavoriteChatPresetPrompts(raw: unknown): FavoriteChatPr
   });
 }
 
+// insertionIndex identifies a gap in the original list, before removing the
+// dragged module. Keep each module's injection settings and enabled state.
+export function reorderChatPresetPrompts(
+  prompts: ChatPresetPrompt[], identifier: string, insertionIndex: number,
+) {
+  const sourceIndex = prompts.findIndex((prompt) => prompt.identifier === identifier);
+  if (sourceIndex < 0 || !Number.isInteger(insertionIndex)) return prompts;
+  const boundary = Math.max(0, Math.min(prompts.length, insertionIndex));
+  const targetIndex = boundary > sourceIndex ? boundary - 1 : boundary;
+  if (targetIndex === sourceIndex) return prompts;
+  const reordered = [...prompts];
+  const [prompt] = reordered.splice(sourceIndex, 1);
+  reordered.splice(targetIndex, 0, prompt);
+  return reordered;
+}
+
 export function loadFavoriteChatPresetPromptsFromStorage(storageKey: string) {
   try {
     return normalizeFavoriteChatPresetPrompts(JSON.parse(localStorage.getItem(storageKey) ?? "[]"));
