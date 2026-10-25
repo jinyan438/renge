@@ -2766,6 +2766,49 @@ summary:focus-visible {
   justify-content: space-between;
   gap: 10px;
   color: #172033;
+  flex-wrap: wrap;
+}
+
+.preset-prompt-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.preset-favorite-action[aria-pressed="true"],
+.settings-desktop .preset-favorite-action[aria-pressed="true"] {
+  border-color: #a9cbff;
+  color: #0666dd;
+  background: #eaf3ff;
+}
+
+.preset-favorite-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.preset-favorite-item > .ghost-action {
+  min-width: 0;
+}
+
+.preset-favorite-item > .ghost-action > span {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preset-favorite-item svg,
+.preset-favorite-item small {
+  flex-shrink: 0;
+}
+
+.preset-favorite-item > .ghost-action:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .preset-prompt-fields-row {

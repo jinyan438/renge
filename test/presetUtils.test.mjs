@@ -3,10 +3,14 @@ import test from "node:test";
 
 import {
   applyChatPresetToMessages,
+  canAddFavoriteChatPresetPrompt,
+  chatPresetPromptsMatch,
+  copyFavoriteChatPresetPrompt,
   createDefaultChatPreset,
   exportSillyTavernPresetJson,
   importSillyTavernPreset,
   normalizeChatPresetPrompt,
+  normalizeFavoriteChatPresetPrompts,
 } from "../src/presetUtils.ts";
 
 function createPreset(prompts) {
@@ -42,6 +46,54 @@ const macroContext = {
 function text(messages) {
   return messages.map((message) => `${message.role}:${message.content}`);
 }
+
+test("favorite copies preserve injection settings, survive identifier collisions and stay independent", () => {
+  const saved = normalizeChatPresetPrompt({
+    identifier: "shared", name: "收藏模板", content: "saved content", role: "assistant",
+    enabled: false, systemPrompt: true, injectionPosition: 2, injectionDepth: 1, injectionOrder: 42,
+  }, 0);
+  const preset = createPreset([{ identifier: "shared", content: "existing content" }]);
+  preset.backupPrompts = [normalizeChatPresetPrompt({ identifier: "backup", content: "keep backup" }, 0)];
+  const before = JSON.stringify(preset);
+  const copy = copyFavoriteChatPresetPrompt(preset, saved);
+  assert.ok(copy);
+  assert.notEqual(copy.identifier, saved.identifier);
+  assert.deepEqual(copy, { ...saved, identifier: copy.identifier, enabled: true });
+  assert.equal(JSON.stringify(preset), before);
+  assert.equal(saved.enabled, false);
+  preset.prompts.push(copy);
+  assert.equal(canAddFavoriteChatPresetPrompt(preset, saved), false);
+  assert.equal(copyFavoriteChatPresetPrompt(preset, saved), null);
+  const messages = applyChatPresetToMessages(preset, "", [{ role: "user", content: "latest" }], macroContext);
+  assert.ok(messages.some((message) => message.role === "assistant" && message.content === "saved content"));
+  copy.content = "local edit";
+  assert.equal(saved.content, "saved content");
+  assert.equal(chatPresetPromptsMatch(copy, saved), false);
+});
+
+test("favorite special modules retain Tavern identifiers and never overwrite conflicting modules", () => {
+  const preset = createDefaultChatPreset();
+  const history = normalizeChatPresetPrompt({ identifier: "chatHistory", name: "History", marker: true }, 0);
+  preset.backupPrompts = [history];
+  assert.equal(copyFavoriteChatPresetPrompt(preset, history).identifier, "chatHistory");
+  const main = normalizeChatPresetPrompt({ identifier: "main", name: "Main", content: "saved main" }, 0);
+  preset.prompts = [{ ...main, content: "keep current main" }];
+  assert.equal(copyFavoriteChatPresetPrompt(preset, main), null);
+  assert.equal(preset.prompts[0].content, "keep current main");
+  assert.equal(chatPresetPromptsMatch(history, { ...history, identifier: "worldInfoBefore" }), false);
+});
+
+test("favorite storage round-trips snapshots and ignores invalid entries", () => {
+  const favorites = normalizeFavoriteChatPresetPrompts([
+    null, { id: "invalid" }, { id: "favorite", prompt: { identifier: "saved", content: "收藏内容", injectionDepth: 3 } },
+  ]);
+  assert.equal(favorites.length, 1);
+  assert.equal(favorites[0].id, "favorite");
+  assert.equal(favorites[0].prompt.content, "收藏内容");
+  assert.equal(favorites[0].prompt.injectionDepth, 3);
+  assert.deepEqual(normalizeFavoriteChatPresetPrompts(JSON.parse(JSON.stringify(favorites))), favorites);
+  assert.deepEqual(normalizeFavoriteChatPresetPrompts({}), []);
+});
 
 test("chat depth is measured from the original message boundaries", () => {
   const preset = createPreset([

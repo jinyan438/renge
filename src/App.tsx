@@ -155,13 +155,19 @@ import {
 import {
   applyChatPresetToMessages,
   buildChatPresetRequestParameters,
+  canAddFavoriteChatPresetPrompt,
+  chatPresetPromptsMatch,
+  copyFavoriteChatPresetPrompt,
   createDefaultChatPreset,
   exportSillyTavernPresetJson,
   importSillyTavernPreset,
   loadChatPresetsFromStorage,
+  loadFavoriteChatPresetPromptsFromStorage,
   normalizeChatPreset,
+  normalizeFavoriteChatPresetPrompts,
   type ChatPreset,
   type ChatPresetPrompt,
+  type FavoriteChatPresetPrompt,
 } from "./presetUtils";
 import { buildPocketHistoryMessage, buildSharedPocketConversation, formatPocketContextMessage, getPocketMessageIdentity, pocketContextRevision, syncPocketContext, type PocketContextSync, type PocketConversationBuilder } from "./pocketPhoneContext";
 import { isPocketGroup, pocketStorageKey } from "./pocketPhoneState";
@@ -1106,6 +1112,7 @@ type RengeAppData = {
   activeSystemPromptId?: string;
   activeSystemPromptIds?: string[];
   chatPresets?: ChatPreset[];
+  favoriteChatPresetPrompts?: FavoriteChatPresetPrompt[];
   statusBarPresets?: StatusBarPreset[];
   activeChatPresetId?: string;
   chatPresetEnabled?: boolean;
@@ -1661,6 +1668,7 @@ const SYSTEM_PROMPTS_STORAGE_KEY = "renge_system_prompts";
 const ACTIVE_SYSTEM_PROMPT_STORAGE_KEY = "renge_active_system_prompt";
 const ACTIVE_SYSTEM_PROMPTS_STORAGE_KEY = "renge_active_system_prompts";
 const CHAT_PRESETS_STORAGE_KEY = "renge_chat_presets";
+const FAVORITE_CHAT_PRESET_PROMPTS_STORAGE_KEY = "renge_favorite_chat_preset_prompts";
 const ACTIVE_CHAT_PRESET_STORAGE_KEY = "renge_active_chat_preset";
 const CHAT_PRESET_ENABLED_STORAGE_KEY = "renge_chat_preset_enabled";
 const WORLD_BOOKS_STORAGE_KEY = "renge_world_books";
@@ -3548,6 +3556,7 @@ function persistAppDataToLocalStores(
     data.activeSystemPromptIds ?? [],
   );
   setLocalStorageJsonSafely(CHAT_PRESETS_STORAGE_KEY, data.chatPresets ?? []);
+  setLocalStorageJsonSafely(FAVORITE_CHAT_PRESET_PROMPTS_STORAGE_KEY, data.favoriteChatPresetPrompts ?? []);
   setLocalStorageJsonSafely(STATUS_BAR_PRESETS_STORAGE_KEY, data.statusBarPresets ?? []);
   setLocalStorageValueSafely(ACTIVE_CHAT_PRESET_STORAGE_KEY, data.activeChatPresetId ?? "");
   setLocalStorageValueSafely(
@@ -12881,6 +12890,9 @@ export function App() {
   const [chatPresets, setChatPresets] = useState<ChatPreset[]>(() =>
     loadChatPresetsFromStorage(CHAT_PRESETS_STORAGE_KEY),
   );
+  const [favoriteChatPresetPrompts, setFavoriteChatPresetPrompts] = useState<FavoriteChatPresetPrompt[]>(
+    () => loadFavoriteChatPresetPromptsFromStorage(FAVORITE_CHAT_PRESET_PROMPTS_STORAGE_KEY),
+  );
   const [statusBarPresets, setStatusBarPresets] = useState<StatusBarPreset[]>(
     loadStatusBarPresetsFromStorage,
   );
@@ -15185,6 +15197,7 @@ export function App() {
       activeSystemPromptId,
       activeSystemPromptIds,
       chatPresets: chatPresetsRef.current,
+      favoriteChatPresetPrompts,
       statusBarPresets,
       activeChatPresetId,
       chatPresetEnabled,
@@ -15220,7 +15233,7 @@ export function App() {
       pcConnection: appDataPcConnection,
       updatedAt: snapshotUpdatedAt,
     };
-  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataPcConnection, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, contextCompressionSettings, extensions, llmContextSettings, llmFullAccessEnabled, llmPushNotificationsEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, tavernExtensionSettings, tavernSettingsStore, userProfile, userProfiles, activeUserProfileId, worldBooks]);
+  }, [activeCharacterCardId, activeChatPresetId, activePersonaId, activeProviderId, activeSystemPromptId, activeSystemPromptIds, activeWorldBookIds, appDataPcConnection, characterCards, characterTranslationAdditionalPrompt, characterTranslationPromptEnabled, chatChoiceToolsEnabled, chatDialogueRewriteEnabled, chatHeartbeatReminderVisible, chatHtmlRenderEnabled, chatMode, chatMultiBubbleEnabled, chatPersonalization, chatPresetEnabled, chatPresets, chatReasoningVisible, chatRenderedEditingEnabled, chatSender, contextCompressionSettings, extensions, favoriteChatPresetPrompts, llmContextSettings, llmFullAccessEnabled, llmPushNotificationsEnabled, mcpServers, multiAgentAutoStopEnabled, multiAgentModelConfigs, multiAgentPersonaIds, multiAgentPrimaryPersonaId, multiAgentRounds, multiAgentStopCondition, multiAgentSubPersonaIds, multiAgentWorkflow, personas, providers, chatSessions, regexScripts, skills, statusBarPresets, systemPrompts, tavernGlobalVariables, tavernScripts, tavernExtensionSettings, tavernSettingsStore, userProfile, userProfiles, activeUserProfileId, worldBooks]);
 
   flushTavernPersistenceRef.current = async () => {
     if (!appDataLoaded || appDataPersistenceSuspendedRef.current) {
@@ -15318,6 +15331,9 @@ export function App() {
         persistentData?.chatPresets && persistentData.chatPresets.length > 0
           ? persistentData.chatPresets.map((preset, index) => normalizeChatPreset(preset, index))
           : loadChatPresetsFromStorage(CHAT_PRESETS_STORAGE_KEY);
+      const normalizedFavoriteChatPresetPrompts = Array.isArray(persistentData?.favoriteChatPresetPrompts)
+        ? normalizeFavoriteChatPresetPrompts(persistentData.favoriteChatPresetPrompts)
+        : loadFavoriteChatPresetPromptsFromStorage(FAVORITE_CHAT_PRESET_PROMPTS_STORAGE_KEY);
       const normalizedStatusBarPresets = Array.isArray(persistentData?.statusBarPresets)
         ? normalizeStatusBarPresets(persistentData.statusBarPresets)
         : loadStatusBarPresetsFromStorage();
@@ -15662,6 +15678,7 @@ export function App() {
       setActiveSystemPromptId(nextActiveSystemPromptId);
       setActiveSystemPromptIds(nextActiveSystemPromptIds);
       setChatPresets(normalizedChatPresets);
+      setFavoriteChatPresetPrompts(normalizedFavoriteChatPresetPrompts);
       setStatusBarPresets(normalizedStatusBarPresets);
       setActiveChatPresetId(nextActiveChatPresetId);
       setChatPresetEnabled(nextChatPresetEnabled);
@@ -16300,6 +16317,9 @@ export function App() {
       ) ?? activeChatPreset?.prompts[0],
     [activeChatPreset, selectedChatPresetPromptId],
   );
+  const selectedChatPresetPromptFavorite = selectedChatPresetPrompt
+    ? favoriteChatPresetPrompts.find((favorite) => chatPresetPromptsMatch(favorite.prompt, selectedChatPresetPrompt))
+    : undefined;
 
   useEffect(() => {
     if (!activeChatPreset) {
@@ -17358,6 +17378,27 @@ export function App() {
     const prompts = [...activeChatPreset.prompts];
     [prompts[currentIndex], prompts[targetIndex]] = [prompts[targetIndex], prompts[currentIndex]];
     updateActiveChatPreset({ prompts });
+  };
+
+  const toggleChatPresetPromptFavorite = () => {
+    if (!selectedChatPresetPrompt) return;
+    setFavoriteChatPresetPrompts((current) => {
+      const existing = current.find((favorite) => chatPresetPromptsMatch(favorite.prompt, selectedChatPresetPrompt));
+      return existing
+        ? current.filter((favorite) => favorite.id !== existing.id)
+        : [...current, { id: crypto.randomUUID(), prompt: { ...selectedChatPresetPrompt } }];
+    });
+  };
+
+  const addFavoriteChatPresetPrompt = (favorite: FavoriteChatPresetPrompt) => {
+    if (!activeChatPreset) return;
+    const prompt = copyFavoriteChatPresetPrompt(activeChatPreset, favorite.prompt);
+    if (!prompt) return;
+    updateActiveChatPreset({
+      prompts: [...activeChatPreset.prompts, prompt],
+      backupPrompts: activeChatPreset.backupPrompts.filter((backup) => backup.identifier !== prompt.identifier),
+    });
+    setSelectedChatPresetPromptId(prompt.identifier);
   };
 
   const deleteChatPresetPrompt = (identifier: string) => {
@@ -35574,14 +35615,26 @@ export function App() {
                         <div className="preset-prompt-editor">
                           <div className="preset-prompt-editor-title">
                             <strong>编辑模块</strong>
-                            <button
-                              type="button"
-                              className="danger-action"
-                              onClick={() => deleteChatPresetPrompt(selectedChatPresetPrompt.identifier)}
-                            >
-                              <Trash2 size={14} />
-                              删除模块
-                            </button>
+                            <div className="preset-prompt-editor-actions">
+                              <button
+                                type="button"
+                                className="ghost-action preset-favorite-action"
+                                aria-pressed={Boolean(selectedChatPresetPromptFavorite)}
+                                title={selectedChatPresetPromptFavorite ? "取消全局收藏" : "收藏当前模块，供所有预设添加"}
+                                onClick={toggleChatPresetPromptFavorite}
+                              >
+                                <Bookmark size={14} fill={selectedChatPresetPromptFavorite ? "currentColor" : "none"} />
+                                {selectedChatPresetPromptFavorite ? "取消收藏" : "收藏模块"}
+                              </button>
+                              <button
+                                type="button"
+                                className="danger-action"
+                                onClick={() => deleteChatPresetPrompt(selectedChatPresetPrompt.identifier)}
+                              >
+                                <Trash2 size={14} />
+                                删除模块
+                              </button>
+                            </div>
                           </div>
                           <label className="field">
                             <span>模块名称</span>
@@ -35651,6 +35704,45 @@ export function App() {
                         </div>
                       ) : (
                         <div className="preset-empty-state">选择一个模块后可编辑内容与注入位置。</div>
+                      )}
+                    </div>
+
+                    <div className="preset-backup-prompts preset-favorite-prompts">
+                      <strong>收藏模块（全局共用）</strong>
+                      <p>收藏时保存模块的内容与注入设置；点击即可添加到当前预设，后续编辑互不影响。</p>
+                      {favoriteChatPresetPrompts.length > 0 ? (
+                        <div>
+                          {favoriteChatPresetPrompts.map((favorite) => {
+                            const added = activeChatPreset.prompts.some((prompt) => chatPresetPromptsMatch(prompt, favorite.prompt));
+                            const canAdd = canAddFavoriteChatPresetPrompt(activeChatPreset, favorite.prompt);
+                            return (
+                              <div className="preset-favorite-item" key={favorite.id}>
+                                <button
+                                  type="button"
+                                  className="ghost-action"
+                                  disabled={!canAdd}
+                                  title={added ? "当前预设已添加此模块" : !canAdd ? "当前预设已有相同标识的占位或主提示模块" : `添加 ${favorite.prompt.name} 到当前预设`}
+                                  onClick={() => addFavoriteChatPresetPrompt(favorite)}
+                                >
+                                  {added ? <Check size={13} /> : <Plus size={13} />}
+                                  <span>{favorite.prompt.name}</span>
+                                  {!canAdd && <small>{added ? "已添加" : "标识冲突"}</small>}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="icon-button"
+                                  aria-label={`取消收藏 ${favorite.prompt.name}`}
+                                  title="取消收藏，不影响已添加的模块"
+                                  onClick={() => setFavoriteChatPresetPrompts((current) => current.filter((entry) => entry.id !== favorite.id))}
+                                >
+                                  <X size={13} />
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <p>还没有收藏模块，可在「删除模块」左侧点击「收藏模块」。</p>
                       )}
                     </div>
 

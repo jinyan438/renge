@@ -26,6 +26,11 @@ export type ChatPresetPrompt = {
   injectionOrder: number;
 };
 
+export type FavoriteChatPresetPrompt = {
+  id: string;
+  prompt: ChatPresetPrompt;
+};
+
 export type ChatPreset = {
   id: string;
   name: string;
@@ -225,6 +230,63 @@ export function normalizeChatPresetPrompt(
     ),
     injectionDepth: integerNumber(prompt.injectionDepth ?? prompt.injection_depth, 0),
     injectionOrder: finiteNumber(prompt.injectionOrder ?? prompt.injection_order, index),
+  };
+}
+
+export function normalizeFavoriteChatPresetPrompts(raw: unknown): FavoriteChatPresetPrompt[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry, index) => {
+    if (!isRecord(entry) || !isRecord(entry.prompt)) return [];
+    return [{
+      id: typeof entry.id === "string" && entry.id ? entry.id : crypto.randomUUID(),
+      prompt: normalizeChatPresetPrompt(entry.prompt, index),
+    }];
+  });
+}
+
+export function loadFavoriteChatPresetPromptsFromStorage(storageKey: string) {
+  try {
+    return normalizeFavoriteChatPresetPrompts(JSON.parse(localStorage.getItem(storageKey) ?? "[]"));
+  } catch {
+    return [];
+  }
+}
+
+function hasSemanticPromptIdentifier(prompt: ChatPresetPrompt) {
+  return prompt.marker || prompt.identifier === "main" || markerIdentifiers.has(prompt.identifier);
+}
+
+// Copies can have a different identifier and enabled state while still using the
+// same saved template. Special Tavern identifiers must retain their meaning.
+export function chatPresetPromptsMatch(left: ChatPresetPrompt, right: ChatPresetPrompt) {
+  return (!(hasSemanticPromptIdentifier(left) || hasSemanticPromptIdentifier(right)) ||
+      left.identifier === right.identifier) &&
+    left.name === right.name && left.role === right.role && left.content === right.content &&
+    left.marker === right.marker && left.systemPrompt === right.systemPrompt &&
+    left.injectionPosition === right.injectionPosition &&
+    left.injectionDepth === right.injectionDepth && left.injectionOrder === right.injectionOrder;
+}
+
+export function canAddFavoriteChatPresetPrompt(preset: ChatPreset, saved: ChatPresetPrompt) {
+  if (preset.prompts.some((prompt) => chatPresetPromptsMatch(prompt, saved))) return false;
+  // Do not overwrite a different main/history/placeholder module or change its
+  // special identifier, which would change how the preset builds the request.
+  return !hasSemanticPromptIdentifier(saved) ||
+    ![...preset.prompts, ...preset.backupPrompts].some(
+      (prompt) => prompt.identifier === saved.identifier && !chatPresetPromptsMatch(prompt, saved),
+    );
+}
+
+export function copyFavoriteChatPresetPrompt(preset: ChatPreset, saved: ChatPresetPrompt) {
+  if (!canAddFavoriteChatPresetPrompt(preset, saved)) return null;
+  const collision = [...preset.prompts, ...preset.backupPrompts].some(
+    (prompt) => prompt.identifier === saved.identifier,
+  );
+  return {
+    ...saved,
+    identifier: collision && !hasSemanticPromptIdentifier(saved)
+      ? crypto.randomUUID() : saved.identifier,
+    enabled: true,
   };
 }
 
