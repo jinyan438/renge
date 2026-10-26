@@ -1,0 +1,37 @@
+.desktop-message-dialog {
+  box-sizing: border-box;
+  width: min(480px, calc(100vw - 36px));
+  max-height: calc(100vh - 36px);
+  padding: 24px;
+  overflow: auto;
+  border: 1px solid #dfe4ec;
+  border-radius: 12px;
+  color: #1f2937;
+  background: #fff;
+  box-shadow: 0 18px 60px #0f172a33;
+  font: inherit;
+  -webkit-app-region: no-drag;
+}
+
+.desktop-message-dialog::backdrop {
+  background: #0f172a7a;
+}
+
+.desktop-message-dialog h2 {
+  margin: 0 0 16px;
+  font-size: 18px;
+}
+
+.desktop-message-dialog p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
+}
+
+.desktop-message-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 24px;
+}

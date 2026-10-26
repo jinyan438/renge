@@ -103,8 +103,10 @@ export function createDesktopWindowManager({ screen, icon, onWindowCreated = () 
       switch (action) {
         case "show":
           if (child.isMinimized()) child.restore();
-          child.show();
-          child.focus();
+          // Pointer activation also updates the portal's focus key. Re-showing
+          // an already active window can disrupt its input or context-menu focus.
+          if (!child.isVisible()) child.show();
+          if (!child.isFocused()) child.focus();
           break;
         case "minimize": child.minimize(); break;
         case "toggle-maximize":

@@ -1,3 +1,4 @@
+import { confirmAction } from "./desktopDialogs";
 import {
   Activity,
   ArrowLeft,
@@ -1325,11 +1326,11 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
     setSelectedImportantCharacterId(character.characterId);
   };
 
-  const removeSelectedImportantCharacter = () => {
+  const removeSelectedImportantCharacter = async () => {
     if (!selectedImportantCharacter) return;
     if (
       typeof window !== "undefined" &&
-      !window.confirm(`删除重要角色“${selectedImportantCharacter.characterName}”及其全部状态值？`)
+      !await confirmAction(`删除重要角色“${selectedImportantCharacter.characterName}”及其全部状态值？`)
     ) {
       return;
     }
@@ -1499,10 +1500,10 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
     });
   };
 
-  const clearSessionValues = () => {
+  const clearSessionValues = async () => {
     if (
       typeof window !== "undefined" &&
-      !window.confirm(`清空“${state.characterName}”角色卡的全部状态值？条目结构和初始值会保留。`)
+      !await confirmAction(`清空“${state.characterName}”角色卡的全部状态值？条目结构和初始值会保留。`)
     ) {
       return;
     }

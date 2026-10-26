@@ -33,19 +33,18 @@ try {
     manager.setDefaultTimeout(15_000);
     await manager.locator(".extension-manager-shell").waitFor();
     await home.evaluate(() => { window.confirm = () => { throw new Error("Confirmation was shown on the desktop home"); }; });
-    await manager.evaluate(() => { window.confirm = () => true; });
   }
   const card = (name) => manager.locator("article.extension-card").filter({ has: manager.getByRole("heading", { name, exact: true }) });
   await openManager();
-  await manager.evaluate(() => { window.confirm = () => false; });
   await card("pi-gpt-search").getByRole("button", { name: "删除", exact: true }).click();
+  await manager.locator("dialog.desktop-message-dialog").getByRole("button", { name: "取消", exact: true }).click();
   assert.equal(await card("pi-gpt-search").count(), 1, "cancel keeps the package card");
   assert.ok((await stat(fixture.npmPath)).isDirectory());
-  await manager.evaluate(() => { window.confirm = () => true; });
   for (const extension of fixture.targets) {
     const deleted = home.waitForResponse((response) => response.request().method() === "DELETE" &&
       new URL(response.url()).pathname === `/api/extensions/${extension.id}`);
     await card(extension.packageName).getByRole("button", { name: "删除", exact: true }).click();
+    await manager.locator("dialog.desktop-message-dialog").getByRole("button", { name: "确定", exact: true }).click();
     const response = await deleted;
     assert.equal(response.status(), 200, await response.text());
     await card(extension.packageName).waitFor({ state: "detached" });

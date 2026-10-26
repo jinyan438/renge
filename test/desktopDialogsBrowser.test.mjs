@@ -46,15 +46,15 @@ try {
   settings = await open("系统设置", "settings");
   const settingsId = await windowId(settings);
   await focus(settings);
-  await settings.evaluate(() => {
-    window.dialogMessages = [];
-    window.confirm = (message) => { window.dialogMessages.push(message); return true; };
-  });
   await settings.locator(".settings-nav").getByRole("button", { name: "数据", exact: true }).click();
   await settings.getByRole("button", { name: "清除所有数据", exact: true }).click();
+  const confirmation = settings.locator("dialog.desktop-message-dialog");
+  await confirmation.waitFor();
+  assert.match(await confirmation.innerText(), /清除全部应用数据/);
+  assert.equal(await home.locator("dialog.desktop-message-dialog").count(), 0);
+  await confirmation.getByRole("button", { name: "确定", exact: true }).click();
   await settings.getByRole("dialog", { name: "最终确认", exact: true }).waitFor();
   assert.equal(await home.getByRole("dialog", { name: "最终确认", exact: true }).count(), 0);
-  assert.match((await settings.evaluate(() => window.dialogMessages))[0], /清除全部应用数据/);
   // Moving focus must not move an already open overlay to another page.
   const chat = await open("开始对话", "chat");
   await settings.getByRole("dialog", { name: "最终确认", exact: true }).waitFor();
@@ -68,19 +68,13 @@ try {
   await settings.getByRole("dialog", { name: "裁剪头像", exact: true }).getByRole("button", { name: "取消", exact: true }).click();
 
   studio = await open("人格工作室", "studio");
-  await studio.evaluate(() => {
-    window.alertMessages = [];
-    window.alert = (message) => window.alertMessages.push(message);
-  });
   await focus(studio);
   await studio.locator('input[accept*="text/markdown"]').setInputFiles({ name: "invalid.json", mimeType: "application/json", buffer: Buffer.from("") });
-  await studio.waitForFunction(() => window.alertMessages.length === 1).catch(async (error) => {
-    console.log("Dialog diagnostics", errors, await Promise.all(app.context().pages().map(async (page) => ({
-      title: await page.title(), state: await page.evaluate(() => ({ focused: document.hasFocus(), alert: window.alert.toString(), messages: window.alertMessages })),
-    }))));
-    throw error;
-  });
-  assert.match((await studio.evaluate(() => window.alertMessages))[0], /导入失败/);
+  const alert = studio.locator("dialog.desktop-message-dialog");
+  await alert.waitFor();
+  assert.match(await alert.innerText(), /导入失败/);
+  assert.equal(await home.locator("dialog.desktop-message-dialog").count(), 0);
+  await alert.getByRole("button", { name: "确定", exact: true }).click();
 
   await app.evaluate(({ dialog }) => {
     globalThis.dialogCalls = [];
@@ -163,6 +157,7 @@ try {
   assert.equal(calls.at(-1).parentId, await windowId(home));
   await settings.locator(".settings-nav").getByRole("button", { name: "数据", exact: true }).click();
   await settings.getByRole("button", { name: "清除所有数据", exact: true }).click();
+  await confirmation.getByRole("button", { name: "确定", exact: true }).click();
   await settings.getByRole("dialog", { name: "最终确认", exact: true }).waitFor();
   await settings.close();
   settings = await open("系统设置", "settings");

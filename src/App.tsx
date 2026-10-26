@@ -296,6 +296,7 @@ import {
   type PromptTemplateStoredMessage,
 } from "./promptTemplateExtension";
 import { DesktopHome, type HomeDestination } from "./DesktopHome";
+import { confirmAction, alertMessage } from "./desktopDialogs";
 import { NativeDesktopWindow, getActiveDesktopWindow, getDesktopWindow, nativeDesktopWindowsEnabled, useDesktopWindow, type NativeDesktopWindowState } from "./NativeDesktopWindow";
 import { WindowResizeHandles } from "./WindowResizeHandles";
 import { WindowSnapPreview } from "./WindowSnapPreview";
@@ -13070,8 +13071,8 @@ export function App() {
       activeUserProfileId: profile.id,
     }));
   };
-  const deleteUserProfile = () => {
-    if (userProfiles.length <= 1 || !getActiveDesktopWindow().confirm(`删除用户资料“${userProfile.nickname || "未命名用户"}”？删除后无法恢复。`)) return;
+  const deleteUserProfile = async () => {
+    if (userProfiles.length <= 1 || !await confirmAction(`删除用户资料“${userProfile.nickname || "未命名用户"}”？删除后无法恢复。`)) return;
     setUserProfileState((current) => {
       if (current.userProfiles.length <= 1) return current;
       const remaining = current.userProfiles.filter((profile) => profile.id !== userProfile.id);
@@ -17053,7 +17054,7 @@ export function App() {
     const previouslySuspended = appDataPersistenceSuspendedRef.current;
     let backupInstalled = false;
     try {
-      const confirmed = getActiveDesktopWindow().confirm(
+      const confirmed = await confirmAction(
         `即将导入 ${file.name}（${formatFileSize(file.size)}）的 v3 ZIP 完整备份。\n\n备份通过完整校验后，会替换当前全部应用数据。该操作不可直接撤销；如果写入过程中失败，请保留备份并重新导入。是否继续？`,
       );
       if (!confirmed) {
@@ -17144,11 +17145,12 @@ export function App() {
     }
   };
 
-  const requestClearAllAppData = () => {
+  const requestClearAllAppData = async () => {
     if (dataBackupState.status === "loading") return;
     const dialogWindow = getActiveDesktopWindow();
-    const confirmed = dialogWindow.confirm(
+    const confirmed = await confirmAction(
       "这会永久清除全部应用数据并恢复出厂状态，包括聊天、角色卡、人格、API Key、世界书、脚本、扩展、Skills 和界面设置。\n\n你手动导出的 JSON 备份和外部工作区文件不会被删除。是否继续？",
+      dialogWindow,
     );
     if (!confirmed) {
       setDataBackupState({ status: "idle", message: "已取消清除，当前数据未发生变化。" });
@@ -17525,9 +17527,9 @@ export function App() {
       });
     }
   };
-  const deleteCharacterCard = (card: CharacterCard) => {
-    if (!getActiveDesktopWindow().confirm(`删除角色卡「${card.name}」？已产生的会话消息会保留。`)) return;
-    const remaining = characterCards.filter((item) => item.id !== card.id);
+  const deleteCharacterCard = async (card: CharacterCard) => {
+    if (!await confirmAction(`删除角色卡「${card.name}」？已产生的会话消息会保留。`)) return;
+    const remaining = characterCardsRef.current.filter((item) => item.id !== card.id);
     setCharacterCards(remaining);
     if (activeCharacterCardId === card.id) setActiveCharacterCardId(remaining[0]?.id ?? "");
     if (editingCharacterCardId === card.id) setEditingCharacterCardId("");
@@ -18858,7 +18860,7 @@ export function App() {
   };
 
   const deleteInstalledExtension = async (extension: InstalledExtension) => {
-    const confirmed = getActiveDesktopWindow().confirm(
+    const confirmed = await confirmAction(
       `确定删除扩展「${extension.displayName}」吗？本地扩展文件和配置记录都会移除。`,
     );
     if (!confirmed) return;
@@ -22479,9 +22481,13 @@ export function App() {
       return;
     }
     const deletedSession = chatSessionsRef.current.find((session) => session.id === sessionId);
-    if (!deletedSession || !getActiveDesktopWindow().confirm(
+    if (!deletedSession || !await confirmAction(
       `确定删除会话「${deletedSession.title}」？\n\n会话记录、生成图片、角色记忆文件夹和相关记忆绑定将被删除。此操作无法撤销。`,
     )) return;
+    // Other windows and background tasks can change state while this dialog is open.
+    if (!chatSessionsRef.current.some(session => session.id === sessionId)
+      || chatRuntimesRef.current.get(sessionId).controller
+      || memoryCleanupTasksRef.current.has(sessionId) || memoryDeletionSessionsRef.current.has(sessionId)) return;
     memoryDeletionSessionsRef.current.add(sessionId);
     try { await clearSessionMemoryFiles(deletedSession); }
     catch (error) {
@@ -22540,21 +22546,24 @@ export function App() {
       setChatStatus({ status: "warning", message: "此工作区还有任务正在运行，请先停止任务再删除会话。" });
       return;
     }
-    const workspaceSessionCount = chatSessions.filter(
-      (session) => session.workspaceKey === workspaceKey,
-    ).length;
+    const deletedSessions = chatSessionsRef.current.filter(session => session.workspaceKey === workspaceKey);
+    const workspaceSessionCount = deletedSessions.length;
     if (workspaceSessionCount === 0) return;
 
-    const workspaceMemoryCount = chatSessions.filter(
-      (session) => session.workspaceKey === workspaceKey && session.memoryPersonaIds.length > 0,
+    const workspaceMemoryCount = deletedSessions.filter(
+      (session) => session.memoryPersonaIds.length > 0,
     ).length;
-    const confirmed = getActiveDesktopWindow().confirm(
+    const confirmed = await confirmAction(
       `删除「${workspaceName}」下的 ${workspaceSessionCount} 个会话？\n会同时删除这些会话的角色记忆文件夹，保留工作区内的其他文件。${
         workspaceMemoryCount > 0 ? `\n其中 ${workspaceMemoryCount} 个会话的记忆也会取消。` : ""
       }`,
     );
     if (!confirmed) return;
-    const deletedSessions = chatSessionsRef.current.filter(session => session.workspaceKey === workspaceKey);
+    // Delete only the sessions named by this confirmation, never sessions added
+    // from another window while it was open. Recheck running/cleanup guards too.
+    if (deletedSessions.some(session => !chatSessionsRef.current.some(current => current.id === session.id)
+      || chatRuntimesRef.current.get(session.id).controller
+      || memoryCleanupTasksRef.current.has(session.id) || memoryDeletionSessionsRef.current.has(session.id))) return;
     const deletedIds = new Set(deletedSessions.map(session => session.id));
     for (const id of deletedIds) memoryDeletionSessionsRef.current.add(id);
     const cleanup = await Promise.allSettled(deletedSessions.map(session => clearSessionMemoryFiles(session)));
@@ -32133,7 +32142,7 @@ export function App() {
       setActivePersonaId(imported.id);
     } catch (error) {
       console.error(error);
-      if (!dialogWindow.closed) dialogWindow.alert("导入失败：请提供有效的 Persona JSON，或符合 Prompt 预览格式的文本文件。");
+      await alertMessage("导入失败：请提供有效的 Persona JSON，或符合 Prompt 预览格式的文本文件。", dialogWindow);
     }
   };
 
@@ -32242,7 +32251,7 @@ export function App() {
       .map((result) => result.error)
       .filter(Boolean);
     if (failedFiles.length > 0) {
-      if (!dialogWindow.closed) dialogWindow.alert("部分头像读取失败：" + failedFiles.join("、"));
+      await alertMessage("部分头像读取失败：" + failedFiles.join("、"), dialogWindow);
     }
   };
 
@@ -34833,11 +34842,11 @@ export function App() {
                     type="checkbox"
                     checked={llmFullAccessEnabled}
                     disabled={!window.rengeDesktop?.isElectron}
-                    onChange={(event) => {
+                    onChange={async (event) => {
                       const enabled = event.target.checked;
                       if (
                         enabled &&
-                        !getActiveDesktopWindow().confirm(
+                        !await confirmAction(
                           "系统文件读取权限始终开放。开启运行完全访问后，AI 还可无审批修改非工作区文件，并可无审批运行任意命令。\n\n该设置会持久保存。仅在你信任当前模型、提示词和任务内容时开启。是否继续？",
                         )
                       ) {
@@ -38166,7 +38175,7 @@ export function App() {
       chatStatus.status === "loading" ||
       (chatMode === "roleplay" && !activeSessionRoleplayCard),
   };
-  const clearActiveChatSession = () => {
+  const clearActiveChatSession = async () => {
     const sessionId = activeChatSessionIdRef.current;
     const currentSession = chatSessionsRef.current.find((session) => session.id === sessionId);
     if (!currentSession || chatSessionResetTasksRef.current.has(sessionId) || memoryCleanupTasksRef.current.has(sessionId)
@@ -38178,9 +38187,16 @@ export function App() {
       setSessionChatStatus(sessionId, { status: "warning", message: "请等当前任务结束后再重置会话。" });
       return;
     }
-    if (!getActiveDesktopWindow().confirm(
+    if (!await confirmAction(
       "确定重置当前会话？\n\n将清空该会话的所有数据和角色记忆文件夹，角色卡恢复到开场白，会话 ID 保持不变。此操作无法撤销。",
     )) return;
+    const latestRuntime = chatRuntimesRef.current.get(sessionId);
+    if (activeChatSessionIdRef.current !== sessionId
+      || chatSessionsRef.current.find(session => session.id === sessionId) !== currentSession
+      || latestRuntime.controller || latestRuntime.generationState !== "idle"
+      || latestRuntime.status.status === "loading" || getSessionRunData(sessionId).manualStatusBar
+      || piCompactionPending || chatSessionResetTasksRef.current.has(sessionId)
+      || memoryCleanupTasksRef.current.has(sessionId) || memoryDeletionSessionsRef.current.has(sessionId)) return;
     let memoryCleanup: Promise<void>;
     try { memoryCleanup = clearSessionMemoryFiles(currentSession, true); }
     catch (error) {
