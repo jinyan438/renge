@@ -1412,6 +1412,13 @@ public class LocalWebServer {
             if (target.equals(root)) throw new IOException("操作必须指向子目录或文件。");
             if ("mkdir".equals(operation)) {
                 if (!target.isDirectory() && !target.mkdirs()) throw new IOException("无法创建目录。");
+            } else if ("pruneDirectory".equals(operation)) {
+                // File.delete only removes empty directories; preserve shared parents.
+                if (target.exists() && !target.isDirectory()) throw new IOException("目标不是目录。");
+                if (target.isDirectory() && !target.delete()) {
+                    String[] children = target.list();
+                    if (children == null || children.length == 0) throw new IOException("无法清理空目录。");
+                }
             } else if ("write".equals(operation) || "delete".equals(operation)) {
                 String actual = null;
                 if (target.isFile()) try (InputStream input = new FileInputStream(target)) { actual = new String(readAll(input), StandardCharsets.UTF_8); }

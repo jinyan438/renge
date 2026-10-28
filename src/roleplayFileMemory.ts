@@ -11,6 +11,7 @@ export type RoleplayFileMemory = {
   updatedAt: string;
   lastError?: string;
   filesystemReady?: boolean;
+  storageDirectory?: string;
   revisions?: MemoryRevision[];
 };
 type MemoryRevision = {
@@ -43,6 +44,12 @@ export function memoryPath(value: unknown, directory = false): string {
     throw new Error("请使用记忆目录内的相对路径，不得包含 ..、绝对路径或非法文件名。");
   }
   if (!directory && !path.toLowerCase().endsWith(".md")) throw new Error("记忆文件必须使用 .md 扩展名。");
+  return path;
+}
+
+export function memoryStorageDirectory(value: unknown): string {
+  const path = memoryPath(value, true);
+  if (!path || path.includes("/") || (path !== "角色记忆" && !path.endsWith("-记忆"))) throw new Error("无效的角色记忆目录名。");
   return path;
 }
 
@@ -85,6 +92,9 @@ export function normalizeRoleplayFileMemory(value: unknown, scope: string): Role
     .filter(path => path && !result.files[path]).sort();
   if (typeof raw.lastError === "string") result.lastError = raw.lastError;
   if (raw.filesystemReady === true) result.filesystemReady = true;
+  if (raw.storageDirectory) {
+    try { result.storageDirectory = memoryStorageDirectory(raw.storageDirectory); } catch { /* Invalid imported location. */ }
+  }
   if (Array.isArray(raw.revisions)) result.revisions = raw.revisions.filter(revision =>
     revision && Array.isArray(revision.sources) && Array.isArray(revision.changes)).map(revision => ({
     sources: revision.sources.filter(source => typeof source?.id === "string" && typeof source.signature === "string"),

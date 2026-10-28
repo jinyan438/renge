@@ -19,9 +19,9 @@ test("workspace and temporary storage isolate writes and scoped directory cleanu
       const memory = normalizeRoleplayFileMemory(null, memoryScope(key, id));
       writeMemoryFile(memory, "人物/角色.md", content); return memory;
     };
-    await loadMemoryFiles(projectAccess, "scene", makeMemory(workspace, "项目人物"));
-    await loadMemoryFiles(temporaryAccess, "scene", makeMemory("default", "临时人物"));
-    const path = `${roleplayMemoryRoot("scene")}/人物/角色.md`;
+    await loadMemoryFiles(projectAccess, "scene", makeMemory(workspace, "项目人物"), false, "守门人-记忆");
+    await loadMemoryFiles(temporaryAccess, "scene", makeMemory("default", "临时人物"), false, "守门人-记忆");
+    const path = `${roleplayMemoryRoot("scene", "守门人-记忆")}/人物/角色.md`;
     assert.equal(await readFile(join(workspace, path), "utf8"), "项目人物");
     assert.equal(await readFile(join(temporary, path), "utf8"), "临时人物");
     await projectAccess.write(path, "右侧栏的手动修改", "项目人物");
@@ -41,6 +41,7 @@ test("workspace and temporary storage isolate writes and scoped directory cleanu
     assert.equal(await projectAccess.read(path), "右侧栏的手动修改");
     await deleteMemoryFiles(projectAccess, "scene", memoryScope(workspace, "scene"));
     await assert.rejects(access(join(workspace, roleplayMemoryRoot("scene"))), /ENOENT/);
+    await assert.rejects(access(join(workspace, "守门人-记忆")), /ENOENT/);
     assert.equal(await projectAccess.read(neighbor), "其他会话");
     assert.equal(await temporaryAccess.read(path), "临时人物", "matching session IDs in another workspace are untouched");
     assert.equal(await readFile(join(workspace, "keep.txt"), "utf8"), "工作区文件");

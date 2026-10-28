@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access as pathAccess, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMemoryTools as createTools, memoryPath, memoryScope, normalizeRoleplayFileMemory,
   recentRoleplayBody, reconcileMemoryHistory, recordMemoryRevision, runMemoryAgent, writeMemoryFile } from "../src/roleplayFileMemory.ts";
 import { workspaceFileOperation } from "../workspace-files-store.mjs";
-import { commitMemoryFiles, loadMemoryFiles, prepareMemoryFileTool, roleplayMemoryRoot } from "../src/roleplayMemoryStorage.ts";
+import { commitMemoryFiles, deleteMemoryFiles, loadMemoryFiles, prepareMemoryFileTool, roleplayMemoryDirectory, roleplayMemoryRoot } from "../src/roleplayMemoryStorage.ts";
 
 import { executeMemoryCodingTool } from "../pi/memory-file-tools.mjs";
 import { CODING_FILE_TOOL_DEFINITIONS } from "../src/codingFileTools.ts";
@@ -38,6 +38,19 @@ test("session folder names remain distinct on case-insensitive filesystems", () 
   assert.notEqual(roleplayMemoryRoot("A").toLowerCase(), roleplayMemoryRoot("a").toLowerCase());
   assert.notEqual(roleplayMemoryRoot("scene.").toLowerCase(), roleplayMemoryRoot("scene").toLowerCase());
   assert.ok(!roleplayMemoryRoot("../outside").split("/").includes(".."));
+});
+
+test("character memory folders use readable names and separate colliding card names", () => {
+  assert.equal(roleplayMemoryDirectory({ id: "a", name: "守门人" }), "守门人-记忆");
+  assert.equal(roleplayMemoryRoot("scene", "守门人-记忆"), "守门人-记忆/会话-scene");
+  const cards = [{ id: "a", name: "Alice" }, { id: "b", name: "alice" }, { id: "c", name: "A/B" }, { id: "d", name: "A:B" }];
+  assert.equal(new Set(cards.map(card => roleplayMemoryDirectory(card, cards).toLowerCase())).size, cards.length);
+  for (const name of ["../危险:/角色*", "CON.md", "  ", "角色".repeat(200)]) {
+    const directory = roleplayMemoryDirectory({ id: "a", name });
+    assert.equal(memoryPath(directory, true), directory);
+    assert.ok(!directory.includes("/"));
+    assert.ok(directory.endsWith("-记忆"));
+  }
 });
 
 test("session/workspace scopes survive persistence and reject copied memory", () => {
@@ -429,8 +442,98 @@ function fileAccess(root) {
     mkdir: async path => { await operation("mkdir", path); },
     write: async (path, content, expectedContent) => { await operation("write", path, { content, expectedContent }); },
     remove: async (path, expectedContent) => { await operation("delete", path, { expectedContent }); },
+    removeDirectory: async path => { await operation("deleteDirectory", path); },
+    removeEmptyDirectory: async path => { await operation("pruneDirectory", path); },
   };
 }
+
+test("legacy memory migrates by character, survives renames, and cleans up only its own session", async () => {
+  const root = await mkdtemp(join(tmpdir(), "renge-memory-character-"));
+  try {
+    const access = fileAccess(root), base = fresh(); writeMemoryFile(base, "人物/状态.md", "旧缓存");
+    const legacy = await loadMemoryFiles(access, "session-a", base);
+    const neighbor = normalizeRoleplayFileMemory(null, memoryScope("workspace-a", "session-b"));
+    writeMemoryFile(neighbor, "人物/状态.md", "其他角色的记忆");
+    await loadMemoryFiles(access, "session-b", neighbor);
+    await access.write(`${roleplayMemoryRoot("session-a")}/人物/状态.md`, "磁盘手动更正", "旧缓存");
+    await access.mkdir(`${roleplayMemoryRoot("session-a")}/空目录/子目录`);
+    const migrated = await loadMemoryFiles(access, "session-a", legacy, false, "守门人-记忆");
+    assert.equal(migrated.files["人物/状态.md"].content, "磁盘手动更正");
+    assert.equal(migrated.storageDirectory, "守门人-记忆");
+    assert.equal(normalizeRoleplayFileMemory(JSON.parse(JSON.stringify(migrated)), scope).storageDirectory, "守门人-记忆");
+    assert.equal(normalizeRoleplayFileMemory(migrated, memoryScope("other", "session-a")).storageDirectory, undefined);
+    await pathAccess(join(root, roleplayMemoryRoot("session-a", "守门人-记忆"), "空目录/子目录"));
+    await assert.rejects(pathAccess(join(root, roleplayMemoryRoot("session-a"))), /ENOENT/);
+    assert.equal(await access.read(`${roleplayMemoryRoot("session-b")}/人物/状态.md`), "其他角色的记忆");
+    const other = await loadMemoryFiles(access, "session-b", neighbor, false, "旅人-记忆");
+    await assert.rejects(pathAccess(join(root, "角色记忆")), /ENOENT/);
+    const renamed = await loadMemoryFiles(access, "session-a", migrated, true, "钟楼守卫-记忆");
+    await assert.rejects(pathAccess(join(root, "守门人-记忆")), /ENOENT/);
+    await prepareMemoryFileTool(access, "session-a", renamed, renamed, "read", { path: "人物/状态.md" });
+    const draft = normalizeRoleplayFileMemory(renamed, scope); writeMemoryFile(draft, "人物/状态.md", "改名后继续更新");
+    await commitMemoryFiles(access, "session-a", renamed, draft);
+    assert.equal(await access.read(`${roleplayMemoryRoot("session-a", "钟楼守卫-记忆")}/人物/状态.md`), "改名后继续更新");
+    await deleteMemoryFiles(access, "session-a", scope);
+    await assert.rejects(pathAccess(join(root, "钟楼守卫-记忆")), /ENOENT/);
+    assert.equal(await access.read(`${roleplayMemoryRoot("session-b", other.storageDirectory)}/人物/状态.md`), "其他角色的记忆");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("character-folder migration preserves conflicting copies and non-Markdown attachments", async () => {
+  const root = await mkdtemp(join(tmpdir(), "renge-memory-character-conflict-"));
+  try {
+    const access = fileAccess(root), base = fresh(); writeMemoryFile(base, "状态.md", "原目录内容");
+    const legacy = await loadMemoryFiles(access, "session-a", base);
+    const target = roleplayMemoryRoot("session-a", "守门人-记忆");
+    await access.mkdir(target); await access.write(`${target}/状态.md`, "目标已有的手动修改", null);
+    await assert.rejects(loadMemoryFiles(access, "session-a", legacy, false, "守门人-记忆"), /迁移冲突/);
+    assert.equal(await access.read(`${roleplayMemoryRoot("session-a")}/状态.md`), "原目录内容");
+    assert.equal(await access.read(`${target}/状态.md`), "目标已有的手动修改");
+    await access.remove(`${target}/状态.md`, "目标已有的手动修改");
+    const attachment = join(root, roleplayMemoryRoot("session-a"), "附件.bin");
+    await writeFile(attachment, Buffer.from([0, 255, 128, 1]));
+    await loadMemoryFiles(access, "session-a", legacy, false, "守门人-记忆");
+    assert.deepEqual(await readFile(attachment), Buffer.from([0, 255, 128, 1]));
+    assert.equal(await access.read(`${target}/状态.md`), "原目录内容");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("case-only character renames do not copy and delete the same directory on Windows", async () => {
+  const root = await mkdtemp(join(tmpdir(), "renge-memory-case-rename-"));
+  try {
+    const access = fileAccess(root), base = fresh(); writeMemoryFile(base, "状态.md", "必须保留的记忆");
+    const first = await loadMemoryFiles(access, "session-a", base, false, "Alice-记忆");
+    const renamed = await loadMemoryFiles(access, "session-a", first, false, "alice-记忆");
+    assert.equal(renamed.files["状态.md"].content, "必须保留的记忆");
+    assert.equal(renamed.storageDirectory, "Alice-记忆");
+    assert.equal(await access.read(`${roleplayMemoryRoot("session-a", "Alice-记忆")}/状态.md`), "必须保留的记忆");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("interrupted character-folder migration retains source files and protects edits made during copying", async () => {
+  for (const mode of ["copy-failure", "manual-edit"]) {
+    const root = await mkdtemp(join(tmpdir(), "renge-memory-migrate-failure-"));
+    try {
+      const access = fileAccess(root), base = fresh();
+      writeMemoryFile(base, "A.md", "原事实 A"); writeMemoryFile(base, "B.md", "原事实 B");
+      const legacy = await loadMemoryFiles(access, "session-a", base);
+      const source = roleplayMemoryRoot("session-a"), target = roleplayMemoryRoot("session-a", "守门人-记忆");
+      const tracked = { ...access, write: async (path, content, expected) => {
+        if (mode === "copy-failure" && path === `${target}/B.md`) throw new Error("fixture copy failure");
+        await access.write(path, content, expected);
+        if (mode === "manual-edit" && path === `${target}/A.md`) await access.write(`${source}/A.md`, "复制期间的手动修改", "原事实 A");
+      } };
+      await assert.rejects(loadMemoryFiles(tracked, "session-a", legacy, false, "守门人-记忆"), /copy failure|已被修改/);
+      assert.equal(await access.read(`${source}/A.md`), mode === "manual-edit" ? "复制期间的手动修改" : "原事实 A");
+      assert.equal(await access.read(`${source}/B.md`), "原事实 B");
+      if (mode === "copy-failure") {
+        const retried = await loadMemoryFiles(access, "session-a", legacy, false, "守门人-记忆");
+        assert.equal(retried.files["A.md"].content, "原事实 A"); assert.equal(retried.files["B.md"].content, "原事实 B");
+        await assert.rejects(pathAccess(join(root, source)), /ENOENT/);
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
 
 test("memory migrates into session workspace folders and uses physical edits as truth", async () => {
   const root = await mkdtemp(join(tmpdir(), "renge-memory-workspace-"));

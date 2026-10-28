@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -26,18 +26,25 @@ try {
   await mkdir(".runtime", { recursive: true });
   server = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir: root, temporaryFilesRoot: join(root, "temporary-files") });
   const provider = { id: "fixture", name: "Fixture", apiBaseUrl: "http://127.0.0.1/v1", apiKey: "fixture-key", apiType: "chat-completions", modelId: "fixture", models: ["fixture"], updatedAt: now };
-  const sessions = ["A", "B"].map(id => ({ id, title: `会话${id}`, mode: "roleplay", roleplayCharacterCardId: "card", workspaceKey: "default", workspaceName: "默认工作区",
+  const sessions = ["A", "B"].map(id => ({ id, title: `会话${id}`, mode: "roleplay", roleplayCharacterCardId: id === "A" ? "card" : "traveler-card", workspaceKey: "default", workspaceName: "默认工作区",
     fileMemory: memory("default", id, id === "A" ? "守门人持有铜钥匙，当前在旧港口。" : "B_ONLY_SECRET"),
     messages: Array.from({ length: 6 }, (_, i) => ({ id: `${id}-${i}`, role: i % 2 ? "assistant" : "user", content: `${id}_BODY_${i}`, createdAt: now })),
     createdAt: now, updatedAt: now }));
   sessions.push({ ...sessions[1], id: "C", title: "普通会话C", mode: "ai", roleplayCharacterCardId: undefined, fileMemory: undefined });
   await fetch(`${server.url}/api/app-data`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data: {
     version: 1, chatMode: "roleplay", providers: [provider], activeProviderId: provider.id, chatSessions: sessions,
-    characterCards: [{ id: "card", name: "守门人", description: "CHARACTER_CARD_KEPT", firstMessage: "欢迎。", createdAt: now, updatedAt: now }],
+    characterCards: [{ id: "card", name: "守门人", description: "CHARACTER_CARD_KEPT", firstMessage: "欢迎。", createdAt: now, updatedAt: now },
+      { id: "traveler-card", name: "旅人", firstMessage: "你好。", createdAt: now, updatedAt: now }],
     llmContextSettings: { roleplay: { fileMemory: true } },
     systemPrompts: [{ id: "sys", name: "保留的系统提示词", content: "SYSTEM_PROMPT_KEPT", updatedAt: now }], activeSystemPromptIds: ["sys"],
     worldBooks: [{ id: "world", name: "世界", enabled: true, entries: [{ id: "lore", name: "法则", enabled: true, constant: true, content: "WORLDBOOK_KEPT" }], updatedAt: now }], activeWorldBookIds: ["world"],
   } }) });
+  for (const id of ["A", "B"]) {
+    const directory = join(root, "temporary-files", "角色记忆", `会话-%${id.charCodeAt(0).toString(16).toUpperCase()}`);
+    await mkdir(join(directory, "人物"), { recursive: true });
+    await writeFile(join(directory, ".memory.json"), JSON.stringify({ version: 1, scope: JSON.stringify(["default", id]) }));
+    await writeFile(join(directory, "人物/守门人.md"), id === "A" ? "守门人持有铜钥匙，当前在旧港口。\n磁盘保留事实：徽章为银色。" : "B_ONLY_SECRET");
+  }
   browser = await chromium.launch({ headless: true });
   page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   page.setDefaultTimeout(15_000);
@@ -131,24 +138,27 @@ try {
   assert.match(JSON.stringify(actual), /按需查证的会话记录.*A-0/);
   assert.doesNotMatch(JSON.stringify(actual), /A_BODY_[1-3]|B_ONLY_SECRET/);
   assert.match(JSON.stringify(actual), /守门人持有铜钥匙/);
+  assert.match(JSON.stringify(actual), /徽章为银色/);
   assert.doesNotMatch(JSON.stringify(actual), /路径拼错/);
   assert.match(JSON.stringify(actual), /SYSTEM_PROMPT_KEPT/); assert.match(JSON.stringify(actual), /WORLDBOOK_KEPT/);
   assert.match(JSON.stringify(actual), /CHARACTER_CARD_KEPT/);
   assert.equal(persisted.chatSessions.find(session => session.id === "B").fileMemory.files["人物/守门人.md"].content, "B_ONLY_SECRET");
-  const mirror = join(root, "temporary-files", "角色记忆", "会话-%41");
+  const mirror = join(root, "temporary-files", "守门人-记忆", "会话-%41");
   assert.equal(await readFile(join(mirror, initialMemoryPath), "utf8"), "- 当前位置：钟楼。\n- 铜钥匙持有人：守门人。");
   assert.equal((await readdir(mirror)).includes("剧情原文"), false, "generation never creates transcript folders");
   assert.equal(Object.keys(persisted.chatSessions.find(session => session.id === "A").fileMemory.files).some(path => path.startsWith("剧情原文/")), false);
   // The existing file module is the only memory editor, and its writes go
   // straight to the physical temporary folder used by generation.
   await selectSession("B");
-  await saved(data => data.chatSessions.find(session => session.id === "B")?.fileMemory?.filesystemReady);
+  await saved(data => data.chatSessions.find(session => session.id === "B")?.fileMemory?.storageDirectory === "旅人-记忆");
+  assert.equal(await readFile(join(root, "temporary-files", "旅人-记忆", "会话-%42", "人物/守门人.md"), "utf8"), "B_ONLY_SECRET");
+  await assert.rejects(access(join(root, "temporary-files", "角色记忆")), /ENOENT/);
   await selectSession("A");
   const expand = page.getByRole("button", { name: "展开右侧栏", exact: true });
   if (await expand.isVisible()) await expand.click();
   await page.getByRole("button", { name: /文件.*浏览工作区/ }).click();
   const files = page.locator(".files-sidebar-panel");
-  for (const path of ["角色记忆", "角色记忆/会话-%41", "角色记忆/会话-%41/人物", "角色记忆/会话-%41/人物/守门人.md"]) {
+  for (const path of ["守门人-记忆", "守门人-记忆/会话-%41", "守门人-记忆/会话-%41/人物", "守门人-记忆/会话-%41/人物/守门人.md"]) {
     await files.locator(`.files-tree-row[title="${path}"]`).click();
   }
   await files.getByRole("button", { name: "编辑文件", exact: true }).click();
@@ -171,11 +181,11 @@ try {
   assert.ok(expandedMemory.directories.includes("钟楼之约/生效条件"));
   assert.ok(expandedMemory.directories.includes("人物/守门人/私下约定"));
   for (const path of ["钟楼之约", "钟楼之约/生效条件", "钟楼之约/生效条件/开门时刻.md"]) {
-    await files.locator(`.files-tree-row[title="角色记忆/会话-%41/${path}"]`).click();
+    await files.locator(`.files-tree-row[title="守门人-记忆/会话-%41/${path}"]`).click();
   }
   await files.getByText("通行约定仅在黎明生效。", { exact: true }).waitFor();
   for (const path of ["人物/守门人", "人物/守门人/私下约定", "人物/守门人/私下约定/通行.md"]) {
-    await files.locator(`.files-tree-row[title="角色记忆/会话-%41/${path}"]`).click();
+    await files.locator(`.files-tree-row[title="守门人-记忆/会话-%41/${path}"]`).click();
   }
   await files.getByText("守门人承诺代为开启铜门。", { exact: true }).waitFor();
   assert.match(await readFile(join(mirror, "人物/守门人.md"), "utf8"), /手动设定/);

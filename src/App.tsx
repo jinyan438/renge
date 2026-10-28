@@ -1,4 +1,4 @@
-import { commitMemoryFiles, deleteMemoryFiles, httpWorkspaceFileAccess, loadMemoryFiles, prepareMemoryFileTool, roleplayMemoryRoot, type WorkspaceFileAccess } from "./roleplayMemoryStorage";
+import { commitMemoryFiles, deleteMemoryFiles, httpWorkspaceFileAccess, loadMemoryFiles, prepareMemoryFileTool, roleplayMemoryDirectory, roleplayMemoryRoot, type WorkspaceFileAccess } from "./roleplayMemoryStorage";
 import { httpCodingFileTools } from "./codingFileTools";
 import { RoleplayMemorySettings } from "./RoleplayMemorySettings";
 import { runMemoryAgent, reconcileMemoryHistory, recordMemoryRevision, memoryScope, normalizeRoleplayFileMemory, recentRoleplayBody, type RoleplayFileMemory } from "./roleplayFileMemory";
@@ -18503,22 +18503,30 @@ export function App() {
     chatSessionsRef.current = sessions;
     setChatSessions(sessions);
   };
+  const getSessionMemoryDirectory = (session: Pick<ChatSession, "roleplayCharacterCardId" | "fileMemory">, cards = characterCardsRef.current) => {
+    const card = cards.find(card => card.id === session.roleplayCharacterCardId);
+    const directory = card ? roleplayMemoryDirectory(card, cards) : session.fileMemory?.storageDirectory ?? "角色记忆";
+    const existing = session.fileMemory?.storageDirectory;
+    return existing?.toLowerCase() === directory.toLowerCase() ? existing : directory;
+  };
+  const activeMemoryDirectory = activeChatSession ? getSessionMemoryDirectory(activeChatSession, characterCards) : "";
   useEffect(() => {
     const session = activeChatSession;
-    if (!appDataLoaded || session?.mode !== "roleplay" || !session.fileMemory || session.fileMemory.filesystemReady
+    if (!appDataLoaded || session?.mode !== "roleplay" || !session.fileMemory
+      || (session.fileMemory.filesystemReady && session.fileMemory.storageDirectory === activeMemoryDirectory)
       || chatRuntimesRef.current.get(session.id).controller || memoryMigrationTasksRef.current.has(session.id)
       || memoryCleanupTasksRef.current.has(session.id)
       || localStorage.getItem(`${MEMORY_CLEANUP_PENDING_STORAGE_PREFIX}${session.id}`)) return;
     const task = (async () => {
       const files = await loadMemoryFiles(getMemoryFileAccess(session), session.id,
-        normalizeRoleplayFileMemory(session.fileMemory, memoryScope(session.workspaceKey, session.id)));
+        normalizeRoleplayFileMemory(session.fileMemory, memoryScope(session.workspaceKey, session.id)), false, activeMemoryDirectory);
       if (!chatRuntimesRef.current.get(session.id).controller && !memoryCleanupTasksRef.current.has(session.id)
         && chatSessionsRef.current.some(current => current.id === session.id && current.createdAt === session.createdAt)) cacheSessionMemory(session.id, files);
       setTemporaryFilesRevision(current => current + 1);
     })().catch(error => setSessionChatStatus(session.id, { status: "warning", message: `记忆目录迁移失败：${error instanceof Error ? error.message : error}` }))
       .finally(() => memoryMigrationTasksRef.current.delete(session.id));
     memoryMigrationTasksRef.current.set(session.id, task);
-  }, [appDataLoaded, activeChatSession?.id, activeChatSession?.workspaceKey, activeLocalWorkspaceHandle]);
+  }, [appDataLoaded, activeChatSession?.id, activeChatSession?.workspaceKey, activeLocalWorkspaceHandle, activeMemoryDirectory]);
   const fileBrowserSource = useMemo<FileBrowserSource | null>(() => {
     if (activeLocalWorkspaceHandle?.kind === "electron") {
       const desktopApi = window.rengeDesktop;
@@ -18648,8 +18656,9 @@ export function App() {
       await source.writeText!(path, content, expected);
       const sessions = chatSessionsRef.current.map(session => {
         if (session.workspaceKey !== workspaceKey || !path.toLowerCase().endsWith(".md")) return session;
-        const prefix = `${roleplayMemoryRoot(session.id)}/`;
-        if (!path.startsWith(prefix)) return session;
+        const prefix = [roleplayMemoryRoot(session.id, session.fileMemory?.storageDirectory ?? getSessionMemoryDirectory(session)),
+          roleplayMemoryRoot(session.id)].map(root => `${root}/`).find(prefix => path.startsWith(prefix));
+        if (!prefix) return session;
         const memory = normalizeRoleplayFileMemory(session.fileMemory, memoryScope(workspaceKey, session.id));
         memory.files[path.slice(prefix.length)] = { content, updatedAt: new Date().toISOString(), userEdited: true };
         return { ...session, fileMemory: memory, updatedAt: new Date().toISOString() };
@@ -26233,7 +26242,8 @@ export function App() {
       await memoryMigrationTasksRef.current.get(requestSessionId);
       const memoryAccess = fileMemoryEnabled && memorySession ? getMemoryFileAccess(memorySession) : null;
       let diskMemory = memoryAccess ? await loadMemoryFiles(memoryAccess, requestSessionId,
-        normalizeRoleplayFileMemory(memorySession?.fileMemory, fileMemoryScope), true) : null;
+        normalizeRoleplayFileMemory(memorySession?.fileMemory, fileMemoryScope), true,
+        memorySession ? getSessionMemoryDirectory(memorySession) : undefined) : null;
       if (memoryAccess && diskMemory) {
         // Load only files that an undo would touch so external edits can be
         // protected before reconciling a regenerated/deleted story branch.
