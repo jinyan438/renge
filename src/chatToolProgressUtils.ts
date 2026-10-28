@@ -261,6 +261,7 @@ const piNativeToolTitleMap: Record<string, string> = {
   ls: "列出文件",
   write: "写入文件",
   edit: "修改文件",
+  chat_present_files: "交付文件",
   bash: "运行命令",
 };
 
@@ -273,6 +274,7 @@ const piNativeActionMap: ReadonlyArray<
   ["Pi 列出目录：", "ls", piNativeToolTitleMap.ls],
   ["Pi 写入文件：", "write", piNativeToolTitleMap.write],
   ["Pi 修改文件：", "edit", piNativeToolTitleMap.edit],
+  ["Pi 交付文件：", "chat_present_files", piNativeToolTitleMap.chat_present_files],
   ["Pi 运行命令：", "bash", piNativeToolTitleMap.bash],
   ["Pi 执行原生工具：", "", "Pi 原生工具"],
 ];

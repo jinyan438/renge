@@ -103,6 +103,8 @@ import { ChatToolDiffPreview } from "./ChatToolDiffPreview";
 import { ChatFileLink } from "./ChatFileLink";
 import { parseChatFileLink, splitChatFilePaths } from "./chatFileLinks";
 import { ChatWorkspaceChanges, getWorkspaceChanges, type WorkspaceChanges } from "./ChatWorkspaceChanges";
+import { ChatPresentedFiles } from "./ChatPresentedFiles";
+import { collectTurnPresentedFiles, presentFilesToolDefinition, PRESENT_FILES_TOOL, validatePresentedFiles } from "./chatPresentedFileUtils";
 import { ChatComposerStatus } from "./ChatComposerStatus";
 import { getPastedTextPreview, resizeChatComposerInput, shouldAttachPastedText } from "./chatComposerInputUtils";
 import { ChatPreviewImage } from "./ChatPreviewImage";
@@ -9951,6 +9953,8 @@ function formatToolActionMessage(
   const pathRef = path ? formatWorkspacePathReference(handle, path) : "";
 
   switch (toolCall.function.name) {
+    case "chat_present_files":
+      return "交付文件。";
     case "browser_navigate":
       return `打开网页：\n${stringArg(args, "url")}`;
     case "browser_open_temporary_file":
@@ -10303,6 +10307,8 @@ function formatToolResultMessage(toolCall: ChatToolCall, result: unknown) {
   }
 
   switch (toolCall.function.name) {
+    case "chat_present_files":
+      return typeof result.message === "string" ? result.message : "文件已交付。";
     case "browser_navigate":
       return `网页已打开：${String(result.title ?? "未命名页面")}\n${String(result.url ?? args.url ?? "")}`;
     case "browser_open_temporary_file":
@@ -11702,6 +11708,8 @@ function formatPiNativeToolAction(event: PiStreamEvent) {
   const args = event.arguments ?? {};
   const path = String(args.path ?? args.file_path ?? "");
   switch (event.toolName) {
+    case "chat_present_files":
+      return "Pi 交付文件：\n正在准备文件卡片。";
     case "read":
       return `Pi 读取文件：\n${path}`;
     case "grep":
@@ -21395,6 +21403,7 @@ export function App() {
       ),
     [chatMultiBubbleEnabled, chatReasoningVisible, regexProcessedChatMessages],
   );
+  const turnPresentedFiles = useMemo(() => collectTurnPresentedFiles(visibleChatMessages), [visibleChatMessages]);
   const lastVisibleChatItemIndex = useMemo(
     () => getLastVisibleChatItemIndex(renderedChatItems, chatReasoningVisible),
     [chatReasoningVisible, renderedChatItems],
@@ -23998,6 +24007,12 @@ export function App() {
       }, activeChatSessionIdRef.current === requestSessionId);
     } else if (toolName === "chat_update_heartbeat") {
       result = await executeHeartbeatTool(rawArguments, requestSessionId);
+    } else if (toolName === PRESENT_FILES_TOOL) {
+      const session = chatSessionsRef.current.find(candidate => candidate.id === requestSessionId);
+      if (!session) throw new Error("交付文件的会话已关闭。");
+      const access = getMemoryFileAccess(session);
+      const presentedFiles = await validatePresentedFiles(JSON.parse(rawArguments), session.workspacePath || "", path => access.list(path));
+      result = { presentedFiles, message: `已交付 ${presentedFiles.files.length} 个文件。` };
     } else if (toolName === "multi_agent_end_rounds") {
       result = await executeMultiAgentEndTool(rawArguments, requestSessionId);
     } else {
@@ -24227,6 +24242,7 @@ export function App() {
       : [];
     return [
       ...(chatChoiceToolsEnabled ? chatChoiceToolDefinitions : []),
+      ...(contextSettings.workspaceTools && fileBrowserSource ? [presentFilesToolDefinition] : []),
       ...localTools,
       ...browserTools,
       ...terminalTools,
@@ -39112,6 +39128,10 @@ export function App() {
                               const changes = getWorkspaceChanges(toolMessage.extra?.workspaceChanges);
                               return changes ? <ChatWorkspaceChanges key={toolMessage.id} changes={changes} /> : null;
                             })}
+                            {toolGroups.flatMap(group => group.segments).map(({ message: toolMessage }) => {
+                              const presented = turnPresentedFiles.get(toolMessage.id);
+                              return presented ? <ChatPresentedFiles key={toolMessage.id} presented={presented} /> : null;
+                            })}
                           </div>
                         </div>
                       </article>
@@ -39476,6 +39496,9 @@ export function App() {
                         </div>
                         {!isEditingMessage && isLastMessageSegment && recordedChanges && (
                           <ChatWorkspaceChanges changes={recordedChanges} />
+                        )}
+                        {!isEditingMessage && isLastMessageSegment && turnPresentedFiles.has(message.id) && (
+                          <ChatPresentedFiles presented={turnPresentedFiles.get(message.id)!} />
                         )}
                         {!isEditingMessage &&
                           isLastMessageSegment &&

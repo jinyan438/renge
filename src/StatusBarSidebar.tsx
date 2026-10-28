@@ -1,5 +1,7 @@
 import { confirmAction } from "./desktopDialogs";
-import { registerChatFileOpener, type ChatFileTarget } from "./chatFileLinks";
+import { registerChatFileOpener, workspaceRelativeFilePath, type ChatFileTarget } from "./chatFileLinks";
+import { registerChatFileActions } from "./chatFileActions";
+import { getFileBrowserRootPath } from "./fileBrowserUtils";
 import {
   Activity,
   ArrowLeft,
@@ -893,6 +895,27 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
     setActiveToolId("files");
     setFileOpenRequest(previous => ({ ...target, id: (previous?.id ?? 0) + 1 }));
   }), [onCollapsedChange]);
+  useEffect(() => {
+    if (!fileBrowserSource) return;
+    const source = fileBrowserSource;
+    return registerChatFileActions({ native: Boolean(source.runSystemAction), run: async (target, action) => {
+      const root = source.rootPath || getFileBrowserRootPath(await source.listDirectory(""));
+      const path = workspaceRelativeFilePath(target.path, root);
+      if (action !== "download") {
+        if (!source.runSystemAction) throw new Error("当前工作区不支持系统文件操作。");
+        await source.runSystemAction(path, action);
+        return;
+      }
+      const result = await source.readBinary(path) as { base64?: string; mimeType?: string };
+      if (typeof result.base64 !== "string") throw new Error("无法下载文件：文件数据不可用。");
+      const bytes = Uint8Array.from(atob(result.base64), char => char.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: result.mimeType || "application/octet-stream" }));
+      const link = document.createElement("a");
+      link.href = url; link.download = path.split("/").at(-1) || "download";
+      document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } });
+  }, [fileBrowserSource, document]);
   const [statusBarSection, setStatusBarSection] = useState<StatusBarEditorTabId>("protagonist");
   const [selectedImportantCharacterId, setSelectedImportantCharacterId] = useState("");
   const selectedImportantCharacter =

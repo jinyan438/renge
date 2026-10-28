@@ -1,0 +1,20 @@
+.chat-presented-files { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 12px; margin: 12px 0; min-width: 0; width: 100%; }
+.chat-presented-file { position: relative; display: flex; align-items: center; gap: 12px; min-width: 0; min-height: 82px; padding: 14px; border: 1px solid #88888820; border-radius: 16px; background: #88888806; }
+.chat-presented-file:hover { border-color: #467bea55; background: #467bea06; }
+.chat-presented-file-preview { position: absolute; z-index: 1; inset: 0; border: 0; background: transparent; border-radius: inherit; cursor: pointer; }
+.chat-presented-file-preview:focus-visible, .chat-presented-file-actions button:focus-visible { outline: 2px solid #467bea; outline-offset: 2px; }
+.chat-presented-file-icon { position: relative; display: grid; place-items: center; flex: 0 0 48px; width: 48px; height: 48px; border-radius: 12px; color: #467bea; background: #467bea0a; border: 1px solid #467bea0d; }
+.chat-presented-file-icon small { position: absolute; bottom: 7px; font-size: 7px; font-weight: 700; line-height: 1; color: #467bea; background: #f4f7ff; border-radius: 2px; padding: 2px; }
+.chat-presented-file-icon.text { color: #1482aa; }
+.chat-presented-file-details { display: flex; flex: 1; flex-direction: column; gap: 4px; min-width: 0; pointer-events: none; }
+.chat-presented-file-details strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 600; }
+.chat-presented-file-details > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; opacity: .6; }
+.chat-presented-file-details > .is-error { color: #e84650; opacity: 1; }
+.chat-presented-file-actions { display: flex; flex: 0 0 auto; z-index: 2; border: 1px solid #88888835; border-radius: 9px; overflow: hidden; }
+.chat-presented-file-actions button { display: grid; place-items: center; min-height: 32px; padding: 7px; color: inherit; background: transparent; border: 0; cursor: pointer; }
+.chat-presented-file-actions button + button { border-left: 1px solid #88888820; padding: 7px 5px; }
+.chat-presented-file-actions button:hover { background: #88888812; }
+.chat-presented-file-menu { position: fixed; z-index: 100000; width: 208px; padding: 5px; border: 1px solid #88888835; border-radius: 11px; background: var(--surface-color, #fff); color: #253047; box-shadow: 0 8px 30px #0002; }
+.chat-presented-file-menu button { display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px 10px; border: 0; border-radius: 7px; background: transparent; text-align: left; color: inherit; font: inherit; font-size: 13px; cursor: pointer; }
+.chat-presented-file-menu button:hover, .chat-presented-file-menu button:focus-visible { background: #467bea12; outline: none; }
+@media (max-width: 500px) { .chat-presented-file { padding: 10px; gap: 9px; } }

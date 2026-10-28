@@ -20,6 +20,7 @@ import { getReliableContextUsage, installPiLiveContext } from "./live-context.mj
 import { createPermissionCheckedPiTools } from "./permission-tools.mjs";
 import { createShellSessionManager } from "./shell-sessions.mjs";
 import { createWorkspaceChangeRecorder } from "./workspace-changes.mjs";
+import { createPresentFilesTool } from "./present-files.mjs";
 import {
   convertOpenAiMessagesToPi,
   filterPiCustomToolDefinitions,
@@ -683,6 +684,7 @@ export function createRengePiHost({
         shellSessions: run.shellSessions,
         beforeMutation: path => workspaceChanges.beforeMutation(path),
       });
+      if (requestedToolsEnabled && nativeTools.includes("write")) localCustomTools.push(createPresentFilesTool(cwd));
       const customDefinitionsForRun = requestedToolsEnabled ? filterPiCustomToolDefinitions(
         requestedToolDefinitions,
         workspace,
