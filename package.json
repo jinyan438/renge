@@ -27,6 +27,7 @@
     "test:desktop-windows": "node test/desktopWindowsBrowser.test.mjs && node test/desktopDialogsBrowser.test.mjs && node test/desktopFocusBrowser.test.mjs && node test/htmlPreviewDesktopBrowser.test.mjs && node test/tavernVisualDecorationsDesktop.test.mjs",
     "test:desktop-focus": "node test/desktopFocusBrowser.test.mjs",
     "test:html-desktop": "npm run build && node test/htmlPreviewDesktopBrowser.test.mjs",
+    "test:html-send": "node test/htmlPreviewSendBrowser.test.mjs && node test/htmlPreviewSendBrowser.test.mjs --desktop",
     "test:session-safety": "node --experimental-strip-types --test test/piSafetyRegression.test.mjs test/sessionPersistenceRegression.test.mjs && node test/sessionSafetyBrowser.test.mjs",
     "test:session-runtime": "node --experimental-strip-types --test test/sessionRuntime.test.mjs && node test/sessionRuntimeBrowser.test.mjs",
     "test:session-performance": "npm run build && node --experimental-strip-types --test test/chatHistoryWindow.test.mjs && node test/sessionFreezingBrowser.test.mjs",

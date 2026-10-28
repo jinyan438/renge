@@ -39233,10 +39233,14 @@ export function App() {
                 // Tavern decorators may replace React-owned paragraph children,
                 // hide containers and mark the entire floor as processed. Replace
                 // the floor on content/swipe/edit transitions so none of that DOM
-                // leaks into the next message. Variable and composer updates keep
-                // the same key, as do streaming fragments before decoration.
+                // leaks into the next message. Use the raw message source:
+                // moving the current-floor status panel to a newly appended
+                // message must not destroy an opening iframe mid-submission.
+                // Variable and composer updates keep the same key, as do
+                // streaming fragments before decoration.
+                const messageSource = chatMessages[messageIndex]?.content ?? segment;
                 const messageRenderKey = tavernCompatible
-                  ? `${id}:${message.renderAsPlainText ? "streaming" : getHtmlPreviewContentRevision(segment, false)}:${
+                  ? `${id}:${message.renderAsPlainText ? "streaming" : getHtmlPreviewContentRevision(messageSource, false)}:${
                       message.source === "roleplay-greeting" ? activeRoleplayGreetingIndex : ""
                     }:${chatHtmlRenderEnabled ? "html" : "text"}:${isEditingMessage ? editingChatMessage.mode : "display"}`
                   : id;
