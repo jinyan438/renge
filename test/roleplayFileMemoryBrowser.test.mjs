@@ -89,7 +89,8 @@ try {
         const listing = JSON.parse(previousTools[0].content);
         assert.equal(listing.kind, "directory");
         assert.doesNotMatch(JSON.stringify(listing), /守门人持有铜钥匙|手动设定/);
-        return [call("read", { path: listing.entries.find(entry => entry.kind === "file").path }),
+        return [{ ...call("read", { path: "人物/路径拼错.md" }), id: "missing-file-read" },
+          call("read", { path: listing.entries.find(entry => entry.kind === "file").path }),
           call("memory_history_read", { id: JSON.parse(previousTools[1].content).matches[0].id })];
       })() : []) : writable
       ? writeCalls : [call("read", { path: "人物/" }), call("memory_history_search", { query: "A_BODY_0" })];
@@ -130,6 +131,7 @@ try {
   assert.match(JSON.stringify(actual), /按需查证的会话记录.*A-0/);
   assert.doesNotMatch(JSON.stringify(actual), /A_BODY_[1-3]|B_ONLY_SECRET/);
   assert.match(JSON.stringify(actual), /守门人持有铜钥匙/);
+  assert.doesNotMatch(JSON.stringify(actual), /路径拼错/);
   assert.match(JSON.stringify(actual), /SYSTEM_PROMPT_KEPT/); assert.match(JSON.stringify(actual), /WORLDBOOK_KEPT/);
   assert.match(JSON.stringify(actual), /CHARACTER_CARD_KEPT/);
   assert.equal(persisted.chatSessions.find(session => session.id === "B").fileMemory.files["人物/守门人.md"].content, "B_ONLY_SECRET");

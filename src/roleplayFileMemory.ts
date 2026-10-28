@@ -369,6 +369,7 @@ export async function runMemoryAgent(options: {
     { role: "user", content: JSON.stringify({ directory: await tools.execute("memory_list", {}), reference: options.reference }) },
   ];
   const failures = new Map<string, { name: string; target: string; message: string }>();
+  const retrievalTools = new Set(["read", "memory_list", "memory_search", "memory_history_search", "memory_history_read"]);
   const failureGroup = (name: string) => name === "edit" || name === "write" ? "file-update" : name;
   const toolTarget = (args: Record<string, unknown> | undefined) => {
     try { return memoryPath(args?.path ?? args?.from, true); } catch { return ""; }
@@ -418,13 +419,19 @@ export async function runMemoryAgent(options: {
         await options.beforeTool?.(call.function.name, args);
         value = await tools.execute(call.function.name, args);
         const target = toolTarget(args);
+        const retrievedFacts = (call.function.name === "read" || call.function.name === "memory_history_read")
+          && typeof value === "object" && value !== null && "content" in value
+          && typeof value.content === "string" && value.content.trim().length > 0;
         for (const [key, failure] of failures) {
           const corrected = failureGroup(failure.name) === failureGroup(call.function.name)
             && (!failure.target || failure.target === target);
           const createdMissingFile = (call.function.name === "write" || call.function.name === "edit")
             && failure.name === "read" && failure.target === target;
           const replacedUnavailableTool = !tools.definitions.some(tool => tool.function.name === failure.name);
-          if (corrected || createdMissingFile || replacedUnavailableTool) failures.delete(key);
+          // Actual facts from another file or history can replace a failed
+          // lookup. Failed mutations still require a correction at their target.
+          const recoveredLookup = retrievedFacts && retrievalTools.has(failure.name);
+          if (corrected || createdMissingFile || replacedUnavailableTool || recoveredLookup) failures.delete(key);
         }
       } catch (error) {
         options.signal.throwIfAborted();

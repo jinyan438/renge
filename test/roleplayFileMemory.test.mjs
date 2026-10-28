@@ -368,6 +368,37 @@ test("a later edit can recover by rereading and retrying after a premature confi
   assert.equal(memory.files["人物.md"].content, "位置：钟楼");
 });
 
+test("a wrong file lookup recovers after actual facts are read from another path or history", async () => {
+  for (const source of ["same-batch", "next-request", "history"]) {
+    const memory = fresh(); writeMemoryFile(memory, "人物/正确.md", "位置：钟楼");
+    let round = 0;
+    const missing = { ...call("read", { path: "人物/拼错.md" }), id: "missing-file" };
+    const recovered = source === "history" ? call("memory_history_read", { id: "old" })
+      : { ...call("read", { path: "人物/正确.md" }), id: "correct-file" };
+    const context = await runMemoryAgent({ executeCodingTool, memory, writable: false, reference: "查证位置", signal,
+      history: [message("old", "位置：钟楼")],
+      request: async () => {
+        round++;
+        if (round === 1) return reply(source === "same-batch" ? [missing, recovered] : [missing]);
+        if (round === 2 && source !== "same-batch") return reply([recovered]);
+        return reply();
+      } });
+    assert.match(context, /位置：钟楼/);
+    assert.doesNotMatch(context, /人物\/拼错.md|文件不存在/);
+    assert.equal(round, source === "same-batch" ? 2 : 3, "a corrected lookup should finish without extra repair requests");
+  }
+});
+
+test("directory listings and search hits do not resolve a failed fact read", async () => {
+  const memory = fresh(); writeMemoryFile(memory, "人物/正确.md", "位置：钟楼");
+  let round = 0;
+  await assert.rejects(runMemoryAgent({ executeCodingTool, memory, writable: false, reference: "查证位置", signal,
+    request: async () => ++round === 1 ? reply([
+      call("read", { path: "人物/拼错.md" }), call("read", { path: "人物" }), call("memory_search", { query: "钟楼" }),
+    ]) : reply(),
+  }), /文件记忆工具未完成.*read（人物\/拼错.md）/);
+});
+
 test("unresolved edits retain their cause and are not hidden by another successful tool", async () => {
   const base = fresh(); writeMemoryFile(base, "人物.md", "位置：港口");
   const draft = normalizeRoleplayFileMemory(base, scope);
@@ -376,6 +407,7 @@ test("unresolved edits retain their cause and are not hidden by another successf
     request: async () => ++round === 1 ? reply([
       call("read", { path: "人物.md" }),
       call("edit", { path: "人物.md", edits: [{ oldText: "并不存在的旧事实", newText: "钟楼" }] }),
+      call("read", { path: "人物.md" }),
       call("memory_list", {}),
     ]) : reply([], "NO_CHANGES"),
   }), error => {
