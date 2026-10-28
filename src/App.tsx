@@ -1,4 +1,5 @@
 import { commitMemoryFiles, deleteMemoryFiles, httpWorkspaceFileAccess, loadMemoryFiles, prepareMemoryFileTool, roleplayMemoryRoot, type WorkspaceFileAccess } from "./roleplayMemoryStorage";
+import { httpCodingFileTools } from "./codingFileTools";
 import { RoleplayMemorySettings } from "./RoleplayMemorySettings";
 import { runMemoryAgent, reconcileMemoryHistory, recordMemoryRevision, memoryScope, normalizeRoleplayFileMemory, recentRoleplayBody, type RoleplayFileMemory } from "./roleplayFileMemory";
 import { ContextTokenMeter } from "./ContextTokenMeter";
@@ -26239,7 +26240,7 @@ export function App() {
         const probe = reconcileMemoryHistory(normalizeRoleplayFileMemory(diskMemory, fileMemoryScope), nextMessages);
         for (const path of Object.keys(diskMemory.files)) {
           if (diskMemory.files[path].unloaded && diskMemory.files[path].content !== probe.files[path]?.content) {
-            await prepareMemoryFileTool(memoryAccess, requestSessionId, diskMemory, diskMemory, "memory_read", { path });
+            await prepareMemoryFileTool(memoryAccess, requestSessionId, diskMemory, diskMemory, "read", { path });
           }
         }
       }
@@ -26263,6 +26264,7 @@ export function App() {
         try {
           const visibleHistory = history.filter(message => !isTavernHiddenMessage(message));
           return await runMemoryAgent({
+            executeCodingTool: httpCodingFileTools(abortSignal),
             memory, writable, history: visibleHistory, reference: {
               generation: isContinuation ? "来源是同一条正文的续写；最终正文包含原有片段，不能把原有事件重复记账。"
                 : isDialogueRewrite || isLocalRewrite ? "来源是同一条正文的修改；以最终版本修正事实，不要把替换前的内容当作新事件。"

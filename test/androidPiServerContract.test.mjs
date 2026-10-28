@@ -55,6 +55,7 @@ test("Android local server exposes the complete Pi session HTTP contract", async
     "/api/pi/chat",
     "/api/pi/session",
     "/api/pi/tool-result",
+    "/api/pi/file-tool",
     "/api/pi/abort",
     "/api/pi/compact",
     "/api/pi/set-auto-compaction",

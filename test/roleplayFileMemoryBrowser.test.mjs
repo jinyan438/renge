@@ -16,7 +16,7 @@ const now = new Date().toISOString();
 const file = content => ({ content, updatedAt: now });
 const memory = (workspace, id, content) => ({ version: 1, scope: JSON.stringify([workspace, id]),
   directories: ["人物"], files: { "人物/守门人.md": file(content) }, updatedAt: now });
-const call = (name, args) => ({ id: `memory-call-${name}`, type: "function", function: { name, arguments: JSON.stringify(args) } });
+const call = (name, args) => ({ id: `memory-call-${name}`, type: "function", function: { name, arguments: JSON.stringify(name === "write" ? { operation: "overwrite", expected_bytes: 0, ...args } : args) } });
 const readData = async () => (await (await fetch(`${server.url}/api/app-data`)).json()).data;
 async function saved(predicate) {
   for (let i = 0; i < 100; i++) { const data = await readData(); if (predicate(data)) return data; await delay(100); }
@@ -47,7 +47,11 @@ try {
     memoryRequests.push(body);
     assert.match(body.request.messages[0].content, /文件记忆管理员/);
     assert.doesNotMatch(JSON.stringify(body.request.messages), /B_ONLY_SECRET/);
-    const writable = body.request.tools.some(tool => tool.function.name === "memory_write");
+    const writable = body.request.tools.some(tool => tool.function.name === "write");
+    const names = body.request.tools.map(tool => tool.function.name);
+    assert.ok(names.includes("read"));
+    assert.equal(names.includes("edit"), writable);
+    assert.ok(!names.some(name => /^memory_(read|write|edit)$/.test(name)));
     const reference = JSON.parse(body.request.messages[1].content).reference;
     assert.equal(reference.messages.length, 3, "memory extraction receives only the latest canonical dialogue");
     assert.ok(reference.messages.every(message => message.role === "user" || message.role === "assistant"));
@@ -61,22 +65,22 @@ try {
       if (previousTools.length) {
         await route.fulfill({ status: 500, json: { error: { message: "fixture memory update failure" } } });
       } else {
-        await route.fulfill({ json: { choices: [{ message: { role: "assistant", content: "", tool_calls: [call("memory_write", { path: "测试/未提交.md", content: "不能留下半轮修改" })] }, finish_reason: "tool_calls" }] } });
+        await route.fulfill({ json: { choices: [{ message: { role: "assistant", content: "", tool_calls: [call("write", { path: "测试/未提交.md", content: "不能留下半轮修改" })] }, finish_reason: "tool_calls" }] } });
       }
       return;
     }
     const writeCalls = storyRequests.length === 1 ? [
-      call("memory_read", { path: "人物/守门人.md" }),
-      call("memory_edit", { path: "人物/守门人.md", oldText: "当前在旧港口", newText: "当前在钟楼" }),
-      call("memory_write", { path: initialMemoryPath, content: "- 当前位置：钟楼。\n- 铜钥匙持有人：守门人。" }),
+      call("read", { path: "人物/守门人.md" }),
+      call("edit", { path: "人物/守门人.md", edits: [{ oldText: "当前在旧港口", newText: "当前在钟楼" }] }),
+      call("write", { path: initialMemoryPath, content: "- 当前位置：钟楼。\n- 铜钥匙持有人：守门人。" }),
     ] : [
       call("memory_mkdir", { path: "钟楼之约/生效条件" }),
-      call("memory_write", { path: "钟楼之约/生效条件/开门时刻.md", content: "通行约定仅在黎明生效。" }),
-      call("memory_write", { path: "人物/守门人/私下约定/通行.md", content: "守门人承诺代为开启铜门。" }),
+      call("write", { path: "钟楼之约/生效条件/开门时刻.md", content: "通行约定仅在黎明生效。" }),
+      call("write", { path: "人物/守门人/私下约定/通行.md", content: "守门人承诺代为开启铜门。" }),
     ];
     const calls = previousTools.length ? (!writable && previousTools.length === 2
       ? [call("memory_history_read", { id: JSON.parse(previousTools[1].content).matches[0].id })] : []) : writable
-      ? writeCalls : [call("memory_read", { path: "人物/守门人.md" }), call("memory_history_search", { query: "A_BODY_0" })];
+      ? writeCalls : [call("read", { path: "人物/守门人.md" }), call("memory_history_search", { query: "A_BODY_0" })];
     await route.fulfill({ json: { choices: [{ message: { role: "assistant", content: calls.length ? "" : "READY", ...(calls.length ? { tool_calls: calls } : {}) }, finish_reason: calls.length ? "tool_calls" : "stop" }] } });
   });
   await page.route("**/api/pi/chat", async route => {

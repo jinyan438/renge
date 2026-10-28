@@ -85,10 +85,10 @@ export async function loadMemoryFiles(access: WorkspaceFileAccess, sessionId: st
 // requests read/search; a scoped content search acts like grep over that subtree.
 export async function prepareMemoryFileTool(access: WorkspaceFileAccess, sessionId: string,
   memory: RoleplayFileMemory, baseline: RoleplayFileMemory, name: string, args: Record<string, unknown>) {
-  if (name !== "memory_read" && name !== "memory_search") return;
+  if (name !== "read" && name !== "memory_search") return;
   const root = roleplayMemoryRoot(sessionId);
   const directory = name === "memory_search" ? memoryPath(args.path ?? "", true) : "";
-  const paths = name === "memory_read" ? [memoryPath(args.path)]
+  const paths = name === "read" ? [memoryPath(args.path)]
     : Object.keys(memory.files).filter(path => !directory || path.startsWith(`${directory}/`));
   for (const path of paths) {
     // A staged edit must remain visible to subsequent reads in this phase.

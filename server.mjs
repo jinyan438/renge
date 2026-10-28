@@ -22,6 +22,7 @@ import {
 } from "./src/responsesApiUtils.mjs";
 import { createRengePiHost } from "./pi/renge-pi-host.mjs";
 import { workspaceFileOperation } from "./workspace-files-store.mjs";
+import { executeMemoryCodingTool } from "./pi/memory-file-tools.mjs";
 import { createRengePiWorkerHost } from "./pi/host-worker-client.mjs";
 import { isPiPackageSource } from "./pi/pi-package-manager.mjs";
 import {
@@ -2618,6 +2619,17 @@ async function proxyStream({ url, apiKey, body, response, headers = {} }) {
 
 async function handleApi(request, response, pathname, dataFilePath, piHost, temporaryFilesRoot) {
   try {
+    if (pathname === "/api/pi/file-tool" && request.method !== "OPTIONS") {
+      if (request.method !== "POST") { sendJson(response, 405, { error: "Method not allowed" }); return; }
+      const controller = new AbortController();
+      const cancel = () => { if (!response.writableEnded) controller.abort(); };
+      request.once("aborted", cancel); response.once("close", cancel);
+      try {
+        const body = await readJsonBody(request);
+        sendJson(response, 200, await executeMemoryCodingTool(body, controller.signal));
+      } finally { request.off("aborted", cancel); response.off("close", cancel); }
+      return;
+    }
     if (pathname === "/api/workspace-files" && request.method !== "OPTIONS") {
       if (request.method !== "POST") { sendJson(response, 405, { error: "Method not allowed" }); return; }
       const body = await readJsonBody(request);

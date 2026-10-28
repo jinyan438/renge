@@ -1154,6 +1154,11 @@ public class LocalWebServer {
             serveAppDataAsset(request.path, output);
             return;
         }
+        if ("/api/pi/file-tool".equals(request.path)) {
+            if (!"POST".equals(request.method)) { sendJson(output, 405, jsonError("Method not allowed")); return; }
+            sendJson(output, 200, PiFileToolSnapshot.execute(parseJson(request.body)));
+            return;
+        }
         if ("/api/workspace-files".equals(request.path)) {
             if (!"POST".equals(request.method)) { sendJson(output, 405, jsonError("Method not allowed")); return; }
             handleTemporaryWorkspaceFiles(parseJson(request.body), output);
