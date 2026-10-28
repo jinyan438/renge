@@ -49,6 +49,7 @@ import {
 } from "./fileBrowserUtils";
 import { highlightSourceCode } from "./syntaxHighlighting";
 import "./files-sidebar.css";
+import { workspaceRelativeFilePath, type ChatFileTarget } from "./chatFileLinks";
 
 export type FileBrowserSystemAction = "default" | "openWith" | "reveal";
 
@@ -68,6 +69,7 @@ export type FileBrowserSource = {
 
 type FilesSidebarPanelProps = {
   source: FileBrowserSource | null;
+  openRequest?: (ChatFileTarget & { id: number }) | null;
   onBack: () => void;
   onClose: () => void;
   onChooseWorkspace?: () => void | Promise<void>;
@@ -295,6 +297,7 @@ async function copyText(value: string) {
 
 export function FilesSidebarPanel({
   source,
+  openRequest,
   onBack,
   onClose,
   onChooseWorkspace,
@@ -449,6 +452,25 @@ export function FilesSidebarPanel({
       });
     }
   }, [source]);
+
+  const openedRequestRef = useRef("");
+  useEffect(() => {
+    if (!openRequest || !source) return;
+    // The root returned by the initial directory listing resolves absolute
+    // links for temporary-file sources which have no rootPath in their props.
+    const root = source.rootPath || resolvedRootPath;
+    if (/^(?:[a-z]:[\\/]|\/)/i.test(openRequest.path) && !root) return;
+    const requestKey = `${source.id}:${openRequest.id}`;
+    if (openedRequestRef.current === requestKey) return;
+    openedRequestRef.current = requestKey;
+    try {
+      const path = workspaceRelativeFilePath(openRequest.path, root);
+      if (!path) return;
+      void openPreview({ path, name: path.split("/").at(-1) || path, kind: "file" });
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "无法打开文件路径");
+    }
+  }, [openRequest, source?.id, resolvedRootPath, openPreview]);
 
   const saveText = async () => {
     if (!source?.writeText || !preview || preview.content === undefined || saving) return;

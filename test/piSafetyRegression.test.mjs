@@ -95,7 +95,15 @@ test("live Pi sessions route native writes through the server permission callbac
         apiBaseUrl: `http://127.0.0.1:${upstream.address().port}/v1`, request: { model: "fake", messages: [{ role: "user", content: "write the file" }] },
       }),
     });
-    assert.match(await response.text(), /finished/);
+    const stream = await response.text();
+    assert.match(stream, /finished/);
+    const summaries = stream.split("\n").filter(line => line.startsWith("data: {")).map(line => JSON.parse(line.slice(6)))
+      .filter(frame => frame.pi?.type === "workspace_changes");
+    if (allowed) {
+      assert.equal(summaries.length, 1);
+      assert.deepEqual(summaries[0].pi.changes.files.map(file => [file.path, file.status]), [["../outside.txt", "modified"]]);
+      assert.ok(stream.indexOf('"type":"workspace_changes"') < stream.indexOf("data: [DONE]"));
+    } else assert.equal(summaries.length, 0, "denied edits never produce a change card");
   };
   await chat("denied");
   assert.equal(await readFile(outside, "utf8"), "original");

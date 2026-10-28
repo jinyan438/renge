@@ -19,6 +19,7 @@ import { createPiRequestBodyRecoveryFetch } from "./request-body-recovery.mjs";
 import { getReliableContextUsage, installPiLiveContext } from "./live-context.mjs";
 import { createPermissionCheckedPiTools } from "./permission-tools.mjs";
 import { createShellSessionManager } from "./shell-sessions.mjs";
+import { createWorkspaceChangeRecorder } from "./workspace-changes.mjs";
 import {
   convertOpenAiMessagesToPi,
   filterPiCustomToolDefinitions,
@@ -584,6 +585,11 @@ export function createRengePiHost({
     }));
 
     let unsubscribe = () => {};
+    const workspaceChanges = createWorkspaceChangeRecorder(cwd);
+    const publishWorkspaceChanges = async () => {
+      const changes = await workspaceChanges.finish();
+      if (changes) writeSse(response, piEvent("workspace_changes", { runId, changes }));
+    };
     let liveContext;
     let providerId = "";
     let modelRuntime;
@@ -675,6 +681,7 @@ export function createRengePiHost({
       const localCustomTools = createPermissionCheckedPiTools({
         cwd, nativeTools, sessionId: ownerSessionId, authorizeTool, checkCancelled,
         shellSessions: run.shellSessions,
+        beforeMutation: path => workspaceChanges.beforeMutation(path),
       });
       const customDefinitionsForRun = requestedToolsEnabled ? filterPiCustomToolDefinitions(
         requestedToolDefinitions,
@@ -982,9 +989,12 @@ export function createRengePiHost({
       // post-turn threshold check. Re-check Pi's own message estimator here.
       if (!run.cancelled) await maybeAutoCompact(session, compaction);
       liveContext.flush();
+      await publishWorkspaceChanges();
       writeSse(response, completionChunk(runId, {}, finishReason));
       writeSse(response, "[DONE]");
     } catch (error) {
+      await run.shellSessions.dispose();
+      await publishWorkspaceChanges();
       if (!response.destroyed && !response.writableEnded) {
         writeSse(response, { error: { message: error instanceof Error ? error.message : String(error) } });
         writeSse(response, "[DONE]");
@@ -994,6 +1004,7 @@ export function createRengePiHost({
       run.completed = true;
       liveContext?.dispose();
       await run.shellSessions.dispose();
+      await workspaceChanges.dispose();
       response.off("close", abortRun);
       if (run.cancelled) await run.session?.abort();
       unsubscribe();

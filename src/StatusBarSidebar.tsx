@@ -1,4 +1,5 @@
 import { confirmAction } from "./desktopDialogs";
+import { registerChatFileOpener, type ChatFileTarget } from "./chatFileLinks";
 import {
   Activity,
   ArrowLeft,
@@ -886,6 +887,12 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   const window = useDesktopWindow();
   const document = window.document;
   const [activeToolId, setActiveToolId] = useState<RightSidebarViewId>("menu");
+  const [fileOpenRequest, setFileOpenRequest] = useState<(ChatFileTarget & { id: number }) | null>(null);
+  useEffect(() => registerChatFileOpener(target => {
+    onCollapsedChange(false);
+    setActiveToolId("files");
+    setFileOpenRequest(previous => ({ ...target, id: (previous?.id ?? 0) + 1 }));
+  }), [onCollapsedChange]);
   const [statusBarSection, setStatusBarSection] = useState<StatusBarEditorTabId>("protagonist");
   const [selectedImportantCharacterId, setSelectedImportantCharacterId] = useState("");
   const selectedImportantCharacter =
@@ -2398,6 +2405,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
               onChooseWorkspace={onChooseWorkspace}
               onClose={handleToolClose}
               source={fileBrowserSource}
+              openRequest={fileOpenRequest}
             />
           </Suspense>
         ) : activeToolId === "status" ? (

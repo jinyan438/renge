@@ -1,0 +1,24 @@
+.chat-file-link, .chat-markdown .chat-file-link { color: #467bea; cursor: pointer; text-decoration: none; overflow-wrap: anywhere; }
+.chat-file-link:hover { text-decoration: underline; }
+.chat-file-link:focus-visible { outline: 2px solid #467bea; outline-offset: 3px; border-radius: 3px; }
+.chat-bubble .chat-file-link code, .chat-markdown .chat-file-link code { color: inherit; }
+.chat-workspace-changes { margin: 12px 0; border: 1px solid var(--border-color, #dadde333); border-radius: 16px; overflow: hidden; width: 100%; min-width: 0; background: var(--panel-bg, #88888806); font-size: 13px; }
+.chat-workspace-changes header { display: flex; gap: 12px; align-items: center; padding: 16px; background: #88888808; border-bottom: 1px solid #88888820; }
+.chat-workspace-changes header strong { font-size: 15px; font-weight: 600; }
+.workspace-changes-icon { display: grid; place-items: center; color: #467bea; background: #467bea12; border-radius: 12px; width: 44px; height: 44px; flex: 0 0 auto; }
+.workspace-changes-stats { display: flex; gap: 10px; align-items: center; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.workspace-changes-stats .additions { color: #22b965; }
+.workspace-changes-stats .deletions { color: #f04d53; }
+.workspace-changes-stats small { opacity: .65; font-family: inherit; }
+.chat-workspace-changes header .workspace-changes-stats { flex-wrap: wrap; margin-top: 3px; }
+.chat-workspace-changes ul { list-style: none; padding: 6px 0; margin: 0; }
+.chat-workspace-changes li { display: flex; align-items: center; gap: 10px; padding: 9px 16px; min-width: 0; }
+.chat-workspace-changes li > .chat-file-link, .workspace-change-path { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.workspace-change-status { border-radius: 4px; padding: 2px 5px; font-size: 11px; white-space: nowrap; background: #88888812; }
+.workspace-change-status.added { color: #22b965; background: #22b96512; }
+.workspace-change-status.modified { color: #467bea; background: #467bea12; }
+.workspace-change-status.deleted { color: #f04d53; background: #f04d5312; }
+.workspace-change-path.deleted { opacity: .65; text-decoration: line-through; }
+.workspace-changes-toggle { display: flex; gap: 6px; align-items: center; border: 0; background: transparent; color: inherit; opacity: .65; cursor: pointer; padding: 10px 16px 14px; }
+.chat-workspace-changes > p { padding: 0 16px 10px; opacity: .65; }
+@media (max-width: 500px) { .chat-workspace-changes li { padding: 9px 10px; gap: 6px; } .chat-workspace-changes header { padding: 12px 10px; } .workspace-changes-stats { gap: 6px; } }

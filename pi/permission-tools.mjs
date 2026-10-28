@@ -25,7 +25,7 @@ async function canonicalPath(path) {
   }
 }
 
-export function createPermissionCheckedPiTools({ cwd, nativeTools, sessionId, authorizeTool, checkCancelled, shellSessions = createShellSessionManager() }) {
+export function createPermissionCheckedPiTools({ cwd, nativeTools, sessionId, authorizeTool, checkCancelled, beforeMutation, shellSessions = createShellSessionManager() }) {
   const authorize = async (toolName, args, signal) => {
     checkCancelled?.();
     if (signal?.aborted) throw new Error("Operation aborted");
@@ -41,6 +41,9 @@ export function createPermissionCheckedPiTools({ cwd, nativeTools, sessionId, au
     } else {
       throw new Error("Shell 命令需要桌面端权限审批。");
     }
+    checkCancelled?.();
+    if (signal?.aborted) throw new Error("Operation aborted");
+    await beforeMutation?.(toolName === "write" || toolName === "edit" ? args.path : undefined);
     checkCancelled?.();
     if (signal?.aborted) throw new Error("Operation aborted");
   };

@@ -100,6 +100,9 @@ import {
 import { createTavernSettingsStore } from "./tavernPersistenceUtils";
 import { createPortal } from "react-dom";
 import { ChatToolDiffPreview } from "./ChatToolDiffPreview";
+import { ChatFileLink } from "./ChatFileLink";
+import { parseChatFileLink, splitChatFilePaths } from "./chatFileLinks";
+import { ChatWorkspaceChanges, getWorkspaceChanges, type WorkspaceChanges } from "./ChatWorkspaceChanges";
 import { ChatComposerStatus } from "./ChatComposerStatus";
 import { getPastedTextPreview, resizeChatComposerInput, shouldAttachPastedText } from "./chatComposerInputUtils";
 import { ChatPreviewImage } from "./ChatPreviewImage";
@@ -1615,9 +1618,11 @@ type PiStreamEvent = {
     | "compaction_start"
     | "compaction_end"
     | "context_usage"
+    | "workspace_changes"
     | "auto_retry_start"
     | "auto_retry_end";
   runId?: string;
+  changes?: WorkspaceChanges;
   inputId?: string;
   kernel?: string;
   nativeTools?: string[];
@@ -5363,7 +5368,7 @@ function getRenderedChatItems(
         item.message.content,
         reasoningVisible,
         item.message.attachments?.length ?? 0,
-        Boolean(item.message.choiceRequest || item.message.toolVisualization),
+        Boolean(item.message.choiceRequest || item.message.toolVisualization || item.message.extra?.workspaceChanges),
       )
     ) {
       continue;
@@ -5389,7 +5394,7 @@ function isRenderedChatItemVisible(
     item.message.content,
     reasoningVisible,
     item.message.attachments?.length ?? 0,
-    Boolean(item.message.choiceRequest || item.message.toolVisualization),
+    Boolean(item.message.choiceRequest || item.message.toolVisualization || item.message.extra?.workspaceChanges),
   );
 }
 
@@ -7563,6 +7568,11 @@ function resizeHtmlPreviewFrame(event: SyntheticEvent<HTMLIFrameElement>) {
   fitHtmlPreviewFrame(frame);
 }
 
+function renderFilePathText(content: string): ReactNode[] {
+  return splitChatFilePaths(content).map((part, index) => part.target
+    ? <ChatFileLink key={index} target={part.target}>{part.text}</ChatFileLink> : part.text);
+}
+
 function renderInlineText(content: string, tavernPlaceholders = false): ReactNode[] {
   const nodes: ReactNode[] = [];
   const normalizedContent = normalizeRedundantTavernQuotePairs(
@@ -7570,7 +7580,7 @@ function renderInlineText(content: string, tavernPlaceholders = false): ReactNod
   );
   // 个性化引用覆盖半角/全角双引号、中文弯引号、书名式引号和半角角括号。
   const inlinePattern =
-    /`(?<code>[^`]+)`|(?<bareImage>https?:\/\/\S+?\.(?:png|jpe?g|webp|gif)(?:\?\S*)?|data:image\/[a-zA-Z+.-]+;base64,[A-Za-z0-9+/=]+)|!\[(?<imageAlt>[^\]]*)\]\s*\(\s*(?<imageUrl>[^)\s]+)\s*\)|\[(?<linkText>[^\]]+)\]\s*\(\s*(?<linkUrl>[^)\s]+)\s*\)|(?<personalizedQuote>"[^"\n]+"|＂[^＂\n]+＂|“[^”\n]+”|〝[^〞\n]+〞|「[^」\n]+」|｢[^｣\n]+｣|『[^』\n]+』)|\*\*(?<doubleAsterisk>[^*]+)\*\*|__(?<doubleUnderscore>[^_]+)__|~~(?<deleted>[^~]+)~~|\*(?<asteriskEm>[^*\n]+)\*|_(?<underscoreEm>[^_\n]+)_/g;
+    /`(?<code>[^`]+)`|(?<bareImage>https?:\/\/\S+?\.(?:png|jpe?g|webp|gif)(?:\?\S*)?|data:image\/[a-zA-Z+.-]+;base64,[A-Za-z0-9+/=]+)|!\[(?<imageAlt>[^\]]*)\]\s*\(\s*(?<imageUrl>[^)\s]+)\s*\)|\[(?<linkText>[^\]]+)\]\s*\(\s*(?<linkUrl><[^>\n]+>|[^)\s]+)\s*\)|(?<personalizedQuote>"[^"\n]+"|＂[^＂\n]+＂|“[^”\n]+”|〝[^〞\n]+〞|「[^」\n]+」|｢[^｣\n]+｣|『[^』\n]+』)|\*\*(?<doubleAsterisk>[^*]+)\*\*|__(?<doubleUnderscore>[^_]+)__|~~(?<deleted>[^~]+)~~|\*(?<asteriskEm>[^*\n]+)\*|_(?<underscoreEm>[^_\n]+)_/g;
   let cursor = 0;
   let match: RegExpExecArray | null;
   const tokenPattern = tavernPlaceholders
@@ -7578,10 +7588,16 @@ function renderInlineText(content: string, tavernPlaceholders = false): ReactNod
     : inlinePattern;
 
   while ((match = tokenPattern.exec(normalizedContent))) {
-    if (match.index > cursor) nodes.push(normalizedContent.slice(cursor, match.index));
+    if (match.index > cursor) nodes.push(...renderFilePathText(normalizedContent.slice(cursor, match.index)));
     const groups = match.groups ?? {};
 
     if (groups.code !== undefined) {
+      const fileTarget = parseChatFileLink(groups.code);
+      if (fileTarget) {
+        nodes.push(<ChatFileLink key={`code-${match.index}`} target={fileTarget}><code>{groups.code}</code></ChatFileLink>);
+        cursor = match.index + match[0].length;
+        continue;
+      }
       const isDigest = groups.code.length <= 256 &&
         /^(?:[a-f\d]{8,}|[a-f\d]{6,}(?:…|\.{3})[a-f\d]{6,})$/i.test(groups.code);
       nodes.push(
@@ -7621,10 +7637,17 @@ function renderInlineText(content: string, tavernPlaceholders = false): ReactNod
         />,
       );
     } else if (groups.linkText !== undefined && groups.linkUrl !== undefined) {
+      const fileTarget = parseChatFileLink(groups.linkUrl, true);
+      if (fileTarget) {
+        nodes.push(<ChatFileLink key={`link-${match.index}`} target={fileTarget} markdown>{groups.linkText}</ChatFileLink>);
+        cursor = match.index + match[0].length;
+        continue;
+      }
+      const safeLink = /^(https?:|mailto:|#)/i.test(groups.linkUrl);
       nodes.push(
         <a
           className="chat-inline-link"
-          href={groups.linkUrl}
+          href={safeLink ? groups.linkUrl : undefined}
           key={`link-${match.index}`}
           rel="noreferrer"
           target="_blank"
@@ -7668,7 +7691,7 @@ function renderInlineText(content: string, tavernPlaceholders = false): ReactNod
     cursor = match.index + match[0].length;
   }
 
-  if (cursor < normalizedContent.length) nodes.push(normalizedContent.slice(cursor));
+  if (cursor < normalizedContent.length) nodes.push(...renderFilePathText(normalizedContent.slice(cursor)));
   return nodes;
 }
 
@@ -7949,6 +7972,11 @@ function serializeRenderedEditorInline(node: Node): string {
   if (tagName === "em" || tagName === "i") return `*${content}*`;
   if (tagName === "del" || tagName === "s") return `~~${content}~~`;
   if (tagName === "code") return `\`${content}\``;
+  if (tagName === "a" && element.dataset.filePath) {
+    if (!element.dataset.fileMarkdown) return content;
+    const destination = `${element.dataset.filePath}${element.dataset.fileLine ? `:${element.dataset.fileLine}` : ""}`;
+    return `[${content}](<${destination}>)`;
+  }
   if (tagName === "a") return `[${content}](${element.getAttribute("href") ?? ""})`;
   if (tagName === "div" || tagName === "p") return `${content}\n`;
   return content;
@@ -11345,7 +11373,8 @@ function createStreamingAssistantMessage(
     complete(content: string, reasoning = "", outputStatus: ChatBubbleStatus = "complete") {
       streamUpdates.cancel();
       if (!hasAssistantTimelinePayload(content, reasoning)) {
-        setChatMessages((current) => current.filter((message) => message.id !== messageId));
+        setChatMessages((current) => current.flatMap((message) => message.id !== messageId ? [message]
+          : message.extra?.workspaceChanges ? [{ ...message, renderAsPlainText: false, outputStatus }] : []));
         return false;
       }
       setChatMessages((current) =>
@@ -11631,6 +11660,18 @@ function piToolCallFromEvent(event: PiStreamEvent): ChatToolCall {
       arguments: JSON.stringify(event.arguments ?? {}),
     },
   };
+}
+
+function attachWorkspaceChanges(setMessages: Dispatch<SetStateAction<ChatMessage[]>>, changes: WorkspaceChanges) {
+  setMessages(current => {
+    // Streaming text is buffered; its message may still have empty content.
+    // Select by turn position so a fast completion never decorates an old reply.
+    const lastUserIndex = current.map(message => message.role).lastIndexOf("user");
+    const target = current.slice(lastUserIndex + 1).reverse().find(message => message.role === "assistant");
+    if (!target) return [...current, { id: crypto.randomUUID(), role: "assistant", content: "", createdAt: new Date().toISOString(), extra: { workspaceChanges: changes } }];
+    return current.map(message => message.id === target.id
+      ? { ...message, extra: { ...message.extra, workspaceChanges: changes } } : message);
+  });
 }
 
 function createPiStreamingAssistantTimeline(
@@ -26645,6 +26686,12 @@ export function App() {
         const piIncompleteToolCalls = new Map<string, ChatToolCall>();
         const piToolVisualizations = new Map<string, ToolVisualization>();
         const handlePiEvent = async (event: PiStreamEvent) => {
+          if (event.type === "workspace_changes") {
+            const changes = getWorkspaceChanges(event.changes);
+            if (changes) attachWorkspaceChanges(commitChatMessages, changes);
+            setTemporaryFilesRevision(current => current + 1);
+            return;
+          }
           if (event.type === "run_ready") {
             runtime.piReady = true;
             void flushSteeringInputs(requestSessionId);
@@ -30086,6 +30133,12 @@ export function App() {
         const piIncompleteToolCalls = new Map<string, ChatToolCall>();
         const piToolVisualizations = new Map<string, ToolVisualization>();
         const handlePiEvent = async (event: PiStreamEvent) => {
+          if (event.type === "workspace_changes") {
+            const changes = getWorkspaceChanges(event.changes);
+            if (changes) attachWorkspaceChanges(commitChatMessages, changes);
+            setTemporaryFilesRevision(current => current + 1);
+            return;
+          }
           if (event.type === "run_ready") {
             runtime.piReady = true;
             void flushSteeringInputs(requestSessionId);
@@ -39055,6 +39108,10 @@ export function App() {
                                     isNewestVisibleItem: renderedItemIndex === lastVisibleChatItemIndex,
                                   })}
                             </div>
+                            {toolGroups.flatMap(group => group.segments).map(({ message: toolMessage }) => {
+                              const changes = getWorkspaceChanges(toolMessage.extra?.workspaceChanges);
+                              return changes ? <ChatWorkspaceChanges key={toolMessage.id} changes={changes} /> : null;
+                            })}
                           </div>
                         </div>
                       </article>
@@ -39078,13 +39135,17 @@ export function App() {
                   { id, message, segment, segmentIndex },
                   renderedSegmentIndex,
                 ) => {
+                const recordedChanges = getWorkspaceChanges(message.extra?.workspaceChanges);
+                if (recordedChanges && !message.content.trim() && !message.reasoning?.trim() && !message.toolVisualization) {
+                  return <article className="chat-message assistant mes" key={id}><ChatWorkspaceChanges changes={recordedChanges} /></article>;
+                }
                 if (
                   message.role === "assistant" &&
                   shouldHideEmptyAssistantBubble(
                     message.content,
                     chatReasoningVisible,
                     message.attachments?.length ?? 0,
-                    Boolean(message.choiceRequest || message.toolVisualization),
+                    Boolean(message.choiceRequest || message.toolVisualization || message.extra?.workspaceChanges),
                   )
                 ) {
                   return null;
@@ -39413,6 +39474,9 @@ export function App() {
                             )}
                           </div>
                         </div>
+                        {!isEditingMessage && isLastMessageSegment && recordedChanges && (
+                          <ChatWorkspaceChanges changes={recordedChanges} />
+                        )}
                         {!isEditingMessage &&
                           isLastMessageSegment &&
                           message.choiceRequest && (
