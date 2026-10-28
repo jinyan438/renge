@@ -143,6 +143,25 @@ test("native edits apply disjoint replacements atomically and preserve line endi
   assert.equal(memory.files[path].content, "\ufeff金币：9\r\n装备：银剑\r\n位置：钟楼");
 });
 
+test("later memory rounds apply the same edit argument preparation as the coding agent", async () => {
+  const path = "人物/状态.md";
+  for (const args of [
+    { path, oldText: "金币：10", newText: "金币：9" },
+    { path, edits: { oldText: "金币：10", newText: "金币：9" } },
+    { path, edits: JSON.stringify([{ oldText: "金币：10", newText: "金币：9" }]) },
+    { path, edits: JSON.stringify({ oldText: "金币：10", newText: "金币：9" }) },
+  ]) {
+    const memory = fresh();
+    const first = createMemoryTools(memory, true);
+    await first.execute("write", { path, content: "金币：10\n装备：银剑", operation: "overwrite", expected_bytes: 0 });
+    const next = createMemoryTools(normalizeRoleplayFileMemory(memory, scope), true);
+    await next.execute("read", { path });
+    await next.execute("edit", args);
+    await next.execute("read", { path });
+    assert.match(next.context(), /金币：9\n装备：银剑/);
+  }
+});
+
 test("native chunked writes check UTF-8 offsets and retries do not duplicate facts", async () => {
   const memory = fresh(), tools = createMemoryTools(memory, true), path = "约定/铜门.md";
   const first = await tools.execute("write", { path, content: "铜门", operation: "overwrite", expected_bytes: 0 });
@@ -280,6 +299,43 @@ test("ignoring tools is reported and explicit no-change is accepted", async () =
   await assert.rejects(runMemoryAgent({ executeCodingTool, memory, writable: false, reference: "", signal: new AbortController().signal, request: async () => reply() }), /未读取/);
   await assert.rejects(runMemoryAgent({ executeCodingTool, memory, writable: true, reference: "", signal: new AbortController().signal, request: async () => reply() }), /未保存/);
   await runMemoryAgent({ executeCodingTool, memory, writable: true, reference: "", signal: new AbortController().signal, request: async () => reply([], "NO_CHANGES") });
+});
+
+test("a later edit can recover by rereading and retrying after a premature confirmation", async () => {
+  const memory = fresh(); writeMemoryFile(memory, "人物.md", "位置：港口");
+  let round = 0;
+  await runMemoryAgent({ executeCodingTool, memory, writable: true, reference: "位置改为钟楼", signal,
+    request: async messages => {
+      if (++round === 1) return reply([call("edit", { path: "人物.md", edits: [{ oldText: "港口", newText: "钟楼" }] })]);
+      if (round === 2) return reply([], "NO_CHANGES");
+      if (round === 3) {
+        assert.match(messages.at(-1).content, /edit（人物.md）.*必须先 read/);
+        return reply([call("read", { path: "人物.md" }), call("edit", { path: "人物.md", oldText: "港口", newText: "钟楼" })]);
+      }
+      return reply();
+    } });
+  assert.equal(memory.files["人物.md"].content, "位置：钟楼");
+});
+
+test("unresolved edits retain their cause and are not hidden by another successful tool", async () => {
+  const base = fresh(); writeMemoryFile(base, "人物.md", "位置：港口");
+  const draft = normalizeRoleplayFileMemory(base, scope);
+  let round = 0;
+  await assert.rejects(runMemoryAgent({ executeCodingTool, memory: draft, writable: true, reference: "", signal,
+    request: async () => ++round === 1 ? reply([
+      call("read", { path: "人物.md" }),
+      call("edit", { path: "人物.md", edits: [{ oldText: "并不存在的旧事实", newText: "钟楼" }] }),
+      call("memory_list", {}),
+    ]) : reply([], "NO_CHANGES"),
+  }), error => {
+    assert.match(error.message, /文件记忆工具未完成.*edit（人物.md）/);
+    assert.match(error.message, /Could not find|exact text|匹配/);
+    assert.match(error.message, /原有文件已保留/);
+    return true;
+  });
+  assert.equal(round, 4, "two bounded correction opportunities follow the failed tool call");
+  assert.equal(base.files["人物.md"].content, "位置：港口");
+  assert.equal(draft.files["人物.md"].content, "位置：港口");
 });
 
 function fileAccess(root) {

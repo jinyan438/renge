@@ -40,6 +40,16 @@ public class PiFileToolSnapshotTest {
         try { call("edit", source, args, false); fail(); } catch (IOException expected) { }
     }
 
+    @Test public void laterRoundsAcceptTheCodingAgentsPreparedEditVariants() throws Exception {
+        JSONObject single = edit("港口", "钟楼");
+        for (Object edits : new Object[]{single, single.toString(), new JSONArray().put(single).toString()}) {
+            JSONObject args = new JSONObject().put("path", "人物.md").put("edits", edits);
+            assertEquals("位置：钟楼", call("edit", "位置：港口", args, false).getString("content"));
+        }
+        JSONObject legacy = new JSONObject().put("path", "人物.md").put("oldText", "港口").put("newText", "钟楼");
+        assertEquals("位置：钟楼", call("edit", "位置：港口", legacy, false).getString("content"));
+    }
+
     @Test public void readsAreScopedToTheProvidedSnapshot() throws Exception {
         JSONObject args = new JSONObject().put("path", "人物.md").put("offset", 2).put("limit", 1);
         String text = call("read", "第一行\n第二行\n第三行", args, false).getJSONObject("result").getJSONArray("content").getJSONObject(0).getString("text");

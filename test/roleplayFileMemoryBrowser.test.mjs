@@ -74,6 +74,10 @@ try {
       call("edit", { path: "人物/守门人.md", edits: [{ oldText: "当前在旧港口", newText: "当前在钟楼" }] }),
       call("write", { path: initialMemoryPath, content: "- 当前位置：钟楼。\n- 铜钥匙持有人：守门人。" }),
     ] : [
+      call("read", { path: "人物/守门人.md" }),
+      call("edit", { path: "人物/守门人.md", oldText: "当前在钟楼", newText: "当前在钟楼，确认通行约定仅在黎明生效" }),
+      call("read", { path: initialMemoryPath }),
+      call("write", { path: initialMemoryPath, content: "- 当前位置：钟楼。\n- 铜钥匙持有人：守门人。\n- 通行时间：黎明。" }),
       call("memory_mkdir", { path: "钟楼之约/生效条件" }),
       call("write", { path: "钟楼之约/生效条件/开门时刻.md", content: "通行约定仅在黎明生效。" }),
       call("write", { path: "人物/守门人/私下约定/通行.md", content: "守门人承诺代为开启铜门。" }),
@@ -151,6 +155,8 @@ try {
   const expanded = await saved(data => data.chatSessions.find(session => session.id === "A")?.fileMemory?.files["人物/守门人/私下约定/通行.md"]);
   assert.match(await readFile(join(mirror, "钟楼之约/生效条件/开门时刻.md"), "utf8"), /黎明/);
   assert.match(await readFile(join(mirror, "人物/守门人/私下约定/通行.md"), "utf8"), /开启铜门/);
+  assert.match(await readFile(join(mirror, "人物/守门人.md"), "utf8"), /手动设定.*确认通行约定仅在黎明生效/);
+  assert.match(await readFile(join(mirror, initialMemoryPath), "utf8"), /通行时间：黎明/);
   const expandedMemory = expanded.chatSessions.find(session => session.id === "A").fileMemory;
   assert.ok(expandedMemory.directories.includes("钟楼之约/生效条件"));
   assert.ok(expandedMemory.directories.includes("人物/守门人/私下约定"));

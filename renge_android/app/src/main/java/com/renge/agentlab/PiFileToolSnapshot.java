@@ -43,7 +43,18 @@ final class PiFileToolSnapshot {
             if (source == null) throw new IOException("文件不存在。");
             boolean bom = source.startsWith("\ufeff"), crlf = source.contains("\r\n");
             String original = (bom ? source.substring(1) : source).replace("\r\n", "\n");
-            JSONArray edits = args.getJSONArray("edits");
+            // Match Pi's prepareArguments: normalize model argument variants
+            // before applying the same precise-edit contract.
+            Object rawEdits = args.opt("edits");
+            if (rawEdits instanceof String) {
+                try { rawEdits = new org.json.JSONTokener((String) rawEdits).nextValue(); }
+                catch (JSONException ignored) { }
+            }
+            JSONArray edits = rawEdits instanceof JSONArray ? new JSONArray(rawEdits.toString()) : new JSONArray();
+            if (rawEdits instanceof JSONObject) edits.put(rawEdits);
+            if (args.opt("oldText") instanceof String && args.opt("newText") instanceof String) {
+                edits.put(new JSONObject().put("oldText", args.getString("oldText")).put("newText", args.getString("newText")));
+            }
             if (edits.length() == 0) throw new IOException("edits must contain at least one replacement");
             List<int[]> ranges = new ArrayList<>();
             for (int i = 0; i < edits.length(); i++) {

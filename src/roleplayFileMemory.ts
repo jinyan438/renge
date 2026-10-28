@@ -352,7 +352,13 @@ export async function runMemoryAgent(options: {
     { role: "system", content: memoryAgentPrompt(options.writable) },
     { role: "user", content: JSON.stringify({ directory: await tools.execute("memory_list", {}), reference: options.reference }) },
   ];
-  let lastFailed = false;
+  const failures = new Map<string, { name: string; target: string; message: string }>();
+  const failureGroup = (name: string) => name === "edit" || name === "write" ? "file-update" : name;
+  const toolTarget = (args: Record<string, unknown> | undefined) => {
+    try { return memoryPath(args?.path ?? args?.from, true); } catch { return ""; }
+  };
+  const failureMessage = () => [...failures.values()].map(failure => failure.message).join("；");
+  let repairAttempts = 0;
   let reminded = false;
   for (let round = 0; round < 24; round++) {
     options.signal.throwIfAborted();
@@ -360,7 +366,13 @@ export async function runMemoryAgent(options: {
     options.signal.throwIfAborted();
     if (/length|max_tokens|max_output_tokens/.test(result.finishReason)) throw new Error("记忆请求被截断，未保存本轮分类修改。");
     if (!result.toolCalls.length) {
-      if (lastFailed) throw new Error("文件记忆工具未完成，原有文件已保留。");
+      if (failures.size) {
+        if (repairAttempts++ < 2) {
+          messages.push({ role: "user", content: `上次工具执行失败：${failureMessage()}。请先根据错误修正参数，必要时用 read 重新读取目标文件，然后重试。工具成功前不能结束；不得通过 NO_CHANGES 跳过失败的修改。` });
+          continue;
+        }
+        throw new Error(`文件记忆工具未完成：${failureMessage()}。原有文件已保留。`);
+      }
       if (options.writable && !tools.mutations && result.content.trim() !== "NO_CHANGES") {
         throw new Error("模型未保存记忆修改。没有值得保存的变化时应返回 NO_CHANGES，否则请使用写入工具。");
       }
@@ -379,20 +391,34 @@ export async function runMemoryAgent(options: {
     for (const call of result.toolCalls) {
       options.signal.throwIfAborted();
       let value: unknown;
+      let args: Record<string, unknown> | undefined;
       try {
         if (!tools.definitions.some(tool => tool.function.name === call.function.name)) throw new Error("当前阶段不可使用此工具。");
-        const args = JSON.parse(call.function.arguments);
+        args = JSON.parse(call.function.arguments);
         if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("记忆工具参数必须是对象。");
         options.onTool?.(call.function.name, args);
         await options.beforeTool?.(call.function.name, args);
         value = await tools.execute(call.function.name, args);
-        lastFailed = false;
+        const target = toolTarget(args);
+        for (const [key, failure] of failures) {
+          const corrected = failureGroup(failure.name) === failureGroup(call.function.name)
+            && (!failure.target || failure.target === target);
+          const createdMissingFile = (call.function.name === "write" || call.function.name === "edit")
+            && failure.name === "read" && failure.target === target;
+          const replacedUnavailableTool = !tools.definitions.some(tool => tool.function.name === failure.name);
+          if (corrected || createdMissingFile || replacedUnavailableTool) failures.delete(key);
+        }
       } catch (error) {
-        value = { error: error instanceof Error ? error.message : String(error) };
-        lastFailed = true;
+        options.signal.throwIfAborted();
+        const reason = error instanceof Error ? error.message : String(error);
+        const path = args?.path ?? args?.from;
+        const message = `${call.function.name}${typeof path === "string" ? `（${path}）` : ""}：${reason}`;
+        const target = toolTarget(args);
+        failures.set(JSON.stringify([failureGroup(call.function.name), target]), { name: call.function.name, target, message });
+        value = { error: message };
       }
       messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(value) });
     }
   }
-  throw new Error("文件记忆更新超过工具轮数，原有文件已保留。");
+  throw new Error(`文件记忆更新超过工具轮数${failures.size ? `：${failureMessage()}` : ""}，原有文件已保留。`);
 }

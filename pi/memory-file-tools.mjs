@@ -28,7 +28,11 @@ export async function executeMemoryCodingTool({ name, args, content, initialized
     }
     const tool = name === "read" ? createReadToolDefinition(root)
       : name === "edit" ? createEditToolDefinition(root) : createResumableWriteTool(root);
-    const result = await tool.execute("memory-file", { ...args, path: stagedName }, signal);
+    const input = { ...args, path: stagedName };
+    // AgentSession prepares model arguments before execution (e.g. edits sent
+    // as a JSON string, a single object, or legacy oldText/newText fields).
+    const prepared = tool.prepareArguments ? await tool.prepareArguments(input) : input;
+    const result = await tool.execute("memory-file", prepared, signal);
     signal?.throwIfAborted();
     // Mutation status messages contain only a filename and execution status.
     // Keep read content untouched, including any literal "snapshot.md" text.
