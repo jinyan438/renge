@@ -70,10 +70,12 @@ try {
       return;
     }
     const writeCalls = storyRequests.length === 1 ? [
+      call("read", { path: "人物" }),
       call("read", { path: "人物/守门人.md" }),
       call("edit", { path: "人物/守门人.md", edits: [{ oldText: "当前在旧港口", newText: "当前在钟楼" }] }),
       call("write", { path: initialMemoryPath, content: "- 当前位置：钟楼。\n- 铜钥匙持有人：守门人。" }),
     ] : [
+      call("read", { path: "人物/" }),
       call("read", { path: "人物/守门人.md" }),
       call("edit", { path: "人物/守门人.md", oldText: "当前在钟楼", newText: "当前在钟楼，确认通行约定仅在黎明生效" }),
       call("read", { path: initialMemoryPath }),
@@ -83,8 +85,14 @@ try {
       call("write", { path: "人物/守门人/私下约定/通行.md", content: "守门人承诺代为开启铜门。" }),
     ];
     const calls = previousTools.length ? (!writable && previousTools.length === 2
-      ? [call("memory_history_read", { id: JSON.parse(previousTools[1].content).matches[0].id })] : []) : writable
-      ? writeCalls : [call("read", { path: "人物/守门人.md" }), call("memory_history_search", { query: "A_BODY_0" })];
+      ? (() => {
+        const listing = JSON.parse(previousTools[0].content);
+        assert.equal(listing.kind, "directory");
+        assert.doesNotMatch(JSON.stringify(listing), /守门人持有铜钥匙|手动设定/);
+        return [call("read", { path: listing.entries.find(entry => entry.kind === "file").path }),
+          call("memory_history_read", { id: JSON.parse(previousTools[1].content).matches[0].id })];
+      })() : []) : writable
+      ? writeCalls : [call("read", { path: "人物/" }), call("memory_history_search", { query: "A_BODY_0" })];
     await route.fulfill({ json: { choices: [{ message: { role: "assistant", content: calls.length ? "" : "READY", ...(calls.length ? { tool_calls: calls } : {}) }, finish_reason: calls.length ? "tool_calls" : "stop" }] } });
   });
   await page.route("**/api/pi/chat", async route => {

@@ -1,4 +1,4 @@
-import { memoryPath, normalizeRoleplayFileMemory, type RoleplayFileMemory } from "./roleplayFileMemory.ts";
+import { memoryPath, normalizeRoleplayFileMemory, resolveMemoryReadTarget, type RoleplayFileMemory } from "./roleplayFileMemory.ts";
 
 export type WorkspaceFileAccess = {
   list(path: string): Promise<{ path: string; kind: "file" | "directory" }[]>;
@@ -86,9 +86,11 @@ export async function loadMemoryFiles(access: WorkspaceFileAccess, sessionId: st
 export async function prepareMemoryFileTool(access: WorkspaceFileAccess, sessionId: string,
   memory: RoleplayFileMemory, baseline: RoleplayFileMemory, name: string, args: Record<string, unknown>) {
   if (name !== "read" && name !== "memory_search") return;
+  const target = name === "read" ? resolveMemoryReadTarget(memory, args.path) : null;
+  if (target?.kind === "directory") return;
   const root = roleplayMemoryRoot(sessionId);
   const directory = name === "memory_search" ? memoryPath(args.path ?? "", true) : "";
-  const paths = name === "read" ? [memoryPath(args.path)]
+  const paths = target ? [target.path]
     : Object.keys(memory.files).filter(path => !directory || path.startsWith(`${directory}/`));
   for (const path of paths) {
     // A staged edit must remain visible to subsequent reads in this phase.

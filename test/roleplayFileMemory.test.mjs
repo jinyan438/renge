@@ -117,6 +117,33 @@ test("nested Markdown edits require reading and preserve unrelated facts", async
   assert.match(memory.files["物品/钱包/金币.md"].content, /装备/);
 });
 
+test("reading a memory directory lists paths without loading or counting file bodies", async () => {
+  const memory = fresh();
+  writeMemoryFile(memory, "人物/队友/守门人.md", "铜钥匙只由守门人持有");
+  memory.directories.push("空目录", "带扩展名.md");
+  let nativeCalls = 0;
+  const tools = createTools(memory, true, [], async (...args) => { nativeCalls++; return executeCodingTool(...args); }, signal);
+  for (const path of ["人物/队友", "人物/队友/", "人物\\队友"]) {
+    const listing = await tools.execute("read", { path });
+    assert.equal(listing.kind, "directory");
+    assert.equal(listing.path, "人物/队友");
+    assert.deepEqual(listing.entries, [{ path: "人物/队友/守门人.md", kind: "file" }]);
+    assert.doesNotMatch(JSON.stringify(listing), /铜钥匙只由守门人持有/);
+  }
+  assert.deepEqual((await tools.execute("read", { path: "空目录" })).entries, []);
+  assert.equal((await tools.execute("read", { path: "带扩展名.md" })).kind, "directory");
+  for (const path of ["", ".", "./"]) assert.equal((await tools.execute("read", { path })).kind, "directory");
+  assert.equal(nativeCalls, 0);
+  assert.equal(tools.context(), "", "listing paths must not count as reading facts");
+  await assert.rejects(tools.execute("edit", { path: "人物/队友/守门人.md", edits: [{ oldText: "铜钥匙", newText: "银钥匙" }] }), /必须先 read/);
+  await tools.execute("read", { path: "人物/队友/守门人.md" });
+  assert.equal(nativeCalls, 1);
+  assert.match(tools.context(), /铜钥匙只由守门人持有/);
+  for (const path of ["../人物", "/人物", "C:/人物", "人物//", "人物/../队友"]) {
+    await assert.rejects(tools.execute("read", { path }), /相对路径/);
+  }
+});
+
 test("paths are sandboxed and legacy archives cannot be overwritten", () => {
   for (const path of ["../secret.md", "/root.md", "C:/secret.md", "a//b.md", "a/../b.md", "a.txt", "CON.md", "a./b.md", "a\u0000.md"]) assert.throws(() => memoryPath(path));
   const memory = fresh();
@@ -283,6 +310,30 @@ test("older conversations are available to the agent only through explicit histo
   assert.equal(Object.keys(memory.files).length, 0);
 });
 
+test("empty-directory reads guide retrieval toward history instead of failing the phase", async () => {
+  const memory = fresh(); memory.directories = ["人物", "人物/队友"];
+  const history = [message("old", "旧约定：铜钥匙由守门人持有。"), message("a"), message("b"), message("c")];
+  let round = 0;
+  const context = await runMemoryAgent({ memory, writable: false, reference: "查证铜钥匙持有人", history, signal,
+    executeCodingTool: async () => assert.fail("directory lookup must not invoke a native file read"),
+    request: async messages => {
+      if (++round === 1) return reply([call("read", { path: "人物/队友" })]);
+      if (round === 2) {
+        const listing = JSON.parse(messages.at(-1).content);
+        assert.equal(listing.kind, "directory"); assert.deepEqual(listing.entries, []);
+        return reply();
+      }
+      if (round === 3) {
+        assert.match(messages.at(-1).content, /没有 Markdown.*memory_history_search.*memory_history_read/);
+        return reply([call("memory_history_search", { query: "铜钥匙" })]);
+      }
+      if (round === 4) return reply([call("memory_history_read", { id: JSON.parse(messages.at(-1).content).matches[0].id })]);
+      return reply();
+    } });
+  assert.match(context, /铜钥匙由守门人持有/);
+  assert.equal(Object.keys(memory.files).length, 0);
+});
+
 test("failed or cancelled write drafts can be discarded atomically", async () => {
   const memory = fresh(); const draft = normalizeRoleplayFileMemory(memory, scope);
   let round = 0;
@@ -408,6 +459,11 @@ test("filesystem initialization lists names and tool reads load only requested M
     const baseline = await loadMemoryFiles(tracked, "session-a", first, true);
     assert.ok(reads.every(path => !path.endsWith(".md")), "initial discovery never reads all Markdown contents");
     const draft = normalizeRoleplayFileMemory(baseline, scope);
+    await prepareMemoryFileTool(tracked, "session-a", draft, baseline, "read", { path: "人物/" });
+    const listing = await createMemoryTools(draft, false).execute("read", { path: "人物/" });
+    assert.deepEqual(listing.entries, [{ path: "人物/守门人.md", kind: "file" }]);
+    assert.ok(reads.every(path => !path.endsWith(".md")), "directory reads do not try to load directories as files or scan their contents");
+    assert.equal(draft.files["人物/守门人.md"].unloaded, true);
     await prepareMemoryFileTool(tracked, "session-a", draft, baseline, "read", { path: "人物/守门人.md" });
     assert.equal(draft.files["人物/守门人.md"].content, "磁盘修改后的内容");
     assert.equal(baseline.files["人物/守门人.md"].content, "磁盘修改后的内容");
