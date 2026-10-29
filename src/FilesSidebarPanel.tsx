@@ -16,6 +16,7 @@ import {
   FolderSearch,
   MoreHorizontal,
   Pencil,
+  Trash2,
   Save,
   RefreshCw,
   Search,
@@ -62,6 +63,8 @@ export type FileBrowserSource = {
   readText(path: string): Promise<unknown>;
   readBinary(path: string): Promise<unknown>;
   writeText?(path: string, content: string, expectedContent: string): Promise<void>;
+  renamePath?(path: string, name: string): Promise<unknown>;
+  deletePath?(path: string, recursive: boolean): Promise<unknown>;
   revision?: number;
   importFiles?(): Promise<unknown>;
   runSystemAction?(path: string, action: FileBrowserSystemAction): Promise<unknown>;
@@ -90,6 +93,48 @@ type FileContextMenuState = {
   x: number;
   y: number;
 };
+
+type FileMutation = { action: "rename" | "delete"; entry: FileBrowserEntry };
+
+function FileMutationDialog({ mutation, busy, error, onCancel, onSubmit }: {
+  mutation: FileMutation;
+  busy: boolean;
+  error: string;
+  onCancel: () => void;
+  onSubmit: (name: string) => void;
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [name, setName] = useState(mutation.entry.name);
+  const renaming = mutation.action === "rename";
+  useEffect(() => {
+    const dialog = dialogRef.current!;
+    dialog.showModal();
+    if (renaming) {
+      inputRef.current?.focus();
+      const dot = mutation.entry.kind === "file" ? name.lastIndexOf(".") : -1;
+      inputRef.current?.setSelectionRange(0, dot > 0 ? dot : name.length);
+    }
+    return () => dialog.close();
+  }, []);
+  return <dialog className="files-mutation-dialog" ref={dialogRef} aria-label={renaming ? "重命名" : "删除确认"}
+    onCancel={event => { event.preventDefault(); if (!busy) onCancel(); }}
+    onKeyDown={event => event.stopPropagation()} onKeyUp={event => event.stopPropagation()}>
+    <form onSubmit={event => { event.preventDefault(); if (!busy) onSubmit(name); }}>
+      <h2>{renaming ? "重命名" : "删除确认"}</h2>
+      <p>{renaming ? mutation.entry.path : `确定永久删除“${mutation.entry.name}”${mutation.entry.kind === "directory" ? "及其全部内容" : ""}？此操作无法撤销，未保存的编辑也将丢弃。`}</p>
+      {renaming ? <label>新名称<input ref={inputRef} aria-label="新名称" value={name} disabled={busy}
+        onChange={event => setName(event.target.value)} /></label> : null}
+      {error ? <p className="is-error" role="alert">{error}</p> : null}
+      <div className="files-mutation-actions">
+        <button type="button" autoFocus={!renaming} disabled={busy} onClick={onCancel}>取消</button>
+        <button className={renaming ? "is-primary" : "is-danger"} type="submit" disabled={busy || (renaming && !name.trim())}>
+          {busy ? "正在处理…" : renaming ? "保存名称" : "确认删除"}
+        </button>
+      </div>
+    </form>
+  </dialog>;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -318,6 +363,10 @@ export function FilesSidebarPanel({
   const [statusMessage, setStatusMessage] = useState("");
   const [error, setError] = useState("");
   const [contextMenu, setContextMenu] = useState<FileContextMenuState | null>(null);
+  const [mutation, setMutation] = useState<FileMutation | null>(null);
+  const [mutating, setMutating] = useState(false);
+  const [mutationError, setMutationError] = useState("");
+  const mutationPendingRef = useRef(false);
   // Directory loads belong to the source lifecycle; selecting a preview must
   // only invalidate an older preview, never the pending directory listing.
   const sourceVersionRef = useRef(0);
@@ -365,6 +414,9 @@ export function FilesSidebarPanel({
     setResolvedRootPath(source?.rootPath ?? "");
     setStatusMessage("");
     setError("");
+    setContextMenu(null);
+    setMutation(null);
+    setMutationError("");
     if (!source) return;
     setLoadingPaths(new Set([""]));
     void source.listDirectory("").then((result) => {
@@ -492,6 +544,7 @@ export function FilesSidebarPanel({
       if (sourceIdRef.current !== sourceId || previewVersionRef.current !== previewVersion) return;
       setPreview({ ...currentPreview, content: editorContent });
       setEditing(false);
+      if (getFileBrowserPreviewKind(currentPreview.entry.path) !== currentPreview.kind) void openPreview(currentPreview.entry);
       setStatusMessage("文件已保存，下次生成将读取最新内容");
     } catch (saveError) {
       if (sourceIdRef.current === sourceId) setError(saveError instanceof Error ? saveError.message : "文件保存失败");
@@ -564,9 +617,72 @@ export function FilesSidebarPanel({
     event.stopPropagation();
     setContextMenu({
       entry,
-      x: Math.min(event.clientX, window.innerWidth - 224),
-      y: Math.min(event.clientY, window.innerHeight - 260),
+      x: Math.max(6, Math.min(event.clientX, window.innerWidth - 224)),
+      y: Math.max(6, Math.min(event.clientY, window.innerHeight - 340)),
     });
+  };
+
+  const beginMutation = (action: FileMutation["action"], entry: FileBrowserEntry) => {
+    setContextMenu(null);
+    setMutationError("");
+    setMutation({ action, entry });
+  };
+
+  const submitMutation = async (name: string) => {
+    if (!source || !mutation || mutationPendingRef.current || saving) return;
+    const version = sourceVersionRef.current;
+    const { entry, action } = mutation;
+    const parent = entry.path.split("/").slice(0, -1).join("/");
+    const nextPath = parent ? `${parent}/${name}` : name;
+    const matches = (path: string) => path === entry.path || path.startsWith(`${entry.path}/`);
+    const remap = (path: string) => matches(path) ? `${nextPath}${path.slice(entry.path.length)}` : path;
+    mutationPendingRef.current = true;
+    setMutating(true);
+    setMutationError("");
+    try {
+      if (action === "rename") await source.renamePath!(entry.path, name);
+      else await source.deletePath!(entry.path, entry.kind === "directory");
+      if (sourceVersionRef.current !== version) return;
+      // Ignore listings and previews started before the filesystem changed.
+      sourceVersionRef.current += 1;
+      previewVersionRef.current += 1;
+      setLoadingPaths(new Set());
+      const mapEntry = (item: FileBrowserEntry): FileBrowserEntry => {
+        const path = remap(item.path);
+        return { ...item, path, name: path.split("/").at(-1)!,
+          absolutePath: getFileBrowserAbsolutePath(resolvedRootPath, { path }) };
+      };
+      setDirectoryEntries(current => Object.fromEntries(Object.entries(current)
+        .filter(([path]) => action === "rename" || !matches(path))
+        .map(([path, entries]) => [action === "rename" ? remap(path) : path,
+          entries.filter(item => action === "rename" || !matches(item.path)).map(item => action === "rename" ? mapEntry(item) : item)])));
+      setExpandedPaths(current => new Set([...current].filter(path => action === "rename" || !matches(path))
+        .map(path => action === "rename" ? remap(path) : path)));
+      for (const [key, content] of [...draftsRef.current]) {
+        const prefix = `${source.id}:`;
+        if (!key.startsWith(prefix) || !matches(key.slice(prefix.length))) continue;
+        draftsRef.current.delete(key);
+        if (action === "rename") draftsRef.current.set(`${prefix}${remap(key.slice(prefix.length))}`, content);
+      }
+      if (preview && matches(preview.entry.path)) {
+        if (action === "delete") { setPreview(null); setEditing(false); setEditorContent(""); }
+        else if (editing) setPreview({ ...preview, entry: mapEntry(preview.entry) });
+        else void openPreview(mapEntry(preview.entry));
+      } else if (preview?.status === "loading") void openPreview(preview.entry);
+      setMutation(null);
+      setError("");
+      setStatusMessage(action === "rename" ? `已重命名为 ${name}` : `已删除 ${entry.name}`);
+      // Reload all expanded folders, including any whose pending load was invalidated.
+      for (const path of new Set(["", parent, ...expandedPaths])) {
+        if (action === "delete" && matches(path)) continue;
+        void loadDirectory(action === "rename" ? remap(path) : path, true);
+      }
+    } catch (mutationError) {
+      if (sourceVersionRef.current === version) setMutationError(mutationError instanceof Error ? mutationError.message : "文件操作失败");
+    } finally {
+      mutationPendingRef.current = false;
+      setMutating(false);
+    }
   };
 
   const renderEntries = (path = "", depth = 0): ReactNode => {
@@ -654,6 +770,13 @@ export function FilesSidebarPanel({
           <button onClick={() => { void copyPath(contextMenu.entry, false); setContextMenu(null); }} role="menuitem" type="button">
             <Copy size={15} /> 复制相对路径
           </button>
+          {source?.renamePath || source?.deletePath ? <span className="files-context-separator" /> : null}
+          {source?.renamePath ? <button disabled={mutating || saving} onClick={() => beginMutation("rename", contextMenu.entry)} role="menuitem" type="button">
+            <Pencil size={15} /> 重命名
+          </button> : null}
+          {source?.deletePath ? <button className="is-danger" disabled={mutating || saving} onClick={() => beginMutation("delete", contextMenu.entry)} role="menuitem" type="button">
+            <Trash2 size={15} /> 删除
+          </button> : null}
         </div>,
         document.body,
       )
@@ -799,6 +922,8 @@ export function FilesSidebarPanel({
         <span className={error ? "is-error" : ""}>{error || statusMessage || (source ? `${rootEntries.length} 个根目录条目` : "未连接")}</span>
       </footer>
       {contextMenuPortal}
+      {mutation ? createPortal(<FileMutationDialog mutation={mutation} busy={mutating} error={mutationError}
+        onCancel={() => setMutation(null)} onSubmit={name => void submitMutation(name)} />, document.body) : null}
     </section>
   );
 }

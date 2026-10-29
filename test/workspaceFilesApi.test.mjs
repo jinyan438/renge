@@ -6,6 +6,7 @@ import test from "node:test";
 import { startRengeServer } from "./piTestServer.mjs";
 import { deleteMemoryFiles, httpWorkspaceFileAccess, loadMemoryFiles, roleplayMemoryRoot } from "../src/roleplayMemoryStorage.ts";
 import { memoryScope, normalizeRoleplayFileMemory, writeMemoryFile } from "../src/roleplayFileMemory.ts";
+import { httpFileBrowserActions } from "../src/fileBrowserActions.ts";
 
 test("workspace and temporary storage isolate writes and scoped directory cleanup", async () => {
   const root = await mkdtemp(join(tmpdir(), "renge-memory-http-"));
@@ -58,6 +59,59 @@ test("workspace and temporary storage isolate writes and scoped directory cleanu
   } finally {
     server.server.closeAllConnections();
     await new Promise(resolve => server.server.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("file sidebar renames and deletes files and directories in the selected scope", async () => {
+  const root = await mkdtemp(join(tmpdir(), "renge-sidebar-mutations-"));
+  const workspace = join(root, "project"), temporary = join(root, "temporary");
+  await mkdir(workspace);
+  await mkdir(temporary);
+  const server = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir: join(root, "data"), temporaryFilesRoot: temporary });
+  try {
+    for (const [scope, directory] of [["workspace", workspace], ["temporary", temporary]]) {
+      const actions = httpFileBrowserActions({ baseUrl: server.url, scope, workspacePath: workspace });
+      await mkdir(join(directory, "folder"));
+      await writeFile(join(directory, "folder", "child.bin"), Buffer.from([0, 255, 1, 128]));
+      await writeFile(join(directory, "original.txt"), "original");
+      await writeFile(join(directory, "occupied.txt"), "keep");
+      await assert.rejects(actions.renamePath("original.txt", "occupied.txt"), /已存在/);
+      assert.equal(await readFile(join(directory, "occupied.txt"), "utf8"), "keep");
+      for (const name of ["../escape.txt", "folder/escape", "..", "", "con.txt", "trailing.", "bad?.txt"]) {
+        await assert.rejects(actions.renamePath("original.txt", name), /有效/);
+      }
+      await assert.rejects(actions.renamePath("", "new-root"), /子目录/);
+      await assert.rejects(actions.deletePath("", true), /子目录/);
+      await assert.rejects(actions.renamePath("../outside.txt", "escape.txt"), /越出/);
+      await actions.renamePath("original.txt", "重命名.txt");
+      await assert.rejects(access(join(directory, "original.txt")), /ENOENT/);
+      assert.equal(await readFile(join(directory, "重命名.txt"), "utf8"), "original");
+      await actions.renamePath("重命名.txt", "重命名.txt");
+      if (process.platform === "win32") {
+        await actions.renamePath("occupied.txt", "Occupied.txt");
+        assert.equal(await readFile(join(directory, "Occupied.txt"), "utf8"), "keep");
+      }
+      await actions.renamePath("folder", "新文件夹");
+      assert.deepEqual(await readFile(join(directory, "新文件夹", "child.bin")), Buffer.from([0, 255, 1, 128]));
+      await actions.deletePath("新文件夹/child.bin", false);
+      await writeFile(join(directory, "新文件夹", "nested.txt"), "delete with directory");
+      await actions.deletePath("新文件夹", true);
+      await assert.rejects(access(join(directory, "新文件夹")), /ENOENT/);
+      const outside = join(root, `outside-${scope}`);
+      await mkdir(outside);
+      await writeFile(join(outside, "keep.txt"), "outside");
+      await symlink(outside, join(directory, "linked"), process.platform === "win32" ? "junction" : "dir");
+      await assert.rejects(actions.renamePath("linked/keep.txt", "changed.txt"), /符号链接/);
+      await assert.rejects(actions.deletePath("linked", true), /符号链接/);
+      assert.equal(await readFile(join(outside, "keep.txt"), "utf8"), "outside");
+      await actions.deletePath("重命名.txt", false);
+      await assert.rejects(access(join(directory, "重命名.txt")), /ENOENT/);
+    }
+  } finally {
+    server.server.closeAllConnections();
+    await new Promise(resolve => server.server.close(resolve));
+    assert.ok(root.startsWith(join(tmpdir(), "renge-sidebar-mutations-")));
     await rm(root, { recursive: true, force: true });
   }
 });

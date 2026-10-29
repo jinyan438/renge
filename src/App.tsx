@@ -446,6 +446,7 @@ import {
 } from "./llmContextSettings";
 import { StatusBarSidebar } from "./StatusBarSidebar";
 import type { FileBrowserSource, FileBrowserSystemAction } from "./FilesSidebarPanel";
+import { httpFileBrowserActions } from "./fileBrowserActions";
 import {
   normalizeTextFileWriteArguments,
   normalizeFileBrowserEntries,
@@ -18528,12 +18529,28 @@ export function App() {
     memoryMigrationTasksRef.current.set(session.id, task);
   }, [appDataLoaded, activeChatSession?.id, activeChatSession?.workspaceKey, activeLocalWorkspaceHandle, activeMemoryDirectory]);
   const fileBrowserSource = useMemo<FileBrowserSource | null>(() => {
+    const handle = activeLocalWorkspaceHandle;
+    const pathActions = handle?.kind === "directory" ? {
+      deletePath: async (path: string, recursive: boolean) => {
+        const target = await getLocalParentDirectory(handle, path);
+        await target.directory.removeEntry(target.name, { recursive });
+      },
+    } : handle?.kind === "android" ? {
+      deletePath: async (path: string, recursive: boolean) => {
+        const api = window.rengeAndroid!;
+        if ((await api.getWorkspaceStatus()).uri !== handle.uri) throw new Error("工作区已切换，请刷新文件列表后重试。");
+        return api.deletePath({ path, recursive });
+      },
+    } : httpFileBrowserActions(handle?.kind === "electron" || handle?.kind === "pc"
+      ? { scope: "workspace", workspacePath: handle.path, ...(handle.kind === "pc" ? { baseUrl: handle.baseUrl } : {}) }
+      : { scope: "temporary" });
     if (activeLocalWorkspaceHandle?.kind === "electron") {
       const desktopApi = window.rengeDesktop;
       if (!desktopApi?.isElectron) return null;
       const scope = "workspace" as const;
       return {
         id: `electron:${activeLocalWorkspaceHandle.path}`,
+        ...pathActions,
         revision: temporaryFilesRevision,
         writeText: (path, content, expected) => getMemoryFileAccess(activeChatSession!).write(path, content, expected),
         kind: "workspace",
@@ -18552,6 +18569,7 @@ export function App() {
       if (!androidApi?.isAndroid) return null;
       return {
         id: `android:${activeLocalWorkspaceHandle.uri}`,
+        ...pathActions,
         revision: temporaryFilesRevision,
         writeText: (path, content, expected) => getMemoryFileAccess(activeChatSession!).write(path, content, expected),
         kind: "workspace",
@@ -18584,6 +18602,7 @@ export function App() {
       };
       return {
         id: `pc:${activeLocalWorkspaceHandle.baseUrl}:${activeLocalWorkspaceHandle.path}`,
+        ...pathActions,
         revision: temporaryFilesRevision,
         writeText: (path, content, expected) => getMemoryFileAccess(activeChatSession!).write(path, content, expected),
         kind: "workspace",
@@ -18606,6 +18625,7 @@ export function App() {
     if (activeLocalWorkspaceHandle?.kind === "directory") {
       return {
         id: `browser:${activeLocalWorkspaceHandle.name}`,
+        ...pathActions,
         revision: temporaryFilesRevision,
         writeText: (path, content, expected) => getMemoryFileAccess(activeChatSession!).write(path, content, expected),
         kind: "workspace",
@@ -18623,7 +18643,7 @@ export function App() {
     const desktopApi = window.rengeDesktop;
     if (!desktopApi?.isElectron) {
       const access = httpWorkspaceFileAccess({ scope: "temporary" });
-      return { id: "server:temporary-files", revision: temporaryFilesRevision, kind: "temporary", name: "临时文件",
+      return { id: "server:temporary-files", ...pathActions, revision: temporaryFilesRevision, kind: "temporary", name: "临时文件",
         listDirectory: async path => ({ entries: await access.list(path) }),
         readText: async path => ({ path, content: await access.read(path) }),
         writeText: access.write,
@@ -18636,6 +18656,7 @@ export function App() {
     const scope = "temporary" as const;
     return {
       id: "electron:temporary-files",
+      ...pathActions,
       revision: temporaryFilesRevision,
       writeText: httpWorkspaceFileAccess({ scope: "temporary" }).write,
       kind: "temporary",

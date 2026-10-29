@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { listSidebarFiles, readSidebarBinaryFile, resolveSidebarFilePath } from "./electron/sidebar-files.mjs";
 
 const queues = new Map();
@@ -32,6 +32,26 @@ export async function workspaceFileOperation(rootPath, body) {
     }
     if (body.operation === "readBinary") return readSidebarBinaryFile(root, path);
     if (!path || target === root) throw new Error("操作必须指向工作区内的文件或子目录。");
+    if (body.operation === "rename") {
+      const name = String(body.name ?? "");
+      if (!name || name === "." || name === ".." || /[\x00-\x1f<>:"/\\|?*]/.test(name)
+        || /[. ]$/.test(name) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) {
+        throw new Error("请输入有效的文件或文件夹名称，不能包含路径分隔符或非法字符。");
+      }
+      const sourceStat = await lstat(target);
+      const destination = join(dirname(target), name);
+      if (destination !== target) {
+        const existing = await lstat(destination).catch(error => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        });
+        const caseOnly = process.platform === "win32" && destination.toLowerCase() === target.toLowerCase()
+          && existing?.dev === sourceStat.dev && existing?.ino === sourceStat.ino;
+        if (existing && !caseOnly) throw new Error("同名文件或文件夹已存在，请换一个名称。");
+        await rename(target, destination);
+      }
+      return { ok: true, path: relative(root, destination).replace(/\\/g, "/") };
+    }
     if (body.operation === "mkdir") { await mkdir(target, { recursive: true }); return { ok: true }; }
     if (body.operation === "deleteDirectory") {
       try {

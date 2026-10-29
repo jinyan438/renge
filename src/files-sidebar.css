@@ -727,7 +727,10 @@
   position: fixed;
   z-index: 6200;
   display: grid;
+  box-sizing: border-box;
   width: 218px;
+  max-height: calc(100vh - 12px);
+  overflow-y: auto;
   padding: 5px;
   border: 1px solid rgba(180, 180, 188, 0.9);
   border-radius: 10px;
@@ -762,6 +765,38 @@
   margin: 4px 5px;
   background: #e0e0e4;
 }
+
+.files-context-menu > button.is-danger { color: #b42d39; }
+.files-context-menu > button.is-danger:hover { background: #fff0f1; }
+.files-context-menu > button:disabled { opacity: 0.5; cursor: default; }
+
+.files-mutation-dialog {
+  box-sizing: border-box;
+  width: min(420px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  padding: 22px;
+  border: 1px solid #dfe4ec;
+  border-radius: 12px;
+  color: #303035;
+  background: #fff;
+  box-shadow: 0 18px 60px #0f172a33;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  -webkit-app-region: no-drag;
+}
+.files-mutation-dialog::backdrop { background: #0f172a7a; }
+.files-mutation-dialog h2 { margin: 0 0 12px; font-size: 18px; }
+.files-mutation-dialog p { margin: 8px 0; overflow-wrap: anywhere; }
+.files-mutation-dialog label { display: grid; gap: 6px; margin-top: 16px; }
+.files-mutation-dialog input { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #b7c0cd; border-radius: 6px; font: inherit; }
+.files-mutation-dialog .is-error { color: #b42d39; }
+.files-mutation-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.files-mutation-actions button { padding: 7px 14px; border: 1px solid #d5d9e0; border-radius: 6px; font: inherit; cursor: pointer; background: #f6f7f9; }
+.files-mutation-actions .is-primary { color: white; background: #075bbd; border-color: #075bbd; }
+.files-mutation-actions .is-danger { color: white; background: #b42d39; border-color: #b42d39; }
+.files-mutation-actions button:disabled { opacity: 0.5; cursor: default; }
 
 .is-spinning {
   animation: files-sidebar-spin 0.85s linear infinite;

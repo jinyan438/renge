@@ -14,6 +14,7 @@
     "test:file-memory": "node --experimental-strip-types --test test/roleplayFileMemory.test.mjs test/workspaceFilesApi.test.mjs test/llmContextSettings.test.mjs && node test/roleplayFileMemoryBrowser.test.mjs",
     "test:files-loading": "node test/filesSidebarLoadingBrowser.test.mjs",
     "test:files-editor": "npm run test:files-loading && node test/filesEditorBrowser.test.mjs && node test/filesEditorBrowser.test.mjs --desktop",
+    "test:files-actions": "node --experimental-strip-types --test test/workspaceFilesApi.test.mjs && node test/filesContextMenuBrowser.test.mjs && node test/filesContextMenuBrowser.test.mjs --desktop && node test/filesContextMenuBrowser.test.mjs --desktop --workspace && node test/filesContextMenuBrowser.test.mjs --workspace",
     "test:chat-files": "node --experimental-strip-types --test test/chatFileLinks.test.mjs test/workspaceChanges.test.mjs test/piSafetyRegression.test.mjs && node test/chatWorkspaceChangesBrowser.test.mjs && node test/chatWorkspaceChangesBrowser.test.mjs --desktop",
     "test:presented-files": "node --experimental-strip-types --test test/chatPresentedFiles.test.mjs && node test/chatPresentedFilesBrowser.test.mjs && node test/chatPresentedFilesBrowser.test.mjs --desktop",
     "test:request-body": "node --test test/piRequestBodyRecovery.test.mjs",
