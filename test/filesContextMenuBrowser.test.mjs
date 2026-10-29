@@ -9,12 +9,17 @@ import { startRengeServer } from "../server.mjs";
 const desktop = process.argv.includes("--desktop");
 const root = await mkdtemp(join(tmpdir(), "renge-files-actions-"));
 const workspace = process.argv.includes("--workspace");
+const fileServiceOffline = process.argv.includes("--file-service-offline");
 const filesRoot = workspace ? join(root, "workspace") : desktop
   ? join(root, "Renge Agent Lab", "Temporary Files") : join(root, "temporary-files");
 let server, browser, app, page;
 const errors = [];
+let mutationHttpRequests = 0;
 try {
   await mkdir(join(filesRoot, "folder"), { recursive: true });
+  await mkdir(join(filesRoot, "直接删除 文件夹", "nested"), { recursive: true });
+  await writeFile(join(filesRoot, "直接删除 文件夹", "nested", "child.txt"), "delete without opening or renaming");
+  await mkdir(join(filesRoot, "empty"));
   await mkdir(join(root, "data"));
   await mkdir(".runtime", { recursive: true });
   await writeFile(join(filesRoot, "notes.md"), "# Notes\nOriginal", "utf8");
@@ -56,6 +61,14 @@ try {
   }
   page.setDefaultTimeout(15_000);
   page.on("pageerror", error => errors.push(error.message));
+  if (fileServiceOffline) await page.context().route("**/api/workspace-files", async route => {
+    const operation = route.request().postDataJSON()?.operation;
+    if (["rename", "delete", "deleteDirectory"].includes(operation)) {
+      mutationHttpRequests += 1;
+      await route.abort("failed");
+    }
+    else await route.continue();
+  });
   await page.getByRole("button", { name: "展开右侧栏", exact: true }).click();
   await page.getByRole("button", { name: /文件.*浏览工作区/ }).click();
   const files = page.locator(".files-sidebar-panel");
@@ -70,6 +83,13 @@ try {
     await page.getByRole("menuitem", { name: action, exact: true }).click();
     return page.getByRole("dialog", { name: action === "重命名" ? "重命名" : "删除确认", exact: true });
   };
+  for (const path of ["直接删除 文件夹", "empty"]) {
+    const directDelete = await openAction(path, "删除");
+    await directDelete.getByRole("button", { name: "确认删除", exact: true }).click();
+    await directDelete.waitFor({ state: "detached" });
+    await row(path).waitFor({ state: "detached" });
+    await assert.rejects(access(join(filesRoot, path)), /ENOENT/);
+  }
   await row("notes.md").click();
   await files.getByRole("button", { name: "编辑文件", exact: true }).click();
   const editor = files.getByLabel("文件编辑内容", { exact: true });
@@ -130,8 +150,20 @@ try {
   await dialog.getByRole("button", { name: "确认删除", exact: true }).click();
   await row("binary.bin").waitFor({ state: "detached" });
   assert.equal(await readFile(join(filesRoot, "occupied.md"), "utf8"), "keep");
+  if (desktop) {
+    const native = await app.firstWindow();
+    const scope = workspace ? "workspace" : "temporary";
+    const mutate = options => native.evaluate(options => window.rengeDesktop.mutateSidebarPath(options),
+      { scope, ...(workspace ? { workspacePath: filesRoot } : {}), ...options });
+    await assert.rejects(mutate({ operation: "deleteDirectory", path: "" }), /子目录/);
+    await assert.rejects(mutate({ operation: "deleteDirectory", path: "../outside" }), /越出/);
+    await assert.rejects(mutate({ operation: "write", path: "occupied.md" }), /未知/);
+    if (workspace) await assert.rejects(mutate({ operation: "delete", path: "occupied.md", workspacePath: `${filesRoot}-other` }), /工作区已切换/);
+    assert.equal(await readFile(join(filesRoot, "occupied.md"), "utf8"), "keep");
+    if (fileServiceOffline) assert.equal(mutationHttpRequests, 0, "native file mutations must not depend on HTTP fetch");
+  }
   assert.deepEqual(errors, []);
-  console.log(`File context menu rename/delete passed (${desktop ? "desktop" : "browser"}, ${workspace ? "workspace" : "temporary"})`);
+  console.log(`File context menu rename/delete passed (${desktop ? "desktop" : "browser"}, ${workspace ? "workspace" : "temporary"}${fileServiceOffline ? ", HTTP mutations blocked" : ""})`);
 } catch (error) {
   console.error("Page errors:", errors);
   await page?.screenshot({ path: `.runtime/files-actions-${desktop ? "desktop" : "browser"}-failure.png` });

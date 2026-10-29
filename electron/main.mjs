@@ -55,6 +55,7 @@ import {
   writeSidebarTextFile,
 } from "./sidebar-files.mjs";
 import { createSidebarTerminalManager } from "./sidebar-terminal.mjs";
+import { workspaceFileOperation } from "../workspace-files-store.mjs";
 import { hasVirtualDisplayAdapter, shouldDisableGpuCompositing, shouldDisableHardwareAcceleration } from "./hardware-acceleration.mjs";
 import { createTextContextMenuTemplate } from "./text-context-menu.mjs";
 import { createDesktopWindowManager } from "./desktop-windows.mjs";
@@ -1530,6 +1531,15 @@ function registerIpcHandlers() {
   ipcMain.handle("sidebar-files:read-binary", async (_event, options = {}) => {
     const rootPath = await getSidebarFilesRoot(options.scope ?? "temporary");
     return readSidebarBinaryFile(rootPath, options.path ?? "");
+  });
+
+  ipcMain.handle("sidebar-files:mutate", async (_event, options = {}) => {
+    if (!["rename", "delete", "deleteDirectory"].includes(options.operation)) throw new Error("未知文件操作。");
+    const rootPath = await getSidebarFilesRoot(options.scope);
+    if (options.scope === "workspace" && (!options.workspacePath || resolve(options.workspacePath) !== resolve(rootPath))) {
+      throw new Error("工作区已切换，请刷新文件列表后重试。");
+    }
+    return workspaceFileOperation(rootPath, { operation: options.operation, path: options.path, name: options.name });
   });
 
   ipcMain.handle("sidebar-files:write-temporary-text", async (_event, options = {}) => {

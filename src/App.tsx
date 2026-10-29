@@ -446,7 +446,7 @@ import {
 } from "./llmContextSettings";
 import { StatusBarSidebar } from "./StatusBarSidebar";
 import type { FileBrowserSource, FileBrowserSystemAction } from "./FilesSidebarPanel";
-import { httpFileBrowserActions } from "./fileBrowserActions";
+import { desktopFileBrowserActions, httpFileBrowserActions, type FileBrowserMutationOptions } from "./fileBrowserActions";
 import {
   normalizeTextFileWriteArguments,
   normalizeFileBrowserEntries,
@@ -1348,6 +1348,7 @@ type RengeDesktopApi = {
     scope: "workspace" | "temporary";
     path: string;
   }): Promise<unknown>;
+  mutateSidebarPath?(options: FileBrowserMutationOptions): Promise<unknown>;
   writeTemporaryTextFile(options: { path: string; content: string }): Promise<unknown>;
   writeTemporaryBinaryFile(options: {
     path: string;
@@ -18541,7 +18542,10 @@ export function App() {
         if ((await api.getWorkspaceStatus()).uri !== handle.uri) throw new Error("工作区已切换，请刷新文件列表后重试。");
         return api.deletePath({ path, recursive });
       },
-    } : httpFileBrowserActions(handle?.kind === "electron" || handle?.kind === "pc"
+    } : window.rengeDesktop?.isElectron && (!handle || handle.kind === "electron")
+      ? desktopFileBrowserActions(window.rengeDesktop.mutateSidebarPath, handle?.kind === "electron"
+        ? { scope: "workspace", workspacePath: handle.path } : { scope: "temporary" })
+      : httpFileBrowserActions(handle?.kind === "electron" || handle?.kind === "pc"
       ? { scope: "workspace", workspacePath: handle.path, ...(handle.kind === "pc" ? { baseUrl: handle.baseUrl } : {}) }
       : { scope: "temporary" });
     if (activeLocalWorkspaceHandle?.kind === "electron") {

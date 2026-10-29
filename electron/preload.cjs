@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld("rengeDesktop", {
   listSidebarFiles: (options) => ipcRenderer.invoke("sidebar-files:list", options),
   readSidebarTextFile: (options) => ipcRenderer.invoke("sidebar-files:read-text", options),
   readSidebarBinaryFile: (options) => ipcRenderer.invoke("sidebar-files:read-binary", options),
+  mutateSidebarPath: (options) => ipcRenderer.invoke("sidebar-files:mutate", options),
   writeTemporaryTextFile: (options) => ipcRenderer.invoke("sidebar-files:write-temporary-text", options),
   writeTemporaryBinaryFile: (options) => ipcRenderer.invoke("sidebar-files:write-temporary-binary", options),
   createTemporaryDirectory: (options) => ipcRenderer.invoke("sidebar-files:create-temporary-directory", options),

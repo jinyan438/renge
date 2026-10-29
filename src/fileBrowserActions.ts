@@ -1,3 +1,25 @@
+export type FileBrowserMutationOptions = {
+  scope: "temporary" | "workspace";
+  workspacePath?: string;
+  operation: "rename" | "delete" | "deleteDirectory";
+  path: string;
+  name?: string;
+};
+
+export function desktopFileBrowserActions(
+  mutate: ((options: FileBrowserMutationOptions) => Promise<unknown>) | undefined,
+  options: Pick<FileBrowserMutationOptions, "scope" | "workspacePath">,
+) {
+  const request = (operation: FileBrowserMutationOptions["operation"], path: string, name?: string) => {
+    if (!mutate) throw new Error("文件操作接口尚未更新，请完全退出并重新打开 renge 后重试。");
+    return mutate({ ...options, operation, path, ...(name === undefined ? {} : { name }) });
+  };
+  return {
+    renamePath: (path: string, name: string) => request("rename", path, name),
+    deletePath: (path: string, recursive: boolean) => request(recursive ? "deleteDirectory" : "delete", path),
+  };
+}
+
 export function httpFileBrowserActions(options: {
   scope: "temporary" | "workspace";
   workspacePath?: string;
