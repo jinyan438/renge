@@ -318,17 +318,20 @@ export function FilesSidebarPanel({
   const [statusMessage, setStatusMessage] = useState("");
   const [error, setError] = useState("");
   const [contextMenu, setContextMenu] = useState<FileContextMenuState | null>(null);
-  const requestVersionRef = useRef(0);
+  // Directory loads belong to the source lifecycle; selecting a preview must
+  // only invalidate an older preview, never the pending directory listing.
+  const sourceVersionRef = useRef(0);
+  const previewVersionRef = useRef(0);
   const sourceIdRef = useRef(source?.id ?? "");
 
   const loadDirectory = useCallback(async (path: string, refresh = false) => {
     if (!source || (!refresh && directoryEntries[path])) return;
-    const sourceId = source.id;
+    const sourceVersion = sourceVersionRef.current;
     setLoadingPaths((current) => new Set(current).add(path));
     setError("");
     try {
       const result = await source.listDirectory(path);
-      if (sourceIdRef.current !== sourceId) return;
+      if (sourceVersionRef.current !== sourceVersion) return;
       const entries = normalizeFileBrowserEntries(result).filter((entry) => {
         const parentPath = entry.path.split("/").slice(0, -1).join("/");
         return parentPath === path;
@@ -337,10 +340,10 @@ export function FilesSidebarPanel({
       if (nextRootPath) setResolvedRootPath(nextRootPath);
       setDirectoryEntries((current) => ({ ...current, [path]: entries }));
     } catch (loadError) {
-      if (sourceIdRef.current !== sourceId) return;
+      if (sourceVersionRef.current !== sourceVersion) return;
       setError(loadError instanceof Error ? loadError.message : "文件列表读取失败");
     } finally {
-      if (sourceIdRef.current !== sourceId) return;
+      if (sourceVersionRef.current !== sourceVersion) return;
       setLoadingPaths((current) => {
         const next = new Set(current);
         next.delete(path);
@@ -351,7 +354,8 @@ export function FilesSidebarPanel({
 
   useEffect(() => {
     sourceIdRef.current = source?.id ?? "";
-    requestVersionRef.current += 1;
+    const version = ++sourceVersionRef.current;
+    previewVersionRef.current += 1;
     setDirectoryEntries({});
     setExpandedPaths(new Set());
     setLoadingPaths(new Set());
@@ -362,10 +366,9 @@ export function FilesSidebarPanel({
     setStatusMessage("");
     setError("");
     if (!source) return;
-    const version = requestVersionRef.current;
     setLoadingPaths(new Set([""]));
     void source.listDirectory("").then((result) => {
-      if (requestVersionRef.current !== version) return;
+      if (sourceVersionRef.current !== version) return;
       const entries = normalizeFileBrowserEntries(result).filter(
         (entry) => !entry.path.includes("/"),
       );
@@ -373,12 +376,16 @@ export function FilesSidebarPanel({
       const nextRootPath = getFileBrowserRootPath(result);
       if (nextRootPath) setResolvedRootPath(nextRootPath);
     }).catch((loadError) => {
-      if (requestVersionRef.current === version) {
+      if (sourceVersionRef.current === version) {
         setError(loadError instanceof Error ? loadError.message : "文件列表读取失败");
       }
     }).finally(() => {
-      if (requestVersionRef.current === version) setLoadingPaths(new Set());
+      if (sourceVersionRef.current === version) setLoadingPaths(new Set());
     });
+    return () => {
+      sourceVersionRef.current += 1;
+      previewVersionRef.current += 1;
+    };
   }, [source?.id]);
 
   useEffect(() => {
@@ -412,7 +419,7 @@ export function FilesSidebarPanel({
     if (!source || entry.kind !== "file") return;
     const kind = getFileBrowserPreviewKind(entry.path);
     setEditing(false);
-    const version = ++requestVersionRef.current;
+    const version = ++previewVersionRef.current;
     setPreview({ entry, kind, status: "loading" });
     setError("");
     if (kind === "unsupported") {
@@ -424,7 +431,7 @@ export function FilesSidebarPanel({
         const result = await source.readBinary(entry.path);
         const base64 = getResultString(result, "base64");
         if (!base64) throw new Error("图片内容为空");
-        if (requestVersionRef.current !== version) return;
+        if (previewVersionRef.current !== version) return;
         setPreview({
           entry,
           kind,
@@ -434,7 +441,7 @@ export function FilesSidebarPanel({
         return;
       }
       const result = await source.readText(entry.path);
-      if (requestVersionRef.current !== version) return;
+      if (previewVersionRef.current !== version) return;
       setPreview({
         entry,
         kind,
@@ -443,7 +450,7 @@ export function FilesSidebarPanel({
         truncated: getResultBoolean(result, "truncated"),
       });
     } catch (previewError) {
-      if (requestVersionRef.current !== version) return;
+      if (previewVersionRef.current !== version) return;
       setPreview({
         entry,
         kind,
@@ -476,13 +483,13 @@ export function FilesSidebarPanel({
     if (!source?.writeText || !preview || preview.content === undefined || saving) return;
     const sourceId = source.id;
     const currentPreview = preview;
-    const previewVersion = requestVersionRef.current;
+    const previewVersion = previewVersionRef.current;
     setSaving(true);
     setError("");
     try {
       await source.writeText(currentPreview.entry.path, editorContent, currentPreview.content!);
       draftsRef.current.delete(`${sourceId}:${currentPreview.entry.path}`);
-      if (sourceIdRef.current !== sourceId || requestVersionRef.current !== previewVersion) return;
+      if (sourceIdRef.current !== sourceId || previewVersionRef.current !== previewVersion) return;
       setPreview({ ...currentPreview, content: editorContent });
       setEditing(false);
       setStatusMessage("文件已保存，下次生成将读取最新内容");
