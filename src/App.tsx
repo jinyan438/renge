@@ -22216,7 +22216,7 @@ export function App() {
     if (!menu?.copyText) return;
 
     try {
-      await writeTextToClipboard(menu.copyText);
+      await writeTextToClipboard(menu.copyText, getDesktopWindow("chat"));
       setChatMessageMenu(null);
       if (chatStatus.status !== "loading") {
         setChatStatus({
@@ -23916,8 +23916,14 @@ export function App() {
   };
 
   const copyChatCodeBlock = useCallback(async (content: string) => {
-    await navigator.clipboard.writeText(content);
-    setChatStatus({ status: "success", message: "已复制代码块。" });
+    try {
+      await writeTextToClipboard(content, getDesktopWindow("chat"));
+      setChatStatus((current) => current.status === "loading" ? current : { status: "success", message: "已复制代码块。" });
+    } catch (error) {
+      setChatStatus((current) => current.status === "loading" ? current : {
+        status: "error", message: error instanceof Error ? `复制失败：${error.message}` : "复制失败。",
+      });
+    }
   }, []);
 
   const executeMcpTool = async (

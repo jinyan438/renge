@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getChatBubbleCopyContent } from "../src/chatClipboardUtils.ts";
+import { getChatBubbleCopyContent, writeTextToClipboard } from "../src/chatClipboardUtils.ts";
 
 function createBubble(innerText, containedNodes = []) {
   const nodes = new Set(containedNodes);
@@ -52,4 +52,14 @@ test("falls back to stored message text when the bubble has no rendered text", (
     text: "原始消息",
     source: "bubble",
   });
+});
+
+test("writes through the supplied window without accessing the opener's DOM", async () => {
+  const copied = [];
+  const clipboard = { async writeText(text) { assert.equal(this, clipboard); copied.push(text); } };
+  const target = { navigator: { clipboard }, getSelection() { throw new Error("DOM fallback must not run after a successful write"); } };
+  const text = "  中文与 emoji 🌸\n第二行\n";
+  await writeTextToClipboard(text, target);
+  await writeTextToClipboard("", target);
+  assert.deepEqual(copied, [text, ""]);
 });

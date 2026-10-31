@@ -36,6 +36,7 @@
     "test:session-reset": "node test/sessionResetBrowser.test.mjs",
     "test:composer": "node --experimental-strip-types --test test/chatComposerStatusUtils.test.mjs test/chatComposerInputUtils.test.mjs && node test/chatComposerStatusBrowser.test.mjs && node test/chatComposerInputBrowser.test.mjs",
     "test:markdown": "node --experimental-strip-types --test test/syntaxHighlighting.test.mjs test/chatPerformanceUtils.test.mjs test/chatClipboardUtils.test.mjs && node test/chatMarkdownBrowser.test.mjs",
+    "test:clipboard": "node --experimental-strip-types --test test/chatClipboardUtils.test.mjs && node test/chatClipboardBrowser.test.mjs && node test/chatClipboardBrowser.test.mjs --desktop",
     "test:image-preview": "node test/chatImagePreviewBrowser.test.mjs",
     "test:html-images": "node --experimental-strip-types --test test/htmlPreviewImages.test.mjs && node test/htmlPreviewImagesBrowser.test.mjs",
     "test:review": "node --experimental-strip-types --test test/codeReview.test.mjs && node test/codeReviewBrowser.test.mjs",
