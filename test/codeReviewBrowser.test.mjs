@@ -63,7 +63,7 @@ try {
     await page.locator(".chat-session-item").filter({ hasText: "审阅测试会话" }).locator("button").first().click();
     const toggle = page.getByRole("button", { name: "展开右侧栏", exact: true });
     if (await toggle.count()) await toggle.click();
-    await page.getByRole("button", { name: /^审阅 查看与审阅代码变更/ }).click();
+    await page.getByRole("button", { name: "审阅", exact: true }).click();
     await page.locator(".review-file-list").getByRole("button", { name: /app.ts/ }).waitFor();
     await page.locator(".review-file-list").getByRole("button", { name: /app.ts/ }).click();
     await page.locator(".review-diff").getByText("return value.trim();", { exact: true }).waitFor();
@@ -162,7 +162,7 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   const mobileToggle = page.getByRole("button", { name: "展开右侧栏", exact: true });
   if (await mobileToggle.count()) await mobileToggle.click();
-  if (!await panel.count()) await page.getByRole("button", { name: /^审阅 查看与审阅代码变更/ }).click();
+  if (!await panel.count()) await page.getByRole("button", { name: "审阅", exact: true }).click();
   await panel.getByRole("button", { name: "展开代码审阅", exact: true }).click();
   await panel.getByRole("button", { name: "在新代码第2行添加评论", exact: true }).waitFor();
   await page.screenshot({ path: ".runtime/code-review-mobile.png" });

@@ -51,15 +51,6 @@ export function PcConnectionSidebarPanel({
       </header>
 
       <div className="pc-connection-sidebar-body">
-        <div className="pc-connection-sidebar-intro">
-          <span aria-hidden="true">
-            <Server size={19} />
-          </span>
-          <div>
-            <strong>电脑工作区</strong>
-            <p>连接同一局域网中的电脑并选择工作区</p>
-          </div>
-        </div>
 
         <div className="pc-connection-card">
           <label className="pc-connection-field">
@@ -84,9 +75,9 @@ export function PcConnectionSidebarPanel({
           </button>
         </div>
 
-        <div className={`pc-connection-status ${status.status}`} aria-live="polite">
-          {status.message || "电脑端先运行 npm run build && npm run serve。"}
-        </div>
+        {status.message && <div className={`pc-connection-status ${status.status}`} role={status.status === "error" ? "alert" : "status"}>
+          {status.message}
+        </div>}
 
         <div className="pc-directory-card">
           <div className="pc-directory-toolbar">

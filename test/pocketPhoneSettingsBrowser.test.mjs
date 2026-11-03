@@ -50,7 +50,7 @@ try {
   async function enter() {
     await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click(); await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
     const maximize = page.getByRole("button", { name: "最大化窗口", exact: true }); if (await maximize.isVisible()) await maximize.click();
-    await page.getByRole("button", { name: "展开右侧栏", exact: true }).click(); await page.getByRole("button", { name: /手机.*可爱手机/ }).click();
+    await page.getByRole("button", { name: "展开右侧栏", exact: true }).click(); await page.getByRole("button", { name: "手机", exact: true }).click();
   }
   async function openSettings() { await phone.getByRole("button", { name: "打开手机设置", exact: true }).click(); }
   async function home() { await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click(); }

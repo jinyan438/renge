@@ -49,7 +49,7 @@ try {
   const read = () => page.evaluate(key => JSON.parse(localStorage.getItem(key)), key);
   async function showPhone() {
     const expand = page.getByRole("button", { name: "展开右侧栏", exact: true }); if (await expand.isVisible()) await expand.click();
-    await page.getByRole("button", { name: /手机.*可爱手机/ }).click(); await phone.getByRole("button", { name: "打开日历", exact: true }).waitFor();
+    await page.getByRole("button", { name: "手机", exact: true }).click(); await phone.getByRole("button", { name: "打开日历", exact: true }).waitFor();
   }
   async function enterApp() {
     await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click(); await page.getByRole("button", { name: "开始对话", exact: true }).last().click();

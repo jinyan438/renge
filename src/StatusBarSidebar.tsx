@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   ClipboardCheck,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   Construction,
   FolderOpen,
@@ -221,63 +222,54 @@ const RIGHT_SIDEBAR_TOOLS = [
   {
     id: "computer",
     label: "连接电脑",
-    description: "连接电脑端工作区与传输文件",
     icon: Server,
     available: true,
   },
   {
     id: "phone",
     label: "手机",
-    description: "可爱手机桌面、微信角色聊天与设置",
     icon: Smartphone,
     available: true,
   },
   {
     id: "review",
     label: "审阅",
-    description: "查看与审阅代码变更",
     icon: ClipboardCheck,
     available: true,
   },
   {
     id: "terminal",
     label: "终端",
-    description: "运行命令并查看输出",
     icon: SquareTerminal,
     available: true,
   },
   {
     id: "browser",
     label: "浏览器",
-    description: "AI 读取、控制和编辑网页",
     icon: Globe,
     available: true,
   },
   {
     id: "files",
     label: "文件",
-    description: "浏览工作区或临时文件",
     icon: FolderOpen,
     available: true,
   },
   {
     id: "status",
     label: "状态栏",
-    description: "查看会话中的动态状态",
     icon: Activity,
     available: true,
   },
   {
     id: "heartbeat",
     label: "心跳",
-    description: "按间隔自动检查待执行事件",
     icon: HeartPulse,
     available: true,
   },
 ] as const satisfies ReadonlyArray<{
   id: RightSidebarToolId;
   label: string;
-  description: string;
   icon: typeof Activity;
   available: boolean;
 }>;
@@ -806,7 +798,6 @@ function StatusPanelPreview({
       ) : headerItems.length === 0 ? (
         <div className="status-panel-empty">
           <span>尚未添加状态条目</span>
-          <small>打开编辑器，创建需要由 AI 维护的变量。</small>
         </div>
       ) : null}
       {insertionIndicator ? (
@@ -1733,9 +1724,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
             >
               <header className="status-bar-editor-header">
                 <div>
-                  <span>STATUS BAR DESIGNER</span>
                   <h2 id="status-bar-editor-title">状态栏可视化编辑</h2>
-                  <p>定义变量、展示方式与顺序，右侧会实时呈现最终效果。</p>
                 </div>
                 <button
                   aria-label="关闭状态栏编辑器"
@@ -1778,7 +1767,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                       <div>
                         <strong>状态栏预设</strong>
                         <span>
-                          每个预设保存全部标签页的独立模板；当前编辑：
+                          当前编辑：
                           {activePresetTemplateLabel}
                         </span>
                       </div>
@@ -1997,7 +1986,6 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                     {draft.items.length === 0 ? (
                       <div className="status-bar-editor-empty">
                         <span>还没有条目</span>
-                        <small>添加一个条目后即可设置变量名和展示样式。</small>
                       </div>
                     ) : (
                       draft.items.map((item, index) => {
@@ -2208,10 +2196,8 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                 <aside className="status-bar-editor-preview-column">
                   <div className="status-editor-preview-heading">
                     <div>
-                      <span>LIVE PREVIEW</span>
                       <strong>实时预览</strong>
                     </div>
-                    <small>按住条目，拖到条目之间的空白位置排序；未填入时使用初始值</small>
                   </div>
                   <StatusPanelPreview
                     draggedItemId={draggedItemId}
@@ -2227,10 +2213,6 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                     }}
                     state={editorPreviewState}
                   />
-                  <div className="status-editor-variable-note">
-                    <strong>变量更新规则</strong>
-                    <p>AI 回复完成后只提交发生变化的变量。未提交的条目会保留当前值，分割线不会进入变量列表。</p>
-                  </div>
                 </aside>
               </div>
 
@@ -2329,7 +2311,6 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
           <section className="right-tools-menu" aria-label="工作区工具菜单">
             <header className="right-tools-sidebar-header">
               <div>
-                <span>WORKSPACE</span>
                 <strong>右侧栏</strong>
               </div>
               <button
@@ -2344,7 +2325,6 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
             <div className="right-tools-menu-body">
               <div className="right-tools-menu-heading">
                 <strong>工作区工具</strong>
-                <p>选择要在右侧栏中打开的工具。</p>
               </div>
               <nav aria-label="右侧工具" className="right-tools-list">
                 {RIGHT_SIDEBAR_TOOLS.map((tool) => {
@@ -2352,6 +2332,7 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                   return (
                     <button
                       key={tool.id}
+                      aria-label={tool.label}
                       onClick={() => {
                         if (tool.id === "computer") pcConnection.onOpen();
                         if (tool.id === "browser") setBrowserInitialized(true);
@@ -2364,10 +2345,9 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                       </span>
                       <span className="right-tool-copy">
                         <strong>{tool.label}</strong>
-                        <small>{tool.description}</small>
                       </span>
                       <span className={tool.available ? "is-available" : undefined}>
-                        {tool.available ? "打开" : "待实现"}
+                        {tool.available ? <ChevronRight size={15} aria-hidden="true" /> : "待实现"}
                       </span>
                     </button>
                   );
@@ -2609,12 +2589,10 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
               {!activeCharacterAvailable ? (
                 <button className="status-bar-disabled-callout" onClick={addImportantCharacter} type="button">
                   <span>还没有重要角色卡</span>
-                  <small>添加角色后，可为每个角色单独设计状态栏条目和保存状态值。</small>
                 </button>
               ) : !state.enabled ? (
                 <button className="status-bar-disabled-callout" onClick={openEditor} type="button">
                   <span>状态栏尚未启用</span>
-                  <small>开启后，AI 会在回复完成时更新发生变化的变量。</small>
                 </button>
               ) : stateConfigurationError ? (
                 <button className="status-bar-disabled-callout" onClick={openEditor} type="button">
@@ -2661,25 +2639,12 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
               </button>
             </header>
             <div className="heartbeat-sidebar-body">
-              <div className="heartbeat-sidebar-intro">
-                <span className="heartbeat-sidebar-icon" aria-hidden="true">
-                  <HeartPulse size={19} />
-                </span>
-                <div>
-                  <strong>会话心跳</strong>
-                  <p>
-                    {heartbeat.event.trim()
-                      ? "按间隔自动检查待执行事件"
-                      : "先填写待执行事件，再开启自动检查"}
-                  </p>
-                </div>
-              </div>
 
               <div className="heartbeat-sidebar-card">
                 <div className="heartbeat-panel-heading">
                   <div>
                     <strong>运行设置</strong>
-                    <small>{chatSessionId ? "设置会保存到当前会话" : "请先打开一个会话"}</small>
+                    {!chatSessionId && <small>请先打开一个会话</small>}
                   </div>
                   <label
                     className={`heartbeat-toggle ${heartbeat.enabled ? "active" : ""}`}
@@ -2792,9 +2757,6 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                 </div>
               </div>
 
-              <p className="heartbeat-sidebar-note">
-                心跳会在当前会话空闲时自动触发，并将待执行事件交给 AI 检查。
-              </p>
             </div>
           </section>
         ) : (
@@ -2826,7 +2788,6 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
                 <Construction size={24} />
               </span>
               <strong>{activeRightSidebarTool?.label}功能待实现</strong>
-              <p>工具面板已经预留，后续可在这里接入完整功能。</p>
             </div>
           </section>
         )}

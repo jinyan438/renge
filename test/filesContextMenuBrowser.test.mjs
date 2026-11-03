@@ -70,7 +70,7 @@ try {
     else await route.continue();
   });
   await page.getByRole("button", { name: "展开右侧栏", exact: true }).click();
-  await page.getByRole("button", { name: /文件.*浏览工作区/ }).click();
+  await page.getByRole("button", { name: "文件", exact: true }).click();
   const files = page.locator(".files-sidebar-panel");
   const row = path => files.locator(`.files-tree-row[title="${path}"]`);
   let capturedMenu = false;

@@ -45,7 +45,7 @@ export function PocketPhoneSettings({ settings, promptOverrides, nickname, owner
     <SettingsCard title="手机" icon={<Smartphone size={20} />} open>
       <label className="pocket-settings-label" htmlFor="pocket-nickname">{owner ? "手机主人" : "我的昵称"}</label>
       {owner ? <p className="pocket-settings-owner">{nickname}</p> : <input id="pocket-nickname" className="pocket-input" maxLength={24} placeholder={nickname} value={settings.nickname} onChange={event => onChange({ nickname: event.target.value })} />}
-      <button className="pocket-setting-toggle" type="button" role="switch" aria-label="大一点的聊天文字" aria-checked={settings.largeText} onClick={() => onChange({ largeText: !settings.largeText })}><span><strong>大一点的聊天文字</strong><small>微信聊天更容易阅读</small></span><i className={settings.largeText ? "is-on" : ""} /></button>
+      <button className="pocket-setting-toggle" type="button" role="switch" aria-label="大一点的聊天文字" aria-checked={settings.largeText} onClick={() => onChange({ largeText: !settings.largeText })}><span><strong>大一点的聊天文字</strong></span><i className={settings.largeText ? "is-on" : ""} /></button>
     </SettingsCard>
     <div className="pocket-settings-section-title">外观</div>
     <SettingsCard title="手机主题" icon={<Palette size={20} />}>
@@ -56,12 +56,11 @@ export function PocketPhoneSettings({ settings, promptOverrides, nickname, owner
       <div className="pocket-settings-group">
         <label htmlFor="pocket-provider">模型渠道</label><select id="pocket-provider" value={settings.providerId} onChange={event => onChange({ providerId: event.target.value, modelId: "" })}><option value="">跟随应用当前渠道</option>{providers.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}{settings.providerId && !provider && <option value={settings.providerId}>渠道已移除，请重新选择</option>}</select>
         <label htmlFor="pocket-model">聊天模型</label><select id="pocket-model" disabled={!settings.providerId || !provider} value={modelId} onChange={event => onChange({ modelId: event.target.value })}>{Array.from(new Set([modelId, provider?.modelId, ...provider?.models || []].filter((value): value is string => !!value))).map(model => <option key={model} value={model}>{model}</option>)}{!modelId && <option value="">暂无可用模型</option>}</select>
-        <p>{canChat ? "当前会话的手机应用共用此模型，包括 ta 的手机。" : "请先在应用的模型渠道中配置接口和模型。"}</p>
+        {!canChat && <p role="status">请在模型渠道中配置模型。</p>}
       </div>
     </SettingsCard>
     <div className="pocket-settings-section-title">生成</div>
     <SettingsCard title="提示词修改" icon={<SlidersHorizontal size={20} />}>
-      <p className="pocket-prompt-intro">提示词全局共用，保存后适用于所有会话的手机和 ta 的手机。双花括号内的变量会自动填入当前角色、资料和记录。请保留输出格式中的字段，方便应用读取。</p>
       <button type="button" className="pocket-prompt-reset-all" onClick={() => { onPromptChange({}); setDrafts({}); setFeedback({}); }}><RotateCcw size={13} />全部恢复默认</button>
       {(["微信", "ta 的手机", "便签", "朋友圈", "小红书", "通用"] as const).map(group => <details className="pocket-prompt-app" key={group}>
         <summary><strong>{group}</strong><small>{POCKET_PROMPTS.filter(prompt => prompt.group === group).length} 项</small><ChevronDown size={14} /></summary>
@@ -75,7 +74,7 @@ export function PocketPhoneSettings({ settings, promptOverrides, nickname, owner
               <textarea id={`pocket-prompt-${prompt.id}`} value={value} maxLength={50000} rows={12} spellCheck={false} onChange={event => { setDrafts(previous => ({ ...previous, [prompt.id]: event.target.value })); setFeedback(previous => ({ ...previous, [prompt.id]: "尚未保存" })); }} />
               {!!variables.length && <p className="pocket-prompt-variables">可用变量：{variables.join("、")}</p>}
               <div className="pocket-prompt-actions"><button type="button" className="pocket-primary" onClick={() => save(prompt.id, prompt.defaultText)}>保存提示词</button><button type="button" onClick={() => reset(prompt.id)}><RotateCcw size={12} />恢复默认</button></div>
-              <p className="pocket-prompt-feedback" role="status">{feedback[prompt.id] || "修改后点击保存提示词。"}</p>
+              {feedback[prompt.id] && <p className="pocket-prompt-feedback" role="status">{feedback[prompt.id]}</p>}
             </div>
           </details>;
         })}

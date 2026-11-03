@@ -112,7 +112,7 @@ try {
   assert.ok((await chat.locator(".chat-thread").innerText()).includes("保留跨窗口编辑。"));
 
   await chat.getByLabel("展开右侧栏", { exact: true }).click();
-  await chat.getByRole("button", { name: /^浏览器 AI/ }).click();
+  await chat.getByRole("button", { name: "浏览器", exact: true }).click();
   const address = chat.getByLabel("浏览器地址", { exact: true });
   await address.fill(`http://127.0.0.1:${fixture.address().port}/`);
   await address.press("Enter");

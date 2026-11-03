@@ -156,7 +156,7 @@ try {
   await selectSession("A");
   const expand = page.getByRole("button", { name: "展开右侧栏", exact: true });
   if (await expand.isVisible()) await expand.click();
-  await page.getByRole("button", { name: /文件.*浏览工作区/ }).click();
+  await page.getByRole("button", { name: "文件", exact: true }).click();
   const files = page.locator(".files-sidebar-panel");
   for (const path of ["守门人-记忆", "守门人-记忆/会话-%41", "守门人-记忆/会话-%41/人物", "守门人-记忆/会话-%41/人物/守门人.md"]) {
     await files.locator(`.files-tree-row[title="${path}"]`).click();

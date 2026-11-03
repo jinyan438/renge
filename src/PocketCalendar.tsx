@@ -41,7 +41,6 @@ export function PocketCalendar({ now, onJump, onExit }: { now: string; onJump: (
       <input id="pocket-calendar-date" className="pocket-input" type="date" min="0001-01-01" max="9999-12-31" required value={fields.date} onChange={event => patch({ date: event.target.value })} />
       <label className="pocket-settings-label" htmlFor="pocket-calendar-time">跳转时间</label>
       <input id="pocket-calendar-time" className="pocket-input" type="time" step={60} required value={fields.time} onChange={event => patch({ time: event.target.value })} />
-      <p className="pocket-calendar-note">跳转后会同步手机时间，并将选定时间加入会话上下文。</p>
       <button className="pocket-primary pocket-calendar-jump" type="submit" disabled={saving || !selected || isCurrent && !error}><CornerDownRight size={16} />{saving ? "正在保存…" : error ? "重试保存时间" : "跳转到选定时间"}</button>
       <button className="pocket-calendar-reset" type="button" onClick={() => { setFields(pocketCalendarFields(now)); setFeedback(""); setError(""); }}>查看当前时间</button>
       {error && <p className="pocket-error" role="alert">{error}</p>}

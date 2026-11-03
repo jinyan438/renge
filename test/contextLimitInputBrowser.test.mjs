@@ -55,7 +55,7 @@ try {
   assert.equal(await inputs.nth(1).inputValue(), "0.1", "small saved limits are preserved");
   assert.equal(await input.getAttribute("min"), null);
   assert.equal(await input.getAttribute("max"), null);
-  await page.getByText("按 K 输入，1 K = 1000 Token，支持小数。", { exact: false }).waitFor();
+  assert.equal(await page.locator(".context-compression-note").count(), 0);
 
   await input.fill("");
   assert.equal(await input.inputValue(), "", "clearing does not restore or clamp the previous value");
@@ -74,6 +74,7 @@ try {
   await input.blur();
   assert.equal(await input.inputValue(), "invalid", "invalid drafts are preserved instead of replaced");
   assert.equal(await input.getAttribute("aria-invalid"), "true");
+  await page.getByText("请输入大于 0 的数值。", { exact: true }).waitFor();
   assert.equal(await savedTokens("limit"), 1, "invalid drafts keep the last valid saved limit");
   await input.fill("63.107");
   await expectSaved("limit", 63_107);

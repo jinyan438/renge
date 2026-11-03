@@ -61,7 +61,7 @@ try {
   async function enterApp() {
     await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click(); await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
     const maximize = page.getByRole("button", { name: "最大化窗口", exact: true }); if (await maximize.isVisible()) await maximize.click();
-    await page.getByRole("button", { name: "展开右侧栏", exact: true }).click(); await page.getByRole("button", { name: /手机.*可爱手机/ }).click();
+    await page.getByRole("button", { name: "展开右侧栏", exact: true }).click(); await page.getByRole("button", { name: "手机", exact: true }).click();
   }
   async function openMoments() { await phone.getByRole("button", { name: "打开微信", exact: true }).click(); await phone.getByRole("button", { name: "发现", exact: true }).click(); await phone.getByRole("button", { name: "朋友圈", exact: true }).click(); }
   async function openOwner(name = "奶糖") { await phone.getByRole("button", { name: "打开ta的手机", exact: true }).click(); await phone.getByRole("button", { name: `查看${name}的手机`, exact: true }).click(); }

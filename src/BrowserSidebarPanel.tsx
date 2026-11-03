@@ -8,7 +8,6 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
-  Code2,
   Copy,
   Download,
   EllipsisVertical,
@@ -2444,7 +2443,7 @@ export function BrowserSidebarPanel({
                 {popoverView === "passwords" ? (
                   <div className="browser-popover-settings">
                     <button className="browser-setting-row" onClick={() => void updateAutofillSetting(!profile?.autofillPasswords)} type="button">
-                      <span><strong>自动填充已导入密码</strong><small>仅对网址来源完全匹配的站点生效</small></span>
+                      <span><strong>自动填充已导入密码</strong></span>
                       <i className={profile?.autofillPasswords ? "is-on" : ""}><b /></i>
                     </button>
                     <button className="browser-setting-action" disabled={!pageActionAvailable || !profile?.passwordCount} onClick={() => webviewNode && void autofillPage(webviewNode, true).catch(reportFeatureError)} type="button">
@@ -2459,9 +2458,9 @@ export function BrowserSidebarPanel({
                   </div>
                 ) : popoverView === "clear-data" ? (
                   <div className="browser-clear-list">
-                    <button onClick={() => void clearBrowserData("cache")} type="button"><span>缓存文件</span><small>保留登录状态</small></button>
+                    <button onClick={() => void clearBrowserData("cache")} type="button"><span>缓存文件</span></button>
                     <button onClick={() => void clearBrowserData("cookies")} type="button"><span>Cookie 和网站数据</span><small>会退出已登录的网站</small></button>
-                    <button onClick={() => void clearBrowserData("history")} type="button"><span>浏览历史</span><small>清空侧栏标签页历史</small></button>
+                    <button onClick={() => void clearBrowserData("history")} type="button"><span>浏览历史</span></button>
                     <button className="is-danger" onClick={() => void clearBrowserData("all")} type="button"><span>全部浏览数据</span><small>缓存、Cookie、网站数据和历史</small></button>
                   </div>
                 ) : (
@@ -2473,7 +2472,7 @@ export function BrowserSidebarPanel({
                     </div>
                     <div className="browser-settings-card">
                       <ShieldCheck size={17} />
-                      <span><strong>独立浏览器资料</strong><small>Cookie、缓存和登录状态与应用页面隔离</small></span>
+                      <span><strong>独立浏览器资料</strong></span>
                     </div>
                     <button className="browser-setting-row" onClick={() => void updateAutofillSetting(!profile?.autofillPasswords)} type="button">
                       <span><strong>密码自动填充</strong><small>已安全保存 {profile?.passwordCount ?? 0} 个密码</small></span>
@@ -2669,22 +2668,12 @@ export function BrowserSidebarPanel({
         {!electronAvailable && !androidBrowserVisible ? (
           <div className="browser-sidebar-empty is-unavailable">
             <span><ShieldCheck size={25} /></span>
-            <strong>{androidAvailable ? "Android 内嵌浏览器" : "桌面浏览器模块"}</strong>
-            <p>
-              {androidAvailable
-                ? "输入网址或搜索内容，网页会直接显示在当前右侧栏中。"
-                : "完整网页控制依赖 Electron 安全隔离容器，请在桌面版中使用。"}
-            </p>
+            <strong>{androidAvailable ? "Android 内嵌浏览器" : "请在桌面版中使用浏览器"}</strong>
           </div>
         ) : pageState.url === "about:blank" && !activeTab?.hasDocumentContent ? (
           <div className="browser-sidebar-empty">
             <span><Globe size={25} /></span>
-            <strong>AI 可控制浏览器</strong>
-            <p>输入网址开始浏览。AI 可以阅读页面、操作控件、编辑 DOM，并执行页面脚本。</p>
-            <div>
-              <small><ShieldCheck size={12} /> 隔离网页权限</small>
-              <small><Code2 size={12} /> 完整 DOM 工具</small>
-            </div>
+            <strong>输入网址或搜索</strong>
           </div>
         ) : null}
 
@@ -2735,9 +2724,7 @@ export function BrowserSidebarPanel({
               <Plus size={12} />
             </button>
           </div>
-        ) : (
-          <small>{androidAvailable ? "右侧栏内嵌网页" : "仅 Electron 桌面版"}</small>
-        )}
+        ) : null}
       </footer>
     </section>
   );

@@ -65,7 +65,7 @@ export function PocketWechatMoments(props: Props) {
         </div>
         <div className="pocket-moment-filters"><button type="button" aria-pressed={!authorId} onClick={() => setAuthorId("")}>全部</button><button type="button" aria-pressed={authorId === props.viewer.id} onClick={() => setAuthorId(props.viewer.id)}>我的动态</button>{props.viewer.id !== POCKET_MOMENTS_USER_ID && <button type="button" title="生成 ta 和联系人的朋友圈动态" disabled={props.busy} onClick={() => props.onGenerate("self")}><RefreshCw size={12} />生成 ta 的动态</button>}<button type="button" aria-label="清空当前朋友圈" disabled={!visible.length} onClick={() => props.onClear(visible.map(post => post.id))}><Trash2 size={14} /></button></div>
         {authorId && authorId !== props.viewer.id && <p className="pocket-moment-author-filter">{people.get(authorId)?.name || visible[0]?.author.name}的动态</p>}
-        {!visible.length && <div className="pocket-moments-empty"><MessageCircle size={30} /><p>还没有朋友圈动态</p><small>发一条这一刻的想法，或生成好友的近况。</small></div>}
+        {!visible.length && <div className="pocket-moments-empty"><MessageCircle size={30} /><p>还没有朋友圈动态</p></div>}
         {visible.map(post => <article className="pocket-moment-post" key={post.id} data-moment-id={post.id}>
           <button className="pocket-moment-avatar" type="button" aria-label={`查看${name(post.author)}的朋友圈`} onClick={() => setAuthorId(post.author.id)}><img src={safePocketAvatar(people.get(post.author.id)?.avatar || post.author.avatar)} alt="" /></button>
           <div className="pocket-moment-body"><button className="pocket-moment-name" type="button" onClick={() => setAuthorId(post.author.id)}>{name(post.author)}</button>{post.text && <p className="pocket-moment-text">{post.text}</p>}

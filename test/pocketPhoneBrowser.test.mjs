@@ -101,7 +101,7 @@ try {
     const maximize = page.getByRole("button", { name: "最大化窗口", exact: true });
     if (await maximize.isVisible()) await maximize.click();
     await page.getByRole("button", { name: "展开右侧栏", exact: true }).click();
-    await page.getByRole("button", { name: /手机.*可爱手机/ }).click();
+    await page.getByRole("button", { name: "手机", exact: true }).click();
     await phone.getByRole("button", { name: "打开微信", exact: true }).waitFor();
   }
   async function waitForReply() {
@@ -674,7 +674,7 @@ try {
   assert.equal(await phone.count(), 0);
   await editMainMessage(queuedReply, "关闭手机时改过的消息");
   await deleteMainMessage(inFlightReply);
-  await page.getByRole("button", { name: /手机.*可爱手机/ }).click();
+  await page.getByRole("button", { name: "手机", exact: true }).click();
   await phone.getByRole("button", { name: "打开微信", exact: true }).click();
   await phone.locator(".pocket-contact-row").filter({ hasText: "奶糖" }).click();
   await phone.getByText("关闭手机时改过的消息", { exact: true }).waitFor();

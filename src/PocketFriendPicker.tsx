@@ -54,7 +54,7 @@ export function PocketFriendPicker(props: Props) {
       if (controllerRef.current !== controller) return;
       const fresh = availablePocketFriends(found, props.existing, props.excludedNames);
       setCandidates(fresh);
-      setNotice(fresh.length ? `识别到 ${fresh.length} 位新朋友，请勾选要添加的角色。` : "没有识别到新角色；已添加的同名角色和玩家已忽略。");
+      setNotice(fresh.length ? `识别到 ${fresh.length} 位新朋友` : "没有识别到新角色");
     } catch (failure) {
       if (controllerRef.current === controller && (!controller.signal.aborted || controller.signal.reason instanceof Error && controller.signal.reason.name !== "AbortError")) setError(failure instanceof Error ? failure.message : "角色识别失败，请重试。");
     } finally {
@@ -66,13 +66,12 @@ export function PocketFriendPicker(props: Props) {
   return <div className="pocket-friend-picker">
     <div className="pocket-friend-modes" aria-label="添加朋友方式">{([ ["manual", "手动创建"], ["context", "上下文识别"], ["card", "角色卡识别"], ["library", "角色库"] ] as const).map(([mode, label]) => <button key={mode} type="button" aria-pressed={props.mode === mode} onClick={() => switchMode(mode)}>{label}</button>)}</div>
     {props.mode !== "manual" && <>
-      <p className="pocket-friend-hint">{props.mode === "library" ? "已添加联系人会自动保存到全局角色库，可在其他会话导入。删除库中角色会保留各会话已有联系人和聊天。" : props.mode === "card" ? "从角色卡、问候语和启用的世界书识别人物，快速生成简短设定。" : "根据当前会话上下文识别出场人物，快速生成简短设定，自动忽略已添加的同名角色。"}</p>
       {props.mode === "card" && <label className="pocket-field">选择角色卡<select aria-label="选择角色卡" value={cardId} onChange={event => { cancel(); setCardId(event.target.value); setCandidates([]); setSelected([]); setNotice(""); setError(""); }}><option value="">请选择角色卡</option>{props.cards.map(card => <option key={card.id} value={card.id}>{card.name}</option>)}</select></label>}
       {props.mode !== "library" && <div className="pocket-friend-tools"><button type="button" className="pocket-primary" disabled={!canGenerate || props.mode === "card" && !cardId || !!progress} onClick={() => void generate()}><Sparkles size={14} />{progress || "识别并生成人设"}</button>{progress && <button type="button" onClick={cancel}>停止识别</button>}</div>}
       {!canGenerate && props.mode !== "library" && <p className="pocket-friend-hint">请先在手机设置中配置模型。</p>}
       {notice && <p className="pocket-friend-hint" role="status">{notice}</p>}
       {error && <p className="pocket-editor-error" role="alert">{error}</p>}
-      {props.mode === "library" && !profiles.length && <p className="pocket-friend-hint">角色库还没有角色，添加朋友后会自动保存。</p>}
+      {props.mode === "library" && !profiles.length && <p className="pocket-friend-hint">角色库暂无角色</p>}
       {!!profiles.length && <>
         <div className="pocket-friend-tools"><span>已选 {chosen.length} / {available.length}</span><button type="button" onClick={() => setSelected(chosen.length === available.length ? [] : available.map(person => pocketFriendName(person.name)))}>{chosen.length === available.length ? "取消全选" : "全选"}</button></div>
         <div className="pocket-friend-candidates">{profiles.map(person => {

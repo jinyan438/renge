@@ -39,7 +39,7 @@ export function ContextLimitInput({ value, onChange }: {
       />
       {!valid && (
         <small id={errorId} className="context-compression-input-error" role="status">
-          请输入有效的正数，填写完成前保留上次有效值。
+          请输入大于 0 的数值。
         </small>
       )}
     </label>

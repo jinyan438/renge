@@ -44,7 +44,7 @@ try {
   page.setDefaultTimeout(15_000);
   page.on("pageerror", error => errors.push(error.message));
   await page.getByRole("button", { name: "展开右侧栏", exact: true }).click();
-  await page.getByRole("button", { name: /文件.*浏览工作区/ }).click();
+  await page.getByRole("button", { name: "文件", exact: true }).click();
   const files = page.locator(".files-sidebar-panel");
   await files.locator('.files-tree-row[title="notes.md"]').click();
   await files.getByRole("button", { name: "编辑文件", exact: true }).click();

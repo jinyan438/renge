@@ -110,7 +110,6 @@ export function ContextTokenMeter({ snapshot, usageStore, compressionEnabled, co
               </div>
             ))}
           </dl>
-          <p>{contextTokenMeter.nativePiContext ? "各项为估算值；总量结合接口用量与本地上下文估算，随任务运行刷新。" : "各项为估算值，总量由模型服务提供。"}</p>
         </section>
         <dl>
           <div>

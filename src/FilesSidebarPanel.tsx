@@ -813,7 +813,6 @@ export function FilesSidebarPanel({
         <div className="files-sidebar-unavailable">
           <span><FolderOpen size={25} /></span>
           <strong>选择工作区后浏览文件</strong>
-          <p>当前环境没有可用的临时文件存储。选择文件夹后可浏览源代码、Markdown 和图片。</p>
           {onChooseWorkspace ? <button onClick={() => void onChooseWorkspace()} type="button">选择工作区</button> : null}
         </div>
       ) : (
@@ -836,7 +835,6 @@ export function FilesSidebarPanel({
               {source.kind === "temporary" ? (
                 <div className="files-temporary-notice">
                   <span>未连接工作区</span>
-                  <small>这里显示当前临时文件夹中的文件。</small>
                   {onChooseWorkspace ? <button onClick={() => void onChooseWorkspace()} type="button">选择工作区</button> : null}
                 </div>
               ) : null}
@@ -889,7 +887,7 @@ export function FilesSidebarPanel({
             </header>
             <div className="files-preview-content">
               {!preview ? (
-                <div className="files-preview-message"><Eye size={24} /><strong>选择文件以预览</strong><span>支持源代码、Markdown 文档和常见图片格式。</span></div>
+                <div className="files-preview-message"><Eye size={24} /><strong>选择文件以预览</strong></div>
               ) : preview.status === "loading" ? (
                   <div className="files-preview-message"><RefreshCw className="is-spinning" size={22} />正在打开文件…</div>
                 ) : preview.status === "error" ? (

@@ -45,7 +45,7 @@ export function PocketNotes(props: Props) {
     </> : <>
       <div className="pocket-notes-list pocket-scroll"><h2>便签</h2><label className="pocket-notes-search"><Search size={16} /><input aria-label="搜索便签" placeholder="搜索" value={query} onChange={event => setQuery(event.target.value)} /></label>
         <div className="pocket-notes-rows">{filtered.map(note => <button className="pocket-note-row" type="button" key={note.id} onClick={() => setNoteId(note.id)}><strong>{note.title || "新建便签"}</strong><span><time>{noteDate(note)}</time><small>{note.body.replace(/\s+/g, " ").trim() || "没有其他文本"}</small></span></button>)}</div>
-        {!filtered.length && <div className="pocket-notes-empty"><SquarePen size={30} /><p>{search ? "没有找到相关便签" : "还没有便签"}</p>{!search && <small>点右上角，让 ta 写下生活里的待办和小心事。</small>}</div>}
+        {!filtered.length && <div className="pocket-notes-empty"><SquarePen size={30} /><p>{search ? "没有找到相关便签" : "还没有便签"}</p></div>}
       </div>
       <footer className="pocket-notes-toolbar"><span>{props.notes.length} 条便签</span><button type="button" aria-label="新建便签" onClick={() => edit()}><SquarePen size={23} /></button></footer>
     </>}

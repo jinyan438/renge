@@ -575,72 +575,46 @@ type SettingsTab =
   | "data";
 const SETTINGS_TAB_META: Record<
   SettingsTab,
-  { title: string; eyebrow: string; description: string }
+  { title: string }
 > = {
   providers: {
     title: "供应商渠道",
-    eyebrow: "MODEL CONNECTIONS",
-    description: "连接模型服务、管理凭据，并为会话选择默认模型。",
   },
   llm: {
     title: "LLM",
-    eyebrow: "MODEL BEHAVIOR",
-    description: "控制应用向语言模型开放的内置交互能力。",
   },
   prompts: {
     title: "提示词",
-    eyebrow: "SYSTEM PROMPTS",
-    description: "维护可复用的系统指令，让不同会话保持稳定的表达与边界。",
   },
   presets: {
     title: "预设",
-    eyebrow: "CHAT PRESETS",
-    description: "组织采样参数、提示词顺序和 SillyTavern 兼容预设。",
   },
   worldbooks: {
     title: "世界书",
-    eyebrow: "WORLD BOOKS",
-    description: "管理按关键词激活的背景知识，为对话补充持续一致的世界设定。",
   },
   regexes: {
     title: "正则后处理",
-    eyebrow: "REGEX PIPELINE",
-    description: "按顺序处理模型输出的显示文本，同时保留原始会话内容。",
   },
   scripts: {
     title: "酒馆脚本",
-    eyebrow: "TAVERN SCRIPTS",
-    description: "管理全局与角色脚本、交互按钮、变量和事件运行日志。",
   },
   user: {
     title: "用户资料",
-    eyebrow: "USER PROFILE",
-    description: "设置你的头像、称呼和简介，为角色扮演提供稳定的用户身份。",
   },
   personalization: {
     title: "个性化",
-    eyebrow: "APPEARANCE",
-    description: "调整聊天文本、角色卡背景和消息气泡，让阅读体验更符合你的偏好。",
   },
   mcp: {
     title: "MCP 服务器",
-    eyebrow: "TOOL CONNECTIONS",
-    description: "连接外部工具服务器，并控制哪些能力可以提供给当前会话。",
   },
   skills: {
     title: "Skills",
-    eyebrow: "AGENT SKILLS",
-    description: "导入可复用技能说明，让智能体根据任务自动匹配工作流。",
   },
   device: {
     title: "手机端",
-    eyebrow: "DEVICE & STORAGE",
-    description: "管理移动设备工作区、ROOT 权限与本地文件访问能力。",
   },
   data: {
     title: "数据",
-    eyebrow: "DATA & BACKUP",
-    description: "导出或恢复应用的完整数据快照，方便迁移设备与保存重要配置。",
   },
 };
 type ProviderPullState = "idle" | "loading" | "success" | "error";
@@ -1777,27 +1751,22 @@ const LLM_CONTEXT_MODE_LABELS: Record<LlmContextMode, string> = {
 };
 const LLM_CONTEXT_SOURCE_META: Record<
   LlmContextSource,
-  { label: string; description: string }
+  { label: string }
 > = {
   skills: {
-    label: "Pi 原生 Skills",
-    description: "由 Pi 匹配已启用 Skill，并通过原生 read 按需读取完整说明。",
+    label: "Skills",
   },
   workspaceTools: {
     label: "工作区文件工具",
-    description: "提供文件读取、写入、搜索、项目分析及其使用说明。",
   },
   browserTools: {
     label: "浏览器工具",
-    description: "提供右侧栏浏览器的导航、检查和交互能力。",
   },
   terminalTools: {
     label: "终端工具",
-    description: "提供终端创建、输入、读取、调整和关闭能力。",
   },
   mcpTools: {
     label: "MCP 工具",
-    description: "启用 Pi MCP Adapter 原生代理工具，并按需连接已启用的服务器。",
   },
 };
 const CHAT_MESSAGE_FONT_OPTIONS: Array<{
@@ -12598,9 +12567,6 @@ function getHorizontalDropPlacement(event: DragEvent<HTMLElement>): DragPlacemen
 
 type PersonalizationOpacityCardProps = {
   title: string;
-  description: string;
-  label: string;
-  hint: string;
   value: number;
   previewVariable: "--chat-wallpaper-mask-opacity" | "--chat-bubble-opacity";
   onCommit: (value: number) => void;
@@ -12608,9 +12574,6 @@ type PersonalizationOpacityCardProps = {
 
 function PersonalizationOpacityCard({
   title,
-  description,
-  label,
-  hint,
   value,
   previewVariable,
   onCommit,
@@ -12640,13 +12603,12 @@ function PersonalizationOpacityCard({
       <div className="personalization-opacity-heading">
         <div>
           <h3>{title}</h3>
-          <p>{description}</p>
         </div>
         <output>{draftValue}%</output>
       </div>
       <label className="personalization-range-field">
-        <span>{label}</span>
         <input
+          aria-label={title}
           type="range"
           min={0}
           max={100}
@@ -12658,7 +12620,6 @@ function PersonalizationOpacityCard({
           onKeyUp={(event) => commitValue(event.currentTarget)}
           onBlur={(event) => commitValue(event.currentTarget)}
         />
-        <small>{hint}</small>
       </label>
     </article>
   );
@@ -17053,6 +17014,7 @@ export function App() {
 
   const exportCompleteAppData = async () => {
     if (!appDataLoaded || appDataPersistenceSuspendedRef.current || dataBackupState.status === "loading") return;
+    if (!await confirmAction("备份包含 API Key、聊天记录和个人资料，文件不会加密。确认导出？")) return;
     const document = getActiveDesktopWindow().document;
     setDataBackupProgress({ active: false, value: null, label: "" });
     setDataBackupState({ status: "loading", message: "正在整理全部应用数据..." });
@@ -18898,6 +18860,7 @@ export function App() {
       setExtensionStatus({ status: "error", message: "请先填写 Pi 插件包名或酒馆扩展 Git 地址。" });
       return;
     }
+    if (!await confirmAction(`安装并启用「${sourceUrl}」？扩展可执行代码并访问文件和网络，请确认来源可信。`)) return;
     setExtensionStatus({ status: "loading", message: "正在识别、安装并验证扩展..." });
     try {
       const response = await fetch("/api/extensions/install", {
@@ -19088,6 +19051,7 @@ export function App() {
     extension: InstalledExtension,
     enabled: boolean,
   ) => {
+    if (enabled && !await confirmAction(`启用「${extension.displayName}」？扩展可执行代码并访问文件和网络，请确认来源可信。`)) return;
     setExtensionStatus({ status: "loading", message: `正在${enabled ? "启用" : "关闭"} ${extension.displayName}...` });
     try {
       if (extension.compatibility === "pi") {
@@ -21661,19 +21625,12 @@ export function App() {
   const configuredContextCompressionLimits = contextCompressionSettings.modelLimits.filter(
     (limit) => limit.modelId.trim(),
   );
-  const selectedModelContextLimit = resolveContextCompressionLimit(
-    { ...contextCompressionSettings, enabled: true },
-    selectedModelValue,
-  );
   const piCompactionSettings = {
     enabled: contextCompressionSettings.enabled,
     reserveTokens: 16_384,
     keepRecentTokens: 20_000,
   };
   const editedLlmContextSettings = llmContextSettings[llmContextSettingsMode];
-  const enabledLlmContextSourceCount = LLM_CONTEXT_SOURCES.filter(
-    (source) => editedLlmContextSettings[source],
-  ).length;
 
   const activeTypes = activePersona?.entryTypes ?? [];
   const selectedEntryType =
@@ -24027,7 +23984,6 @@ export function App() {
       silent: true,
     };
   };
-
 
   const executeChatTool = async (
     toolName: string,
@@ -32746,9 +32702,7 @@ export function App() {
         <header className="extension-manager-header">
           <div>
             <div>
-              <div className="eyebrow">Pi Packages &amp; SillyTavern Extensions</div>
               <h1>扩展管理器</h1>
-              <p>原生加载 Pi 插件与资源包，同时兼容酒馆扩展的会话、角色卡、世界书和变量接口。</p>
             </div>
           </div>
           <div className="extension-manager-summary">
@@ -32763,9 +32717,7 @@ export function App() {
 
         <section className="extension-install-panel" aria-labelledby="extension-install-title">
           <div>
-            <div className="eyebrow">Install Pi Package or Git Extension</div>
             <h2 id="extension-install-title">安装扩展</h2>
-            <p>输入 npm Pi 包名，或粘贴酒馆扩展 Git 地址。Pi Git/本地包可使用 pi: 前缀。</p>
           </div>
           <div className="extension-install-form">
             <label className="field">
@@ -32806,9 +32758,7 @@ export function App() {
                     <div className="extension-title-row">
                       <h2>{promptTemplateExtension.displayName}</h2>
                       <span className="extension-version">v{promptTemplateExtension.version}</span>
-                      <span className="extension-compatibility">Renge 原生兼容</span>
                     </div>
-                    <p>{promptTemplateExtension.description}</p>
                   </div>
                 </div>
                 <div className="extension-card-actions">
@@ -32851,8 +32801,7 @@ export function App() {
                 <span>作者：{promptTemplateExtension.author}</span>
                 <span>许可证：{promptTemplateExtension.license}</span>
                 <span>
-                  {extensionRuntimeStates[promptTemplateExtension.id]?.message ??
-                    promptTemplateExtension.statusMessage}
+                  {extensionRuntimeStates[promptTemplateExtension.id]?.message?.replace("Renge 原生兼容层", "") ?? "已安装"}
                 </span>
                 {promptTemplateExtension.homePage && (
                   <a
@@ -32867,23 +32816,11 @@ export function App() {
               </div>
 
               <div className="extension-card-body">
-                <section className="extension-capabilities">
-                  <h3>已接入能力</h3>
-                  <div>
-                    {promptTemplateExtension.capabilities.map((capability) => (
-                      <span key={capability}>
-                        <Check size={14} />
-                        {capability}
-                      </span>
-                    ))}
-                  </div>
-                </section>
 
                 <section className="extension-settings-panel">
                   <div className="extension-settings-heading">
                     <div>
                       <h3>Prompt Template 设置</h3>
-                      <p>对应上游扩展的生成处理、楼层处理、世界书加载和调试开关。</p>
                     </div>
                     <button type="button" className="ghost-action" onClick={resetPromptTemplateSettings}>
                       <RefreshCw size={15} />
@@ -32895,7 +32832,6 @@ export function App() {
                     <label className="extension-setting-row">
                       <span>
                         <strong>处理生成提示词</strong>
-                        <small>发送给模型前执行所有消息中的 EJS。</small>
                       </span>
                       <input
                         type="checkbox"
@@ -32908,7 +32844,6 @@ export function App() {
                     <label className="extension-setting-row">
                       <span>
                         <strong>加载 [GENERATE] 世界书条目</strong>
-                        <small>支持 BEFORE、AFTER、消息索引和正则注入。</small>
                       </span>
                       <input
                         type="checkbox"
@@ -32923,7 +32858,6 @@ export function App() {
                     <label className="extension-setting-row">
                       <span>
                         <strong>启用 @INJECT</strong>
-                        <small>允许世界书按绝对位置、目标角色或正则插入消息。</small>
                       </span>
                       <input
                         type="checkbox"
@@ -32938,7 +32872,6 @@ export function App() {
                     <label className="extension-setting-row">
                       <span>
                         <strong>处理回复消息</strong>
-                        <small>模型完成输出后执行回复中的 EJS。</small>
                       </span>
                       <input
                         type="checkbox"
@@ -32951,7 +32884,6 @@ export function App() {
                     <label className="extension-setting-row">
                       <span>
                         <strong>加载 [RENDER] 世界书条目</strong>
-                        <small>在回复显示内容前后注入渲染专用模板。</small>
                       </span>
                       <input
                         type="checkbox"
@@ -32966,7 +32898,6 @@ export function App() {
                     <label className="extension-setting-row">
                       <span>
                         <strong>写回处理后的原消息</strong>
-                        <small>处理后的回复保存到当前 Renge 会话。</small>
                       </span>
                       <input
                         type="checkbox"
@@ -32979,7 +32910,6 @@ export function App() {
                     <label className="extension-setting-row">
                       <span>
                         <strong>立即加载世界书初始变量</strong>
-                        <small>读取 [InitialVariables] 和 @@initial_variables。</small>
                       </span>
                       <input
                         type="checkbox"
@@ -32992,7 +32922,6 @@ export function App() {
                     <label className="extension-setting-row">
                       <span>
                         <strong>调试日志</strong>
-                        <small>在开发者控制台输出模板处理结果。</small>
                       </span>
                       <input
                         type="checkbox"
@@ -33005,31 +32934,34 @@ export function App() {
                     <label className="extension-setting-row depth-setting-row">
                       <span>
                         <strong>回复处理深度</strong>
-                        <small>-1 表示不限制；0 只处理最新回复。</small>
                       </span>
                       <input
                         type="number"
-                        min={-1}
-                        value={promptTemplateExtension.settings.depthLimit}
+                        min={0}
+                        disabled={promptTemplateExtension.settings.depthLimit < 0}
+                        value={Math.max(0, promptTemplateExtension.settings.depthLimit)}
+                        aria-label="回复处理深度"
                         onChange={(event) =>
                           updatePromptTemplateSettings({
                             depthLimit: Number.isFinite(Number(event.target.value))
-                              ? Math.max(-1, Math.floor(Number(event.target.value)))
-                              : -1,
+                              ? Math.max(0, Math.floor(Number(event.target.value)))
+                              : 0,
                           })
                         }
+                      />
+                    </label>
+                    <label className="extension-setting-row">
+                      <strong>处理全部回复</strong>
+                      <input
+                        type="checkbox"
+                        checked={promptTemplateExtension.settings.depthLimit < 0}
+                        onChange={(event) => updatePromptTemplateSettings({ depthLimit: event.target.checked ? -1 : 0 })}
                       />
                     </label>
                   </div>
                 </section>
               </div>
 
-              <div className="extension-security-note">
-                <Wrench size={17} />
-                <span>
-                  此扩展会执行角色卡、预设、世界书或模型回复里的 JavaScript 模板。只导入并启用你信任的内容。
-                </span>
-              </div>
             </article>
           )}
           {extensions
@@ -33055,15 +32987,6 @@ export function App() {
                         <div className="extension-title-row">
                           <h2>{extension.displayName}</h2>
                           <span className="extension-version">v{extension.version}</span>
-                          <span
-                            className={`extension-compatibility ${extension.compatibility}`}
-                          >
-                            {extension.compatibility === "native"
-                              ? "Renge 原生兼容"
-                              : extension.compatibility === "pi"
-                                ? "Pi 原生插件"
-                                : "酒馆 Web 兼容"}
-                          </span>
                           <span className={`extension-runtime-badge ${runtimeState.status}`}>
                             {runtimeState.status === "active"
                               ? "运行中"
@@ -33115,9 +33038,7 @@ export function App() {
                     <span>包：{extension.packageName}</span>
                     <span>作者：{extension.author}</span>
                     <span>加载顺序：{extension.loadingOrder}</span>
-                    <span className={runtimeState.status === "error" ? "error" : ""}>
-                      {runtimeState.message}
-                    </span>
+                    {runtimeState.status === "error" && <span className="error">{runtimeState.message}</span>}
                     {extension.homePage && (
                       <a href={extension.homePage} target="_blank" rel="noreferrer">
                         Git 仓库
@@ -33126,51 +33047,7 @@ export function App() {
                     )}
                   </div>
 
-                  <div className="extension-generic-body">
-                    <section className="extension-capabilities">
-                      <h3>兼容能力</h3>
-                      <div>
-                        {extension.capabilities.map((capability) => (
-                          <span key={capability}>
-                            <Check size={14} />
-                            {capability}
-                          </span>
-                        ))}
-                      </div>
-                    </section>
-                    <section className="extension-runtime-details">
-                      <h3>扩展资源</h3>
-                      {extension.compatibility === "pi" ? (
-                        <p>
-                          扩展入口：{extension.piResources?.extensions ?? 0} 个 · Skills：{extension.piResources?.skills ?? 0} 组 · 提示词：{extension.piResources?.prompts ?? 0} 个 · 主题：{extension.piResources?.themes ?? 0} 个
-                        </p>
-                      ) : (
-                        <p>
-                          JavaScript：{extension.jsFiles.length} 个 · CSS：{extension.cssFiles.length} 个
-                        </p>
-                      )}
-                      {extension.requires.length > 0 && (
-                        <p>必需扩展：{extension.requires.join("、")}</p>
-                      )}
-                      {extension.optional.length > 0 && (
-                        <p>可选扩展：{extension.optional.join("、")}</p>
-                      )}
-                      <small>
-                        {extension.compatibility === "pi"
-                          ? "由 Pi DefaultResourceLoader 原生加载；状态变更会在下一次模型请求生效。"
-                          : "关闭或删除时会卸载脚本与样式节点，并广播 renge-extension-unload 事件。"}
-                      </small>
-                    </section>
-                  </div>
 
-                  <div className="extension-security-note">
-                    <Wrench size={17} />
-                    <span>
-                      {extension.compatibility === "pi"
-                        ? "Pi 插件拥有当前用户权限，可访问文件、网络并运行程序。只安装可信的软件包。"
-                        : "通用扩展会执行仓库中的 JavaScript。只安装并启用你信任的 Git 仓库。"}
-                    </span>
-                  </div>
                 </article>
               );
             })}
@@ -33178,7 +33055,7 @@ export function App() {
             <div className="extension-empty-state">
               <Puzzle size={28} />
               <strong>还没有安装扩展</strong>
-              <span>在上方输入 Pi 插件 npm 包名，或粘贴酒馆扩展 Git 仓库地址。</span>
+              <span></span>
             </div>
           )}
         </section>
@@ -33199,9 +33076,7 @@ export function App() {
         <header className="character-manager-header">
           <div>
             <div>
-              <div className="eyebrow">SillyTavern Character Cards</div>
               <h1>角色卡管理器</h1>
-              <p>角色卡内置世界书、正则与酒馆脚本独立保存，只在绑定该角色的会话中生效。</p>
             </div>
           </div>
           <div className="character-manager-actions">
@@ -33247,11 +33122,6 @@ export function App() {
             <div className="character-gallery-empty">
               <BookOpen size={34} />
               <h2>{characterCards.length === 0 ? "还没有角色卡" : "没有匹配的角色卡"}</h2>
-              <p>
-                {characterCards.length === 0
-                  ? "可以批量导入酒馆原生 PNG / JSON 角色卡，也可以从空白卡开始编辑。"
-                  : "换一个名称、作者或标签关键词试试。"}
-              </p>
               {characterCards.length === 0 && (
                 <button
                   type="button"
@@ -33385,9 +33255,6 @@ export function App() {
                   draggable={false}
                 />
               </div>
-              <footer className="character-cover-preview-footer">
-                完整原图预览 · 未进行裁切或拉伸
-              </footer>
             </section>
           </div>
         )}
@@ -33596,10 +33463,6 @@ export function App() {
 
                 {characterEditorTab === "worldbook" && (
                   <div className="character-private-editor">
-                    <div className="character-private-notice">
-                      <Bookmark size={17} />
-                      <span>这里的世界书只绑定当前角色卡，不会进入设置中的全局世界书列表。</span>
-                    </div>
                     {!editingCharacterCard.characterBook ? (
                       <button type="button" className="small-action" onClick={() => updateCharacterCard(editingCharacterCard.id, {
                         characterBook: createWorldBook(`${editingCharacterCard.name || "角色"}的内置世界书`),
@@ -33662,10 +33525,6 @@ export function App() {
 
                 {characterEditorTab === "regex" && (
                   <div className="character-private-editor">
-                    <div className="character-private-notice">
-                      <Braces size={17} />
-                      <span>这里的正则只绑定当前角色卡，不会进入设置中的全局正则列表。</span>
-                    </div>
                     <div className="character-private-list">
                       {editingCharacterCard.regexScripts.map((script, index) => (
                         <details className="character-private-entry" key={script.id} open={index === 0}>
@@ -33738,10 +33597,6 @@ export function App() {
 
                 {characterEditorTab === "scripts" && (
                   <div className="character-private-editor">
-                    <div className="character-private-notice">
-                      <Play size={17} />
-                      <span>这里的脚本只绑定当前角色卡，与设置中的全局脚本分开保存；进入该角色会话时才会运行。</span>
-                    </div>
                     <div className="character-private-list">
                       {editingCharacterCard.tavernScripts.map((script, index) => (
                         <details className="character-private-entry" key={script.id} open={index === 0}>
@@ -33875,7 +33730,6 @@ export function App() {
               </div>
 
               <footer className="character-editor-footer">
-                <span>修改会自动保存到本地和应用数据。</span>
                 <div>
                   <button type="button" className="ghost-action" onClick={() => exportCharacterJson(editingCharacterCard)}><FileJson size={15} />导出 JSON</button>
                   <button type="button" className="ghost-action" onClick={() => void exportCharacterPng(editingCharacterCard)}><Download size={15} />导出 PNG</button>
@@ -33897,9 +33751,6 @@ export function App() {
               <header className="character-editor-header">
                 <div>
                   <h2 id="character-greeting-generation-title">AI 生成备选问候</h2>
-                  <span>
-                    参考角色卡基本信息、现有问候、内置世界书和当前启用的聊天预设。
-                  </span>
                 </div>
                 <button
                   type="button"
@@ -33997,7 +33848,7 @@ export function App() {
               <header className="character-editor-header">
                 <div>
                   <h2 id="character-translation-prompt-title">追加翻译提示词</h2>
-                  <span>保存后会用于所有角色卡的后续翻译。</span>
+                  <span></span>
                 </div>
                 <button
                   type="button"
@@ -34016,9 +33867,6 @@ export function App() {
                 >
                   <div>
                     <strong>启用追加翻译提示词</strong>
-                    <span>
-                      关闭后保留已填写内容，但翻译角色卡时不会将其发送给模型。
-                    </span>
                   </div>
                   <input
                     type="checkbox"
@@ -34037,16 +33885,7 @@ export function App() {
                     placeholder="例如：角色名称保持原文；台词使用古风中文；不要翻译特定术语……"
                     onChange={(event) => setCharacterTranslationPromptDraft(event.target.value)}
                   />
-                  <small>
-                    这段内容会追加到默认翻译规则中；留空并保存可恢复默认翻译行为。
-                  </small>
                 </label>
-                <div className="character-translation-prompt-notice">
-                  <Save size={16} />
-                  <span>
-                    只有点击“保存”才会更新提示词和启用状态，取消不会覆盖此前设置。
-                  </span>
-                </div>
               </div>
               <footer className="character-editor-footer">
                 <button
@@ -34085,7 +33924,6 @@ export function App() {
               <header className="character-editor-header">
                 <div>
                   <h2>翻译预览</h2>
-                  <span>勾选要覆盖到角色卡的字段；正则脚本不会翻译。</span>
                 </div>
                 <button type="button" className="icon-button flat" title="关闭" onClick={() => setCharacterTranslationPreview(null)}><X size={18} /></button>
               </header>
@@ -34229,7 +34067,6 @@ export function App() {
             </span>
             <span className="settings-title-copy">
               <strong>系统设置</strong>
-              <small>Renge Preferences</small>
             </span>
           </div>
           <div className="settings-nav-label">AI 与内容</div>
@@ -34392,9 +34229,7 @@ export function App() {
             <section className="settings-content">
           <header className="topbar">
             <div className="settings-heading-copy">
-              <div className="eyebrow">{SETTINGS_TAB_META[settingsTab].eyebrow}</div>
               <h1>{SETTINGS_TAB_META[settingsTab].title}</h1>
-              <p>{SETTINGS_TAB_META[settingsTab].description}</p>
             </div>
             {settingsTab === "providers" && (
               <div className="topbar-actions">
@@ -34592,54 +34427,20 @@ export function App() {
 
           {settingsTab === "llm" && (
             <section className="section-block llm-settings">
-              <div className="section-heading compact">
-                <div>
-                  <h2>AI 交互能力</h2>
-                  <p>控制聊天中可选的语言模型交互增强能力。</p>
-                </div>
-              </div>
               <article className="llm-setting-card">
                 <div className="llm-setting-copy">
                   <h3>会话完成推送</h3>
-                  <p>
-                    开启后，桌面端会在会话输出完成后显示系统通知；Android 端在应用处于后台时显示通知，点击通知可返回会话。
-                  </p>
                 </div>
-                <label className="tool-toggle llm-feature-toggle">
+                <label className="tool-toggle llm-feature-toggle" title={!window.rengeDesktop?.isElectron && !window.RengeAndroidNative ? "请在桌面端或 Android 端使用" : undefined}>
                   <input
                     type="checkbox"
+                    aria-label="会话完成推送"
                     checked={llmPushNotificationsEnabled}
                     disabled={!window.rengeDesktop?.isElectron && !window.RengeAndroidNative}
                     onChange={(event) => setLlmPushNotificationsEnabled(event.target.checked)}
                   />
-                  <span>开启推送</span>
+                  <span>开启</span>
                 </label>
-                <div
-                  className={`llm-setting-status ${
-                    window.rengeDesktop?.isElectron || window.RengeAndroidNative
-                      ? llmPushNotificationsEnabled
-                        ? "enabled"
-                        : "disabled"
-                      : "disabled"
-                  }`}
-                >
-                  <strong>
-                    {!window.rengeDesktop?.isElectron && !window.RengeAndroidNative
-                      ? "仅桌面端和 Android 端可用"
-                      : llmPushNotificationsEnabled
-                        ? "已开启"
-                        : "已关闭"}
-                  </strong>
-                  <span>
-                    {!window.rengeDesktop?.isElectron && !window.RengeAndroidNative
-                      ? "浏览器版不提供原生会话完成推送。"
-                      : llmPushNotificationsEnabled
-                        ? window.rengeDesktop?.isElectron
-                          ? "回复完成后会显示桌面系统通知。"
-                          : "应用切到后台后，回复完成会显示 Android 系统通知。"
-                        : "不会显示会话完成系统通知。"}
-                  </span>
-                </div>
               </article>
               <RoleplayMemorySettings
                 enabled={llmContextSettings.roleplay.fileMemory === true}
@@ -34647,11 +34448,7 @@ export function App() {
               />
               <article className="llm-setting-card llm-context-settings-card">
                 <div className="llm-setting-copy">
-                  <h3>按会话模式注入上下文</h3>
-                  <p>
-                    关闭一项会同时移除对应系统说明和工具 JSON 定义，直接减少每次请求的 Token。
-                    角色卡、人格和多 Agent 核心指令不受影响。
-                  </p>
+                  <h3>会话工具</h3>
                 </div>
                 <button
                   type="button"
@@ -34682,7 +34479,6 @@ export function App() {
                       <label className="llm-context-source-row" key={source}>
                         <span className="llm-context-source-copy">
                           <strong>{meta.label}</strong>
-                          <span>{meta.description}</span>
                         </span>
                         <span className="tool-toggle llm-feature-toggle">
                           <input
@@ -34702,76 +34498,29 @@ export function App() {
                     );
                   })}
                 </div>
-                <div
-                  className={`llm-setting-status ${
-                    enabledLlmContextSourceCount > 0 ? "enabled" : "disabled"
-                  }`}
-                >
-                  <strong>{LLM_CONTEXT_MODE_LABELS[llmContextSettingsMode]}</strong>
-                  <span>
-                    当前注入 {enabledLlmContextSourceCount}/{LLM_CONTEXT_SOURCES.length} 项附加上下文。
-                    {llmContextSettingsMode === "roleplay" && enabledLlmContextSourceCount === 0
-                      ? " 使用精简上下文，不会向模型发送文件、浏览器、终端、MCP、手机工具或 Skills 信息。"
-                      : " 只启用当前模式确实需要的能力可以降低基础 Token。"}
-                  </span>
-                </div>
               </article>
               <article className="llm-setting-card context-compression-card">
                 <div className="llm-setting-copy">
-                  <h3>Pi 原生上下文压缩</h3>
-                  <p>
-                    普通聊天和代码任务由 Pi 会话内核监控上下文；接近模型上限时，Pi 会原生摘要较早历史，
-                    保留最近上下文并继续当前任务。图片生成等非 Pi 请求仍使用兼容压缩路径。
-                  </p>
+                  <h3>自动压缩上下文</h3>
                 </div>
                 <label className="tool-toggle llm-feature-toggle">
                   <input
                     type="checkbox"
+                    aria-label="自动压缩上下文"
                     checked={contextCompressionSettings.enabled}
                     onChange={(event) => {
                       contextSummaryCacheRef.current.clear();
                       void setPiAutoCompaction(event.target.checked);
                     }}
                   />
-                  <span>开启 Pi 原生压缩</span>
+                  <span>开启</span>
                 </label>
-                <div
-                  className={`llm-setting-status ${
-                    contextCompressionSettings.enabled ? "enabled" : "disabled"
-                  }`}
-                >
-                  <strong>
-                    {contextCompressionSettings.enabled ? "已开启" : "已关闭"}
-                  </strong>
-                  <span>
-                    {!contextCompressionSettings.enabled
-                      ? "Pi 自动压缩已关闭；请求仍由 Pi 内核运行，但不会主动压缩会话。"
-                      : selectedModelValue && selectedModelContextLimit
-                        ? `当前模型 ${selectedModelValue} 的上限为 ${selectedModelContextLimit.toLocaleString()} Token；Pi 将按原生阈值自动压缩。`
-                        : selectedModelValue
-                          ? `当前模型 ${selectedModelValue} 尚未单独配置，将使用预设或默认上下文上限。`
-                          : "请先配置模型 ID 和上下文上限。"}
-                  </span>
-                </div>
-                <div
-                  className={`context-compression-ast-option ${
-                    contextCompressionSettings.enabled ? "enabled" : "disabled"
-                  }`}
-                >
-                  <div>
-                    <strong>Pi 原生保留策略</strong>
-                    <span>
-                      压缩时预留 16,384 Token 输出空间，并保留最近约 20,000 Token 上下文；摘要和会话续接均由
-                      Pi 内核完成。
-                    </span>
-                  </div>
-                </div>
                 <div className="context-compression-limits">
                   <div className="context-compression-limits-heading">
                     <div>
-                      <strong>Pi 模型上下文上限</strong>
+                      <strong>模型上下文上限</strong>
                       <span>
-                        按模型 ID 精确匹配（忽略大小写），已配置 {configuredContextCompressionLimits.length} 项。
+                        已配置 {configuredContextCompressionLimits.length} 项
                       </span>
                     </div>
                     <button
@@ -34841,117 +34590,61 @@ export function App() {
                     </div>
                   ) : (
                     <div className="context-compression-empty">
-                      尚未配置模型。点击“添加模型上限”，可优先带入当前会话模型。
+                      尚未配置模型上限
                     </div>
                   )}
-                  <p className="context-compression-note">
-                    按 K 输入，1 K = 1000 Token，支持小数。这里的上限会作为 Pi 模型的 contextWindow。
-                    Pi 根据上下文用量、16,384 Token 输出预留和
-                    20,000 Token 最近历史保留量决定压缩时机；压缩结果写入 Pi 会话树，不会改写 Renge 聊天记录。
-                  </p>
                 </div>
               </article>
               <article className="llm-setting-card">
                 <div className="llm-setting-copy">
-                  <h3>AI 选项功能</h3>
-                  <p>
-                    开启后，AI 可以调用 <code>chat_present_options</code>
-                    展示结构化选项和自定义回复输入框。
-                  </p>
+                  <h3>AI 回复选项</h3>
                 </div>
                 <label className="tool-toggle llm-feature-toggle">
                   <input
                     type="checkbox"
+                    aria-label="AI 回复选项"
                     checked={chatChoiceToolsEnabled}
                     onChange={(event) => setChatChoiceToolsEnabled(event.target.checked)}
                   />
-                  <span>开启AI选项功能</span>
+                  <span>开启</span>
                 </label>
-                <div
-                  className={`llm-setting-status ${
-                    chatChoiceToolsEnabled ? "enabled" : "disabled"
-                  }`}
-                >
-                  <strong>{chatChoiceToolsEnabled ? "已开启" : "已关闭"}</strong>
-                  <span>
-                    {chatChoiceToolsEnabled
-                      ? "会向 AI 提供工具权限和使用说明。"
-                      : "不会向 AI 提供工具定义、使用说明或内置行动选项指令。"}
-                  </span>
-                </div>
               </article>
               <article className="llm-setting-card">
                 <div className="llm-setting-copy">
-                  <h3>重写对话功能</h3>
-                  <p>
-                    开启后，仅在 AI 回复生成完成时把识别到的引用对白自动替换为
-                    <code>“XXX”</code>。无论是否开启，只要消息中已有 <code>“XXX”</code>
-                    或 <code>YYYY</code>，都可以通过右键菜单执行“重写对话”或“局部重写”。
-                    未被占位符标记的内容保持不变。
-                  </p>
+                  <h3>自动标记可重写对白</h3>
                 </div>
                 <label className="tool-toggle llm-feature-toggle">
                   <input
                     type="checkbox"
+                    aria-label="自动标记可重写对白"
                     checked={chatDialogueRewriteEnabled}
                     onChange={(event) => setChatDialogueRewriteEnabled(event.target.checked)}
                   />
-                  <span>开启重写对话功能</span>
+                  <span>开启</span>
                 </label>
-                <div
-                  className={`llm-setting-status ${
-                    chatDialogueRewriteEnabled ? "enabled" : "disabled"
-                  }`}
-                >
-                  <strong>{chatDialogueRewriteEnabled ? "已开启" : "已关闭"}</strong>
-                  <span>
-                    {chatDialogueRewriteEnabled
-                      ? "新回复会自动把引用对白替换为 “XXX”；右键重写功能始终可用。"
-                      : "新回复保留原始对白；已有 “XXX” 或 YYYY 时仍可右键重写。"}
-                  </span>
-                </div>
               </article>
               <article className="llm-setting-card">
                 <div className="llm-setting-copy">
                   <h3>渲染编辑</h3>
-                  <p>
-                    开启后，右键消息选择“编辑”会直接在当前渲染气泡中修改文字并保存。
-                    独立 HTML、代码块或媒体消息无法安全反向转换时，会自动使用源码编辑。
-                  </p>
                 </div>
                 <label className="tool-toggle llm-feature-toggle">
                   <input
                     type="checkbox"
+                    aria-label="渲染编辑"
                     checked={chatRenderedEditingEnabled}
                     onChange={(event) => setChatRenderedEditingEnabled(event.target.checked)}
                   />
-                  <span>开启渲染编辑</span>
+                  <span>开启</span>
                 </label>
-                <div
-                  className={`llm-setting-status ${
-                    chatRenderedEditingEnabled ? "enabled" : "disabled"
-                  }`}
-                >
-                  <strong>{chatRenderedEditingEnabled ? "已开启" : "已关闭"}</strong>
-                  <span>
-                    {chatRenderedEditingEnabled
-                      ? "可在渲染后的消息气泡中直接编辑，保存时转换回消息内容。"
-                      : "右键编辑仍使用原始消息文本框。"}
-                  </span>
-                </div>
               </article>
               <article className="llm-setting-card">
                 <div className="llm-setting-copy">
                   <h3>运行完全访问</h3>
-                  <p>
-                    Electron 桌面版中的 AI 始终可以读取当前系统账户有权读取的任意目录，包括
-                    非工作区目录。开启后，非工作区目录的创建、编辑、移动和删除也会直接执行；
-                    所有命令（包括非白名单命令和高风险 Git 命令）不再弹出审批提示。
-                  </p>
                 </div>
-                <label className="tool-toggle llm-feature-toggle">
+                <label className="tool-toggle llm-feature-toggle" title={!window.rengeDesktop?.isElectron ? "请在桌面端使用" : undefined}>
                   <input
                     type="checkbox"
+                    aria-label="运行完全访问"
                     checked={llmFullAccessEnabled}
                     disabled={!window.rengeDesktop?.isElectron}
                     onChange={async (event) => {
@@ -34967,28 +34660,8 @@ export function App() {
                       setLlmFullAccessEnabled(enabled);
                     }}
                   />
-                  <span>开启运行完全访问</span>
+                  <span>开启</span>
                 </label>
-                <div
-                  className={`llm-setting-status ${
-                    llmFullAccessEnabled ? "enabled" : "disabled"
-                  }`}
-                >
-                  <strong>
-                    {!window.rengeDesktop?.isElectron
-                      ? "仅桌面版可用"
-                      : llmFullAccessEnabled
-                        ? "完全访问已开启"
-                        : "受限模式"}
-                  </strong>
-                  <span>
-                    {!window.rengeDesktop?.isElectron
-                      ? "浏览器和 Android 环境仍受各自的目录授权或系统权限限制。"
-                      : llmFullAccessEnabled
-                        ? "系统读取和变更均已开放，命令不会触发白名单审批。"
-                        : "系统读取始终开放；变更非工作区文件时逐次弹窗确认，白名单外命令也会请求批准。"}
-                  </span>
-                </div>
               </article>
             </section>
           )}
@@ -35035,10 +34708,6 @@ export function App() {
                   <span className="provider-editor-hero-icon" aria-hidden="true">
                     <Boxes size={24} />
                   </span>
-                  <div className="provider-editor-hero-copy">
-                    <h2>供应商设置</h2>
-                    <p>兼容 OpenAI 风格接口；模型列表从 API 地址下的 /models 拉取。</p>
-                  </div>
                   <button
                     type="button"
                     className="provider-delete-action"
@@ -35057,7 +34726,6 @@ export function App() {
                       <Tags size={20} aria-hidden="true" />
                       <div>
                         <h3>基本信息</h3>
-                        <p>设置供应商的标识名称与接口地址</p>
                       </div>
                     </header>
                     <div className="provider-config-grid">
@@ -35072,7 +34740,6 @@ export function App() {
                             updateProvider(activeProvider.id, { name: event.target.value })
                           }
                         />
-                        <small>用于在列表中显示，便于识别和管理。</small>
                       </label>
 
                       <label className="field provider-field">
@@ -35086,7 +34753,6 @@ export function App() {
                             updateProvider(activeProvider.id, { apiBaseUrl: event.target.value })
                           }
                         />
-                        <small>兼容 OpenAI 风格的接口地址。</small>
                       </label>
                     </div>
                   </article>
@@ -35096,7 +34762,6 @@ export function App() {
                       <Settings2 size={20} aria-hidden="true" />
                       <div>
                         <h3>接口配置</h3>
-                        <p>选择 API 类型并填写密钥</p>
                       </div>
                     </header>
                     <div className="provider-config-grid">
@@ -35130,7 +34795,6 @@ export function App() {
                             Responses
                           </button>
                         </div>
-                        <small>根据供应商提供的接口类型进行选择。</small>
                       </div>
 
                       <label className="field provider-field">
@@ -35158,7 +34822,6 @@ export function App() {
                             {providerApiKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}
                           </button>
                         </div>
-                        <small>输入供应商提供的 API Key，用于访问接口。</small>
                       </label>
                     </div>
                   </article>
@@ -35168,7 +34831,6 @@ export function App() {
                       <Database size={20} aria-hidden="true" />
                       <div>
                         <h3>模型设置</h3>
-                        <p>选择默认模型和配置相关参数</p>
                       </div>
                     </header>
                     <div className="provider-config-grid">
@@ -35200,7 +34862,6 @@ export function App() {
                             </button>
                           )}
                         </div>
-                        <small>填写要使用的模型 ID，或从右侧下拉列表中选择。</small>
                       </div>
 
                       <div className="field provider-field">
@@ -35241,7 +34902,6 @@ export function App() {
                             拉取模型
                           </button>
                         </div>
-                        <small>从 API 获取可用模型列表并选择默认模型。</small>
                       </div>
                     </div>
                   </article>
@@ -35252,7 +34912,6 @@ export function App() {
                         <Wrench size={20} aria-hidden="true" />
                         <div>
                           <h3>高级选项</h3>
-                          <p>配置模型的运行参数和能力</p>
                         </div>
                       </header>
 
@@ -35273,7 +34932,6 @@ export function App() {
                               })
                             }
                           />
-                          <small>最大输出默认 65,536 Token。</small>
                         </label>
 
                         <div className="field provider-field provider-image-capability">
@@ -35299,13 +34957,6 @@ export function App() {
                             />
                             <span>模型支持图片理解</span>
                           </label>
-                          <small>
-                            {activeProviderModelId
-                              ? activeProviderModelSupportsImages
-                                ? "当前模型会接收 image_url 图片。"
-                                : "当前模型仅接收文本，可启用图像识别 MCP 处理图片。"
-                              : "先填写或选择模型 ID，再配置图片理解能力。"}
-                          </small>
                         </div>
 
                         <label className="field provider-field provider-thinking-level">
@@ -35327,7 +34978,6 @@ export function App() {
                               </option>
                             ))}
                           </select>
-                          <small>设置模型在推理/思考时的思维深度。</small>
                         </label>
                       </div>
                     </div>
@@ -35347,7 +34997,6 @@ export function App() {
                         }
                       />
                       <strong>请求思考</strong>
-                      <span>启用后，模型在回答时会进行更充分的思考，以获得更高质量的结果。</span>
                     </label>
                   </article>
 
@@ -35395,10 +35044,6 @@ export function App() {
 
               <section className="section-block provider-editor prompt-editor">
                 <div className="section-heading compact">
-                  <div>
-                    <h2>System Prompt</h2>
-                    <p>左侧勾选的多个提示词会按顺序组合，在 Agent Chat 发送时生效。</p>
-                  </div>
                   <button
                     type="button"
                     className="icon-button danger"
@@ -35482,8 +35127,7 @@ export function App() {
                     <div>
                       <h2>全局预设编辑器</h2>
                       <p>
-                        当前会话使用「{activeChatPreset.name}」；酒馆预设按 prompt_order
-                        的顺序和启用状态导入。
+                        当前会话：{activeChatPreset.name}
                       </p>
                     </div>
                     <div className="topbar-actions">
@@ -35540,7 +35184,6 @@ export function App() {
                     <div className="section-heading compact">
                       <div>
                         <h3>主要参数</h3>
-                        <p>应用预设时覆盖会话请求的采样和 Token 参数。</p>
                       </div>
                     </div>
                     <div className="preset-parameter-grid">
@@ -35665,10 +35308,6 @@ export function App() {
                     <div className="section-heading compact">
                       <div>
                         <h3>提示词注入</h3>
-                        <p>
-                          拖动模块右侧手柄，在模块间的插入线处松开即可排序；拖到列表边缘可自动滚动。
-                          main 放置现有系统提示，chatHistory 放置当前会话历史。
-                        </p>
                       </div>
                       <button type="button" className="small-action" onClick={addChatPresetPrompt}>
                         <Plus size={15} />
@@ -35784,7 +35423,6 @@ export function App() {
 
                     <div className="preset-backup-prompts preset-favorite-prompts">
                       <strong>收藏模块（全局共用）</strong>
-                      <p>收藏时保存模块的内容与注入设置；点击即可添加到当前预设，后续编辑互不影响。</p>
                       {favoriteChatPresetPrompts.length > 0 ? (
                         <div>
                           {favoriteChatPresetPrompts.map((favorite) => {
@@ -35817,14 +35455,13 @@ export function App() {
                           })}
                         </div>
                       ) : (
-                        <p>还没有收藏模块，可在「删除模块」左侧点击「收藏模块」。</p>
+                        <p>暂无收藏模块</p>
                       )}
                     </div>
 
                     {activeChatPreset.backupPrompts.length > 0 && (
                       <div className="preset-backup-prompts">
-                        <strong>备用模块（未进入 prompt_order）</strong>
-                        <p>这些模块来自导入文件，但不在酒馆当前顺序表中；点击即可加入当前预设。</p>
+                        <strong>备用模块</strong>
                         <div>
                           {activeChatPreset.backupPrompts.map((prompt) => (
                             <button
@@ -35864,7 +35501,7 @@ export function App() {
                   <summary className="resource-source-heading">
                     <div>
                       <strong>全局世界书</strong>
-                      <span>勾选的世界书会共同作用于普通、人格、多 Agent 和角色扮演会话</span>
+                      <span></span>
                     </div>
                     <em>{worldBooks.length}</em>
                   </summary>
@@ -35991,7 +35628,6 @@ export function App() {
                   <div className="worldbook-entry-heading">
                     <div>
                       <h3>条目</h3>
-                      <p>常驻条目始终生效；其他条目在最近对话命中关键词后生效。</p>
                     </div>
                     <button type="button" className="small-action" onClick={addWorldBookEntry}>
                       <Plus size={15} />
@@ -36315,12 +35951,6 @@ export function App() {
           {settingsTab === "regexes" && (
             <div className="settings-grid regex-settings-grid">
               <aside className="regex-list-panel section-block">
-                <div className="section-heading compact">
-                  <div>
-                    <h2>正则后处理</h2>
-                    <p>按列表顺序处理 AI 的显示文本，原始会话内容保持不变。</p>
-                  </div>
-                </div>
                 <div className="regex-active-summary">
                   <strong>
                     {effectiveRegexScripts.filter(
@@ -36565,7 +36195,6 @@ export function App() {
                   <div className="regex-editor-section">
                     <div>
                       <h3>执行位置</h3>
-                      <p>Renge 当前只对 AI 输出的显示文本执行；其他位置会原样保留以兼容酒馆格式。</p>
                     </div>
                     <div className="regex-placement-grid">
                       {[
@@ -36645,12 +36274,6 @@ export function App() {
                     </label>
                   </div>
 
-                  <div className="regex-editor-note">
-                    <Braces size={16} />
-                    <span>
-                      替换内容中的 HTML/CSS 需要在会话侧栏开启“渲染 HTML”。正则只改变显示结果，不会修改存档原文，也不会发送给 AI。
-                    </span>
-                  </div>
                 </section>
               ) : (
                 <section className="section-block preset-empty-state">
@@ -36663,12 +36286,6 @@ export function App() {
           {settingsTab === "scripts" && (
             <div className="settings-grid tavern-script-settings-grid">
               <aside className="section-block tavern-script-list-panel">
-                <div className="section-heading compact">
-                  <div>
-                    <h2>脚本管理器</h2>
-                    <p>全局脚本作用于所有会话；角色内置脚本只在绑定角色的会话运行。</p>
-                  </div>
-                </div>
                 <div className={`tavern-runtime-summary ${tavernRuntimeStatus.state}`}>
                   <span>
                     全局 {tavernScripts.length} · 当前预设 {chatPresetEnabled ? activeChatPreset?.tavernScripts.length ?? 0 : 0} · 当前角色 {scopedRoleplayCard?.tavernScripts.length ?? 0}
@@ -36927,7 +36544,6 @@ export function App() {
                     <div className="section-heading compact">
                       <div>
                         <h3>脚本按钮</h3>
-                        <p>可见按钮会显示在会话输入框上方，并触发脚本注册的按钮事件。</p>
                       </div>
                       <button
                         type="button"
@@ -37045,12 +36661,6 @@ export function App() {
                     </div>
                   </details>
 
-                  <div className="tavern-script-security-note">
-                    <Braces size={16} />
-                    <span>
-                      酒馆脚本可以运行远程 JavaScript，并能读写当前会话消息和变量。请只启用来源可信的脚本。
-                    </span>
-                  </div>
                 </section>
               ) : (
                 <section className="section-block preset-empty-state">
@@ -37062,12 +36672,6 @@ export function App() {
 
           {settingsTab === "user" && (
             <section className="section-block user-profile-settings">
-              <div className="section-heading compact">
-                <div>
-                  <h2>用户资料</h2>
-                  <p>可保存多份用户资料，选择后用于聊天显示；开启后将当前资料的昵称和简介发送给 AI。</p>
-                </div>
-              </div>
 
               <div className="user-profile-toolbar">
                 <label className="field">
@@ -37192,7 +36796,6 @@ export function App() {
               <div className="section-heading compact">
                 <div>
                   <h2>聊天文字样式</h2>
-                  <p>设置消息正文的字体与字号，并为引用和斜体内容设置独立颜色。</p>
                 </div>
               </div>
 
@@ -37200,7 +36803,6 @@ export function App() {
                 <article className="personalization-style-card personalization-font-card">
                   <div className="personalization-font-heading">
                     <h3>自定义消息字体</h3>
-                    <p>只调整聊天气泡内的消息正文，不影响应用界面、代码块和输入框。</p>
                   </div>
                   <div className="personalization-font-grid">
                     <label className="field">
@@ -37290,10 +36892,6 @@ export function App() {
                       <code>{chatPersonalization.quoteStyleColor}</code>
                     </label>
                   </div>
-                  <p>
-                    适用于半角/全角双引号、中文弯引号、`「」`、`『』` 和半角 `｢｣`
-                    包裹的内容。
-                  </p>
                   <div className="personalization-preview" aria-label="引用文样式预览">
                     {renderInlineText('“这是引用文样式预览”')}
                   </div>
@@ -37330,7 +36928,6 @@ export function App() {
                       <code>{chatPersonalization.italicStyleColor}</code>
                     </label>
                   </div>
-                  <p>适用于单星号 `*文本*` 包裹的 Markdown 斜体内容。</p>
                   <div className="personalization-preview" aria-label="斜体文样式预览">
                     {renderInlineText("*这是斜体文样式预览*")}
                   </div>
@@ -37340,9 +36937,6 @@ export function App() {
               <div className="section-heading compact personalization-visual-heading ai-avatar-heading">
                 <div>
                   <h2>AI 模式头像</h2>
-                  <p>
-                    先将头像上传到头像库，再按模型 ID 绑定一个头像。只有 AI 模式下当前模型 ID 匹配时才会生效。
-                  </p>
                 </div>
               </div>
 
@@ -37350,9 +36944,6 @@ export function App() {
                 <div className="ai-avatar-library-heading">
                   <div>
                     <h3>头像库</h3>
-                    <p>
-                      可一次上传多张头像，上传后的头像可以被多个模型重复使用。
-                    </p>
                   </div>
                   <label className="small-action ai-avatar-upload-action">
                     <Upload size={15} />
@@ -37400,15 +36991,11 @@ export function App() {
                     ))
                   )}
                 </div>
-                <small className="ai-avatar-gallery-hint">
-                  头像会自动裁剪为正方形；删除头像后，绑定该头像的模型将恢复为未选择状态。
-                </small>
               </article>
 
               <div className="section-heading compact personalization-visual-heading ai-avatar-model-heading">
                 <div>
                   <h2>模型头像绑定</h2>
-                  <p>每个模型 ID 只能选择一个头像；同一头像可以绑定给多个模型。</p>
                 </div>
                 <button type="button" className="small-action" onClick={addAiAvatarModelProfile}>
                   <Plus size={15} />
@@ -37456,9 +37043,6 @@ export function App() {
                               })
                             }
                           />
-                          <small className="ai-avatar-model-hint">
-                            按当前会话使用的模型 ID 精确匹配。
-                          </small>
                         </label>
 
                         <div className="ai-avatar-gallery-field">
@@ -37500,9 +37084,6 @@ export function App() {
                               ))}
                             </div>
                           )}
-                          <small className="ai-avatar-gallery-hint">
-                            绿色边框表示当前绑定的头像，点击其他头像即可切换。
-                          </small>
                         </div>
                       </div>
                     </article>
@@ -37513,16 +37094,12 @@ export function App() {
               <div className="section-heading compact personalization-visual-heading">
                 <div>
                   <h2>角色卡视觉效果</h2>
-                  <p>角色卡会话自动使用当前角色封面作为聊天背景，并可调节蒙版和气泡透明度。</p>
                 </div>
               </div>
 
               <div className="personalization-visual-list">
                 <PersonalizationOpacityCard
-                  title="角色卡壁纸设置"
-                  description="调整覆盖在角色封面背景上的浅色蒙版。"
-                  label="壁纸蒙版不透明度"
-                  hint="数值越低，角色封面越清晰；数值越高，消息内容越易读。"
+                  title="壁纸蒙版不透明度"
                   value={chatPersonalization.wallpaperMaskOpacity}
                   previewVariable="--chat-wallpaper-mask-opacity"
                   onCommit={(wallpaperMaskOpacity) =>
@@ -37534,10 +37111,7 @@ export function App() {
                 />
 
                 <PersonalizationOpacityCard
-                  title="消息气泡设置"
-                  description="调整用户消息和 AI 消息气泡的背景不透明度。"
-                  label="消息气泡不透明度"
-                  hint="降低数值可让角色封面透过气泡显示；0% 为完全透明。"
+                  title="消息气泡不透明度"
                   value={chatPersonalization.bubbleOpacity}
                   previewVariable="--chat-bubble-opacity"
                   onCommit={(bubbleOpacity) =>
@@ -37593,7 +37167,6 @@ export function App() {
                 <div className="section-heading compact">
                   <div>
                     <h2>MCP 工具</h2>
-                    <p>聊天由 Pi MCP Adapter 原生代理工具按需发现、连接和调用服务器。</p>
                   </div>
                   <div className="mcp-editor-actions">
                     <button
@@ -37790,8 +37363,7 @@ export function App() {
 
                           <div className="section-heading compact mcp-adapter-policy-heading">
                             <div>
-                              <h3>Pi MCP Adapter 策略</h3>
-                              <p>连接生命周期和工具暴露策略由 Pi 原生扩展处理。</p>
+                              <h3>工具连接</h3>
                             </div>
                           </div>
                           <label className="field">
@@ -37804,9 +37376,9 @@ export function App() {
                                 })
                               }
                             >
-                              <option value="lazy">lazy：首次使用时连接</option>
-                              <option value="eager">eager：会话启动时连接</option>
-                              <option value="keep-alive">keep-alive：保持连接</option>
+                              <option value="lazy">首次使用时连接</option>
+                              <option value="eager">会话启动时连接</option>
+                              <option value="keep-alive">保持连接</option>
                             </select>
                           </label>
                           <label className="tool-toggle mcp-enable-toggle">
@@ -37817,7 +37389,7 @@ export function App() {
                                 updateMcpServer(activeMcpServer.id, { directTools: event.target.checked })
                               }
                             />
-                            <span>将 MCP 工具注册为 Pi 原生 direct tools</span>
+                            <span>直接提供工具</span>
                           </label>
                           <label className="field">
                             <span>工具前缀</span>
@@ -37927,10 +37499,6 @@ export function App() {
 
               <section className="section-block provider-editor skill-editor">
                 <div className="section-heading compact">
-                  <div>
-                    <h2>Skill 设置</h2>
-                    <p>保留 Renge 管理界面；运行时由 Pi 原生匹配，并通过 read 按需读取完整说明。</p>
-                  </div>
                   <div className="mcp-editor-actions">
                     <button
                       type="button"
@@ -38043,11 +37611,6 @@ export function App() {
                     <p className={`provider-status ${skillStatus.status}`}>{skillStatus.message}</p>
                   )}
 
-                  {skills.length > 0 && (
-                    <p className="provider-status idle">
-                      当前启用 {enabledSkills.length} 个 Pi Skill；发送消息时只注入名称、描述和路径，匹配后再按需读取完整内容。
-                    </p>
-                  )}
                 </div>
               </section>
             </div>
@@ -38058,7 +37621,6 @@ export function App() {
               <div className="section-heading compact">
                 <div>
                   <h2>ROOT 权限</h2>
-                  <p>用于手机端系统级文件访问和高级传输能力。</p>
                 </div>
               </div>
 
@@ -38112,48 +37674,9 @@ export function App() {
 
           {settingsTab === "data" && (
             <div className="data-backup-page">
-              <section className="section-block data-backup-overview">
-                <div className="section-heading compact">
-                  <div>
-                    <h2>完整数据快照</h2>
-                    <p>
-                      一次打包应用内部的全部数据，用于设备迁移、重装恢复或手动留档。
-                    </p>
-                  </div>
-                  <span className="data-backup-badge">
-                    <Database size={15} />
-                    完整备份
-                  </span>
-                </div>
-
-                <div className="data-backup-sensitive-notice">
-                  <KeyRound size={19} aria-hidden="true" />
-                  <div>
-                    <strong>备份包含敏感信息，文件不会加密</strong>
-                    <p>
-                      其中可能包含 API Key、Pi 本地配置、聊天记录、角色卡、个人资料和电脑连接信息。请勿上传到公共仓库，也不要分享给不可信的人。
-                    </p>
-                  </div>
-                </div>
-              </section>
 
               <div className="data-backup-grid">
                 <section className="section-block data-backup-card">
-                  <div className="data-backup-card-heading">
-                    <span className="data-backup-icon export" aria-hidden="true">
-                      <Download size={21} />
-                    </span>
-                    <div>
-                      <h2>导出完整备份</h2>
-                      <p>生成压缩 ZIP 快照，包含主数据、图片资源和应用文件。</p>
-                    </div>
-                  </div>
-                  <ul className="data-backup-list">
-                    <li>人格、角色卡、原始封面与聊天图片</li>
-                    <li>Pi 会话、世界书、预设、脚本与酒馆文件</li>
-                    <li>供应商、MCP、Skill 文件、扩展及生成图片</li>
-                    <li>个性化设置、会话文件与桌面图标位置</li>
-                  </ul>
                   <div className="data-backup-summary">
                     {personas.length} 个人格 · {characterCards.length} 张角色卡 · {chatSessions.length} 个会话
                   </div>
@@ -38169,21 +37692,6 @@ export function App() {
                 </section>
 
                 <section className="section-block data-backup-card warning">
-                  <div className="data-backup-card-heading">
-                    <span className="data-backup-icon import" aria-hidden="true">
-                      <Upload size={21} />
-                    </span>
-                    <div>
-                      <h2>导入完整备份</h2>
-                      <p>从之前导出的快照恢复整个应用。</p>
-                    </div>
-                  </div>
-                  <div className="data-backup-replace-warning">
-                    导入会覆盖当前全部应用数据。开始前建议先导出一次当前数据，以便需要时恢复。
-                  </div>
-                  <p className="data-backup-import-note">
-                    仅支持 v3 ZIP 完整备份。导入时先清空当前数据，再直接解包恢复；失败后请重新导入。
-                  </p>
                   {dataBackupProgress.active && (
                     <div className="data-backup-progress-panel">
                       <div className="data-backup-progress-copy">
@@ -38238,17 +37746,6 @@ export function App() {
               </div>
 
               <section className="section-block data-danger-zone">
-                <div className="data-danger-copy">
-                  <span className="data-danger-icon" aria-hidden="true">
-                    <Trash2 size={20} />
-                  </span>
-                  <div>
-                    <h2>清除所有数据</h2>
-                    <p>
-                      删除应用内部的全部数据和自动备份并恢复出厂状态。手动导出的 ZIP/JSON 备份以及电脑、手机上的外部工作区文件不会被删除。
-                    </p>
-                  </div>
-                </div>
                 <button
                   type="button"
                   className="ghost-action data-clear-action"
@@ -38496,9 +37993,6 @@ export function App() {
             })}
           </div>
 
-          <footer className="roleplay-greeting-selector-footer">
-            点击任意条目立即切换；右下角循环图标仍可快速切到下一条。
-          </footer>
         </section>
       </div>
     ) : null;
@@ -38997,9 +38491,6 @@ export function App() {
                       <BookOpen size={24} />
                     </div>
                     <h2>选择一张角色卡</h2>
-                    <p className="chat-character-picker-description">
-                      点击封面后，角色卡会直接绑定到当前工作区的这个新会话。
-                    </p>
                     <div
                       className={`chat-empty-model ${
                         effectiveChatModelId ? "ready" : "attention"
@@ -40047,27 +39538,20 @@ export function App() {
                                   setMultiAgentStopCondition(event.target.value)
                                 }
                               />
-                              <small>
-                                {!multiAgentAutoStopEnabled
-                                  ? "当前关闭，将固定执行完所有轮次"
-                                  : multiAgentStopCondition.trim()
-                                    ? "Agent 将在判断用户设置的时机到达后结束剩余轮次"
-                                    : "未指定时机，由 Agent 判断讨论是否已自然完成"}
-                              </small>
                             </label>
                             <span>
                               {multiAgentPersonas.length > 0
                                 ? `每轮：${multiAgentPersonas
                                     .map((persona, index) => `${index + 1}. ${persona.name}`)
                                     .join(" → ")}`
-                                : "按下方 Agent 的点击顺序排列"}
+                                : "未选择 Agent"}
                             </span>
                             <small
                               className={multiAgentPersonas.length >= 2 ? "ready" : "attention"}
                             >
                               {multiAgentPersonas.length >= 2
                                 ? `已选择 ${multiAgentPersonas.length} 个 Agent`
-                                : "至少选择 2 个 Agent 才能发送"}
+                                : "未选择足够的 Agent"}
                             </small>
                             </div>
                           ) : (
@@ -40083,17 +39567,6 @@ export function App() {
                                       .join("、")
                                   : "未选择"}
                               </span>
-                              <small
-                                className={
-                                  multiAgentPrimaryPersona && multiAgentSubPersonas.length > 0
-                                    ? "ready"
-                                    : "attention"
-                                }
-                              >
-                                {multiAgentPrimaryPersona && multiAgentSubPersonas.length > 0
-                                  ? "主 Agent 将按人格能力分配、验收并推进子任务"
-                                  : "请选择 1 个主 Agent 和至少 1 个子 Agent"}
-                              </small>
                             </div>
                           )}
                           {chatMode === "multi" && personas.map((persona) => {
@@ -40678,7 +40151,6 @@ export function App() {
         <header className="topbar studio-topbar">
           <div className="studio-heading">
             <div>
-              <div className="eyebrow">人格工作室</div>
               <h1>{activePersona.name}</h1>
             </div>
             <span className="studio-save-status">
@@ -41087,26 +40559,6 @@ export function App() {
               <pre className="prompt-preview">{prompt}</pre>
             </section>
 
-            <section className="inspector-panel inspector-api-panel">
-              <div className="panel-heading">
-                <Settings2 size={18} />
-                <h2>扩展接口</h2>
-              </div>
-              <div className="api-list">
-                <div>
-                  <SlidersHorizontal size={16} />
-                  <span>influence: 类型级别 HIGH / MEDIUM / LOW</span>
-                </div>
-                <div>
-                  <Bot size={16} />
-                  <span>modelProfile: 可接 OpenAI 兼容接口或私有模型</span>
-                </div>
-                <div>
-                  <Database size={16} />
-                  <span>entryTypes: 每个类型拥有自己的条目列表</span>
-                </div>
-              </div>
-            </section>
           </aside>
         </div>
       </section>

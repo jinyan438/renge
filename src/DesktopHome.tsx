@@ -80,8 +80,6 @@ type DesktopHomeProps = {
 type ProjectSpec = {
   id: ProjectId;
   title: string;
-  kicker: string;
-  description: string;
   actionLabel: string;
   anchorX: number;
   anchorY: number;
@@ -954,13 +952,6 @@ const panelHeadingStyle: CSSProperties = {
   lineHeight: 1.15,
 };
 
-const panelCopyStyle: CSSProperties = {
-  margin: 0,
-  color: "#68686d",
-  fontSize: 14,
-  lineHeight: 1.7,
-};
-
 function PrimaryWindowButton({ children, onClick }: { children: ReactNode; onClick: () => void }) {
   return (
     <button
@@ -1030,8 +1021,6 @@ export const DesktopHome = memo(function DesktopHome({
       {
         id: "chat",
         title: "Agent Chat",
-        kicker: "CONVERSATION",
-        description: "使用当前模型直接对话，或带着人格与角色设定进入一段新的会话。",
         actionLabel: "开始对话",
         anchorX: 42.75,
         anchorY: 48.5,
@@ -1042,8 +1031,6 @@ export const DesktopHome = memo(function DesktopHome({
       {
         id: "studio",
         title: "人格工作室",
-        kicker: "PERSONA STUDIO",
-        description: "编辑人格档案、长期记忆、行为边界与结构化条目，让智能体保持一致。",
         actionLabel: "打开工作室",
         anchorX: 26,
         anchorY: 29.5,
@@ -1054,8 +1041,6 @@ export const DesktopHome = memo(function DesktopHome({
       {
         id: "characters",
         title: "角色卡管理",
-        kicker: "CHARACTER LIBRARY",
-        description: "导入、编辑、翻译与导出 SillyTavern PNG / JSON 角色卡。",
         actionLabel: "打开管理器",
         anchorX: 23.33,
         anchorY: 60.88,
@@ -1066,8 +1051,6 @@ export const DesktopHome = memo(function DesktopHome({
       {
         id: "extensions",
         title: "扩展中心",
-        kicker: "EXTENSIONS",
-        description: "安装和运行酒馆扩展兼容层，为会话增加模板、变量与提示词能力。",
         actionLabel: "管理扩展",
         anchorX: 68,
         anchorY: 62.13,
@@ -1078,8 +1061,6 @@ export const DesktopHome = memo(function DesktopHome({
       {
         id: "settings",
         title: "系统设置",
-        kicker: "PREFERENCES",
-        description: "管理模型服务、提示词、预设、世界书、正则与设备能力。",
         actionLabel: "打开设置",
         anchorX: 66.08,
         anchorY: 19.63,
@@ -1090,8 +1071,6 @@ export const DesktopHome = memo(function DesktopHome({
       {
         id: "recent",
         title: "最近会话",
-        kicker: "RECENT NOTES",
-        description: "继续处理最近的对话与工作区上下文，快速回到上一次离开的地方。",
         actionLabel: "查看全部会话",
         anchorX: 73.92,
         anchorY: 40.75,
@@ -1202,18 +1181,6 @@ export const DesktopHome = memo(function DesktopHome({
           <div style={{ fontSize: compact ? 15 : 18, fontWeight: 600, letterSpacing: "-0.05em" }}>
             Renge Agent Lab
           </div>
-          <div
-            style={{
-              marginTop: 4,
-              color: "rgba(255,255,255,0.72)",
-              fontSize: compact ? 10 : 11,
-              fontWeight: 500,
-              letterSpacing: "0.12em",
-              textTransform: "uppercase",
-            }}
-          >
-            Persona Intelligence Workspace
-          </div>
         </div>
         <div
           style={{
@@ -1258,25 +1225,6 @@ export const DesktopHome = memo(function DesktopHome({
             reducedMotion={reducedMotion}
           />
         ))}
-
-      {!compact && (
-        <div
-          style={{
-            position: "absolute",
-            bottom: 28,
-            left: 32,
-            zIndex: 3,
-            color: "rgba(255,255,255,0.58)",
-            fontSize: 10,
-            fontWeight: 500,
-            letterSpacing: "0.08em",
-            pointerEvents: "none",
-            textTransform: "uppercase",
-          }}
-        >
-          Drag to arrange · Click to open
-        </div>
-      )}
 
       <nav
         aria-label="快捷启动栏"
@@ -1377,25 +1325,7 @@ export const DesktopHome = memo(function DesktopHome({
               }}
             />
             <div style={{ minWidth: 0 }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 7,
-                  marginBottom: 7,
-                  color: "rgb(0,102,221)",
-                  fontSize: 10,
-                  fontWeight: 600,
-                  letterSpacing: "0.12em",
-                }}
-              >
-                {activeProject.icon}
-                {activeProject.kicker}
-              </div>
               <h2 style={{ ...panelHeadingStyle, fontSize: compact ? 20 : 24 }}>{activeProject.title}</h2>
-              <p style={{ ...panelCopyStyle, marginTop: 9, fontSize: compact ? 12 : 14 }}>
-                {activeProject.description}
-              </p>
             </div>
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
@@ -1434,10 +1364,6 @@ export const DesktopHome = memo(function DesktopHome({
           onActivate={onOverlayActivate}
           onClose={closeOverlay}
         >
-          <div>
-            <h2 style={panelHeadingStyle}>继续上一次对话</h2>
-            <p style={{ ...panelCopyStyle, marginTop: 7 }}>选择一个会话，立即回到对应的工作区。</p>
-          </div>
           <div style={{ display: "grid", gap: 8 }}>
             {recentSessions.length > 0 ? (
               recentSessions.map((session) => (
@@ -1532,7 +1458,7 @@ export const DesktopHome = memo(function DesktopHome({
                   fontSize: 13,
                 }}
               >
-                还没有会话，去开启一段新对话吧。
+                暂无会话
               </div>
             )}
           </div>
@@ -1577,9 +1503,6 @@ export const DesktopHome = memo(function DesktopHome({
             </span>
             <div>
               <h2 style={panelHeadingStyle}>Renge Agent Lab</h2>
-              <p style={{ ...panelCopyStyle, marginTop: 7 }}>
-                为人格、角色与智能体对话打造的一体化创作工作台。
-              </p>
             </div>
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>

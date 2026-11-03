@@ -128,7 +128,7 @@ try {
     }
   });
   await page.getByRole("button", { name: "展开右侧栏", exact: true }).click();
-  await page.getByRole("button", { name: /手机.*可爱手机/ }).click();
+  await page.getByRole("button", { name: "手机", exact: true }).click();
   await page.locator(".pocket-panel").getByRole("button", { name: "打开微信", exact: true }).click();
   await page.locator(".pocket-panel").getByText("Old phone contact", { exact: true }).waitFor();
   const input = page.getByPlaceholder("输入消息，可粘贴图片");

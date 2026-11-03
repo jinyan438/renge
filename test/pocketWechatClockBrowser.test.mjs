@@ -41,7 +41,7 @@ try {
   const read = () => page.evaluate(key => JSON.parse(localStorage.getItem(key)), key);
   async function showPhone() {
     const expand = page.getByRole("button", { name: "展开右侧栏", exact: true }); if (await expand.isVisible()) await expand.click();
-    await page.getByRole("button", { name: /手机.*可爱手机/ }).click();
+    await page.getByRole("button", { name: "手机", exact: true }).click();
     await phone.getByRole("button", { name: "打开微信", exact: true }).waitFor();
   }
   async function openOwnChat() { await phone.getByRole("button", { name: "打开微信", exact: true }).click(); await phone.locator(".pocket-contact-row").filter({ hasText: "奶糖" }).click(); }

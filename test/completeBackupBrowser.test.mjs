@@ -50,7 +50,13 @@ try {
       throw new Error(await page.locator(".data-backup-status.error").textContent());
     }),
   ]);
-  await page.getByRole("button", { name: "导出完整备份", exact: true }).click();
+  await Promise.all([
+    page.waitForEvent("dialog").then(async dialog => {
+      assert.match(dialog.message(), /API Key.*不会加密/);
+      await dialog.accept();
+    }),
+    page.getByRole("button", { name: "导出完整备份", exact: true }).click(),
+  ]);
   const download = await exported;
   const chunks = [];
   for await (const chunk of await download.createReadStream()) chunks.push(chunk);

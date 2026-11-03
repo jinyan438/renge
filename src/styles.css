@@ -11729,8 +11729,7 @@ input[type="range"] {
 
 .extension-card-body {
   display: grid;
-  grid-template-columns: minmax(210px, 0.48fr) minmax(0, 1.52fr);
-  min-height: 360px;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .extension-generic-body {
@@ -11839,7 +11838,7 @@ input[type="range"] {
 .extension-setting-row {
   display: flex;
   min-width: 0;
-  min-height: 74px;
+  min-height: 48px;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
