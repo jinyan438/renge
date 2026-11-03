@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import vm from "node:vm";
 import test from "node:test";
 import React from "react";
@@ -15,6 +16,25 @@ import {
 } from "../src/chatBubbleStatusUtils.ts";
 import { createChatStreamUpdateBatcher } from "../src/chatPerformanceUtils.ts";
 import { createPiStreamingTimeline } from "../src/piStreamingTimeline.ts";
+import { createLiveToolVisualizationStore } from "../src/liveToolVisualizationStore.ts";
+
+function loadTsxModule(fileName) {
+  const source = readFileSync(new URL(`../src/${fileName}`, import.meta.url), "utf8");
+  const { outputText } = ts.transpileModule(source, {
+    fileName,
+    compilerOptions: {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.CommonJS,
+      jsx: ts.JsxEmit.ReactJSX,
+    },
+  });
+  const exports = {};
+  vm.runInNewContext(outputText, { exports, require: createRequire(import.meta.url) });
+  return exports;
+}
+
+const { ChatDeferredDetails } = loadTsxModule("ChatDeferredDetails.tsx");
+const { ChatLiveToolVisualization } = loadTsxModule("ChatLiveToolVisualization.tsx");
 
 const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
 function loadAppCode(start, end, expression, globals = {}) {
@@ -155,7 +175,7 @@ test("each grouped tool bubble renders its own status even when collapsed", () =
     "  const renderChatReasoning =",
     "renderToolOnlyGroup",
     {
-      React, chatBubbleStatusLabels, getToolBubbleStatus, chatGenerationState: "running",
+      React, ChatDeferredDetails, chatBubbleStatusLabels, getToolBubbleStatus, chatGenerationState: "running",
       formatProcessingDuration: () => "1s",
       renderPiToolVisualization: () => null,
       renderChatAttachments: () => null,
@@ -189,7 +209,7 @@ test("consecutive tool runs wrap into one outer fold that stays open while it is
     "  const renderChatReasoning =",
     "renderToolOnlyGroup",
     {
-      React, chatBubbleStatusLabels, getToolBubbleStatus, chatGenerationState: "running",
+      React, ChatDeferredDetails, chatBubbleStatusLabels, getToolBubbleStatus, chatGenerationState: "running",
       formatProcessingDuration: () => "1s",
       renderPiToolVisualization: () => null,
       renderChatAttachments: () => null,
@@ -232,14 +252,15 @@ test("consecutive tool runs wrap into one outer fold that stays open while it is
 });
 
 test("consecutive runs inside the outer fold keep each newest run expanded until output moves on", () => {
+  let previewRenders = 0;
   const renderGroups = loadAppCode(
     "  const renderChatBubbleDot =",
     "  const renderChatReasoning =",
     "renderToolOnlyGroup",
     {
-      React, chatBubbleStatusLabels, getToolBubbleStatus, chatGenerationState: "running",
+      React, ChatDeferredDetails, chatBubbleStatusLabels, getToolBubbleStatus, chatGenerationState: "running",
       formatProcessingDuration: () => "1s",
-      renderPiToolVisualization: () => null,
+      renderPiToolVisualization: () => { previewRenders++; return null; },
       renderChatAttachments: () => null,
       ListTree: () => null,
       X: () => null, Wrench: () => null, FileCode2: () => null, ChevronDown: () => null,
@@ -260,17 +281,20 @@ test("consecutive runs inside the outer fold keep each newest run expanded until
     toolGroups: [makeGroup("done"), makeGroup("done"), makeGroup("done")], completed: true,
   }, "tools", { isNewestVisibleItem: true }));
   assert.deepEqual(runStates(live), [false, false, true]);
+  assert.equal(previewRenders, 1, "only the expanded run renders its tool previews");
 
-  // Once the outer fold is superseded, every inner run collapses with it.
+  // A superseded outer fold defers every inner run and tool preview.
   const superseded = renderToStaticMarkup(renderGroups({
     toolGroups: [makeGroup("done"), makeGroup("done"), makeGroup("done")], completed: true,
   }, "tools", { isNewestVisibleItem: false }));
-  assert.deepEqual(runStates(superseded), [false, false, false]);
+  assert.deepEqual(runStates(superseded), []);
+  assert.equal(previewRenders, 1, "a closed outer fold does not render hidden previews");
 
   const single = renderToStaticMarkup(renderGroups({
     toolGroups: [makeGroup("done")], completed: true,
   }, "tools", { isNewestVisibleItem: true }));
   assert.deepEqual(runStates(single), [true]);
+  assert.equal(previewRenders, 2);
 });
 
 test("the newest visible chat item decides which tool fold stays expanded", () => {
@@ -301,12 +325,19 @@ test("the newest visible chat item decides which tool fold stays expanded", () =
 });
 
 test("completed and failed tools auto-collapse, including file mutations", () => {
+  const store = createLiveToolVisualizationStore();
   const renderTool = loadAppCode(
-    "  const renderPiToolVisualization =",
+    "  const renderPiToolVisualizationBody =",
     "  const renderToolProgressBlock =",
     "renderPiToolVisualization",
     {
       React,
+      ChatDeferredDetails,
+      ChatLiveToolVisualization,
+      useCallback: (callback) => callback,
+      copyChatCodeBlock: () => {},
+      liveToolVisualizations: store,
+      activeChatSessionId: "test-session",
       toolVisualizationResultText: () => "",
       toolVisualizationDiff: () => "",
       isObjectRecord: () => false,
@@ -316,14 +347,26 @@ test("completed and failed tools auto-collapse, including file mutations", () =>
       Wrench: () => null,
       CircleCheck: () => null,
       X: () => null,
-      LoaderCircle: () => null,
+      ChatStatusSpinner: () => null,
       ChevronDown: () => null,
     },
   );
 
-  assert.equal(renderTool({ name: "write", status: "running" }, "running").props.open, true);
-  assert.equal(renderTool({ name: "write", status: "done" }, "done").props.open, false);
-  assert.equal(renderTool({ name: "write", status: "error" }, "error").props.open, false);
+  const assertExpanded = (visualization, expanded) => {
+    const markup = renderToStaticMarkup(renderTool(visualization, visualization.status));
+    const details = markup.match(/<details\b[^>]*>/g) ?? [];
+    assert.equal(details.length, 1);
+    assert.equal(/\bopen=""/.test(details[0]), expanded, `${visualization.name}: ${visualization.status}`);
+  };
+  for (const name of ["read", "write", "edit"]) {
+    for (const status of ["running", "done", "error"]) {
+      assertExpanded({ name, status }, status === "running");
+    }
+  }
+
+  const running = { toolCallId: "live-write", name: "write", status: "running" };
+  store.update("test-session", running.toolCallId, { ...running, status: "done" });
+  assertExpanded(running, false);
 });
 
 test("consecutive assistant tool messages group into one completed tool-only run", () => {
