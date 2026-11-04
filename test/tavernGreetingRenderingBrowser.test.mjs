@@ -174,7 +174,6 @@ try {
   await page.goto(server.url);
   await page.waitForFunction(() => window.__greetingRuntimeReady, null, { timeout: 90_000 });
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   await page.frameLocator(".chat-html-frame").getByRole("button", { name: "进入清晨开局" }).click();
   const message = page.locator('#chat .mes[mesid="0"]');
   await page.locator(".chat-html-frame").waitFor({ state: "detached" });
@@ -354,7 +353,6 @@ try {
   await page.reload();
   await page.waitForFunction(() => window.__greetingRuntimeReady, null, { timeout: 90_000 });
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   await message.getByText("夕阳照亮庭院。", { exact: true }).waitFor();
   await ordinary.getByText("修改后第二段。", { exact: true }).waitFor();
   assert.equal(await markerMessage.locator("[data-tavern-placeholder]").count(), 4,

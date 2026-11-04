@@ -84,7 +84,6 @@ try {
   });
   await page.goto(server.url);
   await page.getByRole("button",{name:"打开Agent Chat",exact:true}).click();
-  await page.getByRole("button",{name:"开始对话",exact:true}).last().click();
   await page.locator(".chat-session-item").filter({hasText:"Runner one"}).click();
   await page.waitForFunction(() => window.__fixtureReady && document.querySelector('[data-runner-opening] iframe'));
   const opening = page.frameLocator('iframe[title="Runner opening fixture"]');
@@ -179,7 +178,6 @@ try {
   // Runtime startup may precede opening the chat after a cold reload.
   await page.waitForTimeout(1500);
   await page.getByRole("button",{name:"打开Agent Chat",exact:true}).click();
-  await page.getByRole("button",{name:"开始对话",exact:true}).last().click();
   await page.waitForFunction(() => window.__fixtureReady);
   assert.equal(await page.evaluate(async () => (await TavernHelper.getWorldbook('Runner World')).find(entry=>entry.extra?.profile_source).extra.nested.name), "Alex");
   await page.locator(".chat-session-item").filter({hasText:"Runner two"}).click();

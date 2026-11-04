@@ -1,12 +1,7 @@
 import {
   ArrowRight,
-  Bot,
-  BookOpen,
   Boxes,
   MessageSquare,
-  Puzzle,
-  Settings2,
-  Sparkles,
 } from "lucide-react";
 import {
   type CSSProperties,
@@ -15,7 +10,6 @@ import {
   memo,
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -58,7 +52,7 @@ export type HomeRecentSession = {
 };
 
 type ProjectId = HomeDestination | "recent";
-type OverlayId = ProjectId | "about";
+type OverlayId = "recent" | "about";
 
 type DesktopHomeProps = {
   activePersonaName: string;
@@ -66,8 +60,6 @@ type DesktopHomeProps = {
   chatModelReady: boolean;
   personaCount: number;
   characterCount: number;
-  extensionCount: number;
-  enabledExtensionCount: number;
   sessionCount: number;
   recentSessions: HomeRecentSession[];
   overlayZIndex: number;
@@ -80,12 +72,9 @@ type DesktopHomeProps = {
 type ProjectSpec = {
   id: ProjectId;
   title: string;
-  actionLabel: string;
   anchorX: number;
   anchorY: number;
   thumbnail: string;
-  icon: ReactNode;
-  stats: string[];
 };
 
 type DragOffset = { x: number; y: number };
@@ -986,8 +975,6 @@ export const DesktopHome = memo(function DesktopHome({
   chatModelReady,
   personaCount,
   characterCount,
-  extensionCount,
-  enabledExtensionCount,
   sessionCount,
   recentSessions,
   overlayZIndex,
@@ -1016,83 +1003,50 @@ export const DesktopHome = memo(function DesktopHome({
     [onOverlayActivate],
   );
 
-  const projects = useMemo<ProjectSpec[]>(
-    () => [
-      {
-        id: "chat",
-        title: "Agent Chat",
-        actionLabel: "开始对话",
-        anchorX: 42.75,
-        anchorY: 48.5,
-        thumbnail: PROJECT_THUMBNAILS[0],
-        icon: <MessageSquare size={20} />,
-        stats: [chatModelLabel, `${sessionCount} 个会话`],
-      },
-      {
-        id: "studio",
-        title: "人格工作室",
-        actionLabel: "打开工作室",
-        anchorX: 26,
-        anchorY: 29.5,
-        thumbnail: PROJECT_THUMBNAILS[1],
-        icon: <Bot size={20} />,
-        stats: [`${personaCount} 个人格`, `当前：${activePersonaName}`],
-      },
-      {
-        id: "characters",
-        title: "角色卡管理",
-        actionLabel: "打开管理器",
-        anchorX: 23.33,
-        anchorY: 60.88,
-        thumbnail: PROJECT_THUMBNAILS[2],
-        icon: <BookOpen size={20} />,
-        stats: [`${characterCount} 张角色卡`, "PNG / JSON"],
-      },
-      {
-        id: "extensions",
-        title: "扩展中心",
-        actionLabel: "管理扩展",
-        anchorX: 68,
-        anchorY: 62.13,
-        thumbnail: PROJECT_THUMBNAILS[3],
-        icon: <Puzzle size={20} />,
-        stats: [`${extensionCount} 个已安装`, `${enabledExtensionCount} 个已启用`],
-      },
-      {
-        id: "settings",
-        title: "系统设置",
-        actionLabel: "打开设置",
-        anchorX: 66.08,
-        anchorY: 19.63,
-        thumbnail: PROJECT_THUMBNAILS[4],
-        icon: <Settings2 size={20} />,
-        stats: [chatModelReady ? "模型已就绪" : "模型待配置", chatModelLabel],
-      },
-      {
-        id: "recent",
-        title: "最近会话",
-        actionLabel: "查看全部会话",
-        anchorX: 73.92,
-        anchorY: 40.75,
-        thumbnail: PROJECT_THUMBNAILS[5],
-        icon: <Sparkles size={20} />,
-        stats: [`${sessionCount} 个会话`, recentSessions[0]?.title ?? "暂无会话"],
-      },
-    ],
-    [
-      activePersonaName,
-      characterCount,
-      chatModelLabel,
-      chatModelReady,
-      enabledExtensionCount,
-      extensionCount,
-      personaCount,
-      recentSessions,
-      sessionCount,
-    ],
-  );
-
-  const activeProject = projects.find((project) => project.id === overlay);
+  const projects: ProjectSpec[] = [
+    {
+      id: "chat",
+      title: "Agent Chat",
+      anchorX: 42.75,
+      anchorY: 48.5,
+      thumbnail: PROJECT_THUMBNAILS[0],
+    },
+    {
+      id: "studio",
+      title: "人格工作室",
+      anchorX: 26,
+      anchorY: 29.5,
+      thumbnail: PROJECT_THUMBNAILS[1],
+    },
+    {
+      id: "characters",
+      title: "角色卡管理",
+      anchorX: 23.33,
+      anchorY: 60.88,
+      thumbnail: PROJECT_THUMBNAILS[2],
+    },
+    {
+      id: "extensions",
+      title: "扩展中心",
+      anchorX: 68,
+      anchorY: 62.13,
+      thumbnail: PROJECT_THUMBNAILS[3],
+    },
+    {
+      id: "settings",
+      title: "系统设置",
+      anchorX: 66.08,
+      anchorY: 19.63,
+      thumbnail: PROJECT_THUMBNAILS[4],
+    },
+    {
+      id: "recent",
+      title: "最近会话",
+      anchorX: 73.92,
+      anchorY: 40.75,
+      thumbnail: PROJECT_THUMBNAILS[5],
+    },
+  ];
   const compactPositions = [
     { x: 30, y: 27 },
     { x: 70, y: 25 },
@@ -1221,7 +1175,7 @@ export const DesktopHome = memo(function DesktopHome({
             onPositionChange={(position) =>
               updateProjectPosition(project.id, positionLayout, position)
             }
-            onOpen={() => openOverlay(project.id)}
+            onOpen={() => project.id === "recent" ? openOverlay("recent") : goTo(project.id)}
             reducedMotion={reducedMotion}
           />
         ))}
@@ -1291,69 +1245,6 @@ export const DesktopHome = memo(function DesktopHome({
           onClick={() => goTo("settings")}
         />
       </nav>
-
-      {activeProject && activeProject.id !== "recent" && (
-        <WindowShell
-          key={activeProject.id}
-          id={activeProject.id}
-          title={activeProject.title}
-          zIndex={overlayZIndex}
-          onActivate={onOverlayActivate}
-          onClose={closeOverlay}
-        >
-          <div
-            style={{
-              display: "grid",
-              minHeight: compact ? 112 : 148,
-              gridTemplateColumns: compact ? "80px minmax(0,1fr)" : "118px minmax(0,1fr)",
-              gap: compact ? 14 : 20,
-              alignItems: "center",
-            }}
-          >
-            <img
-              src={activeProject.thumbnail}
-              alt=""
-              width={118}
-              height={118}
-              decoding="async"
-              style={{
-                width: "100%",
-                aspectRatio: "1",
-                borderRadius: 14,
-                objectFit: "cover",
-                boxShadow: "0 10px 28px rgba(25,25,28,.16)",
-              }}
-            />
-            <div style={{ minWidth: 0 }}>
-              <h2 style={{ ...panelHeadingStyle, fontSize: compact ? 20 : 24 }}>{activeProject.title}</h2>
-            </div>
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {activeProject.stats.map((stat) => (
-              <span
-                key={stat}
-                style={{
-                  maxWidth: "100%",
-                  padding: "7px 10px",
-                  overflow: "hidden",
-                  border: "1px solid #e8e8ec",
-                  borderRadius: 9,
-                  background: "#f7f7f9",
-                  color: "#636369",
-                  fontSize: 11,
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {stat}
-              </span>
-            ))}
-          </div>
-          <PrimaryWindowButton onClick={() => goTo(activeProject.id as HomeDestination)}>
-            {activeProject.actionLabel}
-          </PrimaryWindowButton>
-        </WindowShell>
-      )}
 
       {overlay === "recent" && (
         <WindowShell

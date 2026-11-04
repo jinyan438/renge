@@ -42,7 +42,6 @@ try {
   page.setDefaultTimeout(large ? 120_000 : 20_000);
   await page.goto(controller.url);
   await page.getByRole("button", { name: "打开系统设置", exact: true }).click();
-  await page.getByRole("button", { name: "打开设置", exact: true }).click();
   await page.getByRole("button", { name: "数据", exact: true }).click();
   const exported = Promise.race([
     page.waitForEvent("download"),

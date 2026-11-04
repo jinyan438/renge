@@ -52,7 +52,7 @@ try {
     await page.getByRole("button", { name: "手机", exact: true }).click(); await phone.getByRole("button", { name: "打开日历", exact: true }).waitFor();
   }
   async function enterApp() {
-    await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click(); await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
+    await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
     const maximize = page.getByRole("button", { name: "最大化窗口", exact: true }); if (await maximize.isVisible()) await maximize.click();
   }
   async function jump(date, time) {

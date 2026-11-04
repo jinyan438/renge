@@ -56,7 +56,6 @@ try {
   const errors=[];page.on('pageerror',error=>{errors.push(error.message);console.error('Browser error:',error.message);});
   const open=async()=>{
     await page.getByRole('button',{name:'打开Agent Chat',exact:true}).click();
-    await page.getByRole('button',{name:'开始对话',exact:true}).last().click();
     await page.waitForFunction(()=>window.__regexFixtureReady);
   };
   await page.goto(server.url);await open();

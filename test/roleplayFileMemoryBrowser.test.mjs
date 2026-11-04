@@ -111,7 +111,6 @@ try {
   });
   async function enter() {
     await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-    await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   }
   const selectSession = id => page.locator(".chat-session-item").filter({ hasText: id === "C" ? "普通会话C" : `会话${id}` }).locator("button").first().click();
   async function send(text) {
@@ -122,7 +121,6 @@ try {
     const chat = page.getByRole("region", { name: "Renge 对话工作区", exact: true });
     if (await chat.isVisible()) await chat.getByRole("button", { name: "最小化窗口", exact: true }).click();
     await page.getByRole("button", { name: "打开系统设置", exact: true }).click();
-    await page.getByRole("button", { name: "打开设置", exact: true }).click();
     await page.locator(".settings-nav").getByRole("button", { name: "LLM", exact: true }).click();
   }
   await page.goto(server.url); await enter(); await selectSession("A");

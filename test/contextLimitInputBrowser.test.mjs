@@ -33,7 +33,6 @@ try {
   await page.route("**/api/pi/chat", route => route.abort());
   async function openSettings() {
     await page.getByRole("button", { name: "打开系统设置", exact: true }).click();
-    await page.getByRole("button", { name: "打开设置", exact: true }).click();
     await page.locator(".settings-nav").getByRole("button", { name: "LLM", exact: true }).click();
   }
   const inputs = page.getByRole("textbox", { name: "上下文上限（K Token）", exact: true });

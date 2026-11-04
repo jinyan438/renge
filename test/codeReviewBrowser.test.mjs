@@ -59,7 +59,6 @@ try {
   });
   async function openReview() {
     await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-    await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
     await page.locator(".chat-session-item").filter({ hasText: "审阅测试会话" }).locator("button").first().click();
     const toggle = page.getByRole("button", { name: "展开右侧栏", exact: true });
     if (await toggle.count()) await toggle.click();

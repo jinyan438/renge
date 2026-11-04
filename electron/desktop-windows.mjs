@@ -4,11 +4,6 @@ const windowTitles = {
   extensions: "扩展管理器",
   settings: "系统设置",
   chat: "Agent Chat",
-  "home-studio": "人格工作室",
-  "home-characters": "角色卡",
-  "home-extensions": "扩展管理器",
-  "home-settings": "系统设置",
-  "home-chat": "Agent Chat",
   "home-recent": "最近会话",
   "home-about": "关于 Renge",
 };

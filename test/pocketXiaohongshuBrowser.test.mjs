@@ -77,7 +77,6 @@ try {
   const phone = page.locator(".pocket-panel"), red = phone.locator(".xhs-app");
   async function openPhone() {
     await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-    await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
     const maximize = page.getByRole("button", { name: "最大化窗口", exact: true }); if (await maximize.isVisible()) await maximize.click();
     await page.getByRole("button", { name: "展开右侧栏", exact: true }).click();
     await page.getByRole("button", { name: "手机", exact: true }).click();

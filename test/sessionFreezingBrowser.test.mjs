@@ -47,7 +47,6 @@ try {
   page.on("worker", (worker) => cacheHistoryWrites.push(worker.url()));
   await page.goto(server.url);
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   const select = (title) => page.locator(".chat-session-item").filter({ hasText: title }).locator("button").first().click();
   await select("超长会话");
   await page.getByText("历史末尾", { exact: true }).waitFor();
@@ -90,7 +89,6 @@ try {
   assert.ok(cacheHistoryWrites.some((url) => url.includes("jsonSerialization.worker")), "save serialization runs in a temporary worker");
   await page.reload();
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   await page.getByText("历史末尾", { exact: true }).waitFor();
   const restoredRuntime = await (await page.locator('iframe[title="酒馆脚本运行环境"]').elementHandle()).contentFrame();
   await restoredRuntime.waitForFunction(() => typeof getVariables === "function");

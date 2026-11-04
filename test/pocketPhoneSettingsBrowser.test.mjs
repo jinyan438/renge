@@ -48,7 +48,7 @@ try {
   const readPrompts = () => page.evaluate(key => JSON.parse(localStorage.getItem(key)).prompts, POCKET_PROMPTS_STORAGE_KEY);
   const readOther = () => page.evaluate(key => JSON.parse(localStorage.getItem(key)), otherKey);
   async function enter() {
-    await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click(); await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
+    await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
     const maximize = page.getByRole("button", { name: "最大化窗口", exact: true }); if (await maximize.isVisible()) await maximize.click();
     await page.getByRole("button", { name: "展开右侧栏", exact: true }).click(); await page.getByRole("button", { name: "手机", exact: true }).click();
   }

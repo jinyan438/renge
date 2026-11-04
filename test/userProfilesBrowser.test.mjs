@@ -39,7 +39,6 @@ try {
     const chat = target.getByRole("region", { name: "Renge 对话工作区", exact: true });
     if (await chat.isVisible()) await chat.getByRole("button", { name: "最小化窗口", exact: true }).click();
     await target.getByRole("button", { name: "打开系统设置", exact: true }).click();
-    await target.getByRole("button", { name: "打开设置", exact: true }).click();
     await target.locator(".settings-nav").getByRole("button", { name: "用户资料", exact: true }).click();
     await target.locator(".user-profile-settings").waitFor();
   }
@@ -92,7 +91,6 @@ try {
   const fresh = await browser.newPage();
   await fresh.goto(server.url);
   await fresh.getByRole("button", { name: "打开系统设置", exact: true }).click();
-  await fresh.getByRole("button", { name: "打开设置", exact: true }).click();
   await fresh.locator(".settings-nav").getByRole("button", { name: "用户资料", exact: true }).click();
   assert.equal(await fresh.getByLabel("当前使用的用户", { exact: true }).inputValue(), secondId);
   assert.equal(await fresh.getByLabel("用户昵称", { exact: true }).inputValue(), "小林");
@@ -101,7 +99,6 @@ try {
   // Actual request construction and sender display use only the selected profile.
   await page.getByLabel("关闭设置窗口", { exact: true }).click();
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   assert.equal(await page.locator(".composer-sender-summary").getAttribute("title"), "发送身份：小林");
   await page.getByPlaceholder("输入消息，可粘贴图片").fill("请参考当前资料");
   await page.getByRole("button", { name: "发送", exact: true }).click();

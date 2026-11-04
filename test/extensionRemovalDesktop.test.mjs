@@ -22,13 +22,8 @@ try {
   home.setDefaultTimeout(15_000);
   async function openManager() {
     await home.getByRole("button", { name: "开始对话", exact: true }).waitFor();
-    const summaryWindow = app.waitForEvent("window");
-    await home.getByRole("button", { name: "打开扩展中心", exact: true }).click();
-    const summary = await summaryWindow;
     const managerWindow = app.waitForEvent("window");
-    await summary.getByRole("button", { name: "管理扩展", exact: true }).click().catch((error) => {
-      if (!summary.isClosed()) throw error;
-    });
+    await home.getByRole("button", { name: "打开扩展中心", exact: true }).click();
     manager = await managerWindow;
     manager.setDefaultTimeout(15_000);
     await manager.locator(".extension-manager-shell").waitFor();

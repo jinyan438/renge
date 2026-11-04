@@ -57,7 +57,6 @@ try {
     page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     await page.goto(server.url);
     await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-    await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   }
   page.setDefaultTimeout(15_000);
   page.on("pageerror", error => errors.push(error.message));

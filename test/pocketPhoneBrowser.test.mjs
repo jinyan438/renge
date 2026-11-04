@@ -97,7 +97,6 @@ try {
   const readContact = name => page.evaluate(name => JSON.parse(localStorage.getItem("renge_pocket_phone_v1:phone-one")).contacts.find(contact => contact.name === name), name);
   async function openPhone() {
     await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-    await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
     const maximize = page.getByRole("button", { name: "最大化窗口", exact: true });
     if (await maximize.isVisible()) await maximize.click();
     await page.getByRole("button", { name: "展开右侧栏", exact: true }).click();

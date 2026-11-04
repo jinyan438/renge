@@ -49,7 +49,7 @@ try {
   async function openMirror() { await phone.getByRole("button", { name: "打开ta的手机", exact: true }).click(); await phone.getByRole("button", { name: "查看奶糖的手机", exact: true }).click(); await phone.getByRole("button", { name: "打开微信", exact: true }).click(); await phone.locator(".pocket-contact-row").filter({ hasText: "小月" }).click(); }
   async function sendMain(text) { await page.getByPlaceholder("输入消息，可粘贴图片", { exact: true }).fill(text); await page.getByRole("button", { name: "发送", exact: true }).click(); await page.locator(".chat-message.assistant").filter({ hasText: mainReply }).last().waitFor(); }
 
-  await page.goto(server.url); await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click(); await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
+  await page.goto(server.url); await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
   const maximize = page.getByRole("button", { name: "最大化窗口", exact: true }); if (await maximize.isVisible()) await maximize.click();
   await showPhone(); assert.equal(await phone.locator(".pocket-status > span").first().innerText(), "20:00");
   await openOwnChat(); await queue("第一次发消息");
@@ -66,7 +66,7 @@ try {
   await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click(); await openMirror();
   assert.equal(await phone.locator(`[data-message-id="${secondId}"] .pocket-message.assistant`).count(), 1);
   assert.match(await phone.locator(".pocket-message-time").last().innerText(), /6\/7.*23:00/);
-  await page.reload(); await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click(); await page.getByRole("button", { name: "开始对话", exact: true }).last().click(); await showPhone();
+  await page.reload(); await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click(); await showPhone();
   assert.equal((await read()).wechatClock.storyRealTime, storyAnchor);
   assert.equal(await phone.locator(".pocket-status > span").first().innerText(), "23:00");
   await phone.getByRole("button", { name: "关闭手机模块", exact: true }).click(); await sendMain("继续剧情");

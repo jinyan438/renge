@@ -203,10 +203,6 @@ try {
   assert.equal(apiState.events.generationAfterCommands, "generation_after_commands");
 
   await page.evaluate(() => document.querySelector('[data-desktop-project-icon="chat"]')?.click());
-  const startChatButton = page.getByRole("dialog", { name: "Agent Chat" })
-    .getByRole("button", { name: "开始对话", exact: true });
-  await startChatButton.waitFor();
-  await startChatButton.evaluate(button => button.click());
   await page.locator("#chat").waitFor();
   assert.deepEqual(await page.evaluate(() => {
     const textarea = window.jQuery("#send_textarea").first();

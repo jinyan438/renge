@@ -104,7 +104,6 @@ try {
   await page.route("**/api/pi/chat", (route) => route.continue({ url: `http://127.0.0.1:${upstream.address().port}/chat` }));
   await page.goto(server.url);
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   await page.locator(".chat-session-item").filter({ hasText: "任务流式性能" }).click();
   const input = page.getByPlaceholder("输入消息，可粘贴图片");
   await input.fill("保持任务运行，验证 Token 刷新性能");

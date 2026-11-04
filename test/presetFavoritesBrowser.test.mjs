@@ -45,7 +45,6 @@ try {
   }
   async function openPresets() {
     await page.getByRole("button", { name: "打开系统设置", exact: true }).click();
-    await page.getByRole("button", { name: "打开设置", exact: true }).click();
     await page.locator(".settings-nav").getByRole("button", { name: "预设", exact: true }).click();
     await page.locator(".preset-editor").waitFor();
   }

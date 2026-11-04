@@ -50,7 +50,7 @@ try {
     server = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir: join(root, "data"), temporaryFilesRoot: filesRoot });
     await fetch(`${server.url}/api/app-data`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data }) });
     browser = await chromium.launch({ headless: true }); page = await browser.newPage({ viewport: { width: 1600, height: 1050 }, permissions: ["clipboard-read", "clipboard-write"] });
-    await page.goto(server.url); await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click(); await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
+    await page.goto(server.url); await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
   }
   page.setDefaultTimeout(20_000); page.on("pageerror", error => errors.push(error.message));
   await page.getByPlaceholder("输入消息，可粘贴图片").fill("交付 README.md 和 shim.cpp，附上用途说明");
@@ -93,7 +93,7 @@ try {
   await page.locator(".chat-workspace").screenshot({ path: `.runtime/chat-presented-files-context-${desktop ? "desktop" : "web"}.png` });
   if (!desktop) {
     await page.waitForFunction(async () => (await (await fetch("/api/app-data")).json()).data?.chatSessions?.some(session => session.messages.some(message => message.toolVisualization?.name === "chat_present_files" && message.toolVisualization.status === "done")));
-    await page.reload(); await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click(); await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
+    await page.reload(); await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
     await cards.getByText("README.md", { exact: true }).waitFor();
     await page.setViewportSize({ width: 390, height: 844 }); await cards.scrollIntoViewIfNeeded();
     assert.ok(await cards.evaluate(el => el.scrollWidth <= el.clientWidth + 1));

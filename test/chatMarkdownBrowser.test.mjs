@@ -48,7 +48,6 @@ try {
   page.on("pageerror", error => errors.push(error.message));
   await page.goto(server.url);
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   const proseMessage = page.locator(".chat-message.assistant").filter({ has: page.getByRole("heading", { name: "阅读测试", exact: true }) });
   const highlighted = page.locator(".chat-code-block").filter({ hasText: 'console.log(greeting("Renge"))' });
   await highlighted.locator(".hljs-keyword").first().waitFor();

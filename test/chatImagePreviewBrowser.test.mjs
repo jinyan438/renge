@@ -43,7 +43,6 @@ try {
   await page.route("https://fixture.invalid/generated.png", route => route.fulfill({ contentType: "image/svg+xml", body: image }));
   await page.goto(server.url);
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   const dialog = page.getByRole("dialog", { name: /^图片预览：/ });
   async function openPreview(name, scope = page) {
     const trigger = scope.getByRole("button", { name: `放大查看：${name}`, exact: true });

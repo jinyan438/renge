@@ -36,7 +36,6 @@ try {
   await page.route("**/api/pi/chat", (route) => route.continue({ url: `http://127.0.0.1:${fixture.address().port}/chat` }));
   await page.goto(server.url);
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   await page.locator(".chat-session-item").filter({ hasText: "命令输出回归" }).click();
 
   const pi = (event) => streams.at(-1).write(`data: ${JSON.stringify({ pi: event })}\n\n`);

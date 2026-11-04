@@ -39,7 +39,6 @@ try {
   await page.goto(server.url);
   await page.waitForFunction(() => window.__proseRuntimeReady);
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
 
   for (const [index, content] of fixtures.entries()) {
     await page.evaluate(content => window.TavernHelper.createChatMessages([{ role: "assistant", message: content }]), content);
@@ -84,7 +83,6 @@ try {
   await page.reload();
   await page.waitForFunction(() => window.__proseRuntimeReady);
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   assert.equal(await page.locator('#chat .mes[mesid="2"] .mes_text > p.chat-text-part').count(), 3,
     "saved conversations also regain paragraph layout when reopened");
   assert.deepEqual(errors, []);

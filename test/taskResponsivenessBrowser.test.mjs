@@ -120,7 +120,6 @@ try {
   } else {
     page = await context.newPage(); await page.goto(server.url);
     await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-    await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   }
   page.setDefaultTimeout(60_000);
   await page.locator(".chat-session-item").filter({ hasText: "任务响应验收" }).click();

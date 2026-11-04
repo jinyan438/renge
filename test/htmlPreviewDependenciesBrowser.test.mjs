@@ -92,7 +92,6 @@ try {
   await page.route('https://fonts.googleapis.com/**', route => { pendingFonts.push(route); });
   await page.goto(server.url);
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   await page.getByText("开场正文。", { exact: true }).waitFor();
   await page.locator('.chat-bubble-dot').first().click();
   for (let index = 0; index < documents.length; index++) {
@@ -141,7 +140,6 @@ try {
   await first.frameLocator("iframe").getByRole("heading", { name: "通用档案表单" }).waitFor();
   await page.reload();
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   await page.getByText(`已创建档案：旅人${documents.length - 1}`, { exact: true }).waitFor();
   assert.deepEqual(errors, []);
   console.log("PASS: regex openings, classic/module startup, packed Vue templates, nonblocking fonts, Zod 4 namespaces, full Lodash, literal tokens, icons, forms, variables, messages, mobile layout and reload without CDN access");

@@ -69,7 +69,6 @@ try {
   });
   await page.goto(server.url);
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   const input = page.getByPlaceholder("输入消息，可粘贴图片");
   const status = page.locator(".chat-composer .chat-status");
   const selectSession = (id) => page.locator(".chat-session-item").filter({ hasText: `会话${id}` }).locator("button").first().click();
@@ -216,7 +215,6 @@ try {
   assert.ok(savedPending?.pendingInputs?.some((queued) => queued.content === "刷新后仍需保留的消息"), `pending input must reach persistence before reload: ${JSON.stringify(savedPending)}`);
   await page.reload();
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   await page.getByLabel("待处理消息").getByText("刷新后仍需保留的消息", { exact: true }).waitFor();
   await page.getByRole("button", { name: "继续排队", exact: true }).waitFor();
   await page.getByRole("button", { name: "取消待处理消息", exact: true }).click();

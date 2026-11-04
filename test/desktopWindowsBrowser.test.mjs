@@ -47,7 +47,9 @@ try {
     const win = BrowserWindow.getAllWindows().find((item) => item.webContents.getTitle() === `Renge Agent Lab — ${target}`);
     return win && { bounds: win.getBounds(), maximized: win.isMaximized(), minimized: win.isMinimized(), visible: win.isVisible() };
   }, id);
-  const chat = await open("开始对话", "chat");
+  const chat = await open("打开Agent Chat", "chat");
+  assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 2,
+    "the desktop icon opens only the chat application, without a summary window");
   const input = chat.getByPlaceholder("输入消息，可粘贴图片");
   await input.fill("拖出主窗口后保留的草稿");
   assert.equal(await home.locator(".chat-shell").count(), 0, "module content lives outside the main document");
@@ -75,7 +77,7 @@ try {
   await chat.getByLabel("最小化窗口", { exact: true }).click();
   await home.waitForFunction(() => true);
   assert.equal((await nativeState("Agent Chat")).minimized, true);
-  await home.getByRole("button", { name: "开始对话", exact: true }).click();
+  await home.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
   await input.waitFor({ state: "visible" });
   assert.equal((await nativeState("Agent Chat")).minimized, false);
   assert.equal(await input.inputValue(), "拖出主窗口后保留的草稿");
@@ -132,7 +134,7 @@ try {
   await chat.getByLabel("浏览器菜单", { exact: true }).waitFor();
   await chat.keyboard.press("Escape");
 
-  const settings = await open("系统设置", "settings");
+  const settings = await open("打开系统设置", "settings");
   await settings.locator(".settings-window-shell").waitFor();
   assert.equal(await input.inputValue(), "拖出主窗口后保留的草稿", "opening settings preserves the live chat tree");
   const settingsClosed = settings.waitForEvent("close");
@@ -141,19 +143,18 @@ try {
   });
   await settingsClosed;
   await open("系统设置", "settings");
-  await open("人格工作室", "studio");
-  // Home summary windows use the same native host.
-  const summary = await open("打开角色卡管理", "home-characters");
+  await open("打开人格工作室", "studio");
+  const characters = await open("打开角色卡管理", "characters");
+  await characters.locator(".portfolio-window-shell").waitFor();
+  await open("打开扩展中心", "extensions");
+  assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 6,
+    "all five desktop module icons launch their applications without intermediate windows");
+  // Recent sessions still use the native home window host.
+  const summary = await open("打开最近会话", "home-recent");
   await summary.getByRole("dialog").waitFor();
   await summary.getByLabel("最小化窗口", { exact: true }).click();
-  await home.getByRole("button", { name: "打开角色卡管理", exact: true }).click();
-  assert.equal((await nativeState("角色卡管理")).minimized, false);
-  const createdCharacters = app.waitForEvent("window");
-  await summary.getByRole("button", { name: "打开管理器", exact: true }).click().catch((error) => {
-    if (!summary.isClosed()) throw error;
-  });
-  const characters = await createdCharacters;
-  await characters.locator(".portfolio-window-shell").waitFor();
+  await home.getByRole("button", { name: "打开最近会话", exact: true }).click();
+  assert.equal((await nativeState("最近会话")).minimized, false);
 
   await mkdir(".runtime", { recursive: true });
   await chat.screenshot({ path: ".runtime/desktop-native-chat.png" });
@@ -162,7 +163,7 @@ try {
   await home.reload();
   await home.getByRole("button", { name: "开始对话", exact: true }).waitFor();
   assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 1, "main reload closes all state-dependent child windows");
-  console.log("Desktop native windows passed: outside bounds, drafts, home minimization, minimize/restore, maximize, image modal, message editing, sidebar webview, settings reopen, studio, home summaries, popup restrictions and reload cleanup.");
+  console.log("Desktop native windows passed: direct module launch, outside bounds, drafts, home minimization, minimize/restore, maximize, image modal, message editing, sidebar webview, settings reopen, studio, recent sessions, popup restrictions and reload cleanup.");
 } finally {
   await app?.close();
   fixture?.closeAllConnections();

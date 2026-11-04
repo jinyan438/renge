@@ -14,7 +14,6 @@ try {
   async function openData(page) {
     await page.goto(controller.url);
     await page.getByRole("button", { name: "打开系统设置", exact: true }).click();
-    await page.getByRole("button", { name: "打开设置", exact: true }).click();
     await page.getByRole("button", { name: "数据", exact: true }).click();
   }
   const backup = zipSync({ "backup.json": strToU8(JSON.stringify({

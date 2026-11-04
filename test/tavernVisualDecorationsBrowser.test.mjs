@@ -25,7 +25,6 @@ try {
   const openChat = async () => {
     await page.waitForFunction(() => window.__visualRuntimeReady, null, {timeout:90_000});
     await page.getByRole("button", {name:"打开Agent Chat", exact:true}).click();
-    await page.getByRole("button", {name:"开始对话", exact:true}).last().click();
   };
   const assertVisuals = async (scene, status) => {
     const message = page.locator('#chat .mes[mesid="0"]');

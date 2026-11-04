@@ -86,7 +86,6 @@ try {
     });
     await page.goto(server.url);
     await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-    await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
     await page.locator(".chat-session-item").filter({ hasText: id }).locator("button").first().click();
     await page.waitForTimeout(800);
   }
@@ -201,7 +200,6 @@ try {
   await memoryRemoved("reset-role");
   await page.reload();
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   await page.getByText("The first greeting.", { exact: true }).waitFor();
   assert.equal(await page.getByLabel("待处理消息").count(), 0);
   await page.close();
@@ -219,7 +217,6 @@ try {
   assert.equal(requests.length, requestCount, "failed cleanup prevents stale Pi history reuse");
   await page.reload();
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   await page.getByPlaceholder("输入消息，可粘贴图片").fill("reload must not reuse stale history");
   await page.getByRole("button", { name: "发送", exact: true }).click();
   await page.locator(".chat-composer .chat-status").getByText(/fixture reset failure/).waitFor();
@@ -249,7 +246,6 @@ try {
   assert.equal(requests.length, beforeMemoryFailure);
   await page.reload();
   await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-  await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   await page.getByPlaceholder("输入消息，可粘贴图片").fill("reload must still clean old memory");
   await page.getByRole("button", { name: "发送", exact: true }).click();
   await page.locator(".chat-composer .chat-status").getByText(/fixture memory cleanup failure/).waitFor();

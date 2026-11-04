@@ -48,7 +48,6 @@ try {
     page = await browser.newPage({ viewport: { width: 1440, height: 1050 } });
     await page.goto(server.url);
     await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-    await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
   }
   page.setDefaultTimeout(20_000); page.on("pageerror", error => errors.push(error.message));
   const answer = page.locator(".chat-message.assistant").filter({ hasText: "查看 app.ts" });
@@ -105,7 +104,6 @@ try {
     });
     await page.reload();
     await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
-    await page.getByRole("button", { name: "开始对话", exact: true }).last().click();
     await page.getByRole("region", { name: "本次任务文件变更", exact: true }).getByText("已变更 6 个文件", { exact: true }).waitFor();
     await page.setViewportSize({ width: 390, height: 844 });
     const mobileCard = page.getByRole("region", { name: "本次任务文件变更", exact: true });

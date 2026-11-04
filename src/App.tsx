@@ -32676,8 +32676,6 @@ export function App() {
       chatModelReady={chatModelReady}
       personaCount={personas.length}
       characterCount={characterCards.length}
-      extensionCount={extensions.length}
-      enabledExtensionCount={extensions.filter((extension) => extension.enabled).length}
       sessionCount={chatSessions.length}
       overlayZIndex={desktopOverlayZIndex}
       onOverlayActivate={activateDesktopOverlay}
