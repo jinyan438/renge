@@ -10,6 +10,11 @@ contextBridge.exposeInMainWorld("rengeDesktop", {
   },
   notifyConversationCompleted: (options) =>
     ipcRenderer.invoke("notification:conversation-completed", options),
+  onConversationNotificationClick: (listener) => {
+    const wrapped = (_event, options) => listener(options);
+    ipcRenderer.on("notification:open-conversation", wrapped);
+    return () => ipcRenderer.removeListener("notification:open-conversation", wrapped);
+  },
   clearAppStorage: () => ipcRenderer.invoke("app-data:clear-storage"),
   showTextContextMenu: (options) => ipcRenderer.invoke("text-context-menu:show", options),
   loadDesktopProjectPositions: () => ipcRenderer.invoke("desktop-layout:load"),

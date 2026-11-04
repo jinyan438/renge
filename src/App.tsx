@@ -1304,7 +1304,8 @@ type RengeDesktopApi = {
   isElectron: boolean;
   controlDesktopWindow?(options: { id: string; action: "show" | "close" | "minimize" | "toggle-maximize" | "drag-start" | "drag-move" | "drag-end"; deltaX?: number; deltaY?: number }): Promise<{ ok: boolean }>;
   onDesktopWindowState?(listener: (state: NativeDesktopWindowState) => void): () => void;
-  notifyConversationCompleted?(options: { content: string }): Promise<{ ok: boolean }>;
+  notifyConversationCompleted?(options: { content: string; sessionId: string }): Promise<{ ok: boolean }>;
+  onConversationNotificationClick?(listener: (options: { sessionId: string }) => void): () => void;
   clearAppStorage?(): Promise<{ ok: boolean }>;
   showTextContextMenu?(options: { hasSelection: boolean }): Promise<{ ok: boolean }>;
   loadDesktopProjectPositions?(): Promise<unknown>;
@@ -15008,12 +15009,13 @@ export function App() {
     return controller;
   };
 
-  const notifyConversationCompleted = (content: unknown) => {
+  const notifyConversationCompleted = (content: unknown, sessionId: string) => {
     if (!llmPushNotificationsEnabledRef.current) return;
     const notificationContent = buildCompletionNotificationContent(content);
     try {
       const notification = window.rengeDesktop?.notifyConversationCompleted?.({
         content: notificationContent,
+        sessionId,
       });
       if (notification) {
         void notification.catch((error) => {
@@ -28665,7 +28667,7 @@ export function App() {
         if (!options.exposeHeartbeatTools && options.multiAgentIndex === undefined
             && !options.multiAgentSupervisorMode && !abortSignal.aborted
             && finalAssistantMessage.outputStatus !== "incomplete") {
-          notifyConversationCompleted(finalAssistantMessage.content);
+          notifyConversationCompleted(finalAssistantMessage.content, requestSessionId);
         }
         return (
           chatMessagesRef.current.find(
@@ -28676,7 +28678,7 @@ export function App() {
       if (!options.exposeHeartbeatTools && options.multiAgentIndex === undefined
           && !options.multiAgentSupervisorMode && !abortSignal.aborted
           && finalAssistantMessage.outputStatus !== "incomplete") {
-        notifyConversationCompleted(finalAssistantMessage.content);
+        notifyConversationCompleted(finalAssistantMessage.content, requestSessionId);
       }
       return finalAssistantMessage;
     } catch (error) {
@@ -29179,7 +29181,7 @@ export function App() {
         });
       }
       if (result.completed && result.finalMessage.outputStatus !== "incomplete") {
-        notifyConversationCompleted(result.finalMessage.content);
+        notifyConversationCompleted(result.finalMessage.content, requestSessionId);
       }
     } catch (error) {
       if (isChatAbortError(error)) {
@@ -31110,6 +31112,7 @@ export function App() {
         notifyConversationCompleted(
           chatMessagesRef.current.find((message) => message.id === assistantMessageId)?.content ??
             assistantContent,
+          requestSessionId,
         );
       }
     } catch (error) {
@@ -31839,7 +31842,7 @@ export function App() {
           });
         }
         if (result.completed && result.finalMessage.outputStatus !== "incomplete") {
-          notifyConversationCompleted(result.finalMessage.content);
+          notifyConversationCompleted(result.finalMessage.content, requestSessionId);
         }
       } else {
         const assistantMessage = await generateAssistantForMessages(nextMessages, requestSender, {
@@ -32629,6 +32632,10 @@ export function App() {
     void openChatSessionRef.current(sessionId);
     openWindow("chat");
   }, [openWindow]);
+  useEffect(() => window.rengeDesktop?.onConversationNotificationClick?.(({ sessionId }) => {
+    if (!chatSessionsRef.current.some((session) => session.id === sessionId)) return;
+    handleDesktopOpenRecentSession(sessionId);
+  }), [handleDesktopOpenRecentSession]);
 
   if (!activePersona) {
     return <div className="boot">正在初始化人格工作台...</div>;

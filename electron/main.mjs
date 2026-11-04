@@ -123,9 +123,12 @@ function formatConversationNotificationContent(content) {
     : normalized;
 }
 
-function showConversationCompletedNotification(content) {
+function showConversationCompletedNotification({ content, sessionId } = {}) {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return { ok: false, reason: "window-unavailable" };
+  }
+  if (typeof sessionId !== "string" || !sessionId.trim()) {
+    return { ok: false, reason: "invalid-session" };
   }
   if (!Notification.isSupported()) return { ok: false, reason: "unsupported" };
 
@@ -136,9 +139,7 @@ function showConversationCompletedNotification(content) {
   });
   notification.on("click", () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
+    mainWindow.webContents.send("notification:open-conversation", { sessionId });
   });
   notification.show();
   return { ok: true };
@@ -1193,7 +1194,7 @@ function registerIpcHandlers() {
     if (mainWindow?.webContents && event.sender !== mainWindow.webContents) {
       return { ok: false, reason: "invalid-sender" };
     }
-    return showConversationCompletedNotification(options?.content);
+    return showConversationCompletedNotification(options ?? {});
   });
 
   ipcMain.handle("sidebar-terminal:list", (event, options = {}) =>

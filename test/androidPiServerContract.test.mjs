@@ -137,7 +137,7 @@ test("Android completion notifications are gated by background state and permiss
   assert.match(appSource, /if \(result\.completed && result\.finalMessage\.outputStatus !== "incomplete"\)/);
   assert.match(appSource, /!options\.exposeHeartbeatTools && options\.multiAgentIndex === undefined/);
   assert.match(appSource, /buildCompletionNotificationContent/);
-  assert.match(appSource, /notifyConversationCompleted\(finalAssistantMessage\.content\)/);
+  assert.match(appSource, /notifyConversationCompleted\(finalAssistantMessage\.content, requestSessionId\)/);
   assert.match(activitySource, /setContentText\(notificationContent\)/);
   assert.match(stringsSource, /name="conversation_completed_title">会话输出完成/);
 });
