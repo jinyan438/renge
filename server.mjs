@@ -2637,7 +2637,18 @@ async function handleApi(request, response, pathname, dataFilePath, piHost, temp
       const root = body.scope === "temporary" ? temporaryFilesRoot : String(body.workspacePath ?? "").trim();
       if (!root) throw new Error("没有可用的会话工作区。");
       if (body.scope === "temporary") await mkdir(root, { recursive: true });
-      else { assertPcFileAccessEnabled(); if (!isAbsolute(root) || !(await stat(root)).isDirectory()) throw new Error("工作区目录不可用。"); }
+      else {
+        assertPcFileAccessEnabled();
+        if (!isAbsolute(root)) throw new Error("工作区目录不可用。");
+        let info;
+        try { info = await stat(root); }
+        catch (error) {
+          if (error.code !== "ENOENT") throw error;
+          sendJson(response, 404, { error: "工作区目录不存在。", code: "WORKSPACE_NOT_FOUND" });
+          return;
+        }
+        if (!info.isDirectory()) throw new Error("工作区目录不可用。");
+      }
       sendJson(response, 200, await workspaceFileOperation(root, body));
       return;
     }

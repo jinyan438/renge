@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -59,6 +59,46 @@ test("workspace and temporary storage isolate writes and scoped directory cleanu
   } finally {
     server.server.closeAllConnections();
     await new Promise(resolve => server.server.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("memory cleanup succeeds for missing workspaces without recreating them or hiding other errors", async () => {
+  const root = await mkdtemp(join(tmpdir(), "renge-missing-workspace-"));
+  const workspace = join(root, "RICH3"), moved = join(root, "moved-RICH3");
+  const server = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir: join(root, "data") });
+  try {
+    const projectAccess = httpWorkspaceFileAccess({ baseUrl: server.url, scope: "workspace", workspacePath: workspace });
+    const scope = memoryScope(workspace, "scene");
+    await deleteMemoryFiles(projectAccess, "scene", scope);
+    await deleteMemoryFiles(projectAccess, "scene", scope);
+    await assert.rejects(access(workspace), { code: "ENOENT" }, "cleanup must not recreate a missing workspace");
+    for (const operation of [() => projectAccess.list(""), () => projectAccess.read("memory.md"),
+      () => projectAccess.write("memory.md", "new content", null)]) {
+      await assert.rejects(operation, { code: "WORKSPACE_NOT_FOUND" }, "normal file operations still report a missing workspace");
+    }
+    await mkdir(workspace);
+    const memory = normalizeRoleplayFileMemory(null, scope);
+    writeMemoryFile(memory, "状态.md", "moved memory");
+    await loadMemoryFiles(projectAccess, "scene", memory);
+    await writeFile(join(workspace, "keep.txt"), "ordinary workspace file");
+    await rename(workspace, moved);
+    await deleteMemoryFiles(projectAccess, "scene", scope);
+    assert.equal(await readFile(join(moved, roleplayMemoryRoot("scene"), "状态.md"), "utf8"), "moved memory");
+    assert.equal(await readFile(join(moved, "keep.txt"), "utf8"), "ordinary workspace file");
+    await assert.rejects(access(workspace), { code: "ENOENT" });
+    await writeFile(workspace, "a file replaced the workspace");
+    await assert.rejects(deleteMemoryFiles(projectAccess, "scene", scope), /工作区目录不可用/);
+    assert.equal(await readFile(workspace, "utf8"), "a file replaced the workspace");
+    for (const code of ["EACCES", "ENOENT", "CONFLICT"]) {
+      const failure = Object.assign(new Error(`fixture ${code}`), { code });
+      await assert.rejects(deleteMemoryFiles({ ...projectAccess, list: async () => { throw failure; } }, "scene", scope),
+        error => error === failure, "only a confirmed missing workspace can be ignored");
+    }
+  } finally {
+    server.server.closeAllConnections();
+    await new Promise(resolve => server.server.close(resolve));
+    assert.ok(root.startsWith(join(tmpdir(), "renge-missing-workspace-")));
     await rm(root, { recursive: true, force: true });
   }
 });

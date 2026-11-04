@@ -38,7 +38,7 @@ try {
   };
   const read = async () => (await (await fetch(`${server.url}/api/app-data`)).json()).data;
   const errors = [], requests = [], resets = [];
-  let failReset = false, failMemoryCleanup = false, holdReset = true, databaseReads = 0, confirmReset = true;
+  let failReset = false, failMemoryCleanup = false, failWorkspaceList = false, holdReset = true, databaseReads = 0, confirmReset = true;
   const confirmations = [];
   const memoryDirectory = (id, workspace = join(root, "temporary-files")) => join(workspace, "角色记忆", `会话-${id}`);
   async function seedMemory(id, workspace = join(root, "temporary-files"), workspaceKey = "default") {
@@ -75,7 +75,10 @@ try {
       await route.fulfill(failReset ? { status: 500, json: { error: "fixture reset failure" } } : { json: { ok: true } });
     });
     await page.route("**/api/workspace-files", async route => {
-      if (failMemoryCleanup && route.request().postDataJSON().operation === "deleteDirectory") {
+      const body = route.request().postDataJSON();
+      if (failWorkspaceList && body.scope === "workspace" && body.operation === "list") {
+        await route.fulfill({ status: 403, json: { error: "fixture workspace permission denied", code: "EACCES" } });
+      } else if (failMemoryCleanup && body.operation === "deleteDirectory") {
         await route.fulfill({ status: 500, json: { error: "fixture memory cleanup failure" } });
       } else await route.continue();
     });
@@ -339,9 +342,44 @@ try {
   await assert.rejects(access(join(project, "角色记忆")), /ENOENT/);
   assert.equal(await readFile(join(project, "keep.txt"), "utf8"), "ordinary workspace file");
   await access(memoryDirectory("workspace-keep")); await access(memoryDirectory("workspace-other", otherProject));
+  await page.close();
+
+  // A workspace whose root no longer exists must still be removable. Access
+  // failures keep its sessions until a successful retry, including after reload.
+  const missingProject = join(root, "RICH3");
+  await seed([{ ...session("workspace-keep"), pendingInputs: [] }, ...["missing-a", "missing-b"].map(id => ({
+    ...session(id), workspaceKey: missingProject, workspaceName: "RICH3", workspacePath: missingProject, pendingInputs: [],
+  }))]);
+  await openChat("workspace-keep");
+  const missingButton = page.locator(".chat-workspace-item").filter({ hasText: "RICH3" });
+  confirmReset = false;
+  await missingButton.click({ button: "right" });
+  assert.equal(await missingButton.count(), 1, "cancel keeps a missing workspace");
+  confirmReset = true;
+  failWorkspaceList = true;
+  await missingButton.click({ button: "right" });
+  await page.getByText(/工作区会话已保留.*fixture workspace permission denied/).waitFor();
+  assert.equal(await missingButton.count(), 1, "permission failures must not discard workspace sessions");
+  failWorkspaceList = false;
+  await missingButton.click({ button: "right" });
+  await missingButton.waitFor({ state: "hidden" });
+  let savedWithoutMissingWorkspace;
+  for (let index = 0; index < 100; index++) {
+    savedWithoutMissingWorkspace = (await read()).chatSessions;
+    if (savedWithoutMissingWorkspace.every(candidate => candidate.workspaceKey !== missingProject)) break;
+    await delay(50);
+  }
+  assert.ok(savedWithoutMissingWorkspace.every(candidate => candidate.workspaceKey !== missingProject), "missing workspace deletion persists");
+  assert.ok(savedWithoutMissingWorkspace.some(candidate => candidate.id === "workspace-keep"));
+  await assert.rejects(access(missingProject), { code: "ENOENT" }, "deletion must not recreate the workspace directory");
+  await access(memoryDirectory("workspace-keep"));
+  await page.reload();
+  await page.getByRole("button", { name: "打开Agent Chat", exact: true }).click();
+  await page.locator(".chat-workspace-item").filter({ hasText: "默认工作区" }).waitFor();
+  assert.equal(await page.locator(".chat-workspace-item").filter({ hasText: "RICH3" }).count(), 0, "deleted workspace stays removed after reload");
   assert.deepEqual(errors, []);
   assert.ok(resets.every(reset => ["reset-ai", "reset-role", "reset-failure", "reset-memory-failure", "delete-current", "delete-other"].includes(reset.sessionId)));
-  console.log("Session reset browser regression passed: reset/delete confirmation and cancellation, workspace deletion, scoped memory-folder cleanup, failed cleanup across reloads, retry, immediate reset, ID preservation, defaults, greeting, queues, drafts, images, phone stores, scoped generation, persistence, mobile layout and last-conversation replacement.");
+  console.log("Session reset browser regression passed: reset/delete confirmation and cancellation, existing/missing workspace deletion, permission failure and retry, scoped memory-folder cleanup, failed cleanup across reloads, immediate reset, ID preservation, defaults, greeting, queues, drafts, images, phone stores, scoped generation, persistence, mobile layout and last-conversation replacement.");
 } catch (error) {
   if (page && !page.isClosed()) {
     console.error("Visible statuses:", await page.locator(".chat-status").allTextContents());

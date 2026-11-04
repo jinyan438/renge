@@ -68,9 +68,15 @@ async function findSessionRoots(access: WorkspaceFileAccess, sessionId: string, 
 export async function deleteMemoryFiles(access: WorkspaceFileAccess, sessionId: string, scope: string) {
   // Locate by session identity, including legacy paths and renamed characters.
   // Validate every marker before deleting any of the matching session folders.
-  for (const { root, parent } of await findSessionRoots(access, sessionId, scope)) {
-    await access.removeDirectory(root);
-    await access.removeEmptyDirectory?.(parent);
+  try {
+    for (const { root, parent } of await findSessionRoots(access, sessionId, scope)) {
+      await access.removeDirectory(root);
+      await access.removeEmptyDirectory?.(parent);
+    }
+  } catch (error) {
+    // A deleted or moved workspace has no memory left at its recorded path.
+    // Other failures still block deletion so existing memory can be retried.
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "WORKSPACE_NOT_FOUND") throw error;
   }
 }
 
@@ -226,7 +232,7 @@ export function httpWorkspaceFileAccess(options: { scope: "temporary" | "workspa
       body: JSON.stringify({ ...options, operation, path, ...extra }),
     });
     const result = await response.json();
-    if (!response.ok || result.error) throw new Error(result.error || `文件操作失败：${response.status}`);
+    if (!response.ok || result.error) throw Object.assign(new Error(result.error || `文件操作失败：${response.status}`), { code: result.code });
     return result;
   };
   return {
