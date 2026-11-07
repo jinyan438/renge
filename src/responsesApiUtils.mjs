@@ -93,7 +93,9 @@ function convertChatMessages(messages) {
         }
       }
       if (hasMessageContent(content)) {
-        input.push({ role: "assistant", content });
+        // Local Responses servers such as llama.cpp require this discriminator
+        // to recognize assistant history, including a character's greeting.
+        input.push({ type: "message", role: "assistant", content });
       }
       if (Array.isArray(message.tool_calls)) {
         for (const toolCall of message.tool_calls) {
@@ -114,6 +116,7 @@ function convertChatMessages(messages) {
 
     if (hasMessageContent(content)) {
       input.push({
+        type: "message",
         role: role === "system" || role === "developer" ? role : "user",
         content,
       });

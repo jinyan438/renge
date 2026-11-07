@@ -901,6 +901,12 @@ test("routes Responses providers to /responses with a converted request", async 
         body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
       };
       capturedRequests.push(capturedRequest);
+      // llama.cpp requires an explicit message discriminator for assistant history.
+      if (capturedRequest.body.input.some(item => item.role === "assistant" && item.type !== "message")) {
+        response.writeHead(400, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: { message: "Cannot determine type of 'item'" } }));
+        return;
+      }
       if (capturedRequest.body.stream === true) {
         response.writeHead(200, { "Content-Type": "text/event-stream" });
         response.end([
@@ -954,7 +960,7 @@ test("routes Responses providers to /responses with a converted request", async 
       apiType: "responses",
       request: {
         model: "gpt-test",
-        messages: [{ role: "user", content: "hello" }],
+        messages: [{ role: "assistant", content: "hi" }, { role: "user", content: "hello" }],
         max_tokens: 300,
         stream: false,
       },
@@ -964,7 +970,10 @@ test("routes Responses providers to /responses with a converted request", async 
   assert.equal(response.status, 200);
   assert.equal((await response.json()).object, "response");
   assert.equal(capturedRequests[0].path, "/v1/responses");
-  assert.deepEqual(capturedRequests[0].body.input, [{ role: "user", content: "hello" }]);
+  assert.deepEqual(capturedRequests[0].body.input, [
+    { type: "message", role: "assistant", content: "hi" },
+    { type: "message", role: "user", content: "hello" },
+  ]);
   assert.equal(capturedRequests[0].body.max_output_tokens, 300);
   assert.equal(capturedRequests[0].body.messages, undefined);
   assert.equal(capturedRequests[0].body.max_tokens, undefined);
@@ -977,7 +986,7 @@ test("routes Responses providers to /responses with a converted request", async 
       apiType: "responses",
       request: {
         model: "gpt-test",
-        messages: [{ role: "user", content: "stream" }],
+        messages: [{ role: "assistant", content: "hi" }, { role: "user", content: "stream" }],
         stream: true,
       },
     }),

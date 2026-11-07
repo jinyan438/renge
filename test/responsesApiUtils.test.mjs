@@ -75,8 +75,8 @@ test("maps chat messages, tools, reasoning, and structured output to Responses",
   });
 
   assert.deepEqual(request.input, [
-    { role: "system", content: "Be concise." },
-    { role: "user", content: "Weather?" },
+    { type: "message", role: "system", content: "Be concise." },
+    { type: "message", role: "user", content: "Weather?" },
     {
       id: "rs_1",
       type: "reasoning",
@@ -119,12 +119,35 @@ test("maps Chat Completions image parts to Responses input parts", () => {
   });
 
   assert.deepEqual(request.input, [{
+    type: "message",
     role: "user",
     content: [
       { type: "input_text", text: "Inspect this" },
       { type: "input_image", image_url: "data:image/png;base64,AA==", detail: "high" },
     ],
   }]);
+});
+
+test("identifies assistant history as message items for strict local Responses servers", () => {
+  const messages = [
+    { role: "system", content: "扮演沈枝" },
+    { role: "assistant", content: "哥哥醒没醒呀" },
+    { role: "user", content: "醒了呀" },
+    { role: "assistant", content: [{ type: "text", text: "早呀" }] },
+    { role: "assistant", content: "", tool_calls: [{ id: "call_1", type: "function", function: { name: "check", arguments: "{}" } }] },
+    { role: "tool", tool_call_id: "call_1", content: "ok" },
+  ];
+  const original = structuredClone(messages);
+  const request = buildResponsesApiRequest({ messages });
+  assert.deepEqual(request.input, [
+    { type: "message", role: "system", content: "扮演沈枝" },
+    { type: "message", role: "assistant", content: "哥哥醒没醒呀" },
+    { type: "message", role: "user", content: "醒了呀" },
+    { type: "message", role: "assistant", content: [{ type: "input_text", text: "早呀" }] },
+    { type: "function_call", call_id: "call_1", name: "check", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_1", output: "ok" },
+  ]);
+  assert.deepEqual(messages, original);
 });
 
 test("normalizes a Responses result to the app chat completion shape", () => {

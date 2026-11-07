@@ -21,11 +21,17 @@ const reply = "给你留了最甜的草莓，我们一起吃吧 🍓";
 let fixtureReply = reply;
 let groupResponder;
 let innerRound = 0;
+const localQwenModel = "models/Qwen3.8-27B-TurboFCFusion-Q4_K_M.gguf";
 const upstream = createServer(async (request, response) => {
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
   const body = JSON.parse(Buffer.concat(chunks).toString());
   requests.push({ path: request.url, body });
+  if (request.url.endsWith("responses") && body.input.some(item => item.role === "assistant" && item.type !== "message")) {
+    response.writeHead(400, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ error: { message: "Cannot determine type of 'item'" } }));
+    return;
+  }
   if (JSON.stringify(body).includes("快速识别资料中的可对话人物")) {
     const output = JSON.stringify({ characters: [{ name: "月岛", personality: "{{char}}是{{user}}的青梅竹马。耐心、可爱，记得对方的喜好。", greeting: "{{user}}，今天也想和你一起回家。" }] });
     response.writeHead(200, { "Content-Type": "application/json" });
@@ -64,7 +70,8 @@ try {
   const provider = { id: "fixture-chat", name: "Phone Fixture", apiBaseUrl: `http://127.0.0.1:${upstream.address().port}/v1`, apiKey: "fixture-key", apiType: "chat-completions", modelId: "phone-chat", models: ["phone-chat"], updatedAt: now };
   const seed = {
     version: 1, chatMode: "ai", activeProviderId: provider.id, activePersonaId: "fixture-persona",
-    providers: [provider, { ...provider, id: "fixture-responses", name: "Responses Fixture", apiType: "responses", modelId: "phone-responses", models: ["phone-responses", "phone-other"] }],
+    providers: [provider, { ...provider, id: "fixture-responses", name: "Responses Fixture", apiType: "responses", modelId: "phone-responses", models: ["phone-responses", "phone-other"] },
+      { ...provider, id: "fixture-local-qwen", name: "Local Qwen Fixture", modelId: localQwenModel, models: [localQwenModel], reasoningEnabled: true }],
     userProfile: { nickname: "小月", bio: "喜欢画画和草莓", avatarImage: "" },
     personas: [{ id: "fixture-persona", name: "薄荷", description: "薄荷是一个喜欢种花的温柔朋友。", entryTypes: [{ id: "type", name: "喜好", influence: "HIGH", entries: [{ id: "enabled", key: "喜欢", value: "向日葵", enabled: true }, { id: "disabled", key: "不应导入", value: "disabled-persona-entry", enabled: false }] }], modelProfile: { provider: "", model: "", temperature: 1, responseStyle: "" }, createdAt: now, updatedAt: now }],
     characterCards: [{ id: "fixture-card", name: "月岛", nickname: "", description: "{{char}}是{{user}}的青梅竹马。", personality: "耐心、可爱，记得对方的喜好。", scenario: "放学后一起买甜点。", firstMessage: "{{user}}，今天也想和你一起回家。", messageExample: "", systemPrompt: "", characterBook: { id: "card-phone-world", name: "月岛的世界", entries: [{ content: "月岛角色卡世界书", constant: true }] }, createdAt: now, updatedAt: now }],
@@ -312,6 +319,14 @@ try {
   assert.match(JSON.stringify(requests.at(-1).body), /月岛角色卡世界书/);
   console.log("PASS: character-card import, selectable model, Responses API, themes and large text");
 
+  await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click();
+  await phone.getByRole("button", { name: "打开手机设置", exact: true }).click();
+  await phone.getByText("API（全局共用）", { exact: true }).click();
+  await phone.getByLabel("模型渠道").selectOption("fixture-local-qwen");
+  await phone.getByRole("button", { name: "回到手机桌面", exact: true }).click();
+  await phone.getByRole("button", { name: "打开微信", exact: true }).click();
+  await phone.locator(".pocket-contact-row").filter({ hasText: "月岛" }).click();
+
   const originalCardContact = await readContact("月岛");
   const changedPersonality = "最新角色设定：{{char}}是{{user}}的绘画搭档，说话冷静简洁，喜欢蓝莓。";
   const changedGreeting = "{{user}}，{{char}}带来了蓝莓画本。";
@@ -326,6 +341,12 @@ try {
   await send("修改设定后聊一句");
   await phone.getByText(fixtureReply, { exact: true }).waitFor();
   await phone.getByRole("button", { name: "发送消息", exact: true }).waitFor();
+  assert.equal(requests.at(-1).path, "/v1/responses");
+  assert.equal(requests.at(-1).body.model, localQwenModel);
+  assert.deepEqual(requests.at(-1).body.reasoning, { effort: "none" });
+  assert.ok(requests.at(-1).body.input.some(item => item.role === "assistant"));
+  assert.ok(requests.at(-1).body.input.every(item => item.type === "message"));
+  console.log("PASS: local Qwen phone replies retain typed assistant history through the Responses proxy");
   let rolePrompt = inputText(requests.at(-1).body.input[0]);
   assert.match(rolePrompt, /最新角色设定：月岛是小月的绘画搭档，说话冷静简洁，喜欢蓝莓/);
   assert.doesNotMatch(rolePrompt, /青梅竹马|耐心、可爱/);
