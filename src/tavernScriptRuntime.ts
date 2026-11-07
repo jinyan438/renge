@@ -1,4 +1,6 @@
 import type { TavernScript, TavernScriptButton } from "./tavernScriptUtils";
+import { isTavernScriptEnabled } from "./tavernScriptUtils";
+import { createTavernScriptTreeApi, type TavernScriptScope, type TavernScriptTree } from "./tavernScriptTreeUtils";
 import {
   attachTavernSubscriptionControls,
   createTavernMacroRegistry,
@@ -150,6 +152,8 @@ export type TavernScriptRuntimeAdapter = {
   setChatMetadata?(metadata: Record<string, unknown>): void;
   getScriptData(scriptId: string): Record<string, unknown>;
   setScriptData(scriptId: string, data: Record<string, unknown>): void;
+  getScriptTrees?(scope: TavernScriptScope): TavernScriptTree[];
+  replaceScriptTrees?(trees: TavernScriptTree[], scope: TavernScriptScope): void;
   getCharacter(): TavernRuntimeCharacter | null;
   getCharacterSummaries?(): Array<{ id: string; name: string; avatarDataUrl: string }>;
   getWorldBooks(): TavernRuntimeWorldBook[];
@@ -1714,6 +1718,29 @@ export class TavernScriptRuntime {
     return prompts;
   }
 
+  uninjectPrompts(ids: unknown) {
+    if (Array.isArray(ids)) ids.forEach((id) => this.promptInjections.delete(String(id)));
+  }
+
+  injectPrompts(prompts: unknown, options: unknown = {}) {
+    const ids: string[] = [];
+    const handle = { uninject: () => this.uninjectPrompts(ids) };
+    if (!Array.isArray(prompts)) return handle;
+    const once = isRecord(options) && options.once === true;
+    prompts.forEach((value, index) => {
+      if (!isRecord(value)) return;
+      const content = value.content ?? value.message ?? value.mes;
+      if (typeof content !== "string" || !content.trim()) return;
+      const id = String(value.id ?? `injected-prompt-${crypto.randomUUID()}-${index}`);
+      const role = value.role === "assistant" || value.role === "user" ? value.role : "system";
+      this.promptInjections.set(id, {
+        prompt: { ...cloneValue(value), id, role, content, filter: value.filter }, once,
+      });
+      ids.push(id);
+    });
+    return handle;
+  }
+
   async initializeGreeting(swipeIndex: number) {
     if (this.destroyed) return;
     await this.initializeMvuMessageVariables(swipeIndex);
@@ -1750,7 +1777,7 @@ export class TavernScriptRuntime {
     const startupScripts = this.scripts
       .filter(
         (script) =>
-          script.enabled && script.autoRun && script.runOn === "startup" && script.content.trim(),
+          isTavernScriptEnabled(script) && script.autoRun && script.runOn === "startup" && script.content.trim(),
       )
       .sort((left, right) => Number(isFrameworkScript(right)) - Number(isFrameworkScript(left)));
     for (const script of startupScripts) {
@@ -1807,7 +1834,7 @@ export class TavernScriptRuntime {
   async executeScript(scriptId: string) {
     const script = this.scripts.find((candidate) => candidate.id === scriptId);
     if (!script) throw new Error("没有找到要运行的脚本。");
-    if (!script.enabled) throw new Error(`脚本「${script.name}」未启用。`);
+    if (!isTavernScriptEnabled(script)) throw new Error(`脚本「${script.name}」未启用。`);
     if (!script.content.trim()) throw new Error(`脚本「${script.name}」没有可执行内容。`);
     if (!this.runtimeWindow || !this.iframe) throw new Error("酒馆脚本运行环境尚未初始化。");
     if (this.executedScriptIds.has(script.id) && isFrameworkScript(script)) {
@@ -1865,7 +1892,7 @@ export class TavernScriptRuntime {
     ) {
       for (const script of this.scripts.filter(
         (candidate) =>
-          candidate.enabled &&
+          isTavernScriptEnabled(candidate) &&
           candidate.autoRun &&
           candidate.runOn === "message" &&
           !this.executedScriptIds.has(candidate.id),
@@ -3427,29 +3454,8 @@ export class TavernScriptRuntime {
     const waitGlobalInitialized = async (name = "Mvu", timeout = 30000) =>
       await this.waitForGlobal(String(name), Number(timeout) || 30000);
     const injectedPrompts = this.promptInjections;
-    const uninjectPrompts = (ids: unknown) => {
-      if (Array.isArray(ids)) ids.forEach((id) => injectedPrompts.delete(String(id)));
-    };
-    const injectPrompts = (prompts: unknown, options: unknown = {}) => {
-      const ids: string[] = [];
-      const handle = { uninject: () => uninjectPrompts(ids) };
-      if (!Array.isArray(prompts)) return handle;
-      const once = isRecord(options) && options.once === true;
-      prompts.forEach((value, index) => {
-        if (!isRecord(value)) return;
-        const content = value.content ?? value.message ?? value.mes;
-        if (typeof content !== "string" || !content.trim()) return;
-        const id = String(value.id ?? `injected-prompt-${crypto.randomUUID()}-${index}`);
-        const role =
-          value.role === "assistant" || value.role === "user" ? value.role : "system";
-        injectedPrompts.set(id, {
-          prompt: { ...cloneValue(value), id, role, content, filter: value.filter },
-          once,
-        });
-        ids.push(id);
-      });
-      return handle;
-    };
+    const uninjectPrompts = (ids: unknown) => this.uninjectPrompts(ids);
+    const injectPrompts = (prompts: unknown, options: unknown = {}) => this.injectPrompts(prompts, options);
     const getModelList = async (config: unknown = {}) => {
       const normalized = isRecord(config) ? config : {};
       const apiBaseUrl = String(normalized.apiurl ?? normalized.apiBaseUrl ?? "")
@@ -3605,6 +3611,13 @@ export class TavernScriptRuntime {
     };
     const stopAllGeneration = async () => await this.adapter.stopGeneration?.();
     const api = {
+      ...createTavernScriptTreeApi({
+        get: (scope) => this.adapter.getScriptTrees?.(scope) ?? [],
+        replace: (trees, scope) => {
+          if (!this.adapter.replaceScriptTrees) throw new Error("当前环境不支持修改酒馆脚本库。");
+          this.adapter.replaceScriptTrees(trees, scope);
+        },
+      }),
       getChatMessages,
       setChatMessages,
       setChatMessage,
@@ -4195,7 +4208,7 @@ export class TavernScriptRuntime {
 
   private publishButtons() {
     const buttons = this.scripts.flatMap((script) =>
-      script.enabled && script.buttonEnabled
+      isTavernScriptEnabled(script) && script.buttonEnabled
         ? (this.scriptButtons.get(script.id) ?? [])
             .filter((button) => button.visible)
             .map((button) => ({

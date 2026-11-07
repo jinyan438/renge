@@ -118,6 +118,13 @@ import lodashSource from "lodash/lodash.min.js?raw";
 import vueSource from "vue/dist/vue.global.prod.js?raw";
 import htmlPreviewDependenciesSource from "virtual:html-preview-dependencies";
 import { HTML_PREVIEW_PARENT_BRIDGE_SOURCE } from "./htmlPreviewParentBridge";
+import { HTML_PREVIEW_TAVERN_SCRIPTS_SOURCE } from "./htmlPreviewTavernScripts";
+import {
+  getTavernScriptTrees,
+  replaceTavernScriptTrees,
+  TAVERN_SCRIPT_TREE_API_SOURCE,
+  type TavernScriptTree,
+} from "./tavernScriptTreeUtils";
 import { postMessageToFrame } from "./frameMessaging";
 import { buildHtmlPreviewImagesScript } from "./htmlPreviewImages";
 import {
@@ -4192,6 +4199,7 @@ type ChatContentPart =
   | ChatLiveStreamEmbed;
 
 type HtmlPreviewContext = {
+  scriptTrees?: Partial<Record<TavernScriptScope, TavernScriptTree[]>>;
   currentMessageIndex: number;
   currentHtmlPartIndex?: number;
   parentMessageFrames?: Array<{ partIndex: number; attributes: Record<string, string> }>;
@@ -4995,6 +5003,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  return context;",
     "};",
     "const api = {",
+    `  ...(${HTML_PREVIEW_TAVERN_SCRIPTS_SOURCE})(snapshot, requestParentCommand, ${TAVERN_SCRIPT_TREE_API_SOURCE}),`,
     "  getVariables, setVariables: replaceVariables, replaceVariables, updateVariablesWith, insertOrAssignVariables, insertVariables, deleteVariable, registerVariableSchema,",
     "  getAllVariables, waitGlobalInitialized, errorCatched,",
     "  getInput, setInput, appendInput, triggerSlash, sendMessage, generate, generateRaw: generate,",
@@ -14476,6 +14485,10 @@ export function App() {
         option?: unknown;
         variables?: unknown;
         updates?: unknown;
+        trees?: unknown;
+        ids?: unknown;
+        prompts?: unknown;
+        options?: unknown;
         block?: unknown;
         command?: unknown;
         text?: unknown;
@@ -14585,6 +14598,30 @@ export function App() {
             setChatMessages(messages);
             await flushTavernPersistenceRef.current();
             await waitForToolProgressPaint();
+            result = true;
+          } else if (payload.operation === "replaceScriptTrees") {
+            const option = isObjectRecord(payload.option) ? payload.option : {};
+            if (option.type !== "global" && option.type !== "preset" && option.type !== "character") {
+              throw new Error("无效的酒馆脚本作用域。");
+            }
+            if (!Array.isArray(payload.trees)) throw new Error("酒馆脚本树必须是数组。");
+            replaceScriptLibrary(payload.trees, option.type);
+            result = getTavernScriptTrees(getScriptLibrary(option.type));
+          } else if (payload.operation === "deleteChatMessages") {
+            const messages = chatMessagesRef.current;
+            const ids = Array.isArray(payload.ids) ? payload.ids : [payload.ids];
+            const indexes = new Set(ids.map(Number).filter(Number.isInteger)
+              .map((index) => index < 0 ? messages.length + index : index));
+            const next = messages.filter((_, index) => !indexes.has(index));
+            chatMessagesRef.current = next;
+            setChatMessages(next);
+            await flushTavernPersistenceRef.current();
+            result = true;
+          } else if (payload.operation === "injectPrompts" || payload.operation === "uninjectPrompts") {
+            const runtime = tavernScriptRuntimeRef.current;
+            if (!runtime) throw new Error("酒馆脚本运行环境尚未就绪。");
+            if (payload.operation === "injectPrompts") runtime.injectPrompts(payload.prompts, payload.options);
+            else runtime.uninjectPrompts(payload.ids);
             result = true;
           } else if (payload.operation === "notice") {
             const text = String(payload.text ?? "");
@@ -18816,6 +18853,38 @@ export function App() {
     roleplayGreetingIsOnlyMessage,
     roleplayGreetingSelectorOpen,
   ]);
+  const getScriptLibrary = (scope: TavernScriptScope): TavernScript[] => {
+    if (scope === "global") return tavernScriptsRef.current;
+    if (scope === "preset") return chatPresetEnabledRef.current
+      ? chatPresetsRef.current.find((preset) => preset.id === activeChatPresetIdRef.current)?.tavernScripts ?? [] : [];
+    const session = chatSessionsRef.current.find((chat) => chat.id === activeChatSessionIdRef.current);
+    return chatModeRef.current === "roleplay"
+      ? characterCardsRef.current.find((card) => card.id === session?.roleplayCharacterCardId)?.tavernScripts ?? [] : [];
+  };
+  const replaceScriptLibrary = (trees: unknown[], scope: TavernScriptScope) => {
+    const next = replaceTavernScriptTrees(getScriptLibrary(scope), trees);
+    const updatedAt = new Date().toISOString();
+    if (scope === "global") {
+      tavernScriptsRef.current = next;
+      setTavernScripts(next);
+    } else if (scope === "preset") {
+      if (!chatPresetEnabledRef.current || !activeChatPresetIdRef.current) throw new Error("未绑定会话预设。");
+      const presets = chatPresetsRef.current.map((preset) => preset.id === activeChatPresetIdRef.current
+        ? { ...preset, tavernScripts: next, updatedAt } : preset);
+      chatPresetsRef.current = presets;
+      setChatPresets(presets);
+    } else {
+      const session = chatSessionsRef.current.find((chat) => chat.id === activeChatSessionIdRef.current);
+      if (chatModeRef.current !== "roleplay" || !session?.roleplayCharacterCardId) throw new Error("未绑定角色卡。");
+      const cards = characterCardsRef.current.map((card) => card.id === session.roleplayCharacterCardId
+        ? { ...card, tavernScripts: next, updatedAt } : card);
+      characterCardsRef.current = cards;
+      setCharacterCards(cards);
+    }
+    void flushTavernPersistenceRef.current().catch((error: unknown) => {
+      setChatStatus({ status: "error", message: error instanceof Error ? error.message : "酒馆脚本库保存失败。" });
+    });
+  };
   const activeTavernScripts = useMemo(
     () => [
       ...tavernScripts,
@@ -18836,6 +18905,7 @@ export function App() {
           runOn: script.runOn,
           buttonEnabled: script.buttonEnabled,
           buttons: script.buttons,
+          folderPath: script.folderPath,
         })),
       ),
     [activeTavernScripts],
@@ -20250,6 +20320,8 @@ export function App() {
     };
 
     runtime = new TavernScriptRuntime(activeTavernScripts, {
+      getScriptTrees: (scope) => getTavernScriptTrees(getScriptLibrary(scope)),
+      replaceScriptTrees: replaceScriptLibrary,
       isChatMounted: () => Boolean(tavernHostWindow.document.getElementById("chat")),
       getMessages: () => chatMessagesRef.current as TavernRuntimeMessage[],
       setMessages: (messages) => {
@@ -21476,6 +21548,11 @@ export function App() {
   }, [activeRoleplayGreetingIndex, activeRoleplayGreetings, htmlPreviewSourceMessages]);
   const htmlPreviewContextBase = useMemo<Omit<HtmlPreviewContext, "currentMessageIndex">>(
     () => ({
+      scriptTrees: {
+        global: getTavernScriptTrees(tavernScripts),
+        preset: getTavernScriptTrees(chatPresetEnabled ? activeChatPreset?.tavernScripts ?? [] : []),
+        character: getTavernScriptTrees(activeSessionRoleplayCard?.tavernScripts ?? []),
+      },
       messages: htmlPreviewMessages,
       chatVariables: activeChatSession?.scriptVariables ?? {},
       characterVariables: activeSessionRoleplayCard?.tavernVariables ?? {},
@@ -21499,6 +21576,10 @@ export function App() {
       },
     }),
     [
+      tavernScripts,
+      activeChatPreset?.tavernScripts,
+      chatPresetEnabled,
+      activeSessionRoleplayCard?.tavernScripts,
       activeChatPreset?.tavernVariables,
       activeChatSession?.id,
       activeChatSession?.scriptVariables,

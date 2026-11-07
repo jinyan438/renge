@@ -8,6 +8,14 @@ export type TavernScriptButton = {
   visible: boolean;
 };
 
+export type TavernScriptFolder = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  icon: string;
+  color: string;
+};
+
 export type TavernScript = {
   id: string;
   sourceId: string;
@@ -29,7 +37,12 @@ export type TavernScript = {
   sourceFileName: string;
   createdAt: string;
   updatedAt: string;
+  folderPath?: TavernScriptFolder[];
 };
+
+export function isTavernScriptEnabled(script: TavernScript) {
+  return script.enabled && (script.folderPath ?? []).every((folder) => folder.enabled);
+}
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -189,6 +202,13 @@ export function normalizeTavernScript(
     sourceFileName: sourceFileName || stringValue(raw.sourceFileName),
     createdAt: stringValue(raw.createdAt, timestamp),
     updatedAt: stringValue(raw.updatedAt, timestamp),
+    ...(Array.isArray(raw.folderPath) && raw.folderPath.length > 0 ? {
+      folderPath: raw.folderPath.filter(isRecord).map((folder) => ({
+        id: stringValue(folder.id), name: stringValue(folder.name),
+        enabled: booleanValue(folder.enabled, true),
+        icon: stringValue(folder.icon), color: stringValue(folder.color),
+      })),
+    } : {}),
   };
 }
 
