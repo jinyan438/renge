@@ -207,6 +207,20 @@ function resolvePrompt(promptMessage) {
   return { text: text.join("\n") || "Inspect the attached image.", images };
 }
 
+/**
+ * Preset modules placed after the user's turn belong to every request rather
+ * than to the conversation. Sending them with each model call, without storing
+ * them, keeps them last on every turn and stops copies piling up in history.
+ */
+function installPromptSuffix(session, promptSuffix) {
+  if (promptSuffix.length === 0) return;
+  const transformContext = session.agent.transformContext;
+  session.agent.transformContext = async (messages, signal) => [
+    ...(transformContext ? await transformContext(messages, signal) : messages),
+    ...promptSuffix,
+  ];
+}
+
 function stableProviderId(provider) {
   const key = [
     provider.apiType,
@@ -647,6 +661,7 @@ export function createRengePiHost({
         apiType: provider.apiType,
         modelId: provider.modelId,
         lastUserPromptFallback: body?.piLastUserPromptFallback === true,
+        promptMessageIndex: body?.piPromptMessageIndex,
       });
       run.compactionResources = { mcpConfig, hasMcpServers, additionalSkillPaths, systemPrompt: converted.systemPrompt };
       const settingsManager = SettingsManager.create(cwd, agentDir);
@@ -752,6 +767,7 @@ export function createRengePiHost({
       if (allowDynamicExtensionTools) {
         session.setActiveToolsByName(initialActiveToolNames);
       }
+      installPromptSuffix(session, converted.promptSuffix);
       installContinuousPiRetry(session);
       liveContext = installPiLiveContext(session, {
         onUsage: (usage) => {
@@ -931,7 +947,8 @@ export function createRengePiHost({
         converted.promptMessage ?? converted.fallbackPromptMessage,
       );
       checkCancelled();
-      const pendingPromptTokens = estimatePendingPromptTokens(prompt);
+      const pendingPromptTokens = estimatePendingPromptTokens(prompt) +
+        converted.promptSuffix.reduce((total, message) => total + estimateTokens(message), 0);
       // PiDeck performs native auto-compaction before a prompt when the
       // context is over the reserve threshold. Keep that behavior even when
       // a local OpenAI-compatible gateway omits usage metadata.

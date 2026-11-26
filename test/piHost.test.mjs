@@ -1117,6 +1117,113 @@ test("Pi Host treats the current user turn as the prompt when a fresh session en
   }
 });
 
+test("Pi Host delivers each new user turn when preset prompts follow it", async () => {
+  const upstreamRequests = [];
+  const upstream = createServer(async (request, response) => {
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    upstreamRequests.push(JSON.parse(raw));
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    const base = {
+      id: `preset-suffix-${upstreamRequests.length}`,
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: "test-model",
+    };
+    sendChunk(response, {
+      ...base,
+      choices: [{
+        index: 0,
+        delta: { role: "assistant", content: `reply-${upstreamRequests.length}` },
+        finish_reason: null,
+      }],
+    });
+    sendChunk(response, {
+      ...base,
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    });
+    response.end("data: [DONE]\n\n");
+  });
+
+  const dataDir = await mkdtemp(join(tmpdir(), "renge-pi-preset-suffix-test-"));
+  const upstreamPort = await listen(upstream);
+  const renge = await startRengeServer({ host: "127.0.0.1", port: 0, dataDir });
+  try {
+    // The renderer rebuilds the whole preset layout for every turn: modules
+    // before the chat history, the history itself, then modules after it.
+    const chatHistory = [];
+    const sendTurn = async (userText) => {
+      const messages = [
+        { role: "system", content: "Roleplay rules" },
+        { role: "user", content: "<story>" },
+        { role: "assistant", content: "Opening greeting" },
+        ...chatHistory,
+        { role: "user", content: userText },
+        { role: "user", content: "FORMAT-MODULE" },
+        { role: "assistant", content: "Understood." },
+        { role: "user", content: "STYLE-MODULE" },
+      ];
+      const response = await fetch(`${renge.url}/api/pi/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: "preset-suffix-session",
+          apiBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+          apiKey: "test-key",
+          apiType: "chat-completions",
+          piLastUserPromptFallback: true,
+          piPromptMessageIndex: messages.length - 4,
+          request: { model: "test-model", messages, stream: true },
+        }),
+      });
+      assert.equal(response.status, 200);
+      const reply = `reply-${upstreamRequests.length + 1}`;
+      assert.equal((await response.text()).includes(reply), true);
+      chatHistory.push({ role: "user", content: userText }, { role: "assistant", content: reply });
+      return JSON.stringify(upstreamRequests.at(-1).messages);
+    };
+    const count = (text, needle) => text.split(needle).length - 1;
+    const assertOrdered = (text, needles) => {
+      const positions = needles.map((needle) => text.indexOf(needle));
+      assert.equal(positions.every((position) => position >= 0), true, `missing one of ${needles.join(", ")}`);
+      assert.deepEqual([...positions].sort((left, right) => left - right), positions, needles.join(" < "));
+    };
+
+    const firstTurn = await sendTurn("pat her head");
+    assertOrdered(firstTurn, [
+      "<story>", "Opening greeting", "pat her head", "FORMAT-MODULE", "Understood.", "STYLE-MODULE",
+    ]);
+
+    const secondTurn = await sendTurn("open the window");
+    assertOrdered(secondTurn, [
+      "<story>", "Opening greeting", "pat her head", "reply-1",
+      "open the window", "FORMAT-MODULE", "Understood.", "STYLE-MODULE",
+    ]);
+
+    const thirdTurn = await sendTurn("close the door");
+    assertOrdered(thirdTurn, [
+      "pat her head", "reply-1", "open the window", "reply-2",
+      "close the door", "FORMAT-MODULE", "Understood.", "STYLE-MODULE",
+    ]);
+    for (const turn of [firstTurn, secondTurn, thirdTurn]) {
+      // The modules belong to every request, so they must not pile up in
+      // the stored conversation either.
+      assert.equal(count(turn, "FORMAT-MODULE"), 1);
+      assert.equal(count(turn, "Understood."), 1);
+      assert.equal(count(turn, "STYLE-MODULE"), 1);
+      assert.doesNotMatch(turn, /Continue the conversation/);
+    }
+    assert.equal(count(thirdTurn, "pat her head"), 1);
+    assert.equal(count(thirdTurn, "open the window"), 1);
+    assert.equal(count(thirdTurn, "close the door"), 1);
+    assert.equal(upstreamRequests.length, 3);
+  } finally {
+    await close(renge.server);
+    await close(upstream);
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("Pi chat sanitizes malformed image data URLs before the provider adapter", async () => {
   const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
   let upstreamRequest;

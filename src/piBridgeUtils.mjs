@@ -235,6 +235,7 @@ export function convertOpenAiMessagesToPi(messages, options = {}) {
     .filter(Boolean)
     .join("\n\n");
   const transcript = [];
+  const transcriptSourceIndexes = [];
   source.forEach((message, index) => {
     const timestamp = Date.now() - (source.length - index) * 10;
     if (message?.role === "user") {
@@ -251,8 +252,37 @@ export function convertOpenAiMessagesToPi(messages, options = {}) {
         isError: false,
         timestamp,
       });
+    } else {
+      return;
     }
+    transcriptSourceIndexes.push(index);
   });
+
+  // The renderer may name the user's turn explicitly. Presets can place more
+  // user/assistant modules after it, so "the last user message" would be one
+  // of those modules and a resumed session would never receive the real turn.
+  const userTurnIndex = Number.isInteger(options.promptMessageIndex)
+    ? transcriptSourceIndexes.indexOf(options.promptMessageIndex)
+    : -1;
+  if (userTurnIndex >= 0 && transcript[userTurnIndex].role === "user") {
+    const following = transcript.slice(userTurnIndex + 1);
+    const isToolTraffic = (message) => message.role === "toolResult" ||
+      (message.role === "assistant" && message.content.some((part) => part.type === "toolCall"));
+    // Tool traffic after the turn means an agent loop is in progress, which
+    // the positional rules below already handle.
+    if (!following.some(isToolTraffic)) {
+      // A trailing assistant message is a prefill, which Pi would treat as a
+      // reply to continue instead of a turn to answer.
+      const suffixLength = following.findLastIndex((message) => message.role === "user") + 1;
+      return {
+        systemPrompt,
+        history: transcript.slice(0, userTurnIndex),
+        promptMessage: transcript[userTurnIndex],
+        fallbackPromptMessage: null,
+        promptSuffix: following.slice(0, suffixLength),
+      };
+    }
+  }
 
   const promptIndex = transcript.at(-1)?.role === "user" ? transcript.length - 1 : -1;
   const promptMessage = promptIndex >= 0 ? transcript[promptIndex] : null;
@@ -270,7 +300,7 @@ export function convertOpenAiMessagesToPi(messages, options = {}) {
     : fallbackPromptIndex >= 0
       ? transcript.filter((_, index) => index !== fallbackPromptIndex && index !== prefillIndex)
       : transcript;
-  return { systemPrompt, history, promptMessage, fallbackPromptMessage };
+  return { systemPrompt, history, promptMessage, fallbackPromptMessage, promptSuffix: [] };
 }
 
 export function getPiSamplingParams(request) {

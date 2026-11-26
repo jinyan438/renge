@@ -363,7 +363,12 @@ import {
 } from "./chatToolProgressUtils";
 import { createPiStreamingTimeline } from "./piStreamingTimeline";
 import { resolvePiToolAnchor } from "./piToolMessageOrderUtils";
-import { removeAssistantPrefillAfterLatestUser } from "./piRoleplayPromptUtils";
+import {
+  findUserTurnIndex,
+  markLatestUserTurn,
+  markPromptSuffix,
+  removeAssistantPrefillAfterLatestUser,
+} from "./piRoleplayPromptUtils";
 import {
   chatBubbleStatusLabels,
   getChatBubbleStatus,
@@ -26653,7 +26658,7 @@ export function App() {
         applyPromptRegexToApiMessages(
           composeChatApiMessages(
             systemPrompt,
-            (fileMemoryEnabled ? recentRoleplayBody(messagesForApi) : messagesForApi).map((message) =>
+            markLatestUserTurn((fileMemoryEnabled ? recentRoleplayBody(messagesForApi) : messagesForApi).map((message) =>
               buildChatMessageForApi(
                 message,
                 personas,
@@ -26667,7 +26672,7 @@ export function App() {
                   reasoningReplayProvider: requestProvider,
                 },
               ),
-            ),
+            )),
             responseMode === "persona" ? responderPersona : undefined,
             responderCharacterCard
               ? {
@@ -26699,6 +26704,7 @@ export function App() {
           apiMessages.splice(0, apiMessages.length, ...normalizedRoleplayMessages);
         }
       }
+      markPromptSuffix(apiMessages);
       if (requestFileMemory) {
         const memoryContext = await runMemoryPhase(requestFileMemory, false, nextMessages);
         throwIfChatAborted(abortSignal);
@@ -26769,6 +26775,9 @@ export function App() {
           mutableChatMessageId: assistantMessageId,
           kernel: usePiKernel ? "pi" : "renge",
         });
+        const userTurnIndex = isContinuation || isDialogueRewrite || isLocalRewrite
+          ? -1
+          : findUserTurnIndex(requestMessages);
         const piRunId = usePiKernel ? crypto.randomUUID() : "";
         const runtime = chatRuntimesRef.current.get(requestSessionId);
         runtime.piRunId = piRunId;
@@ -27124,6 +27133,7 @@ export function App() {
                   piSessionScope: getMainPiSessionScope(requestSessionId, requestProvider, requestModelId, messagesForApi),
                   piLastUserPromptFallback:
                     !isContinuation && !isDialogueRewrite && !isLocalRewrite,
+                  ...(userTurnIndex >= 0 ? { piPromptMessageIndex: userTurnIndex } : {}),
                   ...((fileMemoryEnabled || isContinuation || isDialogueRewrite || isLocalRewrite)
                     ? { piHistoryMode: "replace" }
                     : {}),
@@ -30127,7 +30137,7 @@ export function App() {
         applyPromptRegexToApiMessages(
           composeChatApiMessages(
             systemPrompt,
-            messagesForApi.map((message) =>
+            markLatestUserTurn(messagesForApi.map((message) =>
               buildChatMessageForApi(
                 message,
                 personas,
@@ -30141,7 +30151,7 @@ export function App() {
                   reasoningReplayProvider: chatProvider,
                 },
               ),
-            ),
+            )),
             chatMode === "persona" ? chatPersona : undefined,
             responseCharacter
               ? {
@@ -30173,6 +30183,7 @@ export function App() {
           apiMessages.splice(0, apiMessages.length, ...normalizedRoleplayMessages);
         }
       }
+      markPromptSuffix(apiMessages);
       // 图生图：发图片模型前，自动把最近一张已生成图作为参考图挂到最后一条 user 消息上
       {
         const withRef = await maybeAttachReferenceImageForImageModel(apiMessages, requestModelId);
@@ -30216,6 +30227,7 @@ export function App() {
           mutableChatMessageId: assistantMessageId,
           kernel: usePiKernel ? "pi" : "renge",
         });
+        const userTurnIndex = findUserTurnIndex(requestMessages);
         const piRunId = usePiKernel ? crypto.randomUUID() : "";
         const runtime = chatRuntimesRef.current.get(requestSessionId);
         runtime.piRunId = piRunId;
@@ -30525,6 +30537,7 @@ export function App() {
                   piCompaction: piCompactionSettings,
                   piSessionScope: getMainPiSessionScope(requestSessionId, chatProvider, requestModelId, messagesForApi),
                   piLastUserPromptFallback: true,
+                  ...(userTurnIndex >= 0 ? { piPromptMessageIndex: userTurnIndex } : {}),
                   piSkillPaths: requestPiSkillPaths,
                   mcpConfig: {
                     mcpServers: activeLlmContextSettings.mcpTools

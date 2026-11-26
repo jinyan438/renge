@@ -14,7 +14,12 @@ import {
   shouldEnablePiTools,
   withPiDefaultToolChoice,
 } from "../src/piBridgeUtils.mjs";
-import { removeAssistantPrefillAfterLatestUser } from "../src/piRoleplayPromptUtils.ts";
+import {
+  findUserTurnIndex,
+  markLatestUserTurn,
+  markPromptSuffix,
+  removeAssistantPrefillAfterLatestUser,
+} from "../src/piRoleplayPromptUtils.ts";
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
@@ -81,6 +86,49 @@ test("roleplay prompt normalization keeps assistant history before the latest us
   ];
 
   assert.strictEqual(removeAssistantPrefillAfterLatestUser(messages), messages);
+});
+
+test("the user's turn stays identifiable after presets and prompt transforms surround it", () => {
+  const history = markLatestUserTurn([
+    { role: "assistant", content: "opening scene" },
+    { role: "user", content: "先去趟厕所" },
+    { role: "system", content: "chat-side system note" },
+  ]);
+  // Mirrors the prompt pipeline: preset modules are added around the history
+  // and transforms replace messages with spread copies.
+  const prompt = [
+    { role: "system", content: "roleplay rules" },
+    { role: "user", content: "<story>" },
+    ...history.map((message) => ({ ...message, content: `[${message.content}]` })),
+    { role: "user", content: "format module" },
+    { role: "system", content: "post-history instructions" },
+    { role: "user", content: "style module" },
+  ];
+  markPromptSuffix(prompt);
+
+  assert.equal(findUserTurnIndex(prompt), 3);
+  assert.equal(findUserTurnIndex(prompt.map((message) => ({ ...message }))), 3);
+  assert.deepEqual(JSON.parse(JSON.stringify(prompt[3])), { role: "user", content: "[先去趟厕所]" });
+  assert.deepEqual(Object.keys(prompt[3]), ["role", "content"]);
+
+  // A tool loop appends to the finished prompt; its messages are not preset
+  // modules, so the last one has to stay the prompt.
+  assert.equal(findUserTurnIndex([...prompt, { role: "user", content: "retry the tool call" }]), -1);
+  // A script that rebuilds the message drops the mark.
+  assert.equal(
+    findUserTurnIndex(prompt.map(({ role, content }) => ({ role, content }))),
+    -1,
+  );
+});
+
+test("a reply as the latest chat message leaves no user turn to identify", () => {
+  const prompt = markLatestUserTurn([
+    { role: "user", content: "write a story" },
+    { role: "assistant", content: "chapter one" },
+  ]);
+  markPromptSuffix(prompt);
+
+  assert.equal(findUserTurnIndex(prompt), -1);
 });
 
 test("Pi owns reasoning controls so a partial-progress continuation can disable rethinking", () => {
@@ -268,6 +316,60 @@ test("Pi exposes the latest user turn as a fallback behind an assistant prefill"
   assert.deepEqual(result.history.map((message) => message.role), [
     "assistant",
   ]);
+});
+
+test("Pi takes the named user turn as the prompt and keeps later preset modules as a suffix", () => {
+  const result = convertOpenAiMessagesToPi([
+    { role: "system", content: "Roleplay rules" },
+    { role: "user", content: "<story>" },
+    { role: "assistant", content: "Opening greeting" },
+    { role: "user", content: "Open the window" },
+    { role: "user", content: "format module" },
+    { role: "system", content: "Post-history instructions" },
+    { role: "assistant", content: "Understood." },
+    { role: "user", content: "style module" },
+    { role: "assistant", content: "<roleplay-response>" },
+  ], {
+    lastUserPromptFallback: true,
+    promptMessageIndex: 3,
+  });
+
+  assert.equal(result.systemPrompt, "Roleplay rules\n\nPost-history instructions");
+  assert.equal(result.promptMessage.content, "Open the window");
+  assert.equal(result.fallbackPromptMessage, null);
+  assert.deepEqual(result.history.map((message) => message.content), [
+    "<story>",
+    [{ type: "text", text: "Opening greeting" }],
+  ]);
+  assert.deepEqual(result.promptSuffix.map((message) => [message.role, message.content]), [
+    ["user", "format module"],
+    ["assistant", [{ type: "text", text: "Understood." }]],
+    ["user", "style module"],
+  ]);
+});
+
+test("Pi ignores a named user turn that is not followed only by preset modules", () => {
+  const toolLoop = [
+    { role: "user", content: "read the page" },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [{
+        id: "call-1",
+        type: "function",
+        function: { name: "browser_read_page", arguments: "{}" },
+      }],
+    },
+    { role: "tool", tool_call_id: "call-1", content: "page text" },
+    { role: "user", content: "now summarize it" },
+  ];
+
+  for (const promptMessageIndex of [0, 1, 2, 9, -1, "3"]) {
+    const result = convertOpenAiMessagesToPi(toolLoop, { promptMessageIndex });
+    assert.equal(result.promptMessage.content, "now summarize it");
+    assert.equal(result.history.length, 3);
+    assert.deepEqual(result.promptSuffix, []);
+  }
 });
 
 test("Pi image conversion always supplies a valid MIME type", () => {
