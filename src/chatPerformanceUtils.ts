@@ -269,7 +269,20 @@ export function observeChatLayoutChanges(
     return () => undefined;
   }
 
-  const resizeObserver = new ResizeObserver(onLayoutChange);
+  const resizeObserver = new ResizeObserver((entries) => {
+    // A message is first observed after it has been laid out at its real size.
+    // Only then may it skip off-screen rendering: its remembered size keeps
+    // the scroll height exact, whereas an estimate would make scrolling jump.
+    // Desktop chat windows own their elements, so check the dataset rather
+    // than this window's HTMLElement class.
+    for (const entry of entries) {
+      const dataset = entry.target === thread ? undefined : (entry.target as Partial<HTMLElement>).dataset;
+      if (dataset && dataset.chatLayoutSettled === undefined && entry.contentRect.height > 0) {
+        dataset.chatLayoutSettled = "";
+      }
+    }
+    onLayoutChange();
+  });
   const observed = new Set<Element>();
   const observeLayout = () => {
     const targets = new Set<Element>([thread, ...Array.from(thread.children)]);

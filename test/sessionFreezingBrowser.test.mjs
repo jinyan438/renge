@@ -50,18 +50,19 @@ try {
   const select = (title) => page.locator(".chat-session-item").filter({ hasText: title }).locator("button").first().click();
   await select("超长会话");
   await page.getByText("历史末尾", { exact: true }).waitFor();
-  assert.ok(await page.locator("#chat > .mes").count() <= 80);
-  assert.equal(await page.locator('#chat .mes[mesid="0"]').count(), 0);
   assert.equal(await page.locator(".pi-tool-visualization-body").count(), 0, "closed history never builds tool output DOM");
   await page.locator(".chat-tool-run > summary").click();
   await page.locator(".pi-tool-visualization > summary").click();
   await page.locator(".pi-tool-visualization-body").waitFor();
   await page.locator(".chat-tool-run > summary").click();
   await page.locator(".pi-tool-visualization-body").waitFor({ state: "detached" });
-  for (let index = 0; index < 4; index++) await page.getByRole("button", { name: "查看更早的消息", exact: true }).click();
+  // Older history is prepended automatically; no paging controls remain.
   await page.locator('#chat .mes[mesid="0"]').getByText("超长会话", { exact: true }).waitFor();
-  assert.ok(await page.locator("#chat > .mes").count() <= 80);
-  await page.getByRole("button", { name: "回到最新消息", exact: true }).click();
+  assert.equal(await page.locator("#chat > .mes").count(), messages.length, "every message is mounted in one continuous scroll");
+  assert.equal(await page.getByRole("button", { name: "查看更早的消息", exact: true }).count(), 0);
+  await page.locator("#chat").evaluate((thread) => { thread.scrollTop = 0; });
+  await page.locator('#chat .mes[mesid="0"]').getByText("超长会话", { exact: true }).waitFor();
+  await page.locator("#chat").evaluate((thread) => { thread.scrollTop = thread.scrollHeight; });
   await page.getByText("历史末尾", { exact: true }).waitFor();
   await page.waitForFunction(() => window.__freezeTicks.long >= 2);
   await select("短会话");
@@ -94,7 +95,7 @@ try {
   await restoredRuntime.waitForFunction(() => typeof getVariables === "function");
   assert.equal(await restoredRuntime.evaluate(() => getVariables({ type: "chat" }).probe), "durable");
   assert.deepEqual(errors, []);
-  console.log("PASS: bounded 80-message pages, full history APIs, lazy tool bodies, frozen session timers, worker saves and preserved history");
+  console.log("PASS: progressively mounted full history, full history APIs, lazy tool bodies, frozen session timers, worker saves and preserved history");
 } finally {
   await browser?.close();
   server?.server.closeAllConnections();

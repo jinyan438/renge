@@ -383,7 +383,7 @@ test("consecutive assistant tool messages group into one completed tool-only run
           segmentIndex: 0,
           showTime: index === 0,
         })),
-      parseToolProgressContent: (content) =>
+      getCachedSegmentToolProgress: (_message, content) =>
         content.startsWith("Pi 写入文件：")
           ? { variant: "success", title: "写入文件", badge: "完成", links: [], details: [] }
           : null,

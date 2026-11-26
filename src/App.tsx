@@ -15,7 +15,8 @@ import { ChatStatusSpinner } from "./ChatStatusSpinner";
 import { ChatToolOutputPreview } from "./ChatToolOutputPreview";
 import { createLiveToolVisualizationStore } from "./liveToolVisualizationStore";
 import { ChatDeferredDetails } from "./ChatDeferredDetails";
-import { CHAT_HISTORY_PAGE_SIZE, getChatHistoryWindow } from "./chatHistoryWindow";
+import { getChatHistoryMountStart, getNextChatHistoryMountStart, type ChatHistoryMountState } from "./chatHistoryMount";
+import { ChatRenderBoundary, useStableChatCallback } from "./ChatRenderBoundary";
 import { sendJsonOffThread } from "./jsonSerialization";
 import { createUserProfile, normalizeUserProfiles, type UserProfile } from "./userProfileUtils";
 import {
@@ -4080,6 +4081,22 @@ const chatMessageSegmentsCache = new WeakMap<
   ChatMessage,
   Map<boolean, string[]>
 >();
+const chatSegmentToolProgressCache = new WeakMap<
+  ChatMessage,
+  Map<string, ChatToolProgressBlock | null>
+>();
+
+function getCachedSegmentToolProgress(message: ChatMessage, segment: string) {
+  let messageCache = chatSegmentToolProgressCache.get(message);
+  if (!messageCache) {
+    messageCache = new Map();
+    chatSegmentToolProgressCache.set(message, messageCache);
+  }
+  if (messageCache.has(segment)) return messageCache.get(segment)!;
+  const block = parseToolProgressContent(segment);
+  messageCache.set(segment, block);
+  return block;
+}
 
 function getChatMessageSegments(message: ChatMessage, splitShortChatLines = true) {
   const messageCache = chatMessageSegmentsCache.get(message);
@@ -5263,7 +5280,7 @@ function getRenderedChatItems(
     const toolBlock =
       !toolVisualization &&
       segment.message.role === "assistant" && segment.message.renderAsPlainText !== true
-        ? parseToolProgressContent(segment.segment)
+        ? getCachedSegmentToolProgress(segment.message, segment.segment)
         : null;
     const progressEntry: ToolProgressTimingEntry | null = toolVisualization
       ? {
@@ -13256,7 +13273,7 @@ export function App() {
   );
   const [chatSessions, setChatSessions] = useState<ChatSession[]>(loadChatSessions);
   const [activeChatSessionId, setActiveChatSessionId] = useState("");
-  const [chatHistoryPage, setChatHistoryPage] = useState<{ sessionId: string; start: number | null }>({ sessionId: "", start: null });
+  const [chatHistoryMount, setChatHistoryMount] = useState<ChatHistoryMountState>({ sessionId: "", start: 0 });
   const [selectedChatWorkspaceKey, setSelectedChatWorkspaceKey] = useState("");
   const [appDataLoaded, setAppDataLoaded] = useState(false);
   const [, refreshChatRuntimes] = useState(0);
@@ -13574,8 +13591,9 @@ export function App() {
       string,
       {
         source: ChatMessage;
-        depth: number;
+        depthKey: string;
         latestAssistant: boolean;
+        templateEligible: boolean;
         result: ChatMessage;
       }
     >;
@@ -21332,12 +21350,12 @@ export function App() {
     return true;
   };
   selectRoleplayGreetingRef.current = selectRoleplayGreeting;
-  const cycleRoleplayGreeting = () => {
+  const cycleRoleplayGreeting = useStableChatCallback(() => {
     if (activeRoleplayGreetings.length < 2) return;
     selectRoleplayGreeting(
       (activeRoleplayGreetingIndex + 1) % activeRoleplayGreetings.length,
     );
-  };
+  });
   const recentChatSessions = useMemo(
     () =>
       [...chatSessions]
@@ -21356,19 +21374,6 @@ export function App() {
         : chatMessages.filter((message) => !isHeartbeatUiReminderMessage(message)),
     [chatHeartbeatReminderVisible, chatMessages],
   );
-  const chatHistoryWindow = getChatHistoryWindow(
-    visibleChatMessages.length,
-    chatHistoryPage.sessionId === activeChatSessionId ? chatHistoryPage.start : null,
-  );
-  const windowedChatMessages = useMemo(
-    () => visibleChatMessages.slice(chatHistoryWindow.start, chatHistoryWindow.end),
-    [visibleChatMessages, chatHistoryWindow.start, chatHistoryWindow.end],
-  );
-  const changeChatHistoryPage = (start: number | null) => {
-    chatScrollFollowLatestRef.current = start === null;
-    chatContentPartsCache.clear();
-    setChatHistoryPage({ sessionId: activeChatSessionId, start });
-  };
   const regexProcessedChatMessages = useMemo(
     () => {
       const cache = regexDisplayCacheRef.current;
@@ -21401,20 +21406,37 @@ export function App() {
         chatMode === "roleplay" && activeSessionRoleplayCard
           ? getCharacterRegexTemplateConfig(activeSessionRoleplayCard.extensions)
           : null;
-      const processed = windowedChatMessages.map((message, windowIndex) => {
-        const index = chatHistoryWindow.start + windowIndex;
+      // Every append shifts each message's depth. Only scripts with depth bounds
+      // observe it, so cache on which of them apply instead of the raw depth;
+      // otherwise one new message re-runs every regex over the whole history.
+      const depthBoundScripts = [
+        ...effectiveRegexScripts,
+        ...(chatMode === "roleplay" && activeSessionRoleplayCard ? activeSessionRoleplayCard.regexScripts : []),
+      ].filter((script) => script.minDepth !== null || script.maxDepth !== null);
+      const getDepthKey = (depth: number) => depthBoundScripts.map((script) =>
+        (script.minDepth === null || depth >= script.minDepth) &&
+        (script.maxDepth === null || depth <= script.maxDepth) ? "1" : "0").join("");
+      const processed = visibleChatMessages.map((message, index) => {
         if (message.role !== "assistant" || !message.content) return message;
         // Streaming messages are intentionally displayed as raw text. Running
         // character regexes and templates against the growing full response on
         // every fragment makes complex roleplay cards block the main thread.
         if (message.renderAsPlainText === true) return message;
         const depth = visibleChatMessages.length - index - 1;
+        const depthKey = getDepthKey(depth);
         const latestAssistant = index === latestAssistantMessageIndex;
+        const templateEligible = Boolean(characterTemplate) && isCharacterRegexTemplateMessageEligible(
+          characterTemplate!,
+          index,
+          visibleChatMessages.length,
+          firstAssistantMessageIndex,
+        );
         const cached = cache.entries.get(message.id);
         if (
           cached?.source === message &&
-          cached.depth === depth &&
-          cached.latestAssistant === latestAssistant
+          cached.depthKey === depthKey &&
+          cached.latestAssistant === latestAssistant &&
+          cached.templateEligible === templateEligible
         ) {
           return cached.result;
         }
@@ -21447,30 +21469,25 @@ export function App() {
           ? displaySource
           : applyRegexScripts(displaySource, effectiveRegexScripts, regexOptions);
         const templatedContent =
-          characterTemplate &&
-          isCharacterRegexTemplateMessageEligible(
-            characterTemplate,
-            index,
-            visibleChatMessages.length,
-            firstAssistantMessageIndex,
-          )
+          characterTemplate && templateEligible
             ? renderCharacterRegexTemplate(regexContent, characterTemplate)
             : null;
         const content = templatedContent ?? regexContent;
         const result = content === message.content ? message : { ...message, content };
         cache.entries.set(message.id, {
           source: message,
-          depth,
+          depthKey,
           latestAssistant,
+          templateEligible,
           result,
         });
         return result;
       });
-      const displayedIds = new Set(windowedChatMessages.map((message) => message.id));
+      const displayedIds = new Set(visibleChatMessages.map((message) => message.id));
       for (const id of cache.entries.keys()) if (!displayedIds.has(id)) cache.entries.delete(id);
       return processed;
     },
-    [activeChatSessionId, activePersona, activeSessionRoleplayCard, chatMode, effectiveRegexScripts, personas, userProfile.nickname, visibleChatMessages, windowedChatMessages, chatHistoryWindow.start],
+    [activeChatSessionId, activePersona, activeSessionRoleplayCard, chatMode, effectiveRegexScripts, personas, userProfile.nickname, visibleChatMessages],
   );
   const renderedChatItems = useMemo(
     () =>
@@ -21481,7 +21498,18 @@ export function App() {
       ),
     [chatMultiBubbleEnabled, chatReasoningVisible, regexProcessedChatMessages],
   );
-  const turnPresentedFiles = useMemo(() => collectTurnPresentedFiles(visibleChatMessages), [visibleChatMessages]);
+  const turnPresentedFilesRef = useRef<ReturnType<typeof collectTurnPresentedFiles>>(new Map());
+  const turnPresentedFiles = useMemo(() => {
+    // Keep unchanged cards identical so their chat items can skip rendering.
+    const previous = turnPresentedFilesRef.current;
+    const next = collectTurnPresentedFiles(visibleChatMessages);
+    for (const [messageId, presented] of next) {
+      const prior = previous.get(messageId);
+      if (prior && JSON.stringify(prior) === JSON.stringify(presented)) next.set(messageId, prior);
+    }
+    turnPresentedFilesRef.current = next;
+    return next;
+  }, [visibleChatMessages]);
   const lastVisibleChatItemIndex = useMemo(
     () => getLastVisibleChatItemIndex(renderedChatItems, chatReasoningVisible),
     [chatReasoningVisible, renderedChatItems],
@@ -21490,6 +21518,33 @@ export function App() {
     () => new Map(chatMessages.map((message, index) => [message.id, index])),
     [chatMessages],
   );
+  const chatHistoryMountStart = getChatHistoryMountStart(
+    chatHistoryMount,
+    activeChatSessionId,
+    renderedChatItems.length,
+  );
+  const chatHistoryHasItems = renderedChatItems.length > 0;
+  useEffect(() => {
+    if (!activeChatSessionId || !chatHistoryHasItems) return;
+    if (chatHistoryMount.sessionId === activeChatSessionId && chatHistoryMountStart === 0) return;
+    const mountOlderItems = () => setChatHistoryMount({
+      sessionId: activeChatSessionId,
+      start: getNextChatHistoryMountStart(chatHistoryMountStart),
+    });
+    if (chatHistoryMountStart === 0) {
+      mountOlderItems();
+      return;
+    }
+    // Not deferred while scrolling: a reader heading for the first message
+    // must not wait for the wheel to stop before older history appears.
+    const view = chatThreadRef.current?.ownerDocument.defaultView ?? window;
+    if (typeof view.requestIdleCallback === "function") {
+      const idleId = view.requestIdleCallback(mountOlderItems, { timeout: 120 });
+      return () => view.cancelIdleCallback(idleId);
+    }
+    const timerId = view.setTimeout(mountOlderItems, 16);
+    return () => view.clearTimeout(timerId);
+  }, [activeChatSessionId, chatHistoryHasItems, chatHistoryMount.sessionId, chatHistoryMountStart]);
   useEffect(() => {
     chatReadingFocusRef.current = false;
     chatScrollFollowLatestRef.current = true;
@@ -22197,7 +22252,7 @@ export function App() {
     );
   };
 
-  const openChatMessageMenu = (messageId: string, event: MouseEvent<HTMLElement>) => {
+  const openChatMessageMenu = useStableChatCallback((messageId: string, event: MouseEvent<HTMLElement>) => {
     const document = event.currentTarget.ownerDocument;
     const window = document.defaultView!;
     event.preventDefault();
@@ -22245,7 +22300,7 @@ export function App() {
       x: clamp(menuAnchor ? menuAnchor.right - 180 : event.clientX, 8, window.innerWidth - 180),
       y: clamp(menuAnchor ? menuAnchor.bottom + 4 : event.clientY, 8, Math.max(8, window.innerHeight - 248)),
     });
-  };
+  });
 
   const handleChatBubbleContextMenu = (
     messageId: string,
@@ -24744,7 +24799,7 @@ export function App() {
     worldBooks,
   ]);
 
-  const executeChatCommandBlock = async (content: string) => {
+  const executeChatCommandBlock = useStableChatCallback(async (content: string) => {
     if (!localWorkspaceHandle || !localToolsEnabled) {
       setChatStatus({ status: "error", message: "请先选择工作区，才能执行命令。" });
       return;
@@ -24799,7 +24854,7 @@ export function App() {
     }
 
     setChatStatus({ status: "success", message: "命令块执行完成。" });
-  };
+  });
 
   const renderChatMessageHeader = (message: ChatMessage, name: string, duration?: string) => (
     <header className="chat-message-header">
@@ -31312,7 +31367,7 @@ export function App() {
     };
   }, [chatRunningInputMenuSessionId]);
 
-  const respondToChatChoice = (
+  const respondToChatChoice = useStableChatCallback((
     messageId: string,
     value: string,
     optionId?: string,
@@ -31362,7 +31417,7 @@ export function App() {
       });
     }
     void sendPromise;
-  };
+  });
 
   const renderChatChoiceRequest = (message: ChatMessage, messageIndex: number) => {
     const choiceRequest = message.choiceRequest;
@@ -32730,6 +32785,68 @@ export function App() {
     if (!chatSessionsRef.current.some((session) => session.id === sessionId)) return;
     handleDesktopOpenRecentSession(sessionId);
   }), [handleDesktopOpenRecentSession]);
+
+  // Changes whenever anything shared by every chat item changes; per-message
+  // inputs are listed separately in getChatItemRenderDeps.
+  const chatItemRenderContext = useMemo(() => ({}), [
+    activeChatSession?.id,
+    activeChatSessionId,
+    activePersona,
+    activeRoleplayGreetingIndex,
+    activeRoleplayGreetings,
+    activeSessionRoleplayCard,
+    activeTavernScripts,
+    aiModeAvatarImage,
+    chatChoiceDrafts,
+    chatGenerationState !== "idle",
+    chatHtmlRenderEnabled,
+    chatMode,
+    chatMultiBubbleEnabled,
+    chatPersonalization.aiAvatarSettings,
+    chatReasoningVisible,
+    chatStatus.status,
+    copyChatCodeBlock,
+    effectiveChatModelId,
+    htmlPreviewSessionReady,
+    liveToolVisualizations,
+    localToolsEnabled,
+    localWorkspaceHandle,
+    personas,
+    renderPiToolVisualizationBody,
+    roleplayGreetingIsOnlyMessage,
+    roleplayGreetingSelectorOpen,
+    userProfile,
+  ]);
+  const lastUserChatMessageIndex = useMemo(() => {
+    for (let index = chatMessages.length - 1; index >= 0; index -= 1) {
+      if (chatMessages[index].role === "user") return index;
+    }
+    return -1;
+  }, [chatMessages]);
+  const getChatItemRenderDeps = (item: RenderedChatItem, renderedItemIndex: number) => {
+    const segments = item.kind === "toolOnlyGroup"
+      ? item.toolGroups.flatMap((toolGroup) => toolGroup.segments)
+      : item.kind === "toolGroup" ? item.segments : [item];
+    const deps: unknown[] = [chatItemRenderContext, renderedItemIndex === lastVisibleChatItemIndex];
+    for (const { message, segment, segmentIndex } of segments) {
+      const messageIndex = chatMessageIndexById.get(message.id) ?? -1;
+      deps.push(
+        message,
+        segment,
+        segmentIndex,
+        messageIndex,
+        chatMessages[messageIndex]?.content,
+        turnPresentedFiles.get(message.id),
+        Boolean(message.choiceRequest) && lastUserChatMessageIndex > messageIndex,
+        // HTML previews read the shared script context, which also changes
+        // when unrelated messages arrive; plain messages do not need it.
+        chatHtmlRenderEnabled && message.content.includes("<") ? htmlPreviewContexts : null,
+      );
+      // Inline editors call handlers that read the whole conversation.
+      if (editingChatMessage?.messageId === message.id) deps.push({});
+    }
+    return deps;
+  };
 
   if (!activePersona) {
     return <div className="boot">正在初始化人格工作台...</div>;
@@ -38561,21 +38678,6 @@ export function App() {
               chatScrollStateFrameRef.current = () => view.cancelAnimationFrame(frame);
             }}
           >
-            {visibleChatMessages.length > CHAT_HISTORY_PAGE_SIZE && (
-              <nav className="chat-history-navigation" aria-label="会话历史分页">
-                <button type="button" className="small-action" disabled={chatHistoryWindow.start === 0}
-                  onClick={() => changeChatHistoryPage(Math.max(0, chatHistoryWindow.start - CHAT_HISTORY_PAGE_SIZE))}>
-                  查看更早的消息
-                </button>
-                <span>{chatHistoryWindow.start + 1}–{chatHistoryWindow.end} / {visibleChatMessages.length}</span>
-                <button type="button" className="small-action" disabled={chatHistoryWindow.end >= visibleChatMessages.length}
-                  onClick={() => changeChatHistoryPage(Math.min(chatHistoryWindow.latestStart, chatHistoryWindow.start + CHAT_HISTORY_PAGE_SIZE))}>
-                  查看后面的消息
-                </button>
-                <button type="button" className="small-action" disabled={chatHistoryPage.sessionId !== activeChatSessionId || chatHistoryPage.start === null}
-                  onClick={() => changeChatHistoryPage(null)}>回到最新消息</button>
-              </nav>
-            )}
             {visibleChatMessages.length === 0 ? (
               <div
                 className={`chat-empty ${
@@ -38691,7 +38793,9 @@ export function App() {
                 )}
               </div>
             ) : (
-              renderedChatItems.map((item, renderedItemIndex) => {
+              renderedChatItems.slice(chatHistoryMountStart).map((item, mountedItemIndex) => {
+                const renderedItemIndex = chatHistoryMountStart + mountedItemIndex;
+                return <ChatRenderBoundary key={item.id} deps={getChatItemRenderDeps(item, renderedItemIndex)} render={() => {
                 if (item.kind === "toolGroup" || item.kind === "toolOnlyGroup") {
                   const toolGroups =
                     item.kind === "toolOnlyGroup" ? item.toolGroups : [item];
@@ -38884,6 +38988,7 @@ export function App() {
                       tavernSystemMessage ? "system assistant" : message.role
                     }${tavernHiddenMessage ? " tavern-hidden-message" : ""}`}
                     key={messageRenderKey}
+                    data-chat-uncontained={tavernCompatible ? "" : undefined}
                     {...{
                       mesid: messageIndex,
                       is_user:
@@ -39156,6 +39261,7 @@ export function App() {
                   </article>
                 );
                 });
+                }} />;
               })
             )}
             {chatMessageMenu &&

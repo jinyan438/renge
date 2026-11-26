@@ -449,13 +449,13 @@ test("observes chat message height and child-list changes", (context) => {
   let changes = 0;
   const dispose = observeChatLayoutChanges(thread, () => changes += 1);
   assert.deepEqual(observed, [thread, firstChild]);
-  resizeCallback();
+  resizeCallback([]);
   assert.equal(changes, 1);
   thread.children = [firstChild, secondChild];
   mutationCallback();
   assert.equal(changes, 1, "child-list mutation does not force layout before the browser measures it");
   assert.deepEqual(observed, [thread, firstChild, secondChild], "existing message observers remain subscribed");
-  resizeCallback();
+  resizeCallback([]);
   assert.equal(changes, 2);
   thread.children = [secondChild];
   mutationCallback();
@@ -468,10 +468,50 @@ test("observes chat message height and child-list changes", (context) => {
 test("keeps every asynchronously growing chat message in normal layout", () => {
   const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
   const stylesSource = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const conversationSource = readFileSync(new URL("../src/chat-conversation.css", import.meta.url), "utf8");
 
   assert.doesNotMatch(appSource, /createChatMessageVirtualizer/);
   assert.doesNotMatch(stylesSource, /\.chat-message[^{}]*\{[^}]*content-visibility/s);
   assert.doesNotMatch(stylesSource, /--chat-message-intrinsic-height/);
+  // Messages may only skip rendering after a real layout recorded their size,
+  // and never when Tavern card HTML could position content outside them.
+  for (const [, selector] of conversationSource.matchAll(/([^{}]*\.chat-message[^{}]*)\{[^}]*content-visibility:\s*auto/g)) {
+    assert.match(selector, /\[data-chat-layout-settled\]:not\(\[data-chat-uncontained\]\)/);
+  }
+  assert.match(appSource, /data-chat-uncontained=\{tavernCompatible \? "" : undefined\}/);
+  assert.match(conversationSource, /\.chat-thread \.chat-message \{[^}]*contain-intrinsic-size: auto none/);
+});
+
+test("marks chat messages as settled only after a real non-empty layout", (context) => {
+  const previousResizeObserver = globalThis.ResizeObserver;
+  const previousMutationObserver = globalThis.MutationObserver;
+  // Plain objects stand in for elements owned by another (desktop) window.
+  const hidden = { dataset: {} };
+  const visible = { dataset: {} };
+  const thread = { children: [hidden, visible] };
+  let resizeCallback;
+  globalThis.ResizeObserver = class {
+    constructor(callback) { resizeCallback = callback; }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+  globalThis.MutationObserver = class { observe() {} disconnect() {} };
+  context.after(() => {
+    globalThis.ResizeObserver = previousResizeObserver;
+    globalThis.MutationObserver = previousMutationObserver;
+  });
+
+  let changes = 0;
+  observeChatLayoutChanges(thread, () => changes += 1);
+  resizeCallback([
+    { target: thread, contentRect: { height: 500 } },
+    { target: hidden, contentRect: { height: 0 } },
+    { target: visible, contentRect: { height: 120 } },
+  ]);
+  assert.equal(changes, 1);
+  assert.equal(hidden.dataset.chatLayoutSettled, undefined, "an unrendered message keeps normal layout");
+  assert.equal(visible.dataset.chatLayoutSettled, "");
 });
 
 test("keeps mounted HTML previews alive and freezes their rendering offscreen", () => {

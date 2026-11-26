@@ -13,21 +13,20 @@
   background: transparent;
 }
 
-.chat-history-navigation {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 8px;
-  color: var(--conversation-muted);
-  font-size: 12px;
-}
-
 .chat-thread .chat-message {
   position: relative;
   width: 100%;
   min-width: 0;
+  contain-intrinsic-size: auto none;
+}
+
+/* Settled messages keep their last real size while off screen, so long
+   histories neither relayout nor repaint on every streamed fragment.
+   Tavern-scripted messages may hold card HTML with fixed-position content,
+   which containment would clip, so they keep normal rendering. */
+.chat-thread > .chat-message[data-chat-layout-settled]:not([data-chat-uncontained]) {
+  content-visibility: auto;
+  overflow-clip-margin: 16px;
 }
 
 .chat-thread .chat-message.assistant::before {
