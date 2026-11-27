@@ -1,6 +1,7 @@
 // Self-contained Tavern Helper 4 + SillyTavern 1.19 API bridge injected into
 // isolated HTML preview iframes via `Function.prototype.toString()`.
 // Keep `installHtmlPreviewTavernHelperApi` free of external module closures.
+import { getHtmlPreviewDataRequest } from "./htmlPreviewContextData";
 
 export type HtmlPreviewTavernSnapshot = {
   characterNames: string[];
@@ -126,15 +127,14 @@ export const HTML_PREVIEW_TAVERN_API_REMOTE_NAMES: readonly string[] = Object.fr
   "getAllEnabledScriptButtons",
 ]);
 
-const HEAVY_TAVERN_PREVIEW_API_PATTERN =
-  /\b(?:getPreset|setPreset|updatePresetWith|replacePreset|promptManager|getTavernRegexes|formatAsTavernRegexedString|formatAsDisplayedMessage|isCharacterTavernRegexesEnabled|renderMarkdown|getCharData|RawCharacter|characters|getPersonaAvatarPath|getPersona|getCharAvatarPath)\b|<script\b[^>]*\bsrc\s*=|\.load\s*\(/i;
-
 /**
  * Checks whether an HTML snippet may read presets, regexes, character cards or
  * avatar data URLs synchronously so routine bubbles skip serializing them.
  */
 export function needsHeavyTavernPreviewContext(content: string): boolean {
-  return HEAVY_TAVERN_PREVIEW_API_PATTERN.test(content);
+  const request = getHtmlPreviewDataRequest(content);
+  return Boolean(request.characters.length || request.presets.length || request.regexes ||
+    request.characterAvatars.length || request.personaAvatars.length || request.scriptTrees);
 }
 
 type FrameRuntimeContext = {

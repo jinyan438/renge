@@ -238,7 +238,7 @@ try {
     sameSource: true, character: "Runner fixture", hasPreset: true,
   });
   const serialized = await largeFrame.locator("[data-renge-html-preview-variables]").textContent();
-  assert.equal(serialized.split("LARGE_SNAPSHOT_SOURCE_TOKEN:").length - 1, 1);
+  assert.equal(serialized.split("LARGE_SNAPSHOT_SOURCE_TOKEN:").length - 1, 0);
   assert.ok(serialized.length < largePreview.length * 2, "snapshot serialization must not multiply the large HTML");
   assert.equal(await page.getByText("界面加载失败", { exact: true }).count(), 0);
 

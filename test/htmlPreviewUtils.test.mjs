@@ -3,6 +3,9 @@ import test from "node:test";
 import vm from "node:vm";
 
 import { serializeHtmlPreviewValue } from "../src/htmlPreviewSerialization.ts";
+import { getHtmlPreviewDataRequest, loadHtmlPreviewContextData } from "../src/htmlPreviewContextData.ts";
+import { createTavernScriptExports } from "../src/tavernScriptExports.ts";
+import { HTML_PREVIEW_SCRIPT_EXPORTS_SOURCE } from "../src/htmlPreviewScriptExports.ts";
 
 import {
   collectInheritedHtmlPreviewStyleResources,
@@ -22,6 +25,84 @@ import {
 } from "../src/htmlPreviewUtils.ts";
 
 const packDocument = (html) => `<body><script>(function(){var h=new TextDecoder().decode(Uint8Array.from(atob('${Buffer.from(html).toString('base64')}'),function(c){return c.charCodeAt(0)}));document.write(h)})();</script></body>`;
+
+test("compiled frontends request their own APIs without including the installed card and script libraries", async () => {
+  const module = "const characters = []; window.FixtureCard.view(getCurrentMessageId());";
+  const html = `<script type="module" src="data:text/javascript;base64,${Buffer.from(module).toString('base64')}"></script>`;
+  const request = getHtmlPreviewDataRequest(html);
+  assert.deepEqual(request.characters, []);
+  assert.deepEqual(request.presets, []);
+  assert.equal(request.regexes, false);
+  assert.equal(request.scriptTrees, false);
+  assert.ok(request.globals.includes("FixtureCard"));
+  const context = await loadHtmlPreviewContextData(request, () => {
+    assert.fail("a custom runtime frontend must not read unrelated cards, presets or scripts");
+  }, "user");
+  assert.deepEqual(context, { tavern: {} });
+});
+
+test("preview RPC hydration loads explicitly used synchronous APIs before author scripts", async () => {
+  const source = "getCharData('current'); getPreset('Named'); getTavernRegexes(); getScriptTrees(); getCharAvatarPath('Other'); getPersonaAvatarPath('Persona 2');";
+  const content = `<script type="module" src="data:text/javascript;base64,${Buffer.from(source).toString('base64')}"></script>`;
+  const calls = [];
+  const context = await loadHtmlPreviewContextData(getHtmlPreviewDataRequest(content), async (name, args) => {
+    calls.push([name, args]);
+    if (name === "getCharData") return { name: "Current", extensions: { required: true } };
+    if (name === "getPreset") return { name: args[0], prompts: [] };
+    if (name === "getTavernRegexes") return [{ id: "current-regex" }];
+    if (name === "getScriptTrees") return [{ id: args[0].type }];
+    if (name === "getCharAvatarPath" || name === "getPersonaAvatarPath") return `avatar:${args[0]}`;
+    if (name === "getPersona") return { avatar_id: "persona-2" };
+    assert.fail(`unexpected eager API: ${name}`);
+  }, "user");
+  assert.equal(context.tavern.charData.name, "Current");
+  assert.equal(context.tavern.namedPresets.Named.name, "Named");
+  assert.equal(context.tavern.inUsePreset.name, "in_use");
+  assert.deepEqual(context.scriptTrees.character, [{ id: "character" }]);
+  assert.equal(calls.filter(([name]) => name === "getCharData").length, 1);
+  assert.equal(context.tavern.charDataByName, undefined);
+  assert.deepEqual(context.tavern.characterAvatars, { Other: "avatar:Other" });
+  assert.deepEqual(context.tavern.personaAvatars, { "persona-2": "avatar:Persona 2" });
+  assert.equal(calls.some(([name,args]) => name === "getCharAvatarPath" && args[0] === "current"), false);
+});
+
+test("script-owned runtime exports provide synchronous floor reads and RPC actions with fresh results", async () => {
+  const host = { document: { querySelector() {} }, ExistingApi: { save() {} } };
+  const exports = createTavernScriptExports(host, new Set(Object.keys(host)));
+  let name = "Traveller", writes = 0;
+  host.FixtureCard = {
+    engine: "fixture-v1",
+    view: floor => ({ floor, name }),
+    latestFrame: () => null,
+    async opening(value) { name = value.name; writes += 1; return { saved: name }; },
+  };
+  const requested = ["FixtureCard", "ExistingApi", "document", "__proto__"];
+  const snapshot = { scriptExports: exports.snapshot(requested, 2) };
+  assert.deepEqual(Object.keys(snapshot.scriptExports), ["FixtureCard"]);
+  assert.equal(writes, 0, "discovery must never execute actions");
+  const fakeWindow = {};
+  const installer = new Function("window", `return (${HTML_PREVIEW_SCRIPT_EXPORTS_SOURCE});`)(fakeWindow);
+  const bridge = installer(snapshot, async (operation, data) => {
+    const result = operation === "scriptExport" ? await exports.call(data.name, data.method, data.args) : undefined;
+    const fresh = exports.snapshot(requested, 2);
+    return operation === "scriptExport" ? { result, scriptExports: fresh } : fresh;
+  }, structuredClone);
+  assert.equal(fakeWindow.FixtureCard.engine, "fixture-v1");
+  assert.deepEqual(fakeWindow.FixtureCard.view(2), { floor: 2, name: "Traveller" });
+  assert.equal(fakeWindow.FixtureCard.latestFrame(), null);
+  assert.deepEqual(await fakeWindow.FixtureCard.opening({ name: "Alex" }), { saved: "Alex" });
+  assert.equal(writes, 1);
+  assert.equal(fakeWindow.FixtureCard.view(2).name, "Alex");
+  name = "Updated externally";
+  await bridge.refresh();
+  assert.equal(fakeWindow.FixtureCard.view(2).name, name);
+  await assert.rejects(exports.call("FixtureCard", "constructor", []), /不存在/);
+  await assert.rejects(exports.call("ExistingApi", "save", []), /不存在/);
+  await assert.rejects(exports.call("document", "querySelector", []), /不存在/);
+  delete host.FixtureCard;
+  await bridge.refresh();
+  assert.equal(fakeWindow.FixtureCard, undefined, "a removed script export must not retain its old state");
+});
 
 test("serializes large Tavern snapshots without expanding shared cards, swipes and HTML", () => {
   const html = "<div>Fixture</div>".repeat(60_000);

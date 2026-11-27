@@ -7,23 +7,49 @@
     <script>
       (() => {
         const initMessageType = "renge-html-preview-frame-init";
-        const previewId = decodeURIComponent(window.location.hash.slice(1));
-        const initialize = (event) => {
+        const previewId = window.location.protocol === "about:" ? "" : decodeURIComponent(window.location.hash.slice(1));
+        const initialize = async (event) => {
           const payload = event.data;
           if (
             event.source !== window.parent ||
             !payload ||
             payload.type !== initMessageType ||
-            payload.id !== previewId ||
+            (previewId && payload.id !== previewId) ||
+            typeof payload.id !== "string" ||
             typeof payload.document !== "string"
           ) {
             return;
           }
 
           window.removeEventListener("message", initialize);
-          document.open();
-          document.write(payload.document);
-          document.close();
+          // Fetch scoped state before executing author scripts. Heavy objects
+          // cross structured postMessage transport, never an inline JS literal.
+          try {
+            const requestId = `bootstrap:${crypto.randomUUID()}`;
+            window.__rengeHtmlPreviewInitialContext = await new Promise((resolve, reject) => {
+              const timeout = setTimeout(() => {
+                window.removeEventListener("message", receive);
+                reject(new Error("HTML 预览状态加载超时"));
+              }, 15000);
+              const receive = (reply) => {
+                if (reply.source !== window.parent || reply.data?.type !== "renge-html-preview-command-result" ||
+                    reply.data.id !== payload.id || reply.data.requestId !== requestId) return;
+                clearTimeout(timeout);
+                window.removeEventListener("message", receive);
+                if (reply.data.error) reject(new Error(String(reply.data.error)));
+                else resolve(reply.data.result);
+              };
+              window.addEventListener("message", receive);
+              window.parent.postMessage({ type: "renge-html-preview-command", id: payload.id,
+                requestId, operation: "getPreviewContext" }, "*");
+            });
+            document.open();
+            document.write(payload.document);
+            document.close();
+          } catch (error) {
+            console.error("HTML preview initialization failed", error);
+            document.body.textContent = String(error.message || error);
+          }
         };
 
         window.addEventListener("message", initialize);

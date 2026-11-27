@@ -121,6 +121,10 @@ import htmlPreviewDependenciesSource from "virtual:html-preview-dependencies";
 import { HTML_PREVIEW_PARENT_BRIDGE_SOURCE } from "./htmlPreviewParentBridge";
 import { HTML_PREVIEW_TAVERN_SCRIPTS_SOURCE } from "./htmlPreviewTavernScripts";
 import { serializeHtmlPreviewValue } from "./htmlPreviewSerialization";
+import htmlPreviewFrameBootstrapDocument from "../public/html-preview-frame.html?raw";
+import { getHtmlPreviewDataRequest, loadHtmlPreviewContextData, type HtmlPreviewDataRequest } from "./htmlPreviewContextData";
+import { HTML_PREVIEW_SCRIPT_EXPORTS_SOURCE } from "./htmlPreviewScriptExports";
+import type { TavernScriptExportSnapshots } from "./tavernScriptExports";
 import {
   getTavernScriptTrees,
   replaceTavernScriptTrees,
@@ -131,7 +135,6 @@ import {
   HTML_PREVIEW_TAVERN_EVENT_SUBSCRIPTIONS_MESSAGE,
   HTML_PREVIEW_TAVERN_HELPER_API_SOURCE,
   HTML_PREVIEW_TAVERN_API_REMOTE_NAMES,
-  needsHeavyTavernPreviewContext,
   type HtmlPreviewTavernConstants,
   type HtmlPreviewTavernSnapshot,
 } from "./htmlPreviewTavernHelperApi";
@@ -4256,6 +4259,8 @@ type HtmlPreviewContext = {
   currentHtmlPartIndex?: number;
   parentMessageFrames?: Array<{ partIndex: number; attributes: Record<string, string> }>;
   parentGlobals?: Record<string, { get: unknown }>;
+  scriptExports?: TavernScriptExportSnapshots;
+  contextDataRevision?: string;
   messages: Array<{
     role: ChatRole;
     content: string;
@@ -4279,6 +4284,8 @@ type HtmlPreviewContext = {
   >;
   tavern?: HtmlPreviewTavernSnapshot;
 };
+
+type HtmlPreviewContextProvider = () => { context: HtmlPreviewContext; request: HtmlPreviewDataRequest; content: string };
 
 const executableCommandNames = new Set(["npm", "pnpm", "yarn", "node", "git"]);
 const shellLanguages = new Set(["sh", "shell", "bash", "zsh", "cmd", "bat", "powershell", "ps1"]);
@@ -4632,7 +4639,7 @@ const HTML_PREVIEW_TAVERN_CONSTANTS_LITERAL = serializeHtmlPreviewValue(
   HTML_PREVIEW_TAVERN_CONSTANTS,
 );
 
-function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreviewContext) {
+function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreviewContext, hydrateFromParent = false) {
   const previewIdLiteral = serializeHtmlPreviewValue(previewId);
   const messageTypeLiteral = serializeHtmlPreviewValue(HTML_PREVIEW_VARIABLES_UPDATE_MESSAGE);
   const contextMessageTypeLiteral = serializeHtmlPreviewValue(
@@ -4654,7 +4661,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
   const subscriptionMessageTypeLiteral = serializeHtmlPreviewValue(
     HTML_PREVIEW_TAVERN_EVENT_SUBSCRIPTIONS_MESSAGE,
   );
-  const contextLiteral = serializeHtmlPreviewValue(context);
+  const contextLiteral = hydrateFromParent ? "null" : serializeHtmlPreviewValue(context);
 
   return [
     '<script data-renge-html-preview-variables="true">',
@@ -4668,13 +4675,16 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     `const interactionMessageType = ${interactionMessageTypeLiteral};`,
     `const viewportMessageType = ${viewportMessageTypeLiteral};`,
     `const subscriptionMessageType = ${subscriptionMessageTypeLiteral};`,
-    `const snapshot = ${contextLiteral};`,
+    "const initialContext = window.__rengeHtmlPreviewInitialContext || (() => { try { return window.parent.__rengeGetHtmlPreviewContext?.(); } catch { return null; } })();",
+    "delete window.__rengeHtmlPreviewInitialContext;",
+    `const snapshot = initialContext || ${contextLiteral} || {};`,
     "const clone = (value) => {",
     "  if (value == null) return value;",
     "  try { return structuredClone(value); } catch {}",
     "  try { return JSON.parse(JSON.stringify(value)); } catch { return value; }",
     "};",
     "const isRecord = (value) => Boolean(value) && typeof value === \"object\" && !Array.isArray(value);",
+    "window.__rengeGetHtmlPreviewContext = () => clone(snapshot);",
     "const mergeRecords = (base, overlay) => {",
     "  const output = isRecord(base) ? clone(base) : {};",
     "  if (!isRecord(overlay)) return output;",
@@ -4803,14 +4813,25 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  if (event.data.type !== contextUpdateMessageType || event.data.id !== previewId) return;",
     "  if (!isRecord(event.data.context)) return;",
     "  const incomingContext = clone(event.data.context);",
+    "  const contextDataChanged = incomingContext.contextDataRevision !== snapshot.contextDataRevision;",
     "  if (isRecord(incomingContext.tavern) && isRecord(snapshot.tavern)) {",
+    "    if (!contextDataChanged && String(snapshot.tavern.currentCharacterAvatar || '').startsWith('data:')) incomingContext.tavern.currentCharacterAvatar = snapshot.tavern.currentCharacterAvatar;",
     "    incomingContext.tavern = { ...snapshot.tavern, ...incomingContext.tavern };",
     "  }",
     "  Object.assign(snapshot, incomingContext);",
-    "  refreshSillyTavernChatCache();",
-    "  emitVariableUpdate();",
-    "  try { window.dispatchEvent(new CustomEvent(\"renge-html-preview-context-updated\", { detail: clone(snapshot) })); } catch {}",
+    "  const finishContextUpdate = () => {",
+    "    refreshSillyTavernChatCache();",
+    "    void scriptExportsBridge.refresh().then(emitVariableUpdate).catch(console.error);",
+    "    try { window.dispatchEvent(new CustomEvent(\"renge-html-preview-context-updated\", { detail: clone(snapshot) })); } catch {}",
+    "  };",
+    "  if (contextDataChanged) {",
+    "    void requestParentCommand(\"getPreviewContext\").then(fresh => {",
+    "      if (!isRecord(fresh) || fresh.contextDataRevision !== snapshot.contextDataRevision) return;",
+    "      Object.assign(snapshot, fresh); finishContextUpdate();",
+    "    }).catch(console.error);",
+    "  } else finishContextUpdate();",
     "});",
+    `const scriptExportsBridge = (${HTML_PREVIEW_SCRIPT_EXPORTS_SOURCE})(snapshot, requestParentCommand, clone);`,
     "const assignVariables = (variables, option) => {",
     "  const normalized = normalizeVariableOption(option);",
     "  const type = String(normalized.type || \"chat\").toLowerCase();",
@@ -4828,7 +4849,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "    const index = normalizeMessageId(normalized.message_id, true);",
     "    if (snapshot.messages[index]) snapshot.messages[index].variables = next;",
     "  }",
-    "  emitVariableUpdate();",
+    "  void scriptExportsBridge.refresh().then(emitVariableUpdate).catch(console.error);",
     "  try {",
     "    parent.postMessage({",
     "      type: updateMessageType,",
@@ -7225,7 +7246,7 @@ function buildHtmlPreviewDocument(
     : window.location.href;
   const iconStyle = `<style data-renge-html-preview-icons="true">${getTavernFontAwesomeCss(iconBaseUrl)}</style>`;
   const imageScript = buildHtmlPreviewImagesScript(new URL("/html-preview-image", window.location.href).href);
-  const headInjection = `${htmlPreviewViewportMeta}${imageScript}${inheritedStyleInjection}${htmlPreviewStyle}${iconStyle}${buildHtmlPreviewFullscreenScript(previewId)}${htmlPreviewJqueryScript}${htmlPreviewDependenciesScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
+  const headInjection = `${htmlPreviewViewportMeta}${imageScript}${inheritedStyleInjection}${htmlPreviewStyle}${iconStyle}${buildHtmlPreviewFullscreenScript(previewId)}${htmlPreviewJqueryScript}${htmlPreviewDependenciesScript}${htmlPreviewBootstrapScript}${htmlPreviewJqueryDelegationScript}${buildHtmlPreviewVariablesScript(previewId, context, embeddedDepth === 0)}${buildHtmlPreviewPersonalizationScript(context)}${embeddedFramesScript}${buildHtmlPreviewScript(previewId, heavyContent)}`;
   if (/<!doctype\s+html|<html[\s>]/i.test(trimmedContent)) {
     return injectHtmlPreviewHead(trimmedContent, headInjection);
   }
@@ -7255,6 +7276,8 @@ type ChatHtmlPreviewProps = {
   messageId: string;
   previewId: string;
   frameRegistry: { current: Map<string, HTMLIFrameElement> };
+  contextRegistry: { current: Map<string, HtmlPreviewContextProvider> };
+  contextBaseRef: { current: Omit<HtmlPreviewContext, "currentMessageIndex"> };
 };
 
 const ChatHtmlPreview = memo(function ChatHtmlPreview({
@@ -7264,8 +7287,13 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
   messageId,
   previewId,
   frameRegistry,
+  contextRegistry,
+  contextBaseRef,
 }: ChatHtmlPreviewProps) {
   const hostWindow = useDesktopWindow();
+  const dataRequest = useMemo(() => getHtmlPreviewDataRequest(content), [content]);
+  const latestContextRef = useRef({ context, request: dataRequest, content });
+  latestContextRef.current = { context, request: dataRequest, content };
   const containerRef = useRef<HTMLDivElement | null>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const requestHeavyMountRef = useRef<() => void>(() => {});
@@ -7411,11 +7439,11 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       {
         type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
         id: previewId,
-        context: { ...context, parentGlobals },
+        context: { ...context, ...contextBaseRef.current, chatId: context.chatId, parentGlobals },
       },
       "*",
     );
-  }, [content, context, previewId]);
+  }, [content, context, contextBaseRef, previewId]);
 
   const sendViewportUpdate = useCallback(() => {
     const frame = frameRef.current;
@@ -7493,16 +7521,22 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
         frameRegistry.current.get(previewId) === previousFrame
       ) {
         frameRegistry.current.delete(previewId);
+        contextRegistry.current.delete(previewId);
       }
       frameRef.current = frame;
       if (frame) {
         frameRegistry.current.set(previewId, frame);
+        contextRegistry.current.set(previewId, () => {
+          const latest = latestContextRef.current;
+          return { ...latest, context: { ...latest.context, ...contextBaseRef.current, chatId: latest.context.chatId } };
+        });
       }
       else if (frameRegistry.current.get(previewId) === previousFrame) {
         frameRegistry.current.delete(previewId);
+        contextRegistry.current.delete(previewId);
       }
     },
-    [frameRegistry, previewId],
+    [contextBaseRef, contextRegistry, frameRegistry, previewId],
   );
 
   const handleLoad = useCallback(
@@ -7521,7 +7555,6 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
         "*",
       );
       if (
-        isolatedFrame &&
         initializedFrameRef.current !== loadedFrame &&
         sourceDocumentRef.current
       ) {
@@ -7533,7 +7566,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
             id: previewId,
             document: sourceDocumentRef.current.value,
           },
-          isolatedFrame.origin,
+          isolatedFrame?.origin ?? "*",
         );
       }
       const synchronizeLoadedFrame = () => {
@@ -7588,7 +7621,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
               : "allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-scripts"
           }
           src={isolatedFrame?.url}
-          srcDoc={isolatedFrame ? undefined : sourceDocumentRef.current.value}
+          srcDoc={isolatedFrame ? undefined : htmlPreviewFrameBootstrapDocument}
           tabIndex={0}
           title="HTML 预览"
         />
@@ -13550,6 +13583,7 @@ export function App() {
   const chatAttachmentFilesRef = useRef<Map<string, File>>(new Map());
   const chatAttachmentMetadataRef = useRef<Map<string, ChatAttachment>>(new Map());
   const htmlPreviewFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
+  const htmlPreviewFrameContextsRef = useRef<Map<string, HtmlPreviewContextProvider>>(new Map());
   const htmlPreviewSubscribedEventsRef = useRef<Map<string, Set<string>>>(new Map());
   const chatInputValueRef = useRef("");
   const chatInputHasContentRef = useRef(false);
@@ -14903,7 +14937,36 @@ export function App() {
       if (payload.type === HTML_PREVIEW_COMMAND_MESSAGE) {
         try {
           let result: unknown;
-          if (payload.operation === "triggerSlash") {
+          if (payload.operation === "getPreviewContext" || payload.operation === "scriptExport" || payload.operation === "scriptExportSnapshots") {
+            const provider = htmlPreviewFrameContextsRef.current.get(payload.id);
+            if (!provider) throw new Error("HTML 预览会话已关闭。");
+            const provided = provider();
+            if (provided.context.chatId !== activeChatSessionIdRef.current) throw new Error("HTML 预览会话已切换。");
+            const { request } = provided;
+            const context = { ...provided.context, ...htmlPreviewContextBaseRef.current,
+              parentGlobals: getHtmlPreviewParentGlobals(provided.content) };
+            const deadline = Date.now() + 15_000;
+            let runtime = tavernScriptRuntimeRef.current;
+            while ((!runtime || !runtime.isReady()) && Date.now() < deadline) {
+              await new Promise(resolve => window.setTimeout(resolve, 50));
+              runtime = tavernScriptRuntimeRef.current;
+            }
+            if (!runtime?.isReady()) throw new Error("酒馆助手接口尚未就绪。");
+            const getExports = () => runtime!.getScriptExportSnapshots(request.globals, context.currentMessageIndex);
+            if (payload.operation === "getPreviewContext") {
+              const data = await loadHtmlPreviewContextData(request, (name, args) => runtime!.callApi(name, args), context.tavern?.currentPersonaId ?? "");
+              result = { ...context, ...data, tavern: { ...context.tavern, ...data.tavern }, scriptExports: getExports() };
+            } else if (payload.operation === "scriptExportSnapshots") {
+              result = getExports();
+            } else {
+              const call = payload as { name?: unknown; method?: unknown; args?: unknown };
+              const name = String(call.name ?? "");
+              if (!request.globals.includes(name)) throw new Error("未请求的脚本接口。");
+              const value = await runtime.callScriptExport(name, String(call.method ?? ""), Array.isArray(call.args) ? call.args : []);
+              await flushTavernPersistenceRef.current();
+              result = { result: value, scriptExports: getExports() };
+            }
+          } else if (payload.operation === "triggerSlash") {
             if (typeof payload.command !== "string") throw new Error("酒馆命令内容为空。");
             result = await executeSlashCommand(payload.command);
           } else if (payload.operation === "setInput") {
@@ -22312,108 +22375,13 @@ export function App() {
     userProfiles,
     worldBooks,
   ]);
-  const htmlPreviewHeavyTavernCacheRef = useRef<Partial<HtmlPreviewTavernSnapshot> | null>(null);
-  useEffect(() => {
-    htmlPreviewHeavyTavernCacheRef.current = null;
-  }, [
-    activeChatPreset,
-    activeChatSession,
-    activeSessionRoleplayCard,
-    characterCards,
-    chatPresetEnabled,
-    chatPresets,
-    regexScripts,
-    userProfiles,
-    worldBooks,
-  ]);
-  const getHtmlPreviewHeavyTavernPatch = useCallback((): Partial<HtmlPreviewTavernSnapshot> => {
-    if (htmlPreviewHeavyTavernCacheRef.current) return htmlPreviewHeavyTavernCacheRef.current;
-    const activePreset = chatPresetEnabled ? activeChatPreset : undefined;
-    const formatPreset = (preset: ChatPreset) =>
-      toTavernHelperPreset(preset, {
-        regexScripts: preset.regexScripts.map((script) => toTavernHelperRegex(script, "preset")),
-        scripts: getTavernScriptTrees(preset.tavernScripts),
-      });
-    const characterWorldBook = activeSessionRoleplayCard
-      ? resolveSessionCharacterWorldBook(activeChatSession, activeSessionRoleplayCard, worldBooks)
-      : null;
-    const serializeRegex = (script: RegexScript) => ({
-      id: script.id,
-      scriptName: script.scriptName,
-      findRegex: script.findRegex,
-      replaceString: script.replaceString,
-      trimStrings: [...script.trimStrings],
-      placement: [...script.placement],
-      disabled: script.disabled,
-      markdownOnly: script.markdownOnly,
-      promptOnly: script.promptOnly,
-      runOnEdit: script.runOnEdit,
-      substituteRegex: script.substituteRegex,
-      minDepth: script.minDepth,
-      maxDepth: script.maxDepth,
-    });
-    const charDataByName: Record<string, Record<string, unknown>> = {};
-    const characterAvatars: Record<string, string> = {};
-    characterCards.forEach((card) => {
-      const worldbookName =
-        card.id === activeSessionRoleplayCard?.id
-          ? characterWorldBook?.name ?? null
-          : resolveCharacterWorldBook(card, worldBooks)?.name ?? null;
-      const formatted = toSillyTavernCharacterData(card, {
-        worldbookName,
-        avatar: card.avatarDataUrl || `${card.id}.png`,
-        regexScripts: card.regexScripts.map(serializeRegex),
-      });
-      charDataByName[card.name] = formatted;
-      charDataByName[card.id] = formatted;
-      if (card.avatarDataUrl) {
-        characterAvatars[card.name] = card.avatarDataUrl;
-        characterAvatars[`${card.id}.png`] = card.avatarDataUrl;
-        characterAvatars[card.id] = card.avatarDataUrl;
-      }
-    });
-    const patch: Partial<HtmlPreviewTavernSnapshot> = {
-      currentCharacterAvatar: activeSessionRoleplayCard?.avatarDataUrl || null,
-      inUsePreset: activePreset ? formatPreset(activePreset) : null,
-      namedPresets: Object.fromEntries(
-        chatPresets.map((preset) => [preset.name, formatPreset(preset)]),
-      ),
-      regexes: [
-        ...regexScripts.map((script) => toTavernHelperRegex(script, "global")),
-        ...(activePreset?.regexScripts ?? []).map((script) => toTavernHelperRegex(script, "preset")),
-        ...(activeSessionRoleplayCard?.regexScripts ?? []).map((script) =>
-          toTavernHelperRegex(script, "character"),
-        ),
-      ],
-      charData: activeSessionRoleplayCard ? charDataByName[activeSessionRoleplayCard.id] ?? null : null,
-      charDataByName,
-      characterAvatars,
-      personaAvatars: Object.fromEntries(
-        userProfiles
-          .filter((profile) => Boolean(profile.avatarImage))
-          .map((profile) => [profile.id, profile.avatarImage]),
-      ),
-    };
-    htmlPreviewHeavyTavernCacheRef.current = patch;
-    return patch;
-  }, [
-    activeChatPreset,
-    activeChatSession,
-    activeSessionRoleplayCard,
-    characterCards,
-    chatPresetEnabled,
-    chatPresets,
-    regexScripts,
-    userProfiles,
-    worldBooks,
+  const htmlPreviewContextDataRevision = useMemo(() => crypto.randomUUID(), [
+    activeChatPreset, activeChatSession?.characterWorldBookOverrides, activeSessionRoleplayCard,
+    characterCards, chatPresetEnabled, chatPresets, regexScripts, tavernScripts, userProfiles, worldBooks,
   ]);
   const htmlPreviewContextBase = useMemo<Omit<HtmlPreviewContext, "currentMessageIndex">>(
     () => ({
-      scriptTrees: {
-        global: getTavernScriptTrees(tavernScripts),
-        preset: getTavernScriptTrees(chatPresetEnabled ? activeChatPreset?.tavernScripts ?? [] : []),
-        character: getTavernScriptTrees(activeSessionRoleplayCard?.tavernScripts ?? []),
-      },
+      contextDataRevision: htmlPreviewContextDataRevision,
       messages: htmlPreviewMessages,
       chatVariables: activeChatSession?.scriptVariables ?? {},
       characterVariables: activeSessionRoleplayCard?.tavernVariables ?? {},
@@ -22453,10 +22421,25 @@ export function App() {
       extensions,
       htmlPreviewMessages,
       htmlPreviewTavernLight,
+      htmlPreviewContextDataRevision,
       tavernGlobalVariables,
       userProfile.nickname,
     ],
   );
+  const htmlPreviewContextBaseRef = useRef(htmlPreviewContextBase);
+  htmlPreviewContextBaseRef.current = htmlPreviewContextBase;
+  useEffect(() => {
+    // Chat rows can remain memoized when scripts change only variables or
+    // metadata. Synchronize mounted iframes independently of those row renders.
+    htmlPreviewFrameContextsRef.current.forEach((provider, id) => {
+      const frame = htmlPreviewFrameRefs.current.get(id);
+      const provided = provider();
+      if (!frame || provided.context.chatId !== htmlPreviewContextBase.chatId) return;
+      postMessageToFrame(frame, { type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE, id,
+        context: { ...provided.context, ...htmlPreviewContextBase,
+          parentGlobals: getHtmlPreviewParentGlobals(provided.content) } }, "*");
+    });
+  }, [htmlPreviewContextBase]);
   const htmlPreviewContexts = useMemo(
     () => new Map<string, HtmlPreviewContext>(),
     [htmlPreviewContextBase],
@@ -26063,9 +26046,8 @@ export function App() {
     );
     const htmlPreviewSessionId =
       (activeChatSession?.id ?? activeChatSessionId) || "no-session";
-    const getHtmlPreviewContext = (partIndex: number, partContent: string) => {
-      const heavy = needsHeavyTavernPreviewContext(partContent);
-      const contextKey = `${sourceMessageId}:${partIndex}:${heavy ? "heavy" : "light"}`;
+    const getHtmlPreviewContext = (partIndex: number) => {
+      const contextKey = `${sourceMessageId}:${partIndex}`;
       const currentMessageIndex = chatMessageIndexById.get(sourceMessageId) ?? -1;
       const currentMessage = chatMessages[currentMessageIndex];
       const cached = htmlPreviewContexts.get(contextKey);
@@ -26084,9 +26066,6 @@ export function App() {
       if (currentMessage) messages[currentMessageIndex] = formatPreviewMessage(currentMessage);
       const context: HtmlPreviewContext = {
         ...htmlPreviewContextBase,
-        ...(heavy && htmlPreviewContextBase.tavern
-          ? { tavern: { ...htmlPreviewContextBase.tavern, ...getHtmlPreviewHeavyTavernPatch() } }
-          : {}),
         messages,
         currentHtmlPartIndex: partIndex,
         parentMessageFrames: parts.flatMap((part, index) =>
@@ -26120,8 +26099,10 @@ export function App() {
               return (
                 <ChatHtmlPreview
                   content={part.content}
-                  context={getHtmlPreviewContext(partIndex, part.content)}
+                  context={getHtmlPreviewContext(partIndex)}
                   frameRegistry={htmlPreviewFrameRefs}
+                  contextRegistry={htmlPreviewFrameContextsRef}
+                  contextBaseRef={htmlPreviewContextBaseRef}
                   key={previewId}
                   mountReady={htmlPreviewSessionReady}
                   messageId={sourceMessageId}
@@ -26212,8 +26193,10 @@ export function App() {
             return (
               <ChatHtmlPreview
                 content={part.content}
-                context={getHtmlPreviewContext(partIndex, part.content)}
+                context={getHtmlPreviewContext(partIndex)}
                 frameRegistry={htmlPreviewFrameRefs}
+                contextRegistry={htmlPreviewFrameContextsRef}
+                contextBaseRef={htmlPreviewContextBaseRef}
                 key={previewId}
                 mountReady={htmlPreviewSessionReady}
                 messageId={sourceMessageId}

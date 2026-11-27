@@ -1,5 +1,6 @@
 import type { TavernScript, TavernScriptButton } from "./tavernScriptUtils";
 import { isTavernScriptEnabled } from "./tavernScriptUtils";
+import { createTavernScriptExports } from "./tavernScriptExports";
 import { createTavernScriptTreeApi, type TavernScriptScope, type TavernScriptTree } from "./tavernScriptTreeUtils";
 import {
   attachTavernSubscriptionControls,
@@ -1696,6 +1697,7 @@ function isFrameworkScript(script: TavernScript) {
 }
 
 export class TavernScriptRuntime {
+  private scriptExports: ReturnType<typeof createTavernScriptExports> | null = null;
   private readonly scripts: TavernScript[];
   private readonly adapter: TavernScriptRuntimeAdapter;
   private iframe: HTMLIFrameElement | null = null;
@@ -1764,6 +1766,15 @@ export class TavernScriptRuntime {
     const target = Object.prototype.hasOwnProperty.call(this.api, name) ? this.api[name] : undefined;
     if (typeof target !== "function") throw new Error(`酒馆助手接口 ${name} 不存在。`);
     return await Reflect.apply(target, this.api, args);
+  }
+
+  getScriptExportSnapshots(names: string[], messageIndex: number) {
+    return this.isReady() ? this.scriptExports?.snapshot(names, messageIndex) ?? {} : {};
+  }
+
+  async callScriptExport(name: string, method: string, args: unknown[]) {
+    if (!this.isReady() || !this.scriptExports) throw new Error("酒馆脚本接口尚未就绪。");
+    return await this.scriptExports.call(name, method, args);
   }
 
   /** Applies macros registered through `registerMacroLike` plus the builtin ones. */
@@ -1870,6 +1881,11 @@ export class TavernScriptRuntime {
       this.runtimeStyleBridgeCleanup = installRuntimeStyleBridge(this.runtimeWindow, this.hostWindow);
     }
     this.publishButtons();
+
+    this.scriptExports = createTavernScriptExports(
+      this.hostWindow as unknown as Record<string, unknown>,
+      new Set(Object.getOwnPropertyNames(this.hostWindow)),
+    );
 
     const startupScripts = this.scripts
       .filter(
