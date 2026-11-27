@@ -38,6 +38,10 @@ test("setChatMessage also accepts id-first and object forms without changing the
 
 test("appends createChatMessages when TavernHelper passes refresh options", () => {
   assert.equal(resolveTavernCreateMessageInsertionIndex({ refresh: "affected" }, 3), 3);
+  assert.equal(resolveTavernCreateMessageInsertionIndex({ insert_before: "end" }, 3), 3);
+  assert.equal(resolveTavernCreateMessageInsertionIndex({ insert_before: 1 }, 3), 1);
+  assert.equal(resolveTavernCreateMessageInsertionIndex({ insert_before: -1 }, 3), 2);
+  assert.equal(resolveTavernCreateMessageInsertionIndex({ insert_at: -2 }, 4), 2);
   assert.equal(resolveTavernCreateMessageInsertionIndex(undefined, 3), 3);
   assert.equal(resolveTavernCreateMessageInsertionIndex(-1, 3), 3);
   assert.equal(resolveTavernCreateMessageInsertionIndex(1, 3), 1);
@@ -440,13 +444,24 @@ test("macro-like registrations substitute regex values and unregister cleanly", 
     /\{\{card_state\}\}/giu,
     (context) => JSON.stringify({ message: context.message_id }),
   );
+  registry.registerMacroLike(
+    /\{\{stat::([a-z]+)::(\d+)\}\}/gi,
+    (_context, _match, key, delta) => `${key}+${delta}`,
+  );
+  registry.registerMacroLike("{{plain_token}}", () => "PLAIN");
 
   assert.equal(
-    registry.substitute("state={{card_state}}"),
-    'state={"message":7}',
+    registry.substitute("state={{card_state}} {{stat::hp::15}} {{plain_token}}"),
+    'state={"message":7} hp+15 PLAIN',
   );
   assert.equal(registration.unregister(), true);
-  assert.equal(registry.substitute("state={{card_state}}"), "state={{card_state}}");
+  assert.equal(registry.unregisterMacroLike(/\{\{stat::([a-z]+)::(\d+)\}\}/gi), true);
+  assert.equal(registry.unregisterMacroLike("{{plain_token}}"), true);
+  assert.equal(registry.unregisterMacroLike("{{missing}}"), false);
+  assert.equal(
+    registry.substitute("state={{card_state}} {{stat::hp::15}} {{plain_token}}"),
+    "state={{card_state}} {{stat::hp::15}} {{plain_token}}",
+  );
 });
 
 test("jsDelivr module graphs use the local Tavern module proxy", () => {

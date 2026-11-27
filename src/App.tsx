@@ -126,6 +126,35 @@ import {
   TAVERN_SCRIPT_TREE_API_SOURCE,
   type TavernScriptTree,
 } from "./tavernScriptTreeUtils";
+import {
+  HTML_PREVIEW_TAVERN_EVENT_SUBSCRIPTIONS_MESSAGE,
+  HTML_PREVIEW_TAVERN_HELPER_API_SOURCE,
+  HTML_PREVIEW_TAVERN_API_REMOTE_NAMES,
+  needsHeavyTavernPreviewContext,
+  type HtmlPreviewTavernConstants,
+  type HtmlPreviewTavernSnapshot,
+} from "./htmlPreviewTavernHelperApi";
+import {
+  SILLYTAVERN_VERSION,
+  TAVERN_BUILTIN_PROMPT_DEFAULT_ORDER,
+  TAVERN_EVENT_TYPES,
+  TAVERN_HELPER_IFRAME_EVENTS,
+  TAVERN_HELPER_VERSION,
+  TAVERN_MESSAGE_ID_EVENTS,
+  createTavernHelperDefaultPreset,
+  normalizeTavernEventName,
+  toSillyTavernCharacterData,
+  toTavernHelperPersona,
+  toTavernHelperPreset,
+} from "./tavernHelperCompat";
+import {
+  createTavernHelperHostServices,
+  toTavernHelperRegex,
+} from "./tavernHelperHostServices";
+import {
+  executeTavernSlashPipeline,
+  splitTavernSlashPipeline,
+} from "./tavernSlashExecutor";
 import { postMessageToFrame } from "./frameMessaging";
 import { buildHtmlPreviewImagesScript } from "./htmlPreviewImages";
 import {
@@ -4247,6 +4276,7 @@ type HtmlPreviewContext = {
     ChatPersonalizationSettings,
     "quoteStyleEnabled" | "quoteStyleColor"
   >;
+  tavern?: HtmlPreviewTavernSnapshot;
 };
 
 const executableCommandNames = new Set(["npm", "pnpm", "yarn", "node", "git"]);
@@ -4594,6 +4624,20 @@ function serializeHtmlPreviewValue(value: unknown) {
     .replace(/\u2029/g, "\\u2029");
 }
 
+const HTML_PREVIEW_TAVERN_CONSTANTS: HtmlPreviewTavernConstants = {
+  tavernHelperVersion: TAVERN_HELPER_VERSION,
+  sillyTavernVersion: SILLYTAVERN_VERSION,
+  tavernEvents: { ...TAVERN_EVENT_TYPES },
+  iframeEvents: { ...TAVERN_HELPER_IFRAME_EVENTS },
+  messageIdEvents: Array.from(TAVERN_MESSAGE_ID_EVENTS),
+  builtinPromptDefaultOrder: TAVERN_BUILTIN_PROMPT_DEFAULT_ORDER,
+  defaultPreset: createTavernHelperDefaultPreset(),
+  remoteApiNames: HTML_PREVIEW_TAVERN_API_REMOTE_NAMES,
+};
+const HTML_PREVIEW_TAVERN_CONSTANTS_LITERAL = serializeHtmlPreviewValue(
+  HTML_PREVIEW_TAVERN_CONSTANTS,
+);
+
 function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreviewContext) {
   const previewIdLiteral = serializeHtmlPreviewValue(previewId);
   const messageTypeLiteral = serializeHtmlPreviewValue(HTML_PREVIEW_VARIABLES_UPDATE_MESSAGE);
@@ -4613,6 +4657,9 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
   const viewportMessageTypeLiteral = serializeHtmlPreviewValue(
     HTML_PREVIEW_VIEWPORT_MESSAGE,
   );
+  const subscriptionMessageTypeLiteral = serializeHtmlPreviewValue(
+    HTML_PREVIEW_TAVERN_EVENT_SUBSCRIPTIONS_MESSAGE,
+  );
   const contextLiteral = serializeHtmlPreviewValue(context);
 
   return [
@@ -4626,6 +4673,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     `const generationEventMessageType = ${generationEventMessageTypeLiteral};`,
     `const interactionMessageType = ${interactionMessageTypeLiteral};`,
     `const viewportMessageType = ${viewportMessageTypeLiteral};`,
+    `const subscriptionMessageType = ${subscriptionMessageTypeLiteral};`,
     `const snapshot = ${contextLiteral};`,
     "const clone = (value) => {",
     "  if (value == null) return value;",
@@ -4670,7 +4718,6 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  };",
     "}",
     "window._ = lodashCompat;",
-    "const bridgeEventHandlers = new Map();",
     "const pendingCommandRequests = new Map();",
     "let commandRequestSequence = 0;",
     "const updateParentViewport = (width, height) => {",
@@ -4695,61 +4742,6 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  return window.innerWidth || document.documentElement.clientWidth || 0;",
     "};",
     "try { updateParentViewport(getInitialViewportWidth(), window.parent.innerHeight); } catch { updateParentViewport(getInitialViewportWidth(), window.innerHeight); }",
-    "const eventOn = (eventName, callback) => {",
-    "  if (typeof callback !== \"function\") return callback;",
-    "  const key = String(eventName);",
-    "  const callbacks = bridgeEventHandlers.get(key) || new Set();",
-    "  callbacks.add(callback);",
-    "  bridgeEventHandlers.set(key, callbacks);",
-    "  return callback;",
-    "};",
-    "const eventRemoveListener = (eventName, callback) => {",
-    "  const callbacks = bridgeEventHandlers.get(String(eventName));",
-    "  if (!callbacks) return false;",
-    "  callbacks.delete(callback);",
-    "  if (callbacks.size === 0) bridgeEventHandlers.delete(String(eventName));",
-    "  return true;",
-    "};",
-    "const eventOnce = (eventName, callback) => {",
-    "  if (typeof callback !== \"function\") return callback;",
-    "  const once = (...args) => { eventRemoveListener(eventName, once); return callback(...args); };",
-    "  eventOn(eventName, once);",
-    "  return once;",
-    "};",
-    "const eventEmit = async (eventName, ...args) => {",
-    "  const callbacks = Array.from(bridgeEventHandlers.get(String(eventName)) || []);",
-    "  for (const callback of callbacks) await callback(...args);",
-    "  return callbacks.length > 0;",
-    "};",
-    "const emitVariableUpdate = () => void eventEmit(String(window.Mvu?.events?.VARIABLE_UPDATE_ENDED || \"mag_variable_update_ended\"), clone(snapshot));",
-    "window.addEventListener(\"message\", (event) => {",
-    "  if (event.source !== parent || !isRecord(event.data)) return;",
-    "  if (event.data.type === viewportMessageType && event.data.id === previewId) {",
-    "    updateParentViewport(event.data.width, event.data.height);",
-    "    return;",
-    "  }",
-    "  if (event.data.type === commandResultMessageType && event.data.id === previewId) {",
-    "    const pending = pendingCommandRequests.get(String(event.data.requestId));",
-    "    if (!pending) return;",
-    "    pendingCommandRequests.delete(String(event.data.requestId));",
-    "    clearTimeout(pending.timeoutId);",
-    "    if (event.data.error) pending.reject(new Error(String(event.data.error)));",
-    "    else pending.resolve(clone(event.data.result));",
-    "    return;",
-    "  }",
-    "  if (event.data.type === generationEventMessageType && event.data.id === previewId) {",
-    "    if (typeof event.data.eventName !== \"string\") return;",
-    "    const args = Array.isArray(event.data.args) ? clone(event.data.args) : [];",
-    "    void eventEmit(event.data.eventName, ...args);",
-    "    return;",
-    "  }",
-    "  if (event.data.type !== contextUpdateMessageType || event.data.id !== previewId) return;",
-    "  if (!isRecord(event.data.context)) return;",
-    "  Object.assign(snapshot, clone(event.data.context));",
-    "  refreshSillyTavernChatCache();",
-    "  emitVariableUpdate();",
-    "  try { window.dispatchEvent(new CustomEvent(\"renge-html-preview-context-updated\", { detail: clone(snapshot) })); } catch {}",
-    "});",
     "const requestParentCommand = (operation, data = {}) => new Promise((resolve, reject) => {",
     "  const requestId = `${previewId}:${Date.now()}:${++commandRequestSequence}`;",
     "  const timeoutMs = operation === \"generate\" || operation === \"triggerSlash\" ? 10 * 60 * 1000 : 15000;",
@@ -4789,6 +4781,42 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  const index = normalizeMessageId(normalized.message_id, true);",
     "  return snapshot.messages[index]?.variables || {};",
     "};",
+    "const getVariables = (option) => clone(resolveVariables(option) || {});",
+    `const helperBridge = (${HTML_PREVIEW_TAVERN_HELPER_API_SOURCE})({ previewId, subscriptionMessageType, snapshot, clone, isRecord, mergeRecords, requestParentCommand, getVariables }, ${HTML_PREVIEW_TAVERN_CONSTANTS_LITERAL});`,
+    "const { eventOn, eventOnce, eventMakeFirst, eventMakeLast, eventOnButton, eventOff, eventRemoveListener, eventClearEvent, eventClearListener, eventClearAll, eventEmit, eventEmitAndWait } = helperBridge.api;",
+    "const emitVariableUpdate = () => void helperBridge.deliverHostEvent(String(window.Mvu?.events?.VARIABLE_UPDATE_ENDED || \"mag_variable_update_ended\"), [clone(snapshot)]);",
+    "window.addEventListener(\"message\", (event) => {",
+    "  if (event.source !== parent || !isRecord(event.data)) return;",
+    "  if (event.data.type === viewportMessageType && event.data.id === previewId) {",
+    "    updateParentViewport(event.data.width, event.data.height);",
+    "    return;",
+    "  }",
+    "  if (event.data.type === commandResultMessageType && event.data.id === previewId) {",
+    "    const pending = pendingCommandRequests.get(String(event.data.requestId));",
+    "    if (!pending) return;",
+    "    pendingCommandRequests.delete(String(event.data.requestId));",
+    "    clearTimeout(pending.timeoutId);",
+    "    if (event.data.error) pending.reject(new Error(String(event.data.error)));",
+    "    else pending.resolve(clone(event.data.result));",
+    "    return;",
+    "  }",
+    "  if (event.data.type === generationEventMessageType && event.data.id === previewId) {",
+    "    if (typeof event.data.eventName !== \"string\") return;",
+    "    const args = Array.isArray(event.data.args) ? clone(event.data.args) : [];",
+    "    void helperBridge.deliverHostEvent(event.data.eventName, args);",
+    "    return;",
+    "  }",
+    "  if (event.data.type !== contextUpdateMessageType || event.data.id !== previewId) return;",
+    "  if (!isRecord(event.data.context)) return;",
+    "  const incomingContext = clone(event.data.context);",
+    "  if (isRecord(incomingContext.tavern) && isRecord(snapshot.tavern)) {",
+    "    incomingContext.tavern = { ...snapshot.tavern, ...incomingContext.tavern };",
+    "  }",
+    "  Object.assign(snapshot, incomingContext);",
+    "  refreshSillyTavernChatCache();",
+    "  emitVariableUpdate();",
+    "  try { window.dispatchEvent(new CustomEvent(\"renge-html-preview-context-updated\", { detail: clone(snapshot) })); } catch {}",
+    "});",
     "const assignVariables = (variables, option) => {",
     "  const normalized = normalizeVariableOption(option);",
     "  const type = String(normalized.type || \"chat\").toLowerCase();",
@@ -4818,7 +4846,6 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  } catch {}",
     "  return clone(next);",
     "};",
-    "const getVariables = (option) => clone(resolveVariables(option) || {});",
     "const replaceVariables = async (variables, option) => assignVariables(variables, option);",
     "const updateVariablesWith = async (updater, option) => {",
     "  const current = getVariables(option);",
@@ -4862,6 +4889,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  const isHidden = extra.tavernIsHidden === true;",
     "  const tavernName = typeof extra.tavernName === 'string' ? extra.tavernName.trim() : '';",
     "  return {",
+    "    ...extra,",
     "    message_id: index, mesid: index, id: index,",
     "    name: tavernName || (message.role === \"user\" ? snapshot.userName : snapshot.characterName),",
     "    role: isSystem ? \"system\" : message.role, is_user: message.role === \"user\" && !isSystem, is_system: isSystem, is_hidden: isHidden,",
@@ -4872,8 +4900,15 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "};",
     "const getChatMessages = (range = null, options = {}) => {",
     "  const formatted = snapshot.messages.map((message, index) => formatMessage(message, index));",
-    "  const filter = (items) => !isRecord(options) || options.role == null || options.role === \"all\"",
-    "    ? items : items.filter((item) => item.role === options.role);",
+    "  const normalizedOptions = isRecord(options) ? options : {};",
+    "  const role = normalizedOptions.role == null ? \"all\" : String(normalizedOptions.role);",
+    "  const hideState = String(normalizedOptions.hide_state ?? \"all\");",
+    "  const filter = (items) => items.filter((item) => {",
+    "    if (role !== \"all\" && item.role !== role) return false;",
+    "    if (hideState === \"hidden\" && !item.is_hidden) return false;",
+    "    if (hideState === \"unhidden\" && item.is_hidden) return false;",
+    "    return true;",
+    "  });",
     "  if (range == null || range === \"\") return filter(formatted);",
     "  const expandedRange = typeof range === \"string\"",
     "    ? range.replace(/\\{\\{\\s*lastMessageId\\s*\\}\\}/gi, String(snapshot.messages.length - 1)).replace(/\\{\\{\\s*currentMessageId\\s*\\}\\}/gi, String(snapshot.currentMessageIndex))",
@@ -4884,10 +4919,13 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  }",
     "  const match = /^(-?\\d+)\\s*-\\s*(-?\\d+)$/.exec(String(expandedRange).trim());",
     "  if (!match) return [];",
-    "  const start = normalizeMessageId(match[1], false);",
-    "  const end = normalizeMessageId(match[2], false);",
-    "  return filter(formatted.slice(Math.max(0, start), Math.max(0, end) + 1));",
+    "  const first = normalizeMessageId(match[1], false);",
+    "  const second = normalizeMessageId(match[2], false);",
+    "  const start = Math.max(0, Math.min(first, second));",
+    "  const end = Math.min(formatted.length - 1, Math.max(first, second));",
+    "  return start <= end ? filter(formatted.slice(start, end + 1)) : [];",
     "};",
+    "const reservedMessageKeys = new Set([\"message_id\",\"mesid\",\"id\",\"name\",\"role\",\"is_user\",\"is_system\",\"is_hidden\",\"message\",\"mes\",\"content\",\"data\",\"variables\",\"extra\",\"swipe_id\",\"swipes\",\"swipes_data\",\"swipes_info\"]);",
     "const applyMessageUpdates = (updates) => {",
     "  if (!Array.isArray(updates)) return false;",
     "  updates.forEach((update) => {",
@@ -4907,6 +4945,21 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "    else if (isRecord(update.variables)) message.variables = clone(update.variables);",
     "    if (isRecord(update.extra)) message.extra = clone(update.extra);",
     "    else if (Array.isArray(update.swipes_info) && isRecord(update.swipes_info[swipeIndex])) message.extra = clone(update.swipes_info[swipeIndex]);",
+    "    const nextExtra = isRecord(message.extra) ? clone(message.extra) : {};",
+    "    Object.entries(update).forEach(([key, value]) => { if (!reservedMessageKeys.has(key)) nextExtra[key] = clone(value); });",
+    "    if (update.role === \"system\") nextExtra.tavernIsSystem = true;",
+    "    else if (update.role === \"user\" || update.role === \"assistant\") delete nextExtra.tavernIsSystem;",
+    "    if (typeof update.is_hidden === \"boolean\") {",
+    "      if (update.is_hidden) nextExtra.tavernIsHidden = true;",
+    "      else delete nextExtra.tavernIsHidden;",
+    "    }",
+    "    if (typeof update.name === \"string\") {",
+    "      const trimmedName = update.name.trim();",
+    "      const defaultName = message.role === \"user\" ? snapshot.userName : snapshot.characterName;",
+    "      if (trimmedName && (trimmedName !== defaultName || nextExtra.tavernIsSystem === true)) nextExtra.tavernName = trimmedName;",
+    "      else delete nextExtra.tavernName;",
+    "    }",
+    "    message.extra = nextExtra;",
     "  });",
     "  return true;",
     "};",
@@ -4997,24 +5050,59 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "window.toastr = Object.fromEntries([\"success\", \"info\", \"warning\", \"error\"].map(level => [level, (message, title) => notify(level, message, title)]));",
     "window.toastr.clear = () => undefined;",
     HTML_PREVIEW_STSCRIPT_COMPAT_SOURCE,
-    "const generate = (config = {}) => {",
-    "  const normalized = isRecord(config) ? config : { user_input: config };",
-    "  const userInput = String(normalized.user_input ?? normalized.prompt ?? getInput());",
-    "  return requestParentCommand(\"generate\", {",
+    "const runFrameGenerate = async (config = {}, rawMode = false) => {",
+    "  const normalized = isRecord(config) ? clone(config) : { user_input: config };",
+    "  if (normalized.user_input === undefined && normalized.prompt === undefined && !Array.isArray(normalized.ordered_prompts)) {",
+    "    normalized.user_input = getInput();",
+    "  }",
+    "  const generationId = typeof normalized.generation_id === \"string\" && normalized.generation_id.trim()",
+    "    ? normalized.generation_id.trim()",
+    "    : crypto.randomUUID();",
+    "  normalized.generation_id = generationId;",
+    "  await eventEmit(helperBridge.api.iframe_events.GENERATION_REQUESTED, generationId, rawMode ? \"generateRaw\" : \"generate\", clone(normalized));",
+    "  const userInput = String(normalized.user_input ?? normalized.prompt ?? \"\");",
+    "  const content = await requestParentCommand(\"generate\", {",
+    "    config: normalized,",
+    "    rawMode,",
     "    userInput,",
     "    shouldStream: normalized.should_stream,",
     "    disableExtras: normalized.disable_extras === true,",
     "  });",
+    "  return normalized.should_return_reasoning === true && typeof content === \"string\" ? { content } : content;",
     "};",
+    "const generate = (config = {}) => runFrameGenerate(config, false);",
+    "const generateRaw = (config = {}) => runFrameGenerate(config, true);",
     "const stopAllGeneration = () => requestParentCommand(\"stopGeneration\");",
+    "const updateChatMetadata = (patch, reset = false) => requestParentCommand(\"tavernApi\", { name: \"updateChatMetadata\", args: [clone(patch), Boolean(reset)] });",
+    "const deleteLastMessage = () => requestParentCommand(\"tavernApi\", { name: \"deleteLastMessage\", args: [] });",
     "const getContext = () => {",
+    "  const chatMetadata = clone(snapshot.tavern?.chatMetadata || snapshot.chatVariables || {});",
+    "  const extensionSettings = clone(snapshot.extensionVariables || {});",
     "  const context = {",
     "    chat: sillyTavernChatCache,",
-    "    characters: [], characterId: snapshot.characterName ? \"0\" : undefined,",
+    "    characters: helperBridge.getCharactersForContext(),",
+    "    characterId: snapshot.characterName ? \"0\" : undefined,",
+    "    this_chid: snapshot.characterName ? 0 : undefined,",
     "    name1: snapshot.userName, name2: snapshot.characterName, chatId: snapshot.chatId,",
+    "    eventSource: helperBridge.eventSource,",
+    "    eventTypes: helperBridge.api.tavern_events,",
+    "    event_types: helperBridge.api.tavern_events,",
     "    variables: getVariables({ type: \"message\", message_id: \"current\" }),",
-    "    chatMetadata: clone(snapshot.chatVariables || {}),",
-    "    saveChat: saveSillyTavernChat, getRequestHeaders: () => ({ \"Content-Type\": \"application/json\" }),",
+    "    chatMetadata, chat_metadata: chatMetadata,",
+    "    extensionSettings, extension_settings: extensionSettings,",
+    "    saveChat: saveSillyTavernChat,",
+    "    saveSettingsDebounced: () => requestParentCommand(\"tavernApi\", { name: \"saveSettingsDebounced\", args: [] }),",
+    "    setChatMessages, deleteLastMessage, stopGeneration: stopAllGeneration, updateChatMetadata,",
+    "    loadWorldInfo: helperBridge.api.loadWorldInfo,",
+    "    saveWorldInfo: helperBridge.api.saveWorldInfo,",
+    "    substituteParams: helperBridge.substitudeMacros,",
+    "    createOrReplaceWorldbook: helperBridge.api.createOrReplaceWorldbook,",
+    "    replaceWorldbook: helperBridge.api.replaceWorldbook,",
+    "    deleteWorldbook: helperBridge.api.deleteWorldbook,",
+    "    rebindGlobalWorldbooks: helperBridge.api.rebindGlobalWorldbooks,",
+    "    getOrCreateChatWorldbook: helperBridge.api.getOrCreateChatWorldbook,",
+    "    powerUserSettings: {},",
+    "    getRequestHeaders: () => ({ \"Content-Type\": \"application/json\" }),",
     "  };",
     "  Object.defineProperty(context, \"then\", {",
     "    configurable: true, enumerable: false,",
@@ -5025,47 +5113,22 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  return context;",
     "};",
     "const api = {",
+    "  ...helperBridge.api,",
     `  ...(${HTML_PREVIEW_TAVERN_SCRIPTS_SOURCE})(snapshot, requestParentCommand, ${TAVERN_SCRIPT_TREE_API_SOURCE}),`,
-    "  getVariables, setVariables: replaceVariables, replaceVariables, updateVariablesWith, insertOrAssignVariables, insertVariables, deleteVariable, registerVariableSchema,",
+    "  getVariables, setVariables: replaceVariables, replaceVariables, updateVariablesWith, insertOrAssignVariables, insertVariables, deleteVariable, registerVariableSchema, registerMvuSchema: registerVariableSchema,",
     "  getAllVariables, waitGlobalInitialized, errorCatched,",
-    "  getInput, setInput, appendInput, triggerSlash, sendMessage, generate, generateRaw: generate,",
+    "  getInput, setInput, appendInput, triggerSlash, triggerSlashWithResult: triggerSlash, sendMessage, generate, generateRaw,",
     "  stopAllGeneration, stopGenerationById: stopAllGeneration,",
     "  getCurrentMessageId: () => snapshot.currentMessageIndex,",
     "  getLastMessageId: () => snapshot.messages.length - 1,",
-    "  getChatMessages, setChatMessages, setChatMessage, createChatMessages, getContext, eventOn, eventOnce, eventEmit, eventRemoveListener,",
+    "  getChatMessages, setChatMessages, setChatMessage, createChatMessages, getContext,",
+    "  saveChat: saveSillyTavernChat, deleteLastMessage, updateChatMetadata,",
+    "  eventOn, eventOnce, eventMakeFirst, eventMakeLast, eventOnButton, eventOff, eventRemoveListener, eventClearEvent, eventClearListener, eventClearAll, eventEmit, eventEmitAndWait,",
+    "  toastr: window.toastr,",
     "};",
-    // Tavern Helper 4 functions that only the host can serve are forwarded to
-    // the script runtime. Names the frame already implements are kept.
-    "const callTavernApi = (name, args) => requestParentCommand(\"tavernApi\", { name, args: clone(args) });",
-    `${JSON.stringify(HTML_PREVIEW_TAVERN_API_REMOTE_NAMES)}.forEach((name) => {`,
-    "  if (!(name in api)) api[name] = (...args) => callTavernApi(name, args);",
-    "});",
-    // Updater callbacks cannot cross postMessage: read, update here, write back.
-    "const remoteUpdater = (getName, replaceName, argCount) => async (...args) => {",
-    "  const target = args.slice(0, argCount);",
-    "  const updater = args[argCount];",
-    "  const rest = args.slice(argCount + 1);",
-    "  const current = await callTavernApi(getName, [...target, ...rest]);",
-    "  const updated = typeof updater === \"function\" ? await updater(current) : current;",
-    "  await callTavernApi(replaceName, [...target, updated ?? current, ...rest]);",
-    "  return await callTavernApi(getName, [...target, ...rest]);",
-    "};",
-    "api.updateWorldbookWith = remoteUpdater(\"getWorldbook\", \"replaceWorldbook\", 1);",
-    "api.updatePresetWith = remoteUpdater(\"getPreset\", \"replacePreset\", 1);",
-    "api.updateCharacterWith = remoteUpdater(\"getCharacter\", \"replaceCharacter\", 1);",
-    "api.updatePersonaWith = remoteUpdater(\"getPersona\", \"replacePersona\", 1);",
-    "api.updateLorebookEntriesWith = remoteUpdater(\"getLorebookEntries\", \"replaceLorebookEntries\", 1);",
-    "api.updateTavernRegexesWith = remoteUpdater(\"getTavernRegexes\", \"replaceTavernRegexes\", 0);",
-    `api.getTavernHelperVersion = api.getFrontendVersion = () => ${JSON.stringify(TAVERN_HELPER_VERSION)};`,
-    `api.getTavernVersion = () => ${JSON.stringify(SILLYTAVERN_VERSION)};`,
-    `api.tavern_events = ${JSON.stringify(TAVERN_EVENT_TYPES)};`,
-    `api.iframe_events = ${JSON.stringify(TAVERN_HELPER_IFRAME_EVENTS)};`,
-    `api.builtin_prompt_default_order = api.placeholder_prompt_default_order = ${JSON.stringify(TAVERN_BUILTIN_PROMPT_DEFAULT_ORDER)};`,
-    "api.eventOff = api.eventRemoveListener;",
-    "api.getIframeName = () => \"TH-message--\" + snapshot.currentMessageIndex + \"--0\";",
-    "api.getMessageId = () => snapshot.currentMessageIndex;",
-    "api.reloadIframe = () => window.location.reload();",
     "Object.assign(window, api);",
+    "window.event_types = api.tavern_events;",
+    "window.eventSource = helperBridge.eventSource;",
     "const installLegacySendControls = () => {",
     "  const root = document.body || document.documentElement;",
     "  if (!root) return;",
@@ -5105,23 +5168,35 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "else document.addEventListener(\"DOMContentLoaded\", installLegacySendControls, { once: true });",
     "window.getCurrentMessage = () => getChatMessages(snapshot.currentMessageIndex)[0] || null;",
     "window.TavernHelper = window.tavernHelper = window.tavernHelperAPI = window.th = api;",
-    `const sillyTavern = { version: ${JSON.stringify(SILLYTAVERN_VERSION)}, eventTypes: api.tavern_events, event_types: api.tavern_events, getContext, getCurrentChatId: () => snapshot.chatId, saveChat: saveSillyTavernChat, reloadCurrentChat: async () => true };`,
+    `const sillyTavern = { version: ${JSON.stringify(SILLYTAVERN_VERSION)}, versionInfo: helperBridge.versionInfo, eventSource: helperBridge.eventSource, eventTypes: api.tavern_events, event_types: api.tavern_events, getContext, getCurrentChatId: () => snapshot.chatId, saveChat: saveSillyTavernChat, setChatMessages, deleteLastMessage, stopGeneration: stopAllGeneration, updateChatMetadata, substituteParams: helperBridge.substitudeMacros, loadWorldInfo: api.loadWorldInfo, saveWorldInfo: api.saveWorldInfo, reloadCurrentChat: async () => { await api.refreshOneMessage(); return true; }, getRequestHeaders: () => ({ \"Content-Type\": \"application/json\" }) };`,
     "Object.defineProperties(sillyTavern, {",
     "  chat: { get: () => sillyTavernChatCache, configurable: true },",
+    "  characters: { get: () => helperBridge.getCharactersForContext(), configurable: true },",
+    "  characterId: { get: () => snapshot.characterName ? \"0\" : undefined, configurable: true },",
+    "  this_chid: { get: () => snapshot.characterName ? 0 : undefined, configurable: true },",
     "  name1: { get: () => snapshot.userName, configurable: true },",
     "  name2: { get: () => snapshot.characterName, configurable: true },",
+    "  chatId: { get: () => snapshot.chatId, configurable: true },",
+    "  generating: { get: () => Boolean(snapshot.tavern?.isGenerating), configurable: true },",
     "});",
     "window.SillyTavern = sillyTavern;",
+    "api.SillyTavern = sillyTavern;",
     HTML_PREVIEW_PARENT_BRIDGE_SOURCE,
     "const mvu = isRecord(window.Mvu) ? window.Mvu : {};",
     "mvu.events = isRecord(mvu.events) ? mvu.events : {};",
     "mvu.events.VARIABLE_INITIALIZED ||= \"mag_variable_initialized\";",
     "mvu.events.VARIABLE_UPDATE_ENDED ||= \"mag_variable_update_ended\";",
     "mvu.getMvuData = (option) => getVariables(option);",
+    "mvu.getData = (option) => getVariables(option);",
     "mvu.setMvuData = (variables, option) => replaceVariables(variables, option);",
     "mvu.replaceMvuData = (variables, option) => replaceVariables(variables, option);",
+    "mvu.setData = (variables, option) => replaceVariables(variables, option);",
     "mvu.updateMvuData = (updater, option) => updateVariablesWith(updater, option);",
+    "mvu.updateData = (updater, option) => updateVariablesWith(updater, option);",
+    "mvu.isDuringExtraAnalysis = () => false;",
+    "mvu.registerMvuSchema = registerVariableSchema;",
     "window.Mvu = mvu;",
+    "api.Mvu = mvu;",
     "const notifyParentInteraction = () => {",
     "  try { parent.postMessage({ type: interactionMessageType, id: previewId }, \"*\"); } catch {}",
     "};",
@@ -5129,7 +5204,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "document.addEventListener(\"contextmenu\", notifyParentInteraction, true);",
     "})();",
     "</script>",
-  ].join("");
+  ].join("\n");
 }
 
 function buildHtmlPreviewPersonalizationScript(context: HtmlPreviewContext) {
@@ -9811,17 +9886,18 @@ function createTavernExtensionEventBus() {
   const handlers = new Map<string, Set<(...args: unknown[]) => unknown>>();
   const on = (eventName: unknown, callback: unknown) => {
     if (typeof callback !== "function") return callback;
-    const name = String(eventName);
+    const name = normalizeTavernEventName(eventName);
     const callbacks = handlers.get(name) ?? new Set();
     callbacks.add(callback as (...args: unknown[]) => unknown);
     handlers.set(name, callbacks);
     return callback;
   };
   const off = (eventName: unknown, callback: unknown) => {
-    const callbacks = handlers.get(String(eventName));
+    const key = normalizeTavernEventName(eventName);
+    const callbacks = handlers.get(key);
     if (!callbacks || typeof callback !== "function") return false;
     const removed = callbacks.delete(callback as (...args: unknown[]) => unknown);
-    if (callbacks.size === 0) handlers.delete(String(eventName));
+    if (callbacks.size === 0) handlers.delete(key);
     return removed;
   };
   const once = (eventName: unknown, callback: unknown) => {
@@ -9834,7 +9910,7 @@ function createTavernExtensionEventBus() {
     return wrapped;
   };
   const emit = async (eventName: unknown, ...args: unknown[]) => {
-    const callbacks = Array.from(handlers.get(String(eventName)) ?? []);
+    const callbacks = Array.from(handlers.get(normalizeTavernEventName(eventName)) ?? []);
     for (const callback of callbacks) await callback(...args);
     return callbacks.length > 0;
   };
@@ -13480,6 +13556,7 @@ export function App() {
   const chatAttachmentFilesRef = useRef<Map<string, File>>(new Map());
   const chatAttachmentMetadataRef = useRef<Map<string, ChatAttachment>>(new Map());
   const htmlPreviewFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
+  const htmlPreviewSubscribedEventsRef = useRef<Map<string, Set<string>>>(new Map());
   const chatInputValueRef = useRef("");
   const chatInputHasContentRef = useRef(false);
   const [chatInputHasContent, setChatInputHasContent] = useState(false);
@@ -13802,6 +13879,8 @@ export function App() {
   const activeChatPresetIdRef = useRef(activeChatPresetId);
   const chatPresetEnabledRef = useRef(chatPresetEnabled);
   const userProfileRef = useRef<UserProfile>(userProfile);
+  const userProfileStateRef = useRef(userProfileState);
+  const extensionsRef = useRef<InstalledExtension[]>(extensions);
   const tavernScriptsRef = useRef<TavernScript[]>(tavernScripts);
   const tavernGlobalVariablesRef = useRef<Record<string, unknown>>(tavernGlobalVariables);
   const tavernExtensionEventBusRef = useRef(createTavernExtensionEventBus());
@@ -13872,13 +13951,58 @@ export function App() {
     };
   }, []);
 
+  const serializeEventArgsForFrame = (args: unknown[]) =>
+    args.map((arg) => {
+      if (arg == null || typeof arg === "string" || typeof arg === "number" || typeof arg === "boolean") {
+        return arg;
+      }
+      try {
+        return JSON.parse(JSON.stringify(arg)) as unknown;
+      } catch {
+        return null;
+      }
+    });
+
+  const forwardEventToHtmlPreviewFrames = (
+    rawEventName: unknown,
+    args: unknown[],
+    options: { excludeFrame?: HTMLIFrameElement; includeFrame?: HTMLIFrameElement } = {},
+  ) => {
+    const eventName = normalizeTavernEventName(rawEventName);
+    for (const previewId of Array.from(htmlPreviewSubscribedEventsRef.current.keys())) {
+      if (!htmlPreviewFrameRefs.current.has(previewId)) {
+        htmlPreviewSubscribedEventsRef.current.delete(previewId);
+      }
+    }
+    const safeArgs = serializeEventArgsForFrame(args);
+    htmlPreviewFrameRefs.current.forEach((frame, previewId) => {
+      if (options.excludeFrame && frame === options.excludeFrame) return;
+      const explicitlyIncluded = Boolean(options.includeFrame && frame === options.includeFrame);
+      if (!explicitlyIncluded && !htmlPreviewSubscribedEventsRef.current.get(previewId)?.has(eventName)) {
+        return;
+      }
+      postMessageToFrame(
+        frame,
+        {
+          type: HTML_PREVIEW_GENERATION_EVENT_MESSAGE,
+          id: previewId,
+          eventName,
+          args: safeArgs,
+        },
+        "*",
+      );
+    });
+  };
+
   const emitTavernEvent = (eventName: unknown, ...args: unknown[]) => {
+    const normalized = normalizeTavernEventName(eventName);
     const runtime = tavernScriptRuntimeRef.current;
     runtime?.syncChat();
+    forwardEventToHtmlPreviewFrames(normalized, args);
     const tasks: Promise<unknown>[] = [
-      tavernExtensionEventBusRef.current.emit(eventName, ...args),
+      tavernExtensionEventBusRef.current.emit(normalized, ...args),
     ];
-    if (runtime) tasks.push(runtime.emit(String(eventName), ...args));
+    if (runtime) tasks.push(runtime.emit(normalized, ...args));
     return Promise.allSettled(tasks).then(() => undefined);
   };
 
@@ -14291,9 +14415,11 @@ export function App() {
     activeChatPresetIdRef.current = activeChatPresetId;
     chatPresetEnabledRef.current = chatPresetEnabled;
     userProfileRef.current = userProfile;
+    userProfileStateRef.current = userProfileState;
+    extensionsRef.current = extensions;
     tavernScriptsRef.current = tavernScripts;
     tavernGlobalVariablesRef.current = tavernGlobalVariables;
-  }, [activeChatPresetId, activePersonaId, activeWorldBookIds, characterCards, chatPresetEnabled, chatPresets, chatSessions, personas, regexScripts, tavernGlobalVariables, tavernScripts, userProfile, worldBooks]);
+  }, [activeChatPresetId, activePersonaId, activeWorldBookIds, characterCards, chatPresetEnabled, chatPresets, chatSessions, extensions, personas, regexScripts, tavernGlobalVariables, tavernScripts, userProfile, userProfileState, worldBooks]);
 
   useEffect(() => {
     // Avoid scheduling even a no-op state update for every streamed fragment.
@@ -14464,7 +14590,7 @@ export function App() {
       };
     };
 
-    const executeSlashCommand = async (command: string) => {
+    const runLegacySlashCommand = async (command: string) => {
       const parsed = parseTavernSlashCommand(command);
       if (!parsed) throw new Error(`暂不支持该酒馆命令：${command.trim() || "空命令"}`);
       if (parsed.type === "message") {
@@ -14501,6 +14627,148 @@ export function App() {
         return true;
       }
       return writeChatInput(parsed.text, parsed.append, parsed.submit);
+    };
+
+    const executeSlashCommand = async (command: string) => {
+      const segments = splitTavernSlashPipeline(command);
+      const isSimpleLegacyCommand =
+        segments.length > 0 &&
+        !/\{\{(?:pipe|getvar|getglobalvar|var)\b|\{:/i.test(command) &&
+        !/^\/(?:gen|genraw)\s+\S/i.test(segments[0]) &&
+        (segments.length === 1 ||
+          segments.slice(1).every((segment) => /^\/(?:trigger|gen)\s*$/i.test(segment)));
+      if (isSimpleLegacyCommand) {
+        const parsed = parseTavernSlashCommand(command);
+        if (parsed) return await runLegacySlashCommand(command);
+      }
+      return await executeTavernSlashPipeline(command, {
+        getVariable: (scope, key) => {
+          if (scope === "global") return tavernGlobalVariablesRef.current[key];
+          const session = chatSessionsRef.current.find(
+            (candidate) => candidate.id === activeChatSessionIdRef.current,
+          );
+          return session?.scriptVariables?.[key];
+        },
+        setVariable: (scope, key, value) => {
+          if (scope === "global") {
+            const next = normalizeTavernVariables({
+              ...tavernGlobalVariablesRef.current,
+              [key]: value,
+            });
+            tavernGlobalVariablesRef.current = next;
+            setTavernGlobalVariables(next);
+            return;
+          }
+          const sessionId = activeChatSessionIdRef.current;
+          const nextSessions = chatSessionsRef.current.map((session) =>
+            session.id === sessionId
+              ? {
+                  ...session,
+                  scriptVariables: normalizeTavernVariables({
+                    ...(session.scriptVariables ?? {}),
+                    [key]: value,
+                  }),
+                  updatedAt: new Date().toISOString(),
+                }
+              : session,
+          );
+          chatSessionsRef.current = nextSessions;
+          setChatSessions(nextSessions);
+        },
+        deleteVariable: (scope, key) => {
+          if (scope === "global") {
+            const next = { ...tavernGlobalVariablesRef.current };
+            delete next[key];
+            tavernGlobalVariablesRef.current = next;
+            setTavernGlobalVariables(next);
+            return;
+          }
+          const sessionId = activeChatSessionIdRef.current;
+          const nextSessions = chatSessionsRef.current.map((session) => {
+            if (session.id !== sessionId) return session;
+            const nextVariables = { ...(session.scriptVariables ?? {}) };
+            delete nextVariables[key];
+            return {
+              ...session,
+              scriptVariables: nextVariables,
+              updatedAt: new Date().toISOString(),
+            };
+          });
+          chatSessionsRef.current = nextSessions;
+          setChatSessions(nextSessions);
+        },
+        runLegacy: runLegacySlashCommand,
+        notify: (severity, message, title) => {
+          setChatStatus({
+            status: severity === "error" || severity === "warning" ? "error" : "success",
+            message: title ? (message ? `${title}：${message}` : title) : message,
+          });
+        },
+        getMessageCount: () => chatMessagesRef.current.length,
+        setMessagesHidden: (indexes, hidden) => {
+          const indexSet = new Set(indexes);
+          const nextMessages = chatMessagesRef.current.map((message, index) => {
+            if (!indexSet.has(index)) return message;
+            const nextExtra = { ...(message.extra ?? {}) };
+            if (hidden) nextExtra.tavernIsHidden = true;
+            else delete nextExtra.tavernIsHidden;
+            return { ...message, extra: nextExtra };
+          });
+          commitChatMessages(nextMessages);
+        },
+        deleteMessages: (indexes) => {
+          const indexSet = new Set(indexes);
+          commitChatMessages(chatMessagesRef.current.filter((_message, index) => !indexSet.has(index)));
+        },
+        generate: async (prompt, options) =>
+          await generateHtmlPreviewTextRef.current({
+            user_input: prompt,
+            quiet: true,
+            disable_extras: options.raw,
+            ...(options.raw
+              ? {
+                  ordered_prompts: [
+                    ...(options.system ? [{ role: "system", content: options.system }] : []),
+                    "user_input",
+                  ],
+                }
+              : options.system
+                ? {
+                    ordered_prompts: [
+                      { role: "system", content: options.system },
+                      "chat_history",
+                      "user_input",
+                    ],
+                  }
+                : {}),
+          }),
+        stopGeneration: () => {
+          const controller = activeChatAbortControllerRef.current;
+          if (controller && !controller.signal.aborted) controller.abort(createChatAbortError());
+        },
+        injectPrompt: (prompt) => {
+          tavernScriptRuntimeRef.current?.injectPrompts([prompt]);
+        },
+        uninjectPrompts: (ids) => {
+          tavernScriptRuntimeRef.current?.uninjectPrompts(ids);
+        },
+        emitEvent: (eventName, args) => emitTavernEvent(eventName, ...args),
+        audio: async (action, named, text) => {
+          const runtime = tavernScriptRuntimeRef.current;
+          if (!runtime?.isReady()) return;
+          const type = named.type === "ambient" ? "ambient" : "bgm";
+          if (action === "enable") await runtime.callApi("audioEnable", [{ type, state: named.state }]);
+          else if (action === "play") await runtime.callApi("audioPlay", [{ type, play: named.play }]);
+          else if (action === "pause") await runtime.callApi("pauseAudio", [type]);
+          else if (action === "import") await runtime.callApi("audioImport", [{ type, play: named.play }, text || named.url || ""]);
+          else if (action === "select") await runtime.callApi("audioSelect", [{ type }, text || named.url || ""]);
+          else if (action === "mode") await runtime.callApi("audioMode", [{ type, mode: named.mode || text }]);
+        },
+        substituteMacros: (text) =>
+          tavernScriptRuntimeRef.current
+            ? tavernScriptRuntimeRef.current.substituteMacros(text)
+            : text,
+      });
     };
     executeTavernSlashCommandRef.current = executeSlashCommand;
 
@@ -14625,6 +14893,19 @@ export function App() {
         return;
       }
 
+      if (payload.type === HTML_PREVIEW_TAVERN_EVENT_SUBSCRIPTIONS_MESSAGE) {
+        const rawEvents = (payload as { events?: unknown }).events;
+        const events = Array.isArray(rawEvents)
+          ? rawEvents.map((item) => normalizeTavernEventName(item)).filter(Boolean)
+          : [];
+        if (events.length > 0) {
+          htmlPreviewSubscribedEventsRef.current.set(payload.id, new Set(events));
+        } else {
+          htmlPreviewSubscribedEventsRef.current.delete(payload.id);
+        }
+        return;
+      }
+
       if (payload.type === HTML_PREVIEW_COMMAND_MESSAGE) {
         try {
           let result: unknown;
@@ -14640,13 +14921,38 @@ export function App() {
           } else if (payload.operation === "createChatMessages") {
             if (!Array.isArray(payload.updates)) throw new Error("角色卡消息列表无效。");
             const messages = [...chatMessagesRef.current];
-            const created = payload.updates.filter(isObjectRecord).map((value): ChatMessage => ({
-              id: crypto.randomUUID(),
-              role: value.role === "assistant" ? "assistant" : "user",
-              content: String(value.message ?? value.content ?? ""),
-              createdAt: new Date().toISOString(),
-              ...(isObjectRecord(value.data) ? { variables: normalizeTavernVariables(value.data) } : {}),
-            }));
+            const currentSession = chatSessionsRef.current.find(
+              (session) => session.id === activeChatSessionIdRef.current,
+            );
+            const currentCard = characterCardsRef.current.find(
+              (card) => card.id === currentSession?.roleplayCharacterCardId,
+            );
+            const defaultUserName = userProfileRef.current.nickname.trim() || "User";
+            const defaultCharName = currentCard?.name || "Assistant";
+            const created = payload.updates.filter(isObjectRecord).map((value): ChatMessage => {
+              const role: ChatRole =
+                value.role === "assistant" || value.role === "system" ? "assistant" : "user";
+              const extra = isObjectRecord(value.extra)
+                ? normalizeTavernVariables(value.extra)
+                : {};
+              if (value.role === "system") extra.tavernIsSystem = true;
+              if (value.is_hidden === true) extra.tavernIsHidden = true;
+              if (typeof value.name === "string") {
+                const name = value.name.trim();
+                const defaultName = role === "user" ? defaultUserName : defaultCharName;
+                if (name && (name !== defaultName || extra.tavernIsSystem === true)) {
+                  extra.tavernName = name;
+                }
+              }
+              return {
+                id: crypto.randomUUID(),
+                role,
+                content: String(value.message ?? value.content ?? value.mes ?? ""),
+                createdAt: new Date().toISOString(),
+                ...(isObjectRecord(value.data) ? { variables: normalizeTavernVariables(value.data) } : {}),
+                ...(Object.keys(extra).length > 0 ? { extra } : {}),
+              };
+            });
             messages.splice(resolveTavernCreateMessageInsertionIndex(payload.option, messages.length), 0, ...created);
             chatMessagesRef.current = messages;
             setChatMessages(messages);
@@ -14677,6 +14983,18 @@ export function App() {
             if (payload.operation === "injectPrompts") runtime.injectPrompts(payload.prompts, payload.options);
             else runtime.uninjectPrompts(payload.ids);
             result = true;
+          } else if (payload.operation === "tavernEmitEvent") {
+            const eventPayload = payload as { eventName?: unknown; args?: unknown };
+            const normalizedName = normalizeTavernEventName(eventPayload.eventName);
+            const eventArgs = Array.isArray(eventPayload.args) ? eventPayload.args : [];
+            forwardEventToHtmlPreviewFrames(normalizedName, eventArgs, { excludeFrame: frame });
+            await Promise.allSettled([
+              tavernExtensionEventBusRef.current.emit(normalizedName, ...eventArgs),
+              ...(tavernScriptRuntimeRef.current
+                ? [tavernScriptRuntimeRef.current.emit(normalizedName, ...eventArgs)]
+                : []),
+            ]);
+            result = true;
           } else if (payload.operation === "tavernApi") {
             // Generic bridge to the Tavern Helper API of the script runtime.
             // Cards probe for missing data with try/catch, so a failure goes
@@ -14695,10 +15013,26 @@ export function App() {
                 Array.isArray(apiPayload.args) ? apiPayload.args : [],
               );
               let transferable: unknown = null;
-              try {
-                transferable = apiResult === undefined ? null : JSON.parse(JSON.stringify(apiResult));
-              } catch {
-                transferable = null;
+              if (
+                apiResult instanceof Response ||
+                (isObjectRecord(apiResult) &&
+                  typeof (apiResult as { text?: unknown }).text === "function" &&
+                  typeof (apiResult as { status?: unknown }).status === "number")
+              ) {
+                const responseResult = apiResult as Response;
+                transferable = {
+                  __rengeResponse: true,
+                  status: responseResult.status,
+                  statusText: responseResult.statusText,
+                  contentType: responseResult.headers?.get?.("content-type") ?? "application/json",
+                  bodyText: await responseResult.text(),
+                };
+              } else {
+                try {
+                  transferable = apiResult === undefined ? null : JSON.parse(JSON.stringify(apiResult));
+                } catch {
+                  transferable = null;
+                }
               }
               respondToHtmlCommand(frame, payload.id, payload.requestId, transferable);
             } catch (error) {
@@ -14714,12 +15048,30 @@ export function App() {
             });
             result = true;
           } else if (payload.operation === "generate") {
+            const generatePayload = payload as {
+              config?: unknown;
+              rawMode?: unknown;
+              userInput?: unknown;
+              shouldStream?: unknown;
+              disableExtras?: unknown;
+            };
+            const baseConfig = isObjectRecord(generatePayload.config)
+              ? { ...generatePayload.config }
+              : {};
             result = await generateHtmlPreviewTextRef.current(
               {
-                user_input: typeof payload.userInput === "string" ? payload.userInput : "",
-                should_stream: payload.shouldStream,
+                ...baseConfig,
+                user_input:
+                  typeof baseConfig.user_input === "string"
+                    ? baseConfig.user_input
+                    : typeof generatePayload.userInput === "string"
+                      ? generatePayload.userInput
+                      : "",
+                should_stream: baseConfig.should_stream ?? generatePayload.shouldStream,
                 transport_stream: true,
-                disable_extras: payload.disableExtras === true,
+                disable_extras:
+                  baseConfig.disable_extras === true || generatePayload.disableExtras === true,
+                raw_mode: generatePayload.rawMode === true,
               },
               frame,
             );
@@ -14932,6 +15284,38 @@ export function App() {
             ) {
               message.extra = normalizeTavernVariables(rawUpdate.swipes_info[swipeIndex]);
             }
+            const reservedKeys = new Set([
+              "message_id", "mesid", "id", "name", "role", "is_user", "is_system",
+              "is_hidden", "message", "mes", "content", "data", "variables", "extra",
+              "swipe_id", "swipes", "swipes_data", "swipes_info",
+            ]);
+            const nextExtra = isObjectRecord(message.extra)
+              ? normalizeTavernVariables(message.extra)
+              : {};
+            Object.entries(rawUpdate).forEach(([key, value]) => {
+              if (!reservedKeys.has(key)) nextExtra[key] = value;
+            });
+            if (rawUpdate.role === "system") nextExtra.tavernIsSystem = true;
+            else if (rawUpdate.role === "user" || rawUpdate.role === "assistant") {
+              delete nextExtra.tavernIsSystem;
+            }
+            if (typeof rawUpdate.is_hidden === "boolean") {
+              if (rawUpdate.is_hidden) nextExtra.tavernIsHidden = true;
+              else delete nextExtra.tavernIsHidden;
+            }
+            if (typeof rawUpdate.name === "string") {
+              const name = rawUpdate.name.trim();
+              const defaultName =
+                message.role === "user"
+                  ? userProfileRef.current.nickname.trim() || "用户"
+                  : currentCard?.name || "Assistant";
+              if (name && (name !== defaultName || nextExtra.tavernIsSystem === true)) {
+                nextExtra.tavernName = name;
+              } else {
+                delete nextExtra.tavernName;
+              }
+            }
+            message.extra = nextExtra;
           });
           if (requestedGreetingIndex !== null) {
             await selectRoleplayGreetingRef.current(requestedGreetingIndex);
@@ -20403,7 +20787,193 @@ export function App() {
       );
     };
 
+    const hostServices = createTavernHelperHostServices({
+      getCards: () => characterCardsRef.current,
+      setCards: (cards) => updateCards(() => cards),
+      getCurrentCard: getRuntimeRoleplayCard,
+      getCardWorldbookName: (card) => {
+        const session = card.id === getRuntimeRoleplayCard()?.id ? getRuntimeRoleplaySession() : undefined;
+        return resolveSessionCharacterWorldBook(session, card, worldBooksRef.current)?.name ?? null;
+      },
+      createCard: (name) => createCharacterCard(name),
+      getPresets: () => chatPresetsRef.current,
+      setPresets: (presets) => updatePresets(() => presets),
+      getActivePreset: () =>
+        chatPresetEnabledRef.current
+          ? chatPresetsRef.current.find((preset) => preset.id === activeChatPresetIdRef.current)
+          : undefined,
+      createPreset: (name) => ({ ...createDefaultChatPreset(), id: crypto.randomUUID(), name }),
+      getUserProfileState: () => userProfileStateRef.current,
+      setUserProfileState: (nextState) => {
+        const normalized = normalizeUserProfiles(nextState);
+        userProfileStateRef.current = normalized;
+        userProfileRef.current =
+          normalized.userProfiles.find((profile) => profile.id === normalized.activeUserProfileId) ??
+          normalized.userProfiles[0];
+        setUserProfileState(normalized);
+      },
+      createUserProfile: (name) => createUserProfile(name),
+    });
+
     runtime = new TavernScriptRuntime(activeTavernScripts, {
+      ...hostServices,
+      formatDisplayedMessage: (text, messageId) => {
+        const messages = chatMessagesRef.current;
+        const clampedIndex = Math.max(0, Math.min(messages.length - 1, messageId));
+        const message = messages[clampedIndex];
+        const depth = Math.max(0, messages.length - 1 - clampedIndex);
+        const card = getRuntimeRoleplayCard();
+        const preset = chatPresetEnabledRef.current
+          ? chatPresetsRef.current.find((candidate) => candidate.id === activeChatPresetIdRef.current)
+          : undefined;
+        const activeRegexes = [
+          ...regexScriptsRef.current,
+          ...(preset?.regexScripts ?? []),
+          ...(card?.regexScripts ?? []),
+        ];
+        const regexOptions = {
+          placement: 2,
+          destination: "display" as const,
+          depth,
+          userName: userProfileRef.current.nickname,
+          messageVariables: isObjectRecord(message?.variables) ? message.variables : {},
+          characterName: card?.name ?? "Assistant",
+        };
+        const latestAssistantIndex = (() => {
+          for (let i = messages.length - 1; i >= 0; i -= 1) {
+            if (messages[i].role === "assistant") return i;
+          }
+          return -1;
+        })();
+        const displaySource = card
+          ? placeSillyTavernStatusPlaceholderOnCurrentMessage(
+              text,
+              card.regexScripts,
+              clampedIndex === latestAssistantIndex,
+              regexOptions,
+            )
+          : text;
+        const template = card ? getCharacterRegexTemplateConfig(card.extensions) : null;
+        const regexContent = template?.disableParsers
+          ? displaySource
+          : applyRegexScripts(displaySource, activeRegexes, regexOptions);
+        const firstAssistantIndex = messages.findIndex((item) => item.role === "assistant");
+        const templated =
+          template &&
+          message?.role === "assistant" &&
+          isCharacterRegexTemplateMessageEligible(
+            template,
+            clampedIndex,
+            messages.length,
+            firstAssistantIndex,
+          )
+            ? renderCharacterRegexTemplate(regexContent, template)
+            : null;
+        return templated ?? regexContent;
+      },
+      getPersonaDescription: () =>
+        userProfileRef.current.sendToAi ? userProfileRef.current.bio : "",
+      getChatHistory: (characterName) => {
+        const trimmed = characterName.trim();
+        const bare = trimmed.replace(/\.png$/i, "");
+        const card =
+          characterCardsRef.current.find((candidate) => candidate.name === trimmed) ??
+          characterCardsRef.current.find(
+            (candidate) => candidate.id === trimmed || candidate.id === bare || candidate.name === bare,
+          );
+        if (!card) return [];
+        const userName = userProfileRef.current.nickname.trim() || "User";
+        return chatSessionsRef.current
+          .filter((session) => session.roleplayCharacterCardId === card.id)
+          .slice()
+          .sort((left, right) => (Date.parse(right.updatedAt) || 0) - (Date.parse(left.updatedAt) || 0))
+          .map((session) => {
+            const lastMessage = session.messages.at(-1);
+            return {
+              file_name: session.id,
+              chat_id: session.id,
+              chat_items: session.messages.length,
+              last_mes: lastMessage?.createdAt ?? session.updatedAt,
+              mes: lastMessage?.content ?? "",
+              messages: session.messages.map((message, index) => {
+                const isSystem = message.extra?.tavernIsSystem === true;
+                const customName =
+                  typeof message.extra?.tavernName === "string"
+                    ? message.extra.tavernName.trim()
+                    : "";
+                return {
+                  message_id: index,
+                  name: customName || (message.role === "user" ? userName : card.name),
+                  role: isSystem ? "system" : message.role,
+                  is_user: message.role === "user" && !isSystem,
+                  is_system: isSystem,
+                  is_hidden: message.extra?.tavernIsHidden === true,
+                  mes: message.content,
+                  message: message.content,
+                  send_date: message.createdAt,
+                  extra: { ...(message.extra ?? {}) },
+                };
+              }),
+            };
+          });
+      },
+      resetCharacterWorldBookBinding: () => {
+        const session = getRuntimeRoleplaySession();
+        const card = getRuntimeRoleplayCard();
+        if (!session?.characterWorldBookOverrides || !card) return;
+        if (!Object.prototype.hasOwnProperty.call(session.characterWorldBookOverrides, card.id)) return;
+        const overrides = { ...session.characterWorldBookOverrides };
+        delete overrides[card.id];
+        updateSessions((sessions) =>
+          sessions.map((candidate) =>
+            candidate.id === session.id
+              ? {
+                  ...candidate,
+                  characterWorldBookOverrides: overrides,
+                  updatedAt: new Date().toISOString(),
+                }
+              : candidate,
+          ),
+        );
+      },
+      getInstalledExtensionIds: () => extensionsRef.current.map((extension) => extension.id),
+      onScriptEvent: (eventName, args) => {
+        forwardEventToHtmlPreviewFrames(eventName, args);
+        void tavernExtensionEventBusRef.current.emit(eventName, ...args);
+      },
+      reloadChat: () => {
+        setChatMessages((current) => [...current]);
+      },
+      importRawFile: async (kind, fileName, content) => {
+        const safeName = fileName.trim() || `imported-${kind}.json`;
+        if (kind === "character") {
+          const file =
+            content instanceof Blob
+              ? new File([content], safeName, { type: content.type || "application/octet-stream" })
+              : new File([content], safeName, { type: "application/json" });
+          const imported = {
+            ...(await importCharacterCardFile(file)),
+            importedAt: new Date().toISOString(),
+          };
+          updateCards((cards) => sortCharacterCardsByImportTime([imported, ...cards]));
+          return true;
+        }
+        const rawText = content instanceof Blob ? await content.text() : content;
+        const parsedJson = JSON.parse(rawText) as unknown;
+        if (kind === "preset") {
+          const importedPreset = importSillyTavernPreset(parsedJson, safeName);
+          updatePresets((presets) => [...presets, importedPreset]);
+          return true;
+        }
+        if (kind === "worldbook") {
+          const importedBook = importSillyTavernWorldBook(parsedJson, safeName);
+          const nextBooks = [...worldBooksRef.current, importedBook];
+          worldBooksRef.current = nextBooks;
+          setWorldBooks(nextBooks);
+          return true;
+        }
+        return false;
+      },
       getScriptTrees: (scope) => getTavernScriptTrees(getScriptLibrary(scope)),
       replaceScriptTrees: replaceScriptLibrary,
       isChatMounted: () => Boolean(tavernHostWindow.document.getElementById("chat")),
@@ -20638,6 +21208,13 @@ export function App() {
           messageExample: card.messageExample,
           avatarDataUrl: card.avatarDataUrl,
           extensions: card.extensions,
+          creatorNotes: card.creatorNotes,
+          systemPrompt: card.systemPrompt,
+          postHistoryInstructions: card.postHistoryInstructions,
+          alternateGreetings: card.alternateGreetings,
+          tags: card.tags,
+          creator: card.creator,
+          characterVersion: card.characterVersion,
           worldBook: characterWorldBook
             ? toTavernRuntimeWorldBook(
                 characterWorldBook,
@@ -21675,6 +22252,167 @@ export function App() {
     };
     return stableValues;
   }, [activeRoleplayGreetingIndex, activeRoleplayGreetings, htmlPreviewSourceMessages]);
+  const htmlPreviewTavernLight = useMemo<HtmlPreviewTavernSnapshot>(() => {
+    const characterWorldBook = activeSessionRoleplayCard
+      ? resolveSessionCharacterWorldBook(activeChatSession, activeSessionRoleplayCard, worldBooks)
+      : null;
+    const globalBookNames = worldBooks.map((book) => book.name);
+    const allWorldbookNames = Array.from(
+      new Set([
+        ...(characterWorldBook ? [characterWorldBook.name] : []),
+        ...globalBookNames,
+      ]),
+    );
+    const activeGlobalNames = worldBooks
+      .filter((book) => activeWorldBookIds.includes(book.id))
+      .map((book) => book.name);
+    const primaryBookName = characterWorldBook?.name ?? null;
+    const storedChatBook = String(
+      activeChatSession?.tavernMetadata?.world_info ??
+        activeChatSession?.tavernMetadata?.rengeChatWorldbookName ??
+        "",
+    ).trim();
+    const chatWorldbookName =
+      storedChatBook && allWorldbookNames.includes(storedChatBook) ? storedChatBook : null;
+    return {
+      characterNames: characterCards.map((card) => card.name),
+      characterIds: characterCards.map((card) => `${card.id}.png`),
+      currentCharacterName: activeSessionRoleplayCard?.name ?? null,
+      currentCharacterId: activeSessionRoleplayCard ? `${activeSessionRoleplayCard.id}.png` : null,
+      currentCharacterAvatar:
+        activeSessionRoleplayCard?.avatarDataUrl && !activeSessionRoleplayCard.avatarDataUrl.startsWith("data:")
+          ? activeSessionRoleplayCard.avatarDataUrl
+          : activeSessionRoleplayCard
+            ? `${activeSessionRoleplayCard.id}.png`
+            : null,
+      worldbookNames: allWorldbookNames,
+      globalWorldbookNames: activeGlobalNames,
+      charWorldbookNames: {
+        primary: primaryBookName,
+        additional: activeGlobalNames.filter((name) => name !== primaryBookName),
+      },
+      chatWorldbookName,
+      presetNames: chatPresets.map((preset) => preset.name),
+      loadedPresetName: chatPresetEnabled ? activeChatPreset?.name ?? "" : "",
+      personas: userProfiles.map((profile) => ({
+        ...toTavernHelperPersona(profile, profile.id === activeUserProfileId),
+        avatar: profile.avatarImage.startsWith("data:") ? `${profile.id}.png` : profile.avatarImage,
+      })),
+      currentPersonaId: userProfile.id,
+      installedExtensionIds: extensions.map((extension) => extension.id),
+      isGenerating: chatGenerationState !== "idle",
+      chatMetadata: activeChatSession?.tavernMetadata ?? {},
+    };
+  }, [
+    activeChatPreset?.name,
+    activeChatSession,
+    activeSessionRoleplayCard,
+    activeUserProfileId,
+    activeWorldBookIds,
+    characterCards,
+    chatGenerationState,
+    chatPresetEnabled,
+    chatPresets,
+    extensions,
+    userProfile.id,
+    userProfiles,
+    worldBooks,
+  ]);
+  const htmlPreviewHeavyTavernCacheRef = useRef<Partial<HtmlPreviewTavernSnapshot> | null>(null);
+  useEffect(() => {
+    htmlPreviewHeavyTavernCacheRef.current = null;
+  }, [
+    activeChatPreset,
+    activeChatSession,
+    activeSessionRoleplayCard,
+    characterCards,
+    chatPresetEnabled,
+    chatPresets,
+    regexScripts,
+    userProfiles,
+    worldBooks,
+  ]);
+  const getHtmlPreviewHeavyTavernPatch = useCallback((): Partial<HtmlPreviewTavernSnapshot> => {
+    if (htmlPreviewHeavyTavernCacheRef.current) return htmlPreviewHeavyTavernCacheRef.current;
+    const activePreset = chatPresetEnabled ? activeChatPreset : undefined;
+    const formatPreset = (preset: ChatPreset) =>
+      toTavernHelperPreset(preset, {
+        regexScripts: preset.regexScripts.map((script) => toTavernHelperRegex(script, "preset")),
+        scripts: getTavernScriptTrees(preset.tavernScripts),
+      });
+    const characterWorldBook = activeSessionRoleplayCard
+      ? resolveSessionCharacterWorldBook(activeChatSession, activeSessionRoleplayCard, worldBooks)
+      : null;
+    const serializeRegex = (script: RegexScript) => ({
+      id: script.id,
+      scriptName: script.scriptName,
+      findRegex: script.findRegex,
+      replaceString: script.replaceString,
+      trimStrings: [...script.trimStrings],
+      placement: [...script.placement],
+      disabled: script.disabled,
+      markdownOnly: script.markdownOnly,
+      promptOnly: script.promptOnly,
+      runOnEdit: script.runOnEdit,
+      substituteRegex: script.substituteRegex,
+      minDepth: script.minDepth,
+      maxDepth: script.maxDepth,
+    });
+    const charDataByName: Record<string, Record<string, unknown>> = {};
+    const characterAvatars: Record<string, string> = {};
+    characterCards.forEach((card) => {
+      const worldbookName =
+        card.id === activeSessionRoleplayCard?.id
+          ? characterWorldBook?.name ?? null
+          : resolveCharacterWorldBook(card, worldBooks)?.name ?? null;
+      const formatted = toSillyTavernCharacterData(card, {
+        worldbookName,
+        avatar: card.avatarDataUrl || `${card.id}.png`,
+        regexScripts: card.regexScripts.map(serializeRegex),
+      });
+      charDataByName[card.name] = formatted;
+      charDataByName[card.id] = formatted;
+      if (card.avatarDataUrl) {
+        characterAvatars[card.name] = card.avatarDataUrl;
+        characterAvatars[`${card.id}.png`] = card.avatarDataUrl;
+        characterAvatars[card.id] = card.avatarDataUrl;
+      }
+    });
+    const patch: Partial<HtmlPreviewTavernSnapshot> = {
+      currentCharacterAvatar: activeSessionRoleplayCard?.avatarDataUrl || null,
+      inUsePreset: activePreset ? formatPreset(activePreset) : null,
+      namedPresets: Object.fromEntries(
+        chatPresets.map((preset) => [preset.name, formatPreset(preset)]),
+      ),
+      regexes: [
+        ...regexScripts.map((script) => toTavernHelperRegex(script, "global")),
+        ...(activePreset?.regexScripts ?? []).map((script) => toTavernHelperRegex(script, "preset")),
+        ...(activeSessionRoleplayCard?.regexScripts ?? []).map((script) =>
+          toTavernHelperRegex(script, "character"),
+        ),
+      ],
+      charData: activeSessionRoleplayCard ? charDataByName[activeSessionRoleplayCard.id] ?? null : null,
+      charDataByName,
+      characterAvatars,
+      personaAvatars: Object.fromEntries(
+        userProfiles
+          .filter((profile) => Boolean(profile.avatarImage))
+          .map((profile) => [profile.id, profile.avatarImage]),
+      ),
+    };
+    htmlPreviewHeavyTavernCacheRef.current = patch;
+    return patch;
+  }, [
+    activeChatPreset,
+    activeChatSession,
+    activeSessionRoleplayCard,
+    characterCards,
+    chatPresetEnabled,
+    chatPresets,
+    regexScripts,
+    userProfiles,
+    worldBooks,
+  ]);
   const htmlPreviewContextBase = useMemo<Omit<HtmlPreviewContext, "currentMessageIndex">>(
     () => ({
       scriptTrees: {
@@ -21703,6 +22441,7 @@ export function App() {
         quoteStyleEnabled: chatPersonalization.quoteStyleEnabled,
         quoteStyleColor: chatPersonalization.quoteStyleColor,
       },
+      tavern: htmlPreviewTavernLight,
     }),
     [
       tavernScripts,
@@ -21719,6 +22458,7 @@ export function App() {
       chatPersonalization.quoteStyleEnabled,
       extensions,
       htmlPreviewMessages,
+      htmlPreviewTavernLight,
       tavernGlobalVariables,
       userProfile.nickname,
     ],
@@ -25329,8 +26069,9 @@ export function App() {
     );
     const htmlPreviewSessionId =
       (activeChatSession?.id ?? activeChatSessionId) || "no-session";
-    const getHtmlPreviewContext = (partIndex: number) => {
-      const contextKey = `${sourceMessageId}:${partIndex}`;
+    const getHtmlPreviewContext = (partIndex: number, partContent: string) => {
+      const heavy = needsHeavyTavernPreviewContext(partContent);
+      const contextKey = `${sourceMessageId}:${partIndex}:${heavy ? "heavy" : "light"}`;
       const currentMessageIndex = chatMessageIndexById.get(sourceMessageId) ?? -1;
       const currentMessage = chatMessages[currentMessageIndex];
       const cached = htmlPreviewContexts.get(contextKey);
@@ -25349,6 +26090,9 @@ export function App() {
       if (currentMessage) messages[currentMessageIndex] = formatPreviewMessage(currentMessage);
       const context: HtmlPreviewContext = {
         ...htmlPreviewContextBase,
+        ...(heavy && htmlPreviewContextBase.tavern
+          ? { tavern: { ...htmlPreviewContextBase.tavern, ...getHtmlPreviewHeavyTavernPatch() } }
+          : {}),
         messages,
         currentHtmlPartIndex: partIndex,
         parentMessageFrames: parts.flatMap((part, index) =>
@@ -25382,7 +26126,7 @@ export function App() {
               return (
                 <ChatHtmlPreview
                   content={part.content}
-                  context={getHtmlPreviewContext(partIndex)}
+                  context={getHtmlPreviewContext(partIndex, part.content)}
                   frameRegistry={htmlPreviewFrameRefs}
                   key={previewId}
                   mountReady={htmlPreviewSessionReady}
@@ -25474,7 +26218,7 @@ export function App() {
             return (
               <ChatHtmlPreview
                 content={part.content}
-                context={getHtmlPreviewContext(partIndex)}
+                context={getHtmlPreviewContext(partIndex, part.content)}
                 frameRegistry={htmlPreviewFrameRefs}
                 key={previewId}
                 mountReady={htmlPreviewSessionReady}
@@ -29414,22 +30158,16 @@ export function App() {
     eventName: string,
     args: unknown[],
     sourceFrame?: HTMLIFrameElement,
+    includeRuntime = false,
   ) => {
-    const targets = Array.from(htmlPreviewFrameRefs.current.entries()).filter(
-      ([, frame]) => !sourceFrame || frame === sourceFrame,
-    );
-    targets.forEach(([id, frame]) => {
-      postMessageToFrame(
-        frame,
-        {
-          type: HTML_PREVIEW_GENERATION_EVENT_MESSAGE,
-          id,
-          eventName,
-          args,
-        },
-        "*",
-      );
+    forwardEventToHtmlPreviewFrames(eventName, args, {
+      ...(sourceFrame ? { includeFrame: sourceFrame } : {}),
     });
+    if (includeRuntime) {
+      const normalized = normalizeTavernEventName(eventName);
+      void tavernExtensionEventBusRef.current.emit(normalized, ...args);
+      void tavernScriptRuntimeRef.current?.emit(normalized, ...args);
+    }
   };
 
   const generateHtmlPreviewText = async (
@@ -29437,16 +30175,67 @@ export function App() {
     sourceFrame?: HTMLIFrameElement,
   ) => {
     const requestSessionId = activeChatSessionIdRef.current;
-    const { setChatStatus, chatMessagesRef, emitTavernEvent } = createSessionBindings(requestSessionId);
-    const normalizedConfig = isObjectRecord(config) ? config : { user_input: config };
-    const customApi = isObjectRecord(normalizedConfig.custom_api)
-      ? normalizedConfig.custom_api
+    const { setChatStatus, chatMessagesRef } = createSessionBindings(requestSessionId);
+    const normalizedConfig: Record<string, unknown> = isObjectRecord(config)
+      ? { ...config }
+      : { user_input: config };
+    const generationId =
+      typeof normalizedConfig.generation_id === "string" && normalizedConfig.generation_id.trim()
+        ? normalizedConfig.generation_id.trim()
+        : crypto.randomUUID();
+    const requestedPresetName =
+      normalizedConfig.raw_mode !== true &&
+      typeof normalizedConfig.preset_name === "string" &&
+      normalizedConfig.preset_name.trim() &&
+      normalizedConfig.preset_name.trim() !== "in_use"
+        ? normalizedConfig.preset_name.trim()
+        : "";
+    const namedPreset = requestedPresetName
+      ? chatPresetsRef.current.find((preset) => preset.name.trim() === requestedPresetName)
+      : undefined;
+    if (requestedPresetName && !namedPreset) {
+      throw new Error(`预设 '${requestedPresetName}' 不存在`);
+    }
+    const customApi: Record<string, unknown> = isObjectRecord(normalizedConfig.custom_api)
+      ? { ...normalizedConfig.custom_api }
       : {};
+    if (namedPreset) {
+      if (customApi.max_tokens === undefined) customApi.max_tokens = namedPreset.maxTokens;
+      if (customApi.temperature === undefined) customApi.temperature = namedPreset.temperature;
+      if (customApi.frequency_penalty === undefined) customApi.frequency_penalty = namedPreset.frequencyPenalty;
+      if (customApi.presence_penalty === undefined) customApi.presence_penalty = namedPreset.presencePenalty;
+      if (customApi.top_p === undefined) customApi.top_p = namedPreset.topP;
+      if (customApi.top_k === undefined) customApi.top_k = namedPreset.topK;
+    }
     const hasCustomApi = Object.keys(customApi).length > 0;
     const rawPromptSource = Array.isArray(normalizedConfig.ordered_prompts)
       ? normalizedConfig.ordered_prompts
       : normalizedConfig.prompt;
-    const rawPromptOrder = Array.isArray(rawPromptSource) ? rawPromptSource : [];
+    const presetPlaceholderMap: Record<string, string> = {
+      worldInfoBefore: "world_info_before",
+      personaDescription: "persona_description",
+      charDescription: "char_description",
+      charPersonality: "char_personality",
+      scenario: "scenario",
+      worldInfoAfter: "world_info_after",
+      dialogueExamples: "dialogue_examples",
+      chatHistory: "chat_history",
+    };
+    const presetDerivedOrder =
+      namedPreset && !Array.isArray(rawPromptSource)
+        ? [
+            ...namedPreset.prompts
+              .filter((prompt) => prompt.enabled && prompt.injectionPosition === 0)
+              .map((prompt) =>
+                presetPlaceholderMap[prompt.identifier] ?? {
+                  role: prompt.role,
+                  content: prompt.content,
+                },
+              ),
+            "user_input",
+          ]
+        : [];
+    const rawPromptOrder = Array.isArray(rawPromptSource) ? rawPromptSource : presetDerivedOrder;
     const normalizeOrderedPromptMessage = (value: unknown): ChatApiMessage | null => {
       if (!isObjectRecord(value)) return null;
       const role =
@@ -29541,7 +30330,13 @@ export function App() {
     const responseName = responseCharacter?.name ?? chatPersona.name;
     let generatedText = "";
 
-    emitHtmlPreviewGenerationEvent("generation_started", [], sourceFrame);
+    emitHtmlPreviewGenerationEvent("generation_started", [], sourceFrame, false);
+    emitHtmlPreviewGenerationEvent(
+      TAVERN_HELPER_IFRAME_EVENTS.GENERATION_STARTED,
+      [generationId],
+      sourceFrame,
+      true,
+    );
     try {
       setChatStatus({ status: "loading", message: "独立前端正在调用当前会话 API..." });
       const selectedSystemPrompt = requestSystemPrompts
@@ -29630,6 +30425,13 @@ export function App() {
           role: isTavernSystemMessage(message) ? "system" : message.role,
           content: message.content,
         }));
+      const overrides = isObjectRecord(normalizedConfig.overrides) ? normalizedConfig.overrides : {};
+      const chatHistoryOverride = isObjectRecord(overrides.chat_history) ? overrides.chat_history : null;
+      const effectiveChatHistoryMessages = Array.isArray(chatHistoryOverride?.prompts)
+        ? chatHistoryOverride.prompts
+            .map(normalizeOrderedPromptMessage)
+            .filter((value): value is ChatApiMessage => Boolean(value))
+        : chatHistoryMessages;
       let worldInfoInserted = false;
       const orderedPromptMessages = rawPromptOrder.flatMap((value): ChatApiMessage[] => {
         const explicitMessage = normalizeOrderedPromptMessage(value);
@@ -29637,33 +30439,48 @@ export function App() {
         const marker = String(value ?? "").trim().toLowerCase();
         if (!marker) return [];
         if (marker === "user_input") return [{ role: "user", content: userInput }];
-        if (marker === "chat_history") return chatHistoryMessages;
+        if (marker === "chat_history") return effectiveChatHistoryMessages;
         if (marker === "persona_description") {
-          return userProfileSystemPrompt
-            ? [{ role: "system", content: userProfileSystemPrompt }]
-            : [];
+          const content =
+            typeof overrides.persona_description === "string"
+              ? overrides.persona_description
+              : userProfileSystemPrompt;
+          return content ? [{ role: "system", content }] : [];
         }
         if (marker === "char_description") {
-          return responseCharacter?.description
-            ? [{ role: "system", content: responseCharacter.description }]
-            : [];
+          const content =
+            typeof overrides.char_description === "string"
+              ? overrides.char_description
+              : responseCharacter?.description ?? "";
+          return content ? [{ role: "system", content }] : [];
         }
         if (marker === "char_personality") {
-          return responseCharacter?.personality
-            ? [{ role: "system", content: responseCharacter.personality }]
-            : [];
+          const content =
+            typeof overrides.char_personality === "string"
+              ? overrides.char_personality
+              : responseCharacter?.personality ?? "";
+          return content ? [{ role: "system", content }] : [];
         }
         if (marker === "scenario") {
-          return responseCharacter?.scenario
-            ? [{ role: "system", content: responseCharacter.scenario }]
-            : [];
+          const content =
+            typeof overrides.scenario === "string"
+              ? overrides.scenario
+              : responseCharacter?.scenario ?? "";
+          return content ? [{ role: "system", content }] : [];
         }
         if (marker === "dialogue_examples") {
-          return responseCharacter?.messageExample
-            ? [{ role: "system", content: responseCharacter.messageExample }]
-            : [];
+          const content =
+            typeof overrides.dialogue_examples === "string"
+              ? overrides.dialogue_examples
+              : responseCharacter?.messageExample ?? "";
+          return content ? [{ role: "system", content }] : [];
         }
         if (marker === "world_info_before" || marker === "world_info_after") {
+          const overrideContent =
+            marker === "world_info_before" ? overrides.world_info_before : overrides.world_info_after;
+          if (typeof overrideContent === "string") {
+            return overrideContent ? [{ role: "system", content: overrideContent }] : [];
+          }
           if (worldInfoInserted || !worldInfoPrompt) return [];
           worldInfoInserted = true;
           return [{ role: "system", content: worldInfoPrompt }];
@@ -29671,7 +30488,7 @@ export function App() {
         return [];
       });
       const promptTemplateCharacter = disableExtras ? null : responseCharacter;
-      const preparedApiMessages =
+      const basePreparedMessages =
         orderedPromptMessages.length > 0
           ? orderedPromptMessages
           : await applyPromptTemplateToApiMessages(
@@ -29696,6 +30513,30 @@ export function App() {
               responseName,
               requestModelId,
             );
+      const rawInjects = [
+        ...(Array.isArray(normalizedConfig.injects) ? normalizedConfig.injects : []),
+        ...(namedPreset
+          ? namedPreset.prompts
+              .filter((prompt) => prompt.enabled && prompt.injectionPosition !== 0 && prompt.content.trim())
+              .map((prompt) => ({
+                position: "in_chat",
+                depth: prompt.injectionDepth,
+                role: prompt.role,
+                content: prompt.content,
+              }))
+          : []),
+      ];
+      const preparedApiMessages = [...basePreparedMessages];
+      rawInjects.filter(isObjectRecord).forEach((inject) => {
+        if (inject.position === "none") return;
+        const content = String(inject.content ?? inject.message ?? inject.mes ?? "");
+        if (!content.trim()) return;
+        const role: ChatApiMessage["role"] =
+          inject.role === "user" || inject.role === "assistant" ? inject.role : "system";
+        const depth = Math.max(0, Math.trunc(Number(inject.depth ?? 0) || 0));
+        const insertIndex = Math.max(0, preparedApiMessages.length - depth);
+        preparedApiMessages.splice(insertIndex, 0, { role, content });
+      });
       const apiMessages = injectSessionStatusBarConversationContext(
         normalizedConfig.quiet === true
           ? preparedApiMessages
@@ -29865,14 +30706,22 @@ export function App() {
                 console.warn("独立前端流式回调执行失败", error);
               }
               emitHtmlPreviewGenerationEvent(
-                "js_stream_token_received_incrementally",
-                [delta],
+                TAVERN_HELPER_IFRAME_EVENTS.STREAM_TOKEN_RECEIVED_FULLY,
+                [generatedText, generationId],
                 sourceFrame,
+                true,
+              );
+              emitHtmlPreviewGenerationEvent(
+                TAVERN_HELPER_IFRAME_EVENTS.STREAM_TOKEN_RECEIVED_INCREMENTALLY,
+                [delta, generationId],
+                sourceFrame,
+                true,
               );
               emitHtmlPreviewGenerationEvent(
                 "stream_token_received",
                 [{ token: delta, fullText: generatedText }],
                 sourceFrame,
+                false,
               );
             }
           },
@@ -29903,8 +30752,15 @@ export function App() {
 
       throwIfChatAborted(abortSignal);
       if (!generatedText.trim()) throw new Error("API 响应中没有可用的文本内容。");
+      const finalGeneratedText = generatedText.trim();
+      emitHtmlPreviewGenerationEvent(
+        TAVERN_HELPER_IFRAME_EVENTS.GENERATION_ENDED,
+        [finalGeneratedText, generationId],
+        sourceFrame,
+        true,
+      );
       setChatStatus({ status: "success", message: "独立前端 API 调用完成。" });
-      return generatedText.trim();
+      return finalGeneratedText;
     } catch (error) {
       if (isChatAbortError(error)) {
         setChatStatus({ status: "success", message: "已停止独立前端输出。" });
@@ -29916,7 +30772,7 @@ export function App() {
       }
       throw error;
     } finally {
-      emitHtmlPreviewGenerationEvent("generation_ended", [generatedText], sourceFrame);
+      emitHtmlPreviewGenerationEvent("generation_ended", [generatedText], sourceFrame, false);
       // Raw extension requests have their own generation events. Emitting the
       // chat lifecycle here makes auto-fill scripts treat a background request
       // as another completed chat turn and can start the same fill again.

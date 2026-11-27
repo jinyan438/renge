@@ -158,6 +158,50 @@ try {
     });
     assert.equal(await frame.evaluate(() => originalChat === SillyTavern.getContext().chat), true);
   }
+
+  // Isolated message iframes also expose full Tavern Helper 4 APIs, STscript
+  // pipelines, and bidirectional custom events with the host runtime.
+  const apiPreview = `\`\`\`html
+    <html><body><output id="th4"></output><script>
+      (async () => {
+        eventOn('host_to_frame_ping', payload => { document.body.dataset.hostPing = String(payload); });
+        const preset = getPreset('in_use');
+        const persona = getPersona('current');
+        const bookEntries = await getWorldbook('Runner World');
+        const piped = await triggerSlash('/setvar key=frame_stage chapter_2 | /getvar frame_stage');
+        await eventEmit('frame_to_host_ping', 'pong-42');
+        document.getElementById('th4').textContent = JSON.stringify({
+          books: getWorldbookNames(),
+          hasPreset: Boolean(preset && Array.isArray(preset.prompts)),
+          hasPersona: Boolean(persona && typeof persona.name === 'string'),
+          savedEntries: bookEntries.some(entry => entry.extra?.profile_source === 'runner-fixture'),
+          piped,
+          helperVersion: getTavernHelperVersion(),
+        });
+      })().catch(error => { document.getElementById('th4').textContent = 'ERR:' + error.message; });
+    </script></body></html>
+  \`\`\``;
+  await page.evaluate(() => {
+    window.TavernHelper.eventOn("frame_to_host_ping", value => { window.__framePingReceived = value; });
+  });
+  await page.evaluate(async content => TavernHelper.createChatMessages([{role:"assistant",message:content}]), apiPreview);
+  const apiFrameHandle = await page.locator("#chat .mes").last().locator("iframe.chat-html-frame").elementHandle();
+  const apiFrame = await apiFrameHandle.contentFrame();
+  await apiFrame.waitForFunction(() => document.querySelector('#th4')?.textContent);
+  const th4Result = JSON.parse(await apiFrame.locator("#th4").textContent());
+  assert.deepEqual(th4Result, {
+    books: ["Runner World"],
+    hasPreset: true,
+    hasPersona: true,
+    savedEntries: true,
+    piped: "chapter_2",
+    helperVersion: "4.12.2",
+  });
+  assert.equal(await page.evaluate(() => window.__framePingReceived), "pong-42");
+  assert.equal(await page.evaluate(() => TavernHelper.getVariables({type:"chat"}).frame_stage), "chapter_2");
+  await page.evaluate(async () => TavernHelper.eventEmit("host_to_frame_ping", "ack-99"));
+  await apiFrame.waitForFunction(() => document.body.dataset.hostPing === "ack-99");
+
   // Active fragments must remain inside the isolated preview, including
   // entity-obfuscated URL schemes and embedded document content.
   for (const content of [

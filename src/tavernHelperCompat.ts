@@ -164,6 +164,8 @@ export const TAVERN_HELPER_IFRAME_EVENTS = Object.freeze({
   GENERATION_STARTED: "js_generation_started",
   STREAM_TOKEN_RECEIVED_FULLY: "js_stream_token_received_fully",
   STREAM_TOKEN_RECEIVED_INCREMENTALLY: "js_stream_token_received_incrementally",
+  REASONING_TOKEN_RECEIVED_FULLY: "js_reasoning_token_received_fully",
+  REASONING_TOKEN_RECEIVED_INCREMENTALLY: "js_reasoning_token_received_incrementally",
   GENERATION_ENDED: "js_generation_ended",
 });
 
@@ -696,8 +698,13 @@ function toTavernHelperPresetPrompt(prompt: ChatPresetPrompt) {
   };
 }
 
+export type TavernCompatPresetOptions = {
+  regexScripts?: unknown[];
+  scripts?: unknown[];
+};
+
 /** Formats a Renge preset as a Tavern Helper 4 `Preset`. */
-export function toTavernHelperPreset(preset: ChatPreset) {
+export function toTavernHelperPreset(preset: ChatPreset, options: TavernCompatPresetOptions = {}) {
   return {
     settings: {
       max_context: preset.maxContext,
@@ -727,8 +734,11 @@ export function toTavernHelperPreset(preset: ChatPreset) {
     prompts: preset.prompts.map(toTavernHelperPresetPrompt),
     prompts_unused: preset.backupPrompts.map(toTavernHelperPresetPrompt),
     extensions: {
-      regex_scripts: [] as unknown[],
-      tavern_helper: { scripts: [] as unknown[], variables: clone(preset.tavernVariables ?? {}) },
+      regex_scripts: clone(options.regexScripts ?? []),
+      tavern_helper: {
+        scripts: clone(options.scripts ?? []),
+        variables: clone(preset.tavernVariables ?? {}),
+      },
     },
   };
 }
@@ -871,6 +881,8 @@ export type TavernCompatCharacterOptions = {
   regexScripts?: unknown[];
   /** Serialized Tavern Helper script trees embedded in the card. */
   scripts?: unknown[];
+  /** Optional lazy cloner/localizer for `card.extensions` so identity reads skip heavy copies. */
+  materializeExtensions?: (rawExtensions: Record<string, unknown>) => Record<string, unknown>;
 };
 
 /** Formats a card as a Tavern Helper 4 `Character`. */
@@ -900,10 +912,17 @@ export function applyTavernHelperCharacter(card: CharacterCard, value: unknown):
   const firstMessages = Array.isArray(value.first_messages) ? value.first_messages.map(String) : null;
   const extensions = isRecord(value.extensions) ? value.extensions : null;
   const helperExtension = extensions && isRecord(extensions.tavern_helper) ? extensions.tavern_helper : null;
-  const nextExtensions = extensions ? clone(extensions) : card.extensions;
+  const nextExtensions = extensions ? clone(extensions) : clone(card.extensions ?? {});
   if (extensions) {
     delete nextExtensions.regex_scripts;
     delete nextExtensions.tavern_helper;
+  }
+  const hasWorldbookUpdate = Object.prototype.hasOwnProperty.call(value, "worldbook");
+  const nextWorldbookName =
+    hasWorldbookUpdate && typeof value.worldbook === "string" ? value.worldbook.trim() : "";
+  if (hasWorldbookUpdate) {
+    if (nextWorldbookName) nextExtensions.world = nextWorldbookName;
+    else delete nextExtensions.world;
   }
   const avatar = typeof value.avatar === "string" && /^(?:data:image\/|\/api\/app-data\/assets\/)/.test(value.avatar)
     ? value.avatar
@@ -918,6 +937,11 @@ export function applyTavernHelperCharacter(card: CharacterCard, value: unknown):
     firstMessage: firstMessages ? firstMessages[0] ?? "" : card.firstMessage,
     alternateGreetings: firstMessages ? firstMessages.slice(1) : card.alternateGreetings,
     extensions: nextExtensions,
+    characterBook: hasWorldbookUpdate
+      ? nextWorldbookName && card.characterBook?.name === nextWorldbookName
+        ? card.characterBook
+        : null
+      : card.characterBook,
     tavernVariables:
       helperExtension && isRecord(helperExtension.variables)
         ? clone(helperExtension.variables)
@@ -930,12 +954,28 @@ export function applyTavernHelperCharacter(card: CharacterCard, value: unknown):
 export function toSillyTavernCharacterData(card: CharacterCard, options: TavernCompatCharacterOptions = {}) {
   const avatar = options.avatar ?? (card.avatarDataUrl || `${card.id}.png`);
   const worldName = options.worldbookName ?? card.characterBook?.name ?? "";
-  const extensions = {
-    talkativeness: "0.5",
-    fav: false,
-    ...clone(card.extensions ?? {}),
-    ...(worldName ? { world: worldName } : {}),
-    regex_scripts: clone(options.regexScripts ?? []),
+  let extensionsSnapshot: Record<string, unknown> | undefined;
+  const readExtensions = () => {
+    if (!extensionsSnapshot) {
+      const cloned = (options.materializeExtensions ?? clone)(card.extensions ?? {});
+      const regexScripts =
+        options.regexScripts && options.regexScripts.length > 0
+          ? clone(options.regexScripts)
+          : Array.isArray(cloned.regex_scripts)
+            ? cloned.regex_scripts
+            : [];
+      extensionsSnapshot = {
+        talkativeness: "0.5",
+        fav: false,
+        ...cloned,
+        ...(worldName ? { world: worldName } : {}),
+        regex_scripts: regexScripts,
+      };
+    }
+    return extensionsSnapshot;
+  };
+  const writeExtensions = (value: Record<string, unknown>) => {
+    extensionsSnapshot = value;
   };
   return {
     name: card.name,
@@ -951,6 +991,12 @@ export function toSillyTavernCharacterData(card: CharacterCard, options: TavernC
     create_date: card.createdAt,
     avatar,
     chat: "",
+    get extensions() {
+      return readExtensions();
+    },
+    set extensions(value: Record<string, unknown>) {
+      writeExtensions(value);
+    },
     data: {
       name: card.name,
       description: card.description,
@@ -969,7 +1015,12 @@ export function toSillyTavernCharacterData(card: CharacterCard, options: TavernC
       character_book: card.characterBook
         ? { name: card.characterBook.name, entries: clone(card.characterBook.entries) }
         : undefined,
-      extensions,
+      get extensions() {
+        return readExtensions();
+      },
+      set extensions(value: Record<string, unknown>) {
+        writeExtensions(value);
+      },
     },
   };
 }

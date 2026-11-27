@@ -98,8 +98,10 @@ try {
   await open();
   frontend = await frame();
   assert.equal(await frontend.evaluate(() => getScriptTrees({ type: "character" })[1].enabled), false);
+  const toggledFrame = await page.locator("iframe.chat-html-frame").first().elementHandle();
   await frontend.locator("#toggle").click();
   await page.waitForFunction(() => typeof getScriptTrees === 'function' && getScriptTrees({ type: "character" })[1].enabled === true);
+  await page.waitForFunction(old => !old.isConnected, toggledFrame);
   frontend = await frame();
 
   // Separate mounted preview survives deleting a sibling message; reads receive

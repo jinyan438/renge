@@ -66,7 +66,7 @@ try {
     await page.getByRole('button',{name:'Select '+kind,exact:true}).click();
     await page.locator('#regex-result').getByText('Selected '+kind,{exact:true}).waitFor();
     assert.deepEqual(await page.evaluate(()=>TavernHelper.getTavernRegexes({type:'character'}).filter(rule=>rule.enabled).map(rule=>rule.id)),kind==='none'?[]:[`native-${kind}`]);
-    assert.deepEqual(await page.evaluate(()=>TavernHelper.getWorldbook('Protocols').filter(entry=>entry.enabled).map(entry=>entry.name)),kind==='none'?[]:[kind]);
+    assert.deepEqual(await page.evaluate(async()=> (await TavernHelper.getWorldbook('Protocols')).filter(entry=>entry.enabled).map(entry=>entry.name)),kind==='none'?[]:[kind]);
   }
   // Neither a matching ID in another scope nor a stale disabled alias may win.
   assert.deepEqual(await page.evaluate(()=>['global','preset'].map(type=>TavernHelper.getTavernRegexes({type})[0].replace_string)),['GLOBAL','PRESET']);

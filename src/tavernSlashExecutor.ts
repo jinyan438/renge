@@ -106,6 +106,25 @@ function unquote(value: string) {
   return trimmed;
 }
 
+function readBalancedClosure(input: string): { value: string; length: number } | null {
+  if (!input.startsWith("{:")) return null;
+  let depth = 0;
+  for (let index = 0; index < input.length; index += 1) {
+    const pair = input.slice(index, index + 2);
+    if (pair === "{:") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+    if (pair === ":}") {
+      depth -= 1;
+      index += 1;
+      if (depth === 0) return { value: input.slice(0, index + 1), length: index + 1 };
+    }
+  }
+  return null;
+}
+
 /** Parses `/name key=value key2="quoted value" unnamed text`. */
 export function parseTavernSlashSegment(segment: string): ParsedTavernSlashSegment | null {
   const match = /^\/([A-Za-z0-9_?#-]+)(?:\s+([\s\S]*))?$/.exec(segment.trim());
@@ -113,10 +132,19 @@ export function parseTavernSlashSegment(segment: string): ParsedTavernSlashSegme
   const named: Record<string, string> = {};
   let rest = (match[2] ?? "").trimStart();
   for (;;) {
-    const option = /^([A-Za-z_][A-Za-z0-9_]*)=(?:"((?:\\.|[^"\\])*)"|(\{:[\s\S]*?:\})|(\S*))(?:\s+|$)/.exec(rest);
+    const keyMatch = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(rest);
+    if (!keyMatch) break;
+    const afterEq = rest.slice(keyMatch[0].length);
+    const closure = readBalancedClosure(afterEq);
+    if (closure && (closure.length === afterEq.length || /^\s/.test(afterEq.slice(closure.length)))) {
+      named[keyMatch[1].toLowerCase()] = closure.value;
+      rest = afterEq.slice(closure.length).trimStart();
+      continue;
+    }
+    const option = /^([A-Za-z_][A-Za-z0-9_]*)=(?:"((?:\\.|[^"\\])*)"|(\S*))(?:\s+|$)/.exec(rest);
     if (!option) break;
     named[option[1].toLowerCase()] =
-      option[2] !== undefined ? option[2].replace(/\\(["\\])/g, "$1") : option[3] ?? option[4] ?? "";
+      option[2] !== undefined ? option[2].replace(/\\(["\\])/g, "$1") : option[3] ?? "";
     rest = rest.slice(option[0].length);
   }
   return { name: match[1].toLowerCase(), named, text: rest.trim(), raw: segment.trim() };

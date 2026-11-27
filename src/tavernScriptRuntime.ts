@@ -1802,6 +1802,10 @@ export class TavernScriptRuntime {
   }
 
   uninjectPrompts(ids: unknown) {
+    if (ids === null) {
+      this.promptInjections.clear();
+      return;
+    }
     if (Array.isArray(ids)) ids.forEach((id) => this.promptInjections.delete(String(id)));
   }
 
@@ -2539,18 +2543,39 @@ export class TavernScriptRuntime {
       if (buttons.length > 0 || !lastButtonScriptId) return cloneValue(buttons);
       return cloneValue(this.scriptButtons.get(lastButtonScriptId) ?? []);
     };
-    const replaceScriptButtons = (buttons: unknown) => {
+    const replaceScriptButtons = (first: unknown, second?: unknown) => {
+      const explicitScriptId = typeof first === "string" ? first.trim() : "";
+      const buttons = typeof first === "string" ? second : first;
       if (!Array.isArray(buttons)) return;
-      const script = resolveButtonScript(buttons);
+      const script = explicitScriptId
+        ? this.scripts.find((candidate) => candidate.id === explicitScriptId) ?? resolveButtonScript(buttons)
+        : resolveButtonScript(buttons);
       if (!script) return;
       const normalized = this.normalizeRuntimeButtons(buttons, script.id);
       this.scriptButtons.set(script.id, normalized);
       this.publishButtons();
     };
-    const appendInexistentScriptButtons = (buttons: unknown) => {
-      if (!Array.isArray(buttons)) return;
-      const script = resolveButtonScript(buttons);
-      if (!script) return;
+    const updateScriptButtonsWith = (updater: unknown) => {
+      const current = getScriptButtons();
+      if (typeof updater !== "function") return current;
+      const result = (updater as (buttons: TavernScriptButton[]) => unknown)(current);
+      if (result && typeof (result as PromiseLike<unknown>).then === "function") {
+        return Promise.resolve(result).then((resolved) => {
+          if (Array.isArray(resolved)) replaceScriptButtons(resolved);
+          return getScriptButtons();
+        });
+      }
+      if (Array.isArray(result)) replaceScriptButtons(result);
+      return getScriptButtons();
+    };
+    const appendInexistentScriptButtons = (first: unknown, second?: unknown) => {
+      const explicitScriptId = typeof first === "string" ? first.trim() : "";
+      const buttons = typeof first === "string" ? second : first;
+      if (!Array.isArray(buttons)) return getScriptButtons();
+      const script = explicitScriptId
+        ? this.scripts.find((candidate) => candidate.id === explicitScriptId) ?? resolveButtonScript(buttons)
+        : resolveButtonScript(buttons);
+      if (!script) return [];
       const existing = this.scriptButtons.get(script.id) ?? [];
       const names = new Set(existing.map((button) => button.name));
       const additions = this.normalizeRuntimeButtons(buttons, script.id).filter(
@@ -2560,6 +2585,13 @@ export class TavernScriptRuntime {
         this.scriptButtons.set(script.id, [...existing, ...additions]);
         this.publishButtons();
       }
+      return cloneValue(this.scriptButtons.get(script.id) ?? []);
+    };
+    const getScriptName = () => getScript()?.name ?? "";
+    const getScriptInfo = () => getScript()?.info ?? "";
+    const replaceScriptInfo = (info: unknown) => {
+      const script = getScript();
+      if (script) script.info = String(info ?? "");
     };
 
     const getChatMessages = (range: unknown = null, options: unknown = {}) => {
@@ -3815,11 +3847,98 @@ export class TavernScriptRuntime {
       if (!this.adapter.triggerSlash) throw new Error("Renge 斜杠命令接口尚未初始化。");
       return await this.adapter.triggerSlash(String(command ?? ""));
     };
-    const generate = async (config?: unknown) => {
+    const generate = async (config?: unknown, rawMode = false) => {
       if (!this.adapter.generate) throw new Error("Renge 独立生成接口尚未初始化。");
-      const normalizedConfig = isRecord(config)
+      const normalizedConfig: Record<string, unknown> = isRecord(config)
         ? cloneValue(config)
         : { user_input: config };
+      const generationId =
+        typeof normalizedConfig.generation_id === "string" && normalizedConfig.generation_id.trim()
+          ? normalizedConfig.generation_id.trim()
+          : crypto.randomUUID();
+      normalizedConfig.generation_id = generationId;
+      await emitFromScript(
+        TAVERN_HELPER_IFRAME_EVENTS.GENERATION_REQUESTED,
+        generationId,
+        rawMode ? "generateRaw" : "generate",
+        cloneValue(normalizedConfig),
+      );
+      if (
+        !rawMode &&
+        typeof normalizedConfig.preset_name === "string" &&
+        normalizedConfig.preset_name.trim() &&
+        normalizedConfig.preset_name.trim() !== "in_use"
+      ) {
+        const namedPreset = getPreset(normalizedConfig.preset_name.trim());
+        const presetPrompts = (Array.isArray(namedPreset.prompts) ? namedPreset.prompts : [])
+          .filter(isRecord)
+          .filter((prompt) => prompt.enabled !== false);
+        const placeholderToMarker: Record<string, string> = {
+          worldInfoBefore: "world_info_before",
+          personaDescription: "persona_description",
+          charDescription: "char_description",
+          charPersonality: "char_personality",
+          scenario: "scenario",
+          worldInfoAfter: "world_info_after",
+          dialogueExamples: "dialogue_examples",
+          chatHistory: "chat_history",
+        };
+        const orderedPrompts: unknown[] = [];
+        const inChatInjects: Array<Record<string, unknown>> = [];
+        presetPrompts.forEach((prompt) => {
+          const position = isRecord(prompt.position) ? prompt.position : {};
+          const role = prompt.role === "user" || prompt.role === "assistant" ? prompt.role : "system";
+          if (position.type === "in_chat") {
+            const content = substitudeMacros(prompt.content ?? "");
+            if (content.trim()) {
+              inChatInjects.push({
+                position: "in_chat",
+                depth: Math.max(0, Math.trunc(Number(position.depth ?? 4) || 0)),
+                order: Number(position.order ?? 100) || 0,
+                role,
+                content,
+              });
+            }
+            return;
+          }
+          if (isPresetPlaceholderPrompt(prompt)) {
+            const marker = placeholderToMarker[String(prompt.id ?? "")];
+            if (marker) orderedPrompts.push(marker);
+            return;
+          }
+          const content = substitudeMacros(prompt.content ?? "");
+          if (content.trim()) orderedPrompts.push({ role, content });
+        });
+        if (!orderedPrompts.includes("user_input")) orderedPrompts.push("user_input");
+        normalizedConfig.ordered_prompts = orderedPrompts;
+        normalizedConfig.injects = [
+          ...(Array.isArray(normalizedConfig.injects) ? normalizedConfig.injects : []),
+          ...inChatInjects,
+        ];
+        const settings = isRecord(namedPreset.settings) ? namedPreset.settings : {};
+        const customApiPatch: Record<string, unknown> = isRecord(normalizedConfig.custom_api)
+          ? { ...normalizedConfig.custom_api }
+          : {};
+        if (typeof settings.max_completion_tokens === "number" && customApiPatch.max_tokens === undefined) {
+          customApiPatch.max_tokens = settings.max_completion_tokens;
+        }
+        if (typeof settings.temperature === "number" && customApiPatch.temperature === undefined) {
+          customApiPatch.temperature = settings.temperature;
+        }
+        if (typeof settings.frequency_penalty === "number" && customApiPatch.frequency_penalty === undefined) {
+          customApiPatch.frequency_penalty = settings.frequency_penalty;
+        }
+        if (typeof settings.presence_penalty === "number" && customApiPatch.presence_penalty === undefined) {
+          customApiPatch.presence_penalty = settings.presence_penalty;
+        }
+        if (typeof settings.top_p === "number" && customApiPatch.top_p === undefined) {
+          customApiPatch.top_p = settings.top_p;
+        }
+        if (typeof settings.top_k === "number" && customApiPatch.top_k === undefined) {
+          customApiPatch.top_k = settings.top_k;
+        }
+        if (Object.keys(customApiPatch).length > 0) normalizedConfig.custom_api = customApiPatch;
+      }
       const configuredApiUrl = [
         chatCompletionSettings.custom_url,
         chatCompletionSettings.reverse_proxy,
@@ -3918,8 +4037,8 @@ export class TavernScriptRuntime {
       }
     };
     // Tavern Helper returns { content, reasoning? } when reasoning is requested.
-    const generateWithResultShape = async (config?: unknown) => {
-      const content = await generate(config);
+    const generateWithResultShape = async (config?: unknown, rawMode = false) => {
+      const content = await generate(config, rawMode);
       return isRecord(config) && config.should_return_reasoning === true ? { content } : content;
     };
     const stopAllGeneration = () => {
@@ -3998,12 +4117,18 @@ export class TavernScriptRuntime {
 
     const getCharData = (name: unknown = "current") => {
       const target = toTargetName(name, "current");
-      const data = this.adapter.getCharacterData?.(target);
-      if (data) return this.localizePlaceholderImages(cloneValue(data));
+      if (this.adapter.getCharacterData) {
+        const data = this.adapter.getCharacterData(target, (rawExtensions) =>
+          this.localizePlaceholderImages(cloneValue(rawExtensions)),
+        );
+        if (data && typeof data.avatar === "string") {
+          data.avatar = this.localizePlaceholderImages(data.avatar);
+        }
+        return data;
+      }
       const current = this.adapter.getCharacter();
       if (!current || (target !== "current" && target !== current.name)) return null;
-      const fallback = this.getSillyTavernCharacters()[0];
-      return fallback ? { ...fallback } : null;
+      return this.getSillyTavernCharacters()[0] ?? null;
     };
     const getCharAvatarPath = (name: unknown = "current") => {
       const target = toTargetName(name, "current");
@@ -4503,10 +4628,58 @@ export class TavernScriptRuntime {
       refreshOneMessage,
       builtin,
       ...audioApi,
+      audioEnable: (args: unknown) => {
+        if (!isRecord(args)) return "";
+        const enabled = !/^(?:0|false|off|no)$/i.test(String(args.state ?? "true").trim());
+        audioPlayer.setAudioSettings(args.type, { enabled });
+        return "";
+      },
+      audioPlay: (args: unknown) => {
+        if (!isRecord(args)) return "";
+        const play = !/^(?:0|false|off|no)$/i.test(String(args.play ?? "true").trim());
+        if (!play) audioPlayer.pauseAudio(args.type);
+        else {
+          const current = audioPlayer.getCurrentAudio(args.type).src || audioPlayer.getAudioList(args.type)[0]?.url;
+          if (current) audioPlayer.playAudio(args.type, current);
+        }
+        return "";
+      },
+      audioMode: (args: unknown) => {
+        if (!isRecord(args)) return "";
+        const modeMap: Record<string, TavernAudioMode> = {
+          single: "repeat_one",
+          repeat: "repeat_all",
+          random: "shuffle",
+          stop: "play_one_and_stop",
+        };
+        const mapped = modeMap[String(args.mode ?? "").trim().toLowerCase()];
+        if (mapped) audioPlayer.setAudioSettings(args.type, { mode: mapped });
+        return "";
+      },
+      audioImport: (args: unknown, url: unknown) => {
+        const options = isRecord(args) ? args : {};
+        const urls = String(url ?? options.url ?? "")
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean);
+        if (urls.length === 0) return "";
+        audioPlayer.appendAudioList(options.type, urls);
+        if (!/^(?:0|false|off|no)$/i.test(String(options.play ?? "true").trim())) {
+          audioPlayer.playAudio(options.type, urls[0]);
+        }
+        return "";
+      },
+      audioSelect: (args: unknown, url: unknown) => {
+        const options = isRecord(args) ? args : {};
+        const target = String(url ?? options.url ?? "").trim();
+        if (target) audioPlayer.playAudio(options.type, target);
+        return "";
+      },
       isAdmin: () => true,
       getTavernHelperExtensionId: () => TAVERN_HELPER_EXTENSION_ID,
       getExtensionType: (extensionId: unknown) => (isInstalledExtension(extensionId) ? "local" : null),
       getExtensionInstallationInfo: async () => null,
+      getExtensionStatus: async () => null,
       isInstalledExtension,
       installExtension: unsupportedExtensionOperation,
       uninstallExtension: unsupportedExtensionOperation,
@@ -4594,8 +4767,12 @@ export class TavernScriptRuntime {
       injectPrompts,
       uninjectPrompts,
       getScriptId,
+      getScriptName,
+      getScriptInfo,
+      replaceScriptInfo,
       getScriptButtons,
       replaceScriptButtons,
+      updateScriptButtonsWith,
       appendInexistentScriptButtons,
       getButtonEvent: (name: unknown) =>
         this.getButtonEventName(
@@ -4609,6 +4786,8 @@ export class TavernScriptRuntime {
       loadPreset,
       getTavernHelperVersion: () => TAVERN_HELPER_VERSION,
       getFrontendVersion: () => TAVERN_HELPER_VERSION,
+      updateTavernHelper: async () => false,
+      updateFrontendVersion: async () => false,
       getTavernVersion: () => SILLYTAVERN_VERSION,
       getVersion: () => sillyTavern.versionInfo,
       getContext,
@@ -4626,8 +4805,8 @@ export class TavernScriptRuntime {
       sendMessage,
       triggerSlash,
       triggerSlashWithResult: triggerSlash,
-      generate: generateWithResultShape,
-      generateRaw: generateWithResultShape,
+      generate: (config?: unknown) => generateWithResultShape(config, false),
+      generateRaw: (config?: unknown) => generateWithResultShape(config, true),
       stopAllGeneration,
       stopGenerationById: stopAllGeneration,
       toastr,
@@ -5042,31 +5221,63 @@ export class TavernScriptRuntime {
     const character = this.adapter.getCharacter();
     const otherCharacters = (this.adapter.getCharacterSummaries?.() ?? [])
       .filter((entry) => entry.id !== character?.id)
-      .map((entry) => ({ name: entry.name, avatar: entry.avatarDataUrl || `${entry.id}.png`, data: { name: entry.name } }));
+      .map((entry) => ({
+        name: entry.name,
+        avatar: entry.avatarDataUrl || `${entry.id}.png`,
+        data: { name: entry.name },
+      }));
     if (!character) return otherCharacters;
     // Identity polling should not copy bundled scripts and extension databases.
     // Materialize an isolated, mutable extension snapshot only when it is read.
     let extensions: Record<string, unknown> | undefined;
     const localizeExtensions = () => this.localizePlaceholderImages(cloneValue(character.extensions));
+    const readExtensions = () =>
+      (extensions ??= {
+        ...localizeExtensions(),
+        ...(character.worldBook ? { world: character.worldBook.name } : {}),
+      });
+    const writeExtensions = (value: Record<string, unknown>) => {
+      extensions = value;
+    };
     return [
       {
         name: character.name,
+        description: character.description,
+        personality: character.personality,
+        scenario: character.scenario,
+        first_mes: character.firstMessage,
+        mes_example: character.messageExample,
+        creatorcomment: character.creatorNotes ?? "",
+        tags: [...(character.tags ?? [])],
+        talkativeness: 0.5,
+        fav: false,
         avatar: this.localizePlaceholderImages(character.avatarDataUrl) || `${character.id}.png`,
+        chat: this.adapter.getChatId(),
+        get extensions() {
+          return readExtensions();
+        },
+        set extensions(value: Record<string, unknown>) {
+          writeExtensions(value);
+        },
         data: {
           name: character.name,
           description: character.description,
+          character_version: character.characterVersion ?? "",
           personality: character.personality,
           scenario: character.scenario,
           first_mes: character.firstMessage,
           mes_example: character.messageExample,
+          creator_notes: character.creatorNotes ?? "",
+          tags: [...(character.tags ?? [])],
+          system_prompt: character.systemPrompt ?? "",
+          post_history_instructions: character.postHistoryInstructions ?? "",
+          creator: character.creator ?? "",
+          alternate_greetings: [...(character.alternateGreetings ?? [])],
           get extensions() {
-            return extensions ??= {
-              ...localizeExtensions(),
-              ...(character.worldBook ? { world: character.worldBook.name } : {}),
-            };
+            return readExtensions();
           },
           set extensions(value: Record<string, unknown>) {
-            extensions = value;
+            writeExtensions(value);
           },
           character_book: character.worldBook,
         },

@@ -117,9 +117,9 @@ try {
     await th.setLorebookEntries("Fixture World", [{ ...after[1], comment: "renamed again", type: "selective" }]);
     if ((await th.getLorebookEntries("Fixture World"))[1].type !== "selective") throw new Error("Entry type failed to switch");
     if ((await th.getLorebookEntries("Fixture World"))[1].comment !== "renamed again") throw new Error("Legacy comment was shadowed by name alias");
-    const uids = await th.createLorebookEntries("Fixture World", [{ comment: "temporary", content: "remove" }]);
-    if (uids.length !== 1 || typeof uids[0] !== "string") throw new Error("Wrong createLorebookEntries result");
-    await th.deleteLorebookEntries("Fixture World", uids);
+    const created = await th.createLorebookEntries("Fixture World", [{ comment: "temporary", content: "remove" }]);
+    if (created.new_uids.length !== 1 || typeof created.new_uids[0] !== "number" || !Array.isArray(created.entries)) throw new Error("Wrong createLorebookEntries result");
+    await th.deleteLorebookEntries("Fixture World", created.new_uids);
     if ((await th.getLorebookEntries("Fixture World")).length !== 2) throw new Error("Entry deletion failed");
     await th.replaceVariables({ value: "script data" }, { type: "script" });
     await new Promise((resolve, reject) => {

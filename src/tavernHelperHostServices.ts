@@ -3,7 +3,8 @@
 // name resolution and the conversion to and from Tavern Helper's data shapes.
 import type { CharacterCard } from "./characterCardUtils";
 import type { ChatPreset } from "./presetUtils";
-import type { RegexScript } from "./regexUtils";
+import { normalizeRegexScript, type RegexScript } from "./regexUtils";
+import { getTavernScriptTrees, replaceTavernScriptTrees } from "./tavernScriptTreeUtils";
 import type { UserProfile, UserProfileState } from "./userProfileUtils";
 import {
   applyTavernHelperCharacter,
@@ -23,7 +24,10 @@ export type TavernHelperHostServices = {
   getTavernCharacter(name: string): Record<string, unknown> | null;
   saveTavernCharacter(name: string, character: unknown, mode: TavernHelperSaveMode): boolean;
   deleteTavernCharacter(name: string): boolean;
-  getCharacterData(name: string): Record<string, unknown> | null;
+  getCharacterData(
+    name: string,
+    materializeExtensions?: (rawExtensions: Record<string, unknown>) => Record<string, unknown>,
+  ): Record<string, unknown> | null;
   getCharacterAvatarPath(name: string): string | null;
   setCharacterWorldbookName(name: string, worldbookName: string | null): boolean;
   getLoadedPresetName(): string;
@@ -96,6 +100,50 @@ export function toTavernHelperRegex(script: RegexScript, scope: "global" | "char
   };
 }
 
+function fromTavernHelperRegex(value: unknown, index: number): RegexScript {
+  const raw = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const source = raw.source && typeof raw.source === "object" && !Array.isArray(raw.source)
+    ? (raw.source as Record<string, unknown>)
+    : null;
+  const destination = raw.destination && typeof raw.destination === "object" && !Array.isArray(raw.destination)
+    ? (raw.destination as Record<string, unknown>)
+    : null;
+  const placement = source
+    ? Object.entries({ user_input: 1, ai_output: 2, slash_command: 3, world_info: 5, reasoning: 6 })
+        .filter(([name]) => source[name] === true)
+        .map(([, code]) => code)
+    : raw.placement;
+  return normalizeRegexScript(
+    {
+      ...raw,
+      ...(Array.isArray(placement) ? { placement } : {}),
+      ...(typeof destination?.display === "boolean" ? { markdownOnly: destination.display } : {}),
+      ...(typeof destination?.prompt === "boolean" ? { promptOnly: destination.prompt } : {}),
+    },
+    index,
+  );
+}
+
+function applyExtensionScriptsAndRegexes<T extends { regexScripts: RegexScript[]; tavernScripts: CharacterCard["tavernScripts"] }>(
+  target: T,
+  rawValue: unknown,
+): T {
+  if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue)) return target;
+  const extensions = (rawValue as { extensions?: unknown }).extensions;
+  if (!extensions || typeof extensions !== "object" || Array.isArray(extensions)) return target;
+  const extRecord = extensions as Record<string, unknown>;
+  const regexScripts = Array.isArray(extRecord.regex_scripts)
+    ? extRecord.regex_scripts.map((item, index) => fromTavernHelperRegex(item, index))
+    : target.regexScripts;
+  const helper = extRecord.tavern_helper;
+  const helperScripts =
+    helper && typeof helper === "object" && !Array.isArray(helper) && Array.isArray((helper as { scripts?: unknown }).scripts)
+      ? replaceTavernScriptTrees(target.tavernScripts, (helper as { scripts: unknown[] }).scripts)
+      : target.tavernScripts;
+  if (regexScripts === target.regexScripts && helperScripts === target.tavernScripts) return target;
+  return { ...target, regexScripts, tavernScripts: helperScripts };
+}
+
 const stripAvatarExtension = (name: string) => name.replace(/\.png$/i, "");
 
 export function createTavernHelperHostServices(stores: TavernHelperHostStores): TavernHelperHostServices {
@@ -143,6 +191,7 @@ export function createTavernHelperHostServices(stores: TavernHelperHostStores): 
         ? toTavernHelperCharacter(card, {
             ...characterOptions(card),
             regexScripts: card.regexScripts.map((script) => toTavernHelperRegex(script, "character")),
+            scripts: getTavernScriptTrees(card.tavernScripts),
           })
         : null;
     },
@@ -150,13 +199,16 @@ export function createTavernHelperHostServices(stores: TavernHelperHostStores): 
       const existing = findCard(name);
       if (existing) {
         if (mode === "create") return false;
-        const updated = applyTavernHelperCharacter(existing, character);
+        const updated = applyExtensionScriptsAndRegexes(applyTavernHelperCharacter(existing, character), character);
         stores.setCards(stores.getCards().map((card) => (card.id === existing.id ? updated : card)));
         return true;
       }
       const normalized = String(name ?? "").trim();
       if (mode === "replace" || !normalized || normalized === "current") return false;
-      const created = applyTavernHelperCharacter(stores.createCard(stripAvatarExtension(normalized)), character);
+      const created = applyExtensionScriptsAndRegexes(
+        applyTavernHelperCharacter(stores.createCard(stripAvatarExtension(normalized)), character),
+        character,
+      );
       stores.setCards([...stores.getCards(), created]);
       return true;
     },
@@ -166,12 +218,13 @@ export function createTavernHelperHostServices(stores: TavernHelperHostStores): 
       stores.setCards(stores.getCards().filter((card) => card.id !== existing.id));
       return true;
     },
-    getCharacterData: (name) => {
+    getCharacterData: (name, materializeExtensions) => {
       const card = findCard(name);
       return card
         ? toSillyTavernCharacterData(card, {
             ...characterOptions(card),
             regexScripts: card.regexScripts.map(serializeRegexScript),
+            materializeExtensions,
           })
         : null;
     },
@@ -199,19 +252,28 @@ export function createTavernHelperHostServices(stores: TavernHelperHostStores): 
     getLoadedPresetName: () => stores.getActivePreset()?.name ?? "",
     getTavernPreset: (name) => {
       const preset = findPreset(name);
-      return preset ? toTavernHelperPreset(preset) : null;
+      return preset
+        ? toTavernHelperPreset(preset, {
+            regexScripts: preset.regexScripts.map((script) => toTavernHelperRegex(script, "preset")),
+            scripts: getTavernScriptTrees(preset.tavernScripts),
+          })
+        : null;
     },
     saveTavernPreset: (name, preset, mode) => {
       const existing = findPreset(name);
       if (existing) {
         if (mode === "create") return false;
-        const updated = applyTavernHelperPreset(existing, preset);
+        const updated = applyExtensionScriptsAndRegexes(applyTavernHelperPreset(existing, preset), preset);
         stores.setPresets(stores.getPresets().map((item) => (item.id === existing.id ? updated : item)));
         return true;
       }
       const normalized = String(name ?? "").trim();
       if (mode === "replace" || !normalized || normalized === "in_use") return false;
-      stores.setPresets([...stores.getPresets(), applyTavernHelperPreset(stores.createPreset(normalized), preset)]);
+      const created = applyExtensionScriptsAndRegexes(
+        applyTavernHelperPreset(stores.createPreset(normalized), preset),
+        preset,
+      );
+      stores.setPresets([...stores.getPresets(), created]);
       return true;
     },
     deleteTavernPreset: (name) => {
