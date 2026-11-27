@@ -162,70 +162,82 @@ async function inspectPiPackage({ source, cwd, agentDir, manager }) {
   });
   await resourceLoader.reload();
   const extensionResult = resourceLoader.getExtensions();
-  if (extensionResult.errors.length > 0) {
-    throw new Error(
-      `Pi 插件入口加载失败：${extensionResult.errors.map((entry) => entry.error).join("；")}`,
+  const shutdownInspectedExtensions = async () => {
+    for (const extension of extensionResult.extensions ?? []) {
+      const shutdownHandlers = extension.handlers?.get?.("session_shutdown") ?? [];
+      for (const handler of shutdownHandlers) {
+        try { await handler({ type: "session_shutdown", reason: "inspect" }, {}); } catch {}
+      }
+    }
+  };
+  try {
+    if (extensionResult.errors.length > 0) {
+      throw new Error(
+        `Pi 插件入口加载失败：${extensionResult.errors.map((entry) => entry.error).join("；")}`,
+      );
+    }
+
+    const loadedExtensions = extensionResult.extensions.filter(
+      (extension) => packageIdentity(extension.sourceInfo?.source ?? source) === packageIdentity(source),
     );
+    if (resources.extensions.length > 0 && loadedExtensions.length === 0) {
+      throw new Error("Pi 插件清单声明了扩展入口，但没有成功加载任何入口。");
+    }
+
+    const tools = [...new Set(loadedExtensions.flatMap((extension) => [...extension.tools.keys()]))];
+    const commands = [...new Set(loadedExtensions.flatMap((extension) => [...extension.commands.keys()]))];
+    const events = [...new Set(loadedExtensions.flatMap((extension) => [...extension.handlers.keys()]))];
+    const packageName = String(packageJson.name ?? basename(installedPath)).trim();
+    const resourceSummary = {
+      extensions: resources.extensions.length,
+      skills: resources.skills.length,
+      prompts: resources.prompts.length,
+      themes: resources.themes.length,
+    };
+    const capabilities = [
+      resourceSummary.extensions > 0 ? `${resourceSummary.extensions} 个 Pi 扩展入口` : "",
+      resourceSummary.extensions > 0 ? "Pi 动态工具与生命周期注册" : "",
+      tools.length > 0 ? `工具：${tools.join("、")}` : "",
+      commands.length > 0 ? `命令：${commands.join("、")}` : "",
+      events.length > 0 ? `${events.length} 类 Pi 生命周期事件` : "",
+      resourceSummary.skills > 0 ? `${resourceSummary.skills} 组 Skills` : "",
+      resourceSummary.prompts > 0 ? `${resourceSummary.prompts} 个提示词模板` : "",
+      resourceSummary.themes > 0 ? `${resourceSummary.themes} 个主题` : "",
+    ].filter(Boolean);
+    const repositoryUrl = packageRepositoryUrl(packageJson.repository);
+    const homepage = String(packageJson.homepage ?? repositoryUrl).trim();
+    const timestamp = new Date().toISOString();
+
+    return {
+      id: `pi-${safeIdPart(packageName)}-${shortHash(packageName || source)}`.slice(0, 128),
+      packageName,
+      displayName: String(packageJson.displayName ?? packageJson.name ?? basename(installedPath)).trim(),
+      description: String(packageJson.description ?? "通过 Pi 原生包管理器安装的插件。").trim(),
+      author: packageAuthor(packageJson.author) || packageName.split("/")[0] || "未知作者",
+      version: String(packageJson.version ?? "0.0.0"),
+      sourceUrl: source,
+      homePage: homepage,
+      license: String(packageJson.license ?? "未声明"),
+      enabled: true,
+      compatibility: "pi",
+      status: "installed",
+      statusMessage: "已通过 Pi 原生运行时加载",
+      capabilities: capabilities.length > 0 ? capabilities : ["Pi 原生扩展协议"],
+      settings: {},
+      loadingOrder: 50,
+      requires: [],
+      optional: [],
+      jsFiles: [],
+      cssFiles: [],
+      assetBaseUrl: "",
+      piPackageSource: source,
+      piResources: resourceSummary,
+      installedAt: timestamp,
+      updatedAt: timestamp,
+    };
+  } finally {
+    await shutdownInspectedExtensions();
   }
-
-  const loadedExtensions = extensionResult.extensions.filter(
-    (extension) => packageIdentity(extension.sourceInfo?.source ?? source) === packageIdentity(source),
-  );
-  if (resources.extensions.length > 0 && loadedExtensions.length === 0) {
-    throw new Error("Pi 插件清单声明了扩展入口，但没有成功加载任何入口。");
-  }
-
-  const tools = [...new Set(loadedExtensions.flatMap((extension) => [...extension.tools.keys()]))];
-  const commands = [...new Set(loadedExtensions.flatMap((extension) => [...extension.commands.keys()]))];
-  const events = [...new Set(loadedExtensions.flatMap((extension) => [...extension.handlers.keys()]))];
-  const packageName = String(packageJson.name ?? basename(installedPath)).trim();
-  const resourceSummary = {
-    extensions: resources.extensions.length,
-    skills: resources.skills.length,
-    prompts: resources.prompts.length,
-    themes: resources.themes.length,
-  };
-  const capabilities = [
-    resourceSummary.extensions > 0 ? `${resourceSummary.extensions} 个 Pi 扩展入口` : "",
-    resourceSummary.extensions > 0 ? "Pi 动态工具与生命周期注册" : "",
-    tools.length > 0 ? `工具：${tools.join("、")}` : "",
-    commands.length > 0 ? `命令：${commands.join("、")}` : "",
-    events.length > 0 ? `${events.length} 类 Pi 生命周期事件` : "",
-    resourceSummary.skills > 0 ? `${resourceSummary.skills} 组 Skills` : "",
-    resourceSummary.prompts > 0 ? `${resourceSummary.prompts} 个提示词模板` : "",
-    resourceSummary.themes > 0 ? `${resourceSummary.themes} 个主题` : "",
-  ].filter(Boolean);
-  const repositoryUrl = packageRepositoryUrl(packageJson.repository);
-  const homepage = String(packageJson.homepage ?? repositoryUrl).trim();
-  const timestamp = new Date().toISOString();
-
-  return {
-    id: `pi-${safeIdPart(packageName)}-${shortHash(packageName || source)}`.slice(0, 128),
-    packageName,
-    displayName: String(packageJson.displayName ?? packageJson.name ?? basename(installedPath)).trim(),
-    description: String(packageJson.description ?? "通过 Pi 原生包管理器安装的插件。").trim(),
-    author: packageAuthor(packageJson.author) || packageName.split("/")[0] || "未知作者",
-    version: String(packageJson.version ?? "0.0.0"),
-    sourceUrl: source,
-    homePage: homepage,
-    license: String(packageJson.license ?? "未声明"),
-    enabled: true,
-    compatibility: "pi",
-    status: "installed",
-    statusMessage: "已通过 Pi 原生运行时加载",
-    capabilities: capabilities.length > 0 ? capabilities : ["Pi 原生扩展协议"],
-    settings: {},
-    loadingOrder: 50,
-    requires: [],
-    optional: [],
-    jsFiles: [],
-    cssFiles: [],
-    assetBaseUrl: "",
-    piPackageSource: source,
-    piResources: resourceSummary,
-    installedAt: timestamp,
-    updatedAt: timestamp,
-  };
 }
 
 export function createPiPackageManager({ cwd = process.cwd(), agentDir }) {

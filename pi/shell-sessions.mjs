@@ -3,6 +3,7 @@ import { Type } from "typebox";
 
 const DEFAULT_YIELD_MS = 10_000;
 const MAX_YIELD_MS = 60_000;
+const MAX_COMPLETED_SHELL_SESSIONS = 16;
 const yieldParameter = Type.Optional(Type.Number({
   description: "How long to wait for a result in milliseconds (0-60000, default 10000). This only yields control; it never stops the command or changes its timeout.",
   minimum: 0,
@@ -108,14 +109,25 @@ export function createShellSessionManager({ onBackgroundUpdate } = {}) {
           const abort = () => controller.abort();
           signal?.addEventListener("abort", abort, { once: true });
           sessions.set(session.id, session);
+          const pruneCompletedSessions = () => {
+            const completedIds = [];
+            for (const [candidateId, candidate] of sessions) {
+              if (candidate.finished && candidate.waiters.size === 0) completedIds.push(candidateId);
+            }
+            while (completedIds.length > MAX_COMPLETED_SHELL_SESSIONS) {
+              sessions.delete(completedIds.shift());
+            }
+          };
           const finish = (result, error) => {
             session.result = result;
+            session.latest = undefined;
             session.error = error;
             session.finished = true;
             signal?.removeEventListener("abort", abort);
             publish();
             for (const resolve of session.waiters) resolve();
             session.waiters.clear();
+            pruneCompletedSessions();
           };
           // Capture rejection immediately so commands that finish between polls
           // never become unhandled rejections or lose their diagnostic output.

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Flag, Heart, History, ImagePlus, ListFilter, MessageCircle, MoreHorizontal, Music2, PencilLine, Plus, Search, Smile, Sparkles, Square, Star, Users, VolumeX, X } from "lucide-react";
 import { DEFAULT_POCKET_AVATAR, DEFAULT_POCKET_USER_AVATAR } from "./pocketPhoneState";
 import { emptyRedState, normalizeRedState, redActorNickname, redStorageKey, safeRedImage, toggleRedItem, type RedActor, type RedComment, type RedNote, type RedState } from "./pocketXiaohongshuState";
@@ -124,7 +124,10 @@ export function PocketXiaohongshu({ sessionId, nickname, bio, avatar, roles, pro
     stateRef.current = next; setState(next); setStorageWarning(warning);
     if (!next.notes.some(note => note.id === noteId)) setNoteId("");
   }), [sessionId, noteId]);
-  const roleSettingsKey = JSON.stringify(roles);
+  const roleSettingsKey = useMemo(
+    () => JSON.stringify(roles.map(role => [role.id, role.name, role.avatar])),
+    [roles],
+  );
   useEffect(() => {
     const next = syncRedRoleAvatars(stateRef.current, roles);
     if (next !== stateRef.current) update(() => next);

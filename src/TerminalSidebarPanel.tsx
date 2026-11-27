@@ -252,10 +252,13 @@ export function TerminalSidebarPanel({
       if (payload.workspaceKey !== workspaceKey) return;
       const terminal = terminalRefs.current.get(payload.id)?.terminal;
       if (terminal) terminal.write(payload.data);
-      else pendingDataRef.current.set(
-        payload.id,
-        (pendingDataRef.current.get(payload.id) || "") + payload.data,
-      );
+      else {
+        const merged = (pendingDataRef.current.get(payload.id) || "") + payload.data;
+        pendingDataRef.current.set(
+          payload.id,
+          merged.length > 262_144 ? merged.slice(-262_144) : merged,
+        );
+      }
     });
     const stopRestart = terminalApi?.onSidebarTerminalRestarted?.((payload) => {
       if (payload.workspaceKey !== workspaceKey) return;
@@ -291,6 +294,7 @@ export function TerminalSidebarPanel({
       });
     });
     return () => {
+      pendingDataRef.current.clear();
       stopData?.();
       stopRestart?.();
       stopExit?.();

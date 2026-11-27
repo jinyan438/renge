@@ -3,13 +3,57 @@ import { createWriteStream } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { dirname, join } from "node:path";
+
 const appDataBackupCount = 3;
 const completeBackupManagedRoots = [".pi", "extensions", "generated-images", "session-images", "skills", "tavern-files", "tavern-script-assets"];
+const PRIMARY_SNAPSHOT_IDLE_TTL_MS = 30_000;
+const MAX_SERIALIZED_CACHE_BYTES = 48 * 1024 * 1024;
+const LARGE_APP_DATA_ROTATION_THRESHOLD_BYTES = 8 * 1024 * 1024;
+const LARGE_APP_DATA_ROTATION_INTERVAL_MS = 60_000;
 const appDataWriteQueues = new Map();
 const validatedAppDataFiles = new Map();
 const primarySnapshots = new Map();
-const serializedValues = new WeakMap();
+const snapshotIdleTimers = new Map();
+const lastBackupRotationAt = new Map();
+let serializedValues = new WeakMap();
+let serializedCacheBytes = 0;
+
 function isMissingFileError(error) { return error?.code === "ENOENT"; }
+
+function touchPrimarySnapshot(dataFilePath, entry) {
+  primarySnapshots.set(dataFilePath, entry);
+  const previousTimer = snapshotIdleTimers.get(dataFilePath);
+  if (previousTimer) clearTimeout(previousTimer);
+  const timer = setTimeout(() => {
+    snapshotIdleTimers.delete(dataFilePath);
+    if (appDataWriteQueues.has(dataFilePath)) {
+      touchPrimarySnapshot(dataFilePath, entry);
+      return;
+    }
+    if (primarySnapshots.get(dataFilePath) === entry) {
+      primarySnapshots.delete(dataFilePath);
+      if (primarySnapshots.size === 0) {
+        serializedValues = new WeakMap();
+        serializedCacheBytes = 0;
+      }
+    }
+  }, PRIMARY_SNAPSHOT_IDLE_TTL_MS);
+  timer.unref?.();
+  snapshotIdleTimers.set(dataFilePath, timer);
+}
+
+function deletePrimarySnapshot(dataFilePath) {
+  const timer = snapshotIdleTimers.get(dataFilePath);
+  if (timer) {
+    clearTimeout(timer);
+    snapshotIdleTimers.delete(dataFilePath);
+  }
+  primarySnapshots.delete(dataFilePath);
+  if (primarySnapshots.size === 0) {
+    serializedValues = new WeakMap();
+    serializedCacheBytes = 0;
+  }
+}
 
 function parseAppDataContent(content) {
   if (!content.trim()) throw new Error("应用数据文件为空");
@@ -24,13 +68,18 @@ function getAppDataBackupPath(dataFilePath, index) {
   return join(dirname(dataFilePath), `app-data.backup-${index}.json`);
 }
 
-async function readAppDataFile(dataFilePath) {
+async function readAppDataFile(dataFilePath, { cacheSnapshot = true } = {}) {
   const signature = await getAppDataFileSignature(dataFilePath);
   const cached = primarySnapshots.get(dataFilePath);
-  if (cached?.signature === signature) return cached.data;
+  if (cached?.signature === signature) {
+    if (cacheSnapshot) touchPrimarySnapshot(dataFilePath, cached);
+    return cached.data;
+  }
   const parsed = parseAppDataContent(await readFile(dataFilePath, "utf8"));
   validatedAppDataFiles.set(dataFilePath, signature);
-  if (dataFilePath.endsWith("app-data.json")) primarySnapshots.set(dataFilePath, { signature, data: parsed });
+  if (cacheSnapshot && dataFilePath.endsWith("app-data.json")) {
+    touchPrimarySnapshot(dataFilePath, { signature, data: parsed });
+  }
   return parsed;
 }
 
@@ -42,7 +91,7 @@ async function getAppDataFileSignature(dataFilePath) {
 async function ensureAppDataFileValidated(dataFilePath) {
   const signature = await getAppDataFileSignature(dataFilePath);
   if (validatedAppDataFiles.get(dataFilePath) === signature) return signature;
-  await readAppDataFile(dataFilePath);
+  await readAppDataFile(dataFilePath, { cacheSnapshot: false });
   return validatedAppDataFiles.get(dataFilePath);
 }
 
@@ -52,21 +101,40 @@ function validateAppData(payload) {
   }
 }
 
+function allocStandaloneUtf8Buffer(text) {
+  const byteLength = Buffer.byteLength(text, "utf8");
+  const buffer = Buffer.allocUnsafe(byteLength);
+  buffer.write(text, 0, byteLength, "utf8");
+  return buffer;
+}
+
 function encodeValue(value) {
+  return Buffer.from(JSON.stringify(value) ?? "null", "utf8");
+}
+
+function encodeCachedMessage(value) {
   if (value && typeof value === "object") {
     const cached = serializedValues.get(value);
     if (cached) return cached;
-    const bytes = Buffer.from(JSON.stringify(value) ?? "null");
-    serializedValues.set(value, bytes);
+    const json = JSON.stringify(value) ?? "null";
+    const bytes = allocStandaloneUtf8Buffer(json);
+    if (bytes.byteLength <= MAX_SERIALIZED_CACHE_BYTES / 4) {
+      if (serializedCacheBytes + bytes.byteLength > MAX_SERIALIZED_CACHE_BYTES) {
+        serializedValues = new WeakMap();
+        serializedCacheBytes = 0;
+      }
+      serializedValues.set(value, bytes);
+      serializedCacheBytes += bytes.byteLength;
+    }
     return bytes;
   }
-  return Buffer.from(JSON.stringify(value) ?? "null");
+  return Buffer.from(JSON.stringify(value) ?? "null", "utf8");
 }
 
 // Reuse immutable message buffers and let disk backpressure bound allocations.
 // Rebuilding one enormous JSON string on every checkpoint causes large GCs even
 // in a worker and competes with the compositor for CPU and memory bandwidth.
-function* serializeAppDataChunks(payload) {
+export function* serializeAppDataChunks(payload) {
   yield Buffer.from("{");
   let field = 0;
   for (const [key, value] of Object.entries(payload)) {
@@ -87,7 +155,7 @@ function* serializeAppDataChunks(payload) {
         yield Buffer.from("[");
         for (let message = 0; message < content.length; message++) {
           if (message) yield Buffer.from(",");
-          yield encodeValue(content[message]);
+          yield encodeCachedMessage(content[message]);
         }
         yield Buffer.from("]");
       }
@@ -107,7 +175,7 @@ async function writeAppDataFileAtomically(dataFilePath, payload) {
     await rename(temporaryPath, dataFilePath);
     const signature = await getAppDataFileSignature(dataFilePath);
     validatedAppDataFiles.set(dataFilePath, signature);
-    primarySnapshots.set(dataFilePath, { signature, data: payload });
+    touchPrimarySnapshot(dataFilePath, { signature, data: payload });
   } finally {
     await rm(temporaryPath, { force: true }).catch(() => undefined);
   }
@@ -163,6 +231,22 @@ async function rotateAppDataBackups(dataFilePath) {
   }
 }
 
+async function shouldRotateAppDataBackups(dataFilePath, isIncremental) {
+  if (!isIncremental) return true;
+  try {
+    const primaryStat = await stat(dataFilePath);
+    if (primaryStat.size <= LARGE_APP_DATA_ROTATION_THRESHOLD_BYTES) return true;
+    const signature = `${primaryStat.size}:${primaryStat.mtimeMs}:${primaryStat.ctimeMs}`;
+    if (validatedAppDataFiles.get(dataFilePath) !== signature) return true;
+    const lastRotatedAt = lastBackupRotationAt.get(dataFilePath) ?? 0;
+    if (Date.now() - lastRotatedAt >= LARGE_APP_DATA_ROTATION_INTERVAL_MS) return true;
+    await stat(getAppDataBackupPath(dataFilePath, 1));
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 export async function readAppData(dataFilePath) {
   let primaryError = null;
   try {
@@ -186,15 +270,19 @@ export async function readAppData(dataFilePath) {
 }
 
 export async function writeAppData(dataFilePath, payloadOrUpdater) {
+  const isIncremental = typeof payloadOrUpdater === "function";
   const previousWrite = appDataWriteQueues.get(dataFilePath) ?? Promise.resolve();
   const operation = previousWrite
     .catch(() => undefined)
     .then(async () => {
-      const payload = typeof payloadOrUpdater === "function"
+      const payload = isIncremental
         ? await payloadOrUpdater(await readAppData(dataFilePath))
         : payloadOrUpdater;
       validateAppData(payload);
-      await rotateAppDataBackups(dataFilePath);
+      if (await shouldRotateAppDataBackups(dataFilePath, isIncremental)) {
+        await rotateAppDataBackups(dataFilePath);
+        lastBackupRotationAt.set(dataFilePath, Date.now());
+      }
       await writeAppDataFileAtomically(dataFilePath, payload);
     });
   appDataWriteQueues.set(dataFilePath, operation);
@@ -231,7 +319,8 @@ export async function clearAppData(dataFilePath) {
         ownedFiles.map((filePath) => rm(filePath, { force: true })),
       );
       ownedFiles.forEach((filePath) => validatedAppDataFiles.delete(filePath));
-      primarySnapshots.delete(dataFilePath);
+      lastBackupRotationAt.delete(dataFilePath);
+      deletePrimarySnapshot(dataFilePath);
       await Promise.all(
         ["app-data-assets", "roleplay-memory", ...completeBackupManagedRoots].map((name) =>
           rm(join(dataDirectory, name), { recursive: true, force: true }),

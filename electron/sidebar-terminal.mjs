@@ -5,6 +5,7 @@ import * as pty from "node-pty";
 const MAX_TERMINAL_BUFFER = 2 * 1024 * 1024;
 const MAX_TERMINAL_SESSIONS = 12;
 const MAX_TERMINAL_READ = 100_000;
+const TERMINAL_IPC_COALESCE_MS = 16;
 const DEFAULT_TERMINAL_WORKSPACE_KEY = "default";
 
 function clampDimension(value, fallback, maximum) {
@@ -28,9 +29,31 @@ export function getDefaultTerminalShell(platform = process.platform, env = proce
   };
 }
 
-function appendToBuffer(buffer, data) {
-  const next = buffer + data;
-  return next.length > MAX_TERMINAL_BUFFER ? next.slice(-MAX_TERMINAL_BUFFER) : next;
+function appendSessionChunk(session, data) {
+  if (!data) return;
+  session.bufferChunks.push(data);
+  session.bufferLength += data.length;
+  session.bufferFlat = null;
+  while (session.bufferLength > MAX_TERMINAL_BUFFER && session.bufferChunks.length > 0) {
+    const overflow = session.bufferLength - MAX_TERMINAL_BUFFER;
+    const head = session.bufferChunks[0];
+    if (head.length <= overflow) {
+      session.bufferChunks.shift();
+      session.bufferLength -= head.length;
+    } else {
+      session.bufferChunks[0] = head.slice(overflow);
+      session.bufferLength -= overflow;
+    }
+  }
+}
+
+function getSessionBuffer(session) {
+  if (session.bufferFlat !== null) return session.bufferFlat;
+  session.bufferFlat = session.bufferChunks.join("");
+  if (session.bufferChunks.length > 1) {
+    session.bufferChunks = session.bufferFlat ? [session.bufferFlat] : [];
+  }
+  return session.bufferFlat;
 }
 
 function getWorkspaceKey(options = {}) {
@@ -59,6 +82,43 @@ export function createSidebarTerminalManager({
     mainWindow.webContents.send(channel, payload);
   }
 
+  function clearPendingIpc(session) {
+    if (session.ipcTimer) {
+      clearTimeout(session.ipcTimer);
+      session.ipcTimer = null;
+    }
+    session.pendingIpcChunks.length = 0;
+  }
+
+  function flushPendingIpc(session) {
+    if (!session.pendingIpcChunks.length) return;
+    const data = session.pendingIpcChunks.join("");
+    session.pendingIpcChunks.length = 0;
+    send("sidebar-terminal:data", {
+      id: session.id,
+      workspaceKey: session.workspaceKey,
+      data,
+    });
+  }
+
+  function emitTerminalData(session, data) {
+    if (!session.ipcTimer) {
+      send("sidebar-terminal:data", {
+        id: session.id,
+        workspaceKey: session.workspaceKey,
+        data,
+      });
+      const timer = setTimeout(() => {
+        session.ipcTimer = null;
+        flushPendingIpc(session);
+      }, TERMINAL_IPC_COALESCE_MS);
+      timer.unref?.();
+      session.ipcTimer = timer;
+      return;
+    }
+    session.pendingIpcChunks.push(data);
+  }
+
   function serialize(session, includeBuffer = false) {
     return {
       id: session.id,
@@ -70,7 +130,7 @@ export function createSidebarTerminalManager({
       exited: session.exited,
       exitCode: session.exitCode,
       outputOffset: session.outputOffset,
-      ...(includeBuffer ? { buffer: session.buffer } : {}),
+      ...(includeBuffer ? { buffer: getSessionBuffer(session) } : {}),
     };
   }
 
@@ -88,12 +148,15 @@ export function createSidebarTerminalManager({
     const shell = getDefaultTerminalShell();
     const cols = clampDimension(options.cols, 80, 500);
     const rows = clampDimension(options.rows, 24, 300);
+    clearPendingIpc(session);
     session.generation += 1;
     const generation = session.generation;
     session.shell = shell.label;
     session.exited = false;
     session.exitCode = null;
-    session.buffer = "";
+    session.bufferChunks = [];
+    session.bufferLength = 0;
+    session.bufferFlat = "";
     session.outputOffset = 0;
     session.process = ptyModule.spawn(shell.command, shell.args, {
       name: "xterm-256color",
@@ -110,16 +173,14 @@ export function createSidebarTerminalManager({
     });
     session.process.onData((data) => {
       if (session.generation !== generation) return;
-      session.buffer = appendToBuffer(session.buffer, data);
+      appendSessionChunk(session, data);
       session.outputOffset += data.length;
-      send("sidebar-terminal:data", {
-        id: session.id,
-        workspaceKey: session.workspaceKey,
-        data,
-      });
+      emitTerminalData(session, data);
     });
     session.process.onExit(({ exitCode, signal }) => {
       if (session.generation !== generation) return;
+      flushPendingIpc(session);
+      clearPendingIpc(session);
       session.process = null;
       session.exited = true;
       session.exitCode = exitCode;
@@ -150,10 +211,14 @@ export function createSidebarTerminalManager({
       createdAt: Date.now(),
       exited: false,
       exitCode: null,
-      buffer: "",
+      bufferChunks: [],
+      bufferLength: 0,
+      bufferFlat: "",
       outputOffset: 0,
       process: null,
       generation: 0,
+      ipcTimer: null,
+      pendingIpcChunks: [],
     };
     sessions.set(id, session);
     try {
@@ -169,6 +234,10 @@ export function createSidebarTerminalManager({
 
   function disposeSession(session) {
     session.generation += 1;
+    clearPendingIpc(session);
+    session.bufferChunks = [];
+    session.bufferLength = 0;
+    session.bufferFlat = "";
     const terminalProcess = session.process;
     session.process = null;
     if (terminalProcess) {
@@ -215,15 +284,16 @@ export function createSidebarTerminalManager({
     read(event, options = {}) {
       assertSender(event);
       const session = getSession(options);
+      const buffer = getSessionBuffer(session);
       const maxChars = clampDimension(options.maxChars, 20_000, MAX_TERMINAL_READ);
-      const bufferStart = Math.max(0, session.outputOffset - session.buffer.length);
+      const bufferStart = Math.max(0, session.outputOffset - buffer.length);
       const requestedFrom = Number(options.from);
       const hasRequestedFrom = Number.isFinite(requestedFrom) && requestedFrom >= 0;
       const start = hasRequestedFrom
         ? Math.min(session.outputOffset, Math.max(bufferStart, Math.floor(requestedFrom)))
         : Math.max(bufferStart, session.outputOffset - maxChars);
       const bufferIndex = Math.max(0, start - bufferStart);
-      const output = session.buffer.slice(bufferIndex, bufferIndex + maxChars);
+      const output = buffer.slice(bufferIndex, bufferIndex + maxChars);
       return {
         ...serialize(session),
         output,

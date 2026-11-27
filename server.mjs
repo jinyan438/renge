@@ -1,4 +1,6 @@
 import { createServer } from "node:http";
+import { createInterface } from "node:readline";
+import { MessageChannel } from "node:worker_threads";
 import { getCodeReviewSnapshot, getCodeReviewFile } from "./code-review.mjs";
 import { readAppData, writeAppData, clearAppData, requestAppDataStore, retainAppDataStore, releaseAppDataStore } from "./app-data-store-client.mjs";
 import { createReadStream, createWriteStream } from "node:fs";
@@ -46,6 +48,10 @@ const completeBackupManagedRoots = [
   "tavern-script-assets",
 ];
 const tavernModuleProxyVersion = "2";
+const MAX_TAVERN_MODULE_PROXY_CACHE_ENTRIES = 128;
+const MAX_JSON_REQUEST_BODY_BYTES = 256 * 1024 * 1024;
+const MAX_APP_DATA_REQUEST_BYTES = 512 * 1024 * 1024;
+const MAX_PC_READ_FILE_BYTES = 32 * 1024 * 1024;
 const tavernModuleProxyCache = new Map();
 
 function readWindowsInternetSetting(valueName) {
@@ -355,7 +361,16 @@ function getTavernModuleCandidates(remoteUrl) {
 
 async function loadTavernModule(remoteUrl, origin) {
   const cacheKey = `${origin}\n${remoteUrl}`;
-  if (!tavernModuleProxyCache.has(cacheKey)) {
+  const existing = tavernModuleProxyCache.get(cacheKey);
+  if (existing) {
+    tavernModuleProxyCache.delete(cacheKey);
+    tavernModuleProxyCache.set(cacheKey, existing);
+  } else {
+    while (tavernModuleProxyCache.size >= MAX_TAVERN_MODULE_PROXY_CACHE_ENTRIES) {
+      const oldestKey = tavernModuleProxyCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      tavernModuleProxyCache.delete(oldestKey);
+    }
     tavernModuleProxyCache.set(cacheKey, (async () => {
       let lastError;
       for (const candidate of getTavernModuleCandidates(remoteUrl)) {
@@ -454,14 +469,20 @@ function getAsciiDownloadFileName(path) {
   return fallback || "download";
 }
 
-async function readJsonBody(request) {
+async function readJsonBody(request, maxBytes = MAX_JSON_REQUEST_BODY_BYTES) {
   const chunks = [];
+  let length = 0;
   for await (const chunk of request) {
+    length += chunk.length;
+    if (length > maxBytes) {
+      throw Object.assign(new Error("请求体过大"), { status: 413 });
+    }
     chunks.push(chunk);
   }
 
   if (chunks.length === 0) return {};
-  const text = Buffer.concat(chunks).toString("utf8");
+  const text = Buffer.concat(chunks, length).toString("utf8");
+  chunks.length = 0;
   try {
     return JSON.parse(text);
   } catch {
@@ -472,11 +493,18 @@ async function readJsonBody(request) {
 async function readAppDataRequestBytes(request) {
   const chunks = [];
   let length = 0;
-  for await (const chunk of request) { chunks.push(chunk); length += chunk.length; }
+  for await (const chunk of request) {
+    length += chunk.length;
+    if (length > MAX_APP_DATA_REQUEST_BYTES) {
+      throw Object.assign(new Error("应用数据请求体过大"), { status: 413 });
+    }
+    chunks.push(chunk);
+  }
   // Own the ArrayBuffer so transferring it cannot detach a pooled HTTP buffer.
   const bytes = new Uint8Array(length);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+  chunks.length = 0;
   return bytes;
 }
 
@@ -648,8 +676,7 @@ async function forEachWithConcurrency(items, concurrency, visit) {
   if (hasError) throw firstError;
 }
 
-async function installCompleteBackupZip(dataFilePath, zipBytes, stagingDirectory) {
-  const archiveEntries = await unzipCompleteBackup(zipBytes, COMPLETE_BACKUP_MAX_EXTRACTED_BYTES, stagingDirectory);
+async function installCompleteBackupEntries(dataFilePath, archiveEntries) {
   const manifestFile = archiveEntries["backup.json"];
   if (!manifestFile) throw new Error("ZIP 备份缺少 backup.json。");
   const manifest = parseCompleteBackupManifest(
@@ -758,12 +785,17 @@ async function handleCompleteBackupImport(request, response, dataFilePath) {
   try {
     await pipeline(request, sizeLimit, createWriteStream(backupPath, { flags: "wx" }));
     if (uploadedBytes === 0) throw new Error("备份文件为空。");
-    const zipBytes = await readFile(backupPath);
-    const signature = zipBytes.subarray(0, 4);
-    const isZip = signature[0] === 0x50 && signature[1] === 0x4b &&
-      signature[2] === 0x03 && signature[3] === 0x04;
-    if (!isZip) throw new Error("仅支持新版 v3 ZIP 完整备份，请重新导出备份文件。");
-    const result = await installCompleteBackupZip(dataFilePath, zipBytes, stagingDirectory);
+    let archiveEntries;
+    {
+      const zipBytes = await readFile(backupPath);
+      const signature = zipBytes.subarray(0, 4);
+      const isZip = signature[0] === 0x50 && signature[1] === 0x4b &&
+        signature[2] === 0x03 && signature[3] === 0x04;
+      if (!isZip) throw new Error("仅支持新版 v3 ZIP 完整备份，请重新导出备份文件。");
+      archiveEntries = await unzipCompleteBackup(zipBytes, COMPLETE_BACKUP_MAX_EXTRACTED_BYTES, stagingDirectory);
+    }
+    await rm(backupPath, { force: true }).catch(() => undefined);
+    const result = await installCompleteBackupEntries(dataFilePath, archiveEntries);
     sendJson(response, 200, { ok: true, ...result, bytes: uploadedBytes });
   } catch (error) {
     const message = compactError(error);
@@ -1690,6 +1722,10 @@ async function handlePcFiles(request, response, pathname) {
   }
 
   if (pathname === "/api/pc/read-file") {
+    const fileInfo = await stat(targetPath);
+    if (fileInfo.size > MAX_PC_READ_FILE_BYTES) {
+      throw new Error(`文件过大（超过 ${Math.round(MAX_PC_READ_FILE_BYTES / (1024 * 1024))} MB），请使用分段读取。`);
+    }
     sendJson(response, 200, {
       path: relativePath,
       content: await readFile(targetPath, "utf8"),
@@ -1698,6 +1734,10 @@ async function handlePcFiles(request, response, pathname) {
   }
 
   if (pathname === "/api/pc/read-binary-file") {
+    const fileInfo = await stat(targetPath);
+    if (fileInfo.size > MAX_PC_READ_FILE_BYTES) {
+      throw new Error(`二进制文件过大（超过 ${Math.round(MAX_PC_READ_FILE_BYTES / (1024 * 1024))} MB）。`);
+    }
     const content = await readFile(targetPath);
     sendJson(response, 200, {
       path: relativePath,
@@ -1708,16 +1748,30 @@ async function handlePcFiles(request, response, pathname) {
   }
 
   if (pathname === "/api/pc/read-file-range") {
-    const content = await readFile(targetPath, "utf8");
-    const lines = content.replace(/\r\n/g, "\n").split("\n");
     const startLine = Math.max(1, Math.floor(Number(body.startLine ?? 1)));
-    const endLine = Math.min(lines.length, Math.max(startLine, Math.floor(Number(body.endLine ?? startLine + 120))));
+    const requestedEndLine = Math.max(startLine, Math.floor(Number(body.endLine ?? startLine + 120)));
+    const selectedLines = [];
+    let totalLines = 0;
+    const stream = createReadStream(targetPath, { encoding: "utf8" });
+    const reader = createInterface({ input: stream, crlfDelay: Infinity });
+    try {
+      for await (const line of reader) {
+        totalLines += 1;
+        if (totalLines >= startLine && totalLines <= requestedEndLine) {
+          selectedLines.push(line);
+        }
+      }
+    } finally {
+      reader.close();
+      stream.destroy();
+    }
+    const endLine = totalLines === 0 ? startLine : Math.min(totalLines, requestedEndLine);
     sendJson(response, 200, {
       path: relativePath,
       startLine,
       endLine,
-      totalLines: lines.length,
-      content: lines.slice(startLine - 1, endLine).join("\n"),
+      totalLines,
+      content: selectedLines.join("\n"),
     });
     return;
   }
@@ -3029,9 +3083,47 @@ async function handleApi(request, response, pathname, dataFilePath, piHost, temp
 
     if (pathname === "/api/app-data") {
       if (request.method === "GET") {
-        const bytes = await requestAppDataStore(dataFilePath, "httpRead");
-        response.writeHead(200, { "Content-Type": "application/json;charset=utf-8", "Cache-Control": "no-store" });
-        response.end(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+        const { port1, port2 } = new MessageChannel();
+        let headerSent = false;
+        const streamDone = new Promise((resolveStream, rejectStream) => {
+          port1.on("message", (msg) => {
+            if (msg?.end) {
+              port1.close();
+              if (!headerSent) {
+                response.writeHead(200, { "Content-Type": "application/json;charset=utf-8", "Cache-Control": "no-store" });
+                headerSent = true;
+              }
+              response.end();
+              resolveStream();
+              return;
+            }
+            if (msg?.error) {
+              port1.close();
+              rejectStream(Object.assign(new Error(msg.error.message || "读取应用数据失败"), msg.error));
+              return;
+            }
+            if (!headerSent) {
+              response.writeHead(200, { "Content-Type": "application/json;charset=utf-8", "Cache-Control": "no-store" });
+              headerSent = true;
+            }
+            const ok = response.write(Buffer.from(msg.chunk.buffer, msg.chunk.byteOffset, msg.chunk.byteLength));
+            if (ok || response.destroyed) {
+              try { port1.postMessage("next"); } catch {}
+            } else {
+              response.once("drain", () => {
+                try { port1.postMessage("next"); } catch {}
+              });
+            }
+          });
+          response.once("close", () => {
+            try { port1.postMessage("cancel"); } catch {}
+            if (headerSent) resolveStream();
+          });
+        });
+        await Promise.all([
+          requestAppDataStore(dataFilePath, "httpStreamRead", { port: port2 }, [port2]),
+          streamDone,
+        ]);
         return;
       }
 

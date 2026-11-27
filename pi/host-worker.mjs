@@ -49,17 +49,24 @@ parentPort.on("message", async (message) => {
   }
   if (message.type === "cancel") { streams.get(message.id)?.cancel(); return; }
   if (message.type !== "call") return;
+  const callId = message.id;
+  const method = message.method;
+  const args = Array.isArray(message.args) ? message.args : [];
+  message.args = null;
   try {
     let result;
-    if (message.method === "handleChat") {
-      const response = new StreamResponse(message.id);
-      streams.set(message.id, response);
-      result = await host.handleChat(message.args[0], new EventEmitter(), response);
+    if (method === "handleChat") {
+      const chatBody = args[0];
+      args.length = 0;
+      const response = new StreamResponse(callId);
+      streams.set(callId, response);
+      result = await host.handleChat(chatBody, new EventEmitter(), response);
     } else {
-      result = await host[message.method](...message.args);
+      result = await host[method](...args);
+      args.length = 0;
     }
-    parentPort.postMessage({ id: message.id, result });
+    parentPort.postMessage({ id: callId, result });
   } catch (error) {
-    parentPort.postMessage({ id: message.id, error: { message: error instanceof Error ? error.message : String(error), code: error?.code } });
-  } finally { streams.delete(message.id); }
+    parentPort.postMessage({ id: callId, error: { message: error instanceof Error ? error.message : String(error), code: error?.code } });
+  } finally { streams.delete(callId); }
 });

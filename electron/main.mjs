@@ -14,7 +14,8 @@ import {
   webContents,
 } from "electron";
 import { mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { existsSync, mkdirSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync } from "node:fs";
+import { createInterface } from "node:readline";
 import { execFile, execFileSync } from "node:child_process";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -293,12 +294,35 @@ function notifySidebarBrowserDownloads() {
 
 function refreshSidebarBrowserDownload(record) {
   const item = record.item;
+  if (!item) return;
   record.fileName = item.getFilename() || record.fileName;
   record.filePath = item.getSavePath() || record.filePath;
   record.receivedBytes = item.getReceivedBytes();
   record.totalBytes = item.getTotalBytes();
   record.paused = item.isPaused();
   record.updatedAt = Date.now();
+}
+
+function rememberRemovedSidebarBrowserDownloadId(id) {
+  if (!id) return;
+  removedSidebarBrowserDownloadIds.delete(id);
+  while (removedSidebarBrowserDownloadIds.size >= 200) {
+    const oldest = removedSidebarBrowserDownloadIds.values().next().value;
+    if (oldest === undefined) break;
+    removedSidebarBrowserDownloadIds.delete(oldest);
+  }
+  removedSidebarBrowserDownloadIds.add(id);
+}
+
+function releaseSidebarBrowserDownloadItem(record) {
+  if (!record?.item) return;
+  try {
+    record.item.removeAllListeners("updated");
+    record.item.removeAllListeners("done");
+  } catch {
+    // Ignore already destroyed native DownloadItem wrappers.
+  }
+  record.item = null;
 }
 
 function configureSidebarBrowserDownloads() {
@@ -325,7 +349,10 @@ function configureSidebarBrowserDownloads() {
     sidebarBrowserDownloads.set(id, record);
     while (sidebarBrowserDownloads.size > 100) {
       const oldestId = sidebarBrowserDownloads.keys().next().value;
+      const evicted = sidebarBrowserDownloads.get(oldestId);
       sidebarBrowserDownloads.delete(oldestId);
+      rememberRemovedSidebarBrowserDownloadId(oldestId);
+      releaseSidebarBrowserDownloadItem(evicted);
     }
     notifySidebarBrowserDownloads();
     item.on("updated", (_downloadEvent, state) => {
@@ -335,9 +362,14 @@ function configureSidebarBrowserDownloads() {
       notifySidebarBrowserDownloads();
     });
     item.once("done", (_downloadEvent, state) => {
-      if (removedSidebarBrowserDownloadIds.has(id)) return;
+      if (removedSidebarBrowserDownloadIds.has(id)) {
+        releaseSidebarBrowserDownloadItem(record);
+        return;
+      }
       refreshSidebarBrowserDownload(record);
+      record.paused = false;
       record.state = state || "completed";
+      releaseSidebarBrowserDownloadItem(record);
       notifySidebarBrowserDownloads();
     });
   });
@@ -417,6 +449,24 @@ function configureElectronStorage() {
   app.setPath("cache", electronRuntimeCacheDir);
   app.commandLine.appendSwitch("disk-cache-dir", electronRuntimeCacheDir);
   app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
+
+  void readdir(cacheRootDir, { withFileTypes: true }).then(async (entries) => {
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.startsWith("run-")) continue;
+      const pid = Number(entry.name.slice(4));
+      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+      let alive = false;
+      try {
+        process.kill(pid, 0);
+        alive = true;
+      } catch (error) {
+        alive = error?.code === "EPERM";
+      }
+      if (!alive) {
+        await rm(join(cacheRootDir, entry.name), { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
+  }).catch(() => undefined);
 }
 
 function configureElectronRendering() {
@@ -688,20 +738,32 @@ async function fileInfo(inputPath = "") {
 }
 
 async function readFileRange({ path, startLine = 1, endLine }) {
-  const content = await readFile(resolveReadablePath(path), "utf8");
-  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const targetPath = resolveReadablePath(path);
   const safeStartLine = Math.max(1, Math.floor(Number(startLine) || 1));
-  const safeEndLine = Math.min(
-    lines.length,
-    Math.max(safeStartLine, Math.floor(Number(endLine) || safeStartLine + 120)),
-  );
+  const requestedEndLine = Math.max(safeStartLine, Math.floor(Number(endLine) || safeStartLine + 120));
+  const selectedLines = [];
+  let totalLines = 0;
+  const stream = createReadStream(targetPath, { encoding: "utf8" });
+  const reader = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of reader) {
+      totalLines += 1;
+      if (totalLines >= safeStartLine && totalLines <= requestedEndLine) {
+        selectedLines.push(line);
+      }
+    }
+  } finally {
+    reader.close();
+    stream.destroy();
+  }
+  const safeEndLine = totalLines === 0 ? safeStartLine : Math.min(totalLines, requestedEndLine);
 
   return {
     path,
     startLine: safeStartLine,
     endLine: safeEndLine,
-    totalLines: lines.length,
-    content: lines.slice(safeStartLine - 1, safeEndLine).join("\n"),
+    totalLines,
+    content: selectedLines.join("\n"),
   };
 }
 
@@ -1266,7 +1328,8 @@ function registerIpcHandlers() {
     if (action === "clear-completed") {
       for (const [id, record] of sidebarBrowserDownloads) {
         if (record.state !== "progressing") {
-          removedSidebarBrowserDownloadIds.add(id);
+          rememberRemovedSidebarBrowserDownloadId(id);
+          releaseSidebarBrowserDownloadItem(record);
           sidebarBrowserDownloads.delete(id);
         }
       }
@@ -1284,11 +1347,12 @@ function registerIpcHandlers() {
     } else if (action === "reveal") {
       if (!record.filePath) throw new Error("下载文件尚未保存");
       shell.showItemInFolder(record.filePath);
-    } else if (action === "pause") record.item.pause();
-    else if (action === "resume") record.item.resume();
-    else if (action === "cancel") record.item.cancel();
+    } else if (action === "pause") record.item?.pause();
+    else if (action === "resume") record.item?.resume();
+    else if (action === "cancel") record.item?.cancel();
     else if (action === "remove") {
-      removedSidebarBrowserDownloadIds.add(id);
+      rememberRemovedSidebarBrowserDownloadId(id);
+      releaseSidebarBrowserDownloadItem(record);
       sidebarBrowserDownloads.delete(id);
     } else throw new Error("未知的下载操作");
     if (action !== "remove") refreshSidebarBrowserDownload(record);
@@ -1647,15 +1711,25 @@ function registerIpcHandlers() {
     listFiles(options.path ?? "", options.recursive ?? true),
   );
 
-  ipcMain.handle("workspace:read", async (_event, options = {}) => ({
-    path: options.path,
-    content: await readFile(resolveReadablePath(options.path), "utf8"),
-  }));
+  ipcMain.handle("workspace:read", async (_event, options = {}) => {
+    const targetPath = resolveReadablePath(options.path);
+    const info = await stat(targetPath);
+    if (info.size > 32 * 1024 * 1024) {
+      throw new Error("文件过大（超过 32 MB），请使用分段读取。");
+    }
+    return {
+      path: options.path,
+      content: await readFile(targetPath, "utf8"),
+    };
+  });
 
   ipcMain.handle("workspace:read-binary", async (_event, options = {}) => {
     const targetPath = resolveReadablePath(options.path);
-    const content = await readFile(targetPath);
     const info = await stat(targetPath);
+    if (info.size > 32 * 1024 * 1024) {
+      throw new Error("二进制文件过大（超过 32 MB）。");
+    }
+    const content = await readFile(targetPath);
     return {
       path: options.path,
       size: info.size,

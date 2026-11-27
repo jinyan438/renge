@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 
 const execute = promisify(execFile);
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_TOTAL_CAPTURED_BYTES = 32 * 1024 * 1024;
 
 function countLineChanges(before, after) {
   const lines = bytes => bytes?.length ? bytes.toString("utf8").replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n") : [];
@@ -47,6 +48,7 @@ export function createWorkspaceChangeRecorder(cwd, { maxFiles = 500, warn = cons
   cwd = resolve(cwd);
   let scratch, repo, env, beforeTree, baseline;
   let touched = false, finished = false;
+  let capturedBytes = 0;
   const captures = new Map();
   const pathKey = path => process.platform === "win32" ? path.toLowerCase() : path;
   let queue = Promise.resolve();
@@ -94,7 +96,19 @@ export function createWorkspaceChangeRecorder(cwd, { maxFiles = 500, warn = cons
         const absolute = resolve(cwd, path);
         const key = pathKey(absolute);
         if (!captures.has(key)) {
-          try { captures.set(key, { path: absolute, before: await capture(absolute) }); }
+          try {
+            const snapshotBefore = await capture(absolute);
+            if (snapshotBefore?.bytes) {
+              if (capturedBytes + snapshotBefore.bytes.byteLength <= MAX_TOTAL_CAPTURED_BYTES) {
+                capturedBytes += snapshotBefore.bytes.byteLength;
+                captures.set(key, { path: absolute, before: snapshotBefore });
+              } else {
+                captures.set(key, { path: absolute, before: { fingerprint: snapshotBefore.fingerprint, oversized: true } });
+              }
+            } else {
+              captures.set(key, { path: absolute, before: snapshotBefore });
+            }
+          }
           catch (error) { warn(`[workspace-changes] 无法读取编辑前的文件：${error.message}`); }
         }
       });
@@ -125,16 +139,21 @@ export function createWorkspaceChangeRecorder(cwd, { maxFiles = 500, warn = cons
           }
         }
       } catch (error) { warn(`[workspace-changes] 无法读取任务快照差异：${error.message}`); }
-      for (const [key, { path, before }] of captures) {
-        if (files.has(key)) continue;
-        try {
-          const after = await capture(path);
-          if (before?.fingerprint === after?.fingerprint || (!before && !after)) continue;
-          const oversized = before?.oversized || after?.oversized;
-          const binary = before?.bytes?.includes(0) || after?.bytes?.includes(0);
-          files.set(key, { path: displayPath(path), status: !before ? "added" : !after ? "deleted" : "modified",
-            ...(oversized ? { oversized: true } : binary ? { binary: true } : countLineChanges(before?.bytes, after?.bytes)) });
-        } catch (error) { warn(`[workspace-changes] 无法读取编辑后的文件：${error.message}`); }
+      try {
+        for (const [key, { path, before }] of captures) {
+          if (files.has(key)) continue;
+          try {
+            const after = await capture(path);
+            if (before?.fingerprint === after?.fingerprint || (!before && !after)) continue;
+            const oversized = before?.oversized || after?.oversized;
+            const binary = before?.bytes?.includes(0) || after?.bytes?.includes(0);
+            files.set(key, { path: displayPath(path), status: !before ? "added" : !after ? "deleted" : "modified",
+              ...(oversized ? { oversized: true } : binary ? { binary: true } : countLineChanges(before?.bytes, after?.bytes)) });
+          } catch (error) { warn(`[workspace-changes] 无法读取编辑后的文件：${error.message}`); }
+        }
+      } finally {
+        captures.clear();
+        capturedBytes = 0;
       }
       const all = [...files.values()].sort((a, b) => a.path.localeCompare(b.path));
       if (!all.length) return;
@@ -144,6 +163,8 @@ export function createWorkspaceChangeRecorder(cwd, { maxFiles = 500, warn = cons
     },
     async dispose() {
       await queue;
+      captures.clear();
+      capturedBytes = 0;
       // scratch is always the absolute directory returned by our own mkdtemp.
       if (scratch) await rm(scratch, { recursive: true, force: true });
     },

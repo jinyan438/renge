@@ -3,6 +3,7 @@ import { lstat, mkdir, readFile, rename, rm, rmdir, unlink, writeFile } from "no
 import { dirname, join, relative, resolve } from "node:path";
 import { listSidebarFiles, readSidebarBinaryFile, resolveSidebarFilePath } from "./electron/sidebar-files.mjs";
 
+const MAX_WORKSPACE_TEXT_FILE_BYTES = 32 * 1024 * 1024;
 const queues = new Map();
 export async function workspaceFileOperation(rootPath, body) {
   const root = resolve(rootPath);
@@ -19,7 +20,13 @@ export async function workspaceFileOperation(rootPath, body) {
     }
   };
   const read = async () => {
-    try { return await readFile(target, "utf8"); }
+    try {
+      const info = await lstat(target);
+      if (info.size > MAX_WORKSPACE_TEXT_FILE_BYTES) {
+        throw new Error(`文件过大（超过 ${Math.round(MAX_WORKSPACE_TEXT_FILE_BYTES / (1024 * 1024))} MB）。`);
+      }
+      return await readFile(target, "utf8");
+    }
     catch (error) { if (error.code === "ENOENT") return null; throw error; }
   };
   const operation = async () => {

@@ -1225,6 +1225,14 @@ const StatusBarSidebarContent = memo(function StatusBarSidebarContent({
   }, [collapsed]);
 
   useEffect(() => {
+    if (!browserInitialized || (!collapsed && activeToolId === "browser")) return;
+    const timer = window.setTimeout(() => {
+      setBrowserInitialized(false);
+    }, 5 * 60_000);
+    return () => window.clearTimeout(timer);
+  }, [activeToolId, browserInitialized, collapsed]);
+
+  useEffect(() => {
     setEditorOpen(false);
     setStatusBarSection("protagonist");
     setSelectedImportantCharacterId("");

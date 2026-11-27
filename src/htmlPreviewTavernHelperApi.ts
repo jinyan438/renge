@@ -1460,6 +1460,8 @@ function installHtmlPreviewTavernHelperApi(
     eventSource,
     versionInfo,
     deliverHostEvent,
+    hasEventListeners: (eventName: unknown) =>
+      (handlersByEvent.get(normalizeEventName(eventName))?.length ?? 0) > 0,
     substitudeMacros,
     getCharactersForContext: () => {
       const current = getCharData("current");

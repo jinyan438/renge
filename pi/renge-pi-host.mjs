@@ -284,6 +284,10 @@ export function createRengePiHost({
   // Keep the last idle AgentSession available for PiDeck-compatible manual
   // compaction. The next chat request replaces it, while the session file
   // remains the source of truth for normal persistence.
+  const MAX_IDLE_SESSIONS = 3;
+  const IDLE_SESSION_TTL_MS = 180_000;
+  const MAX_COLD_SESSIONS = 20;
+  const MAX_CONTEXT_WINDOW_OVERRIDES = 128;
   const idleSessions = new Map();
   const coldSessions = new Map();
   const frozenOwners = new Set();
@@ -294,6 +298,22 @@ export function createRengePiHost({
   const closingSessions = new WeakMap();
   let modelRuntimePromise;
   let disposed = false;
+
+  const clearEntryIdleTimer = (entry) => {
+    if (!entry?.idleTimer) return;
+    clearTimeout(entry.idleTimer);
+    entry.idleTimer = null;
+  };
+
+  const shutdownUnboundResourceLoader = async (resourceLoader, reason = "abort") => {
+    if (!resourceLoader) return;
+    for (const extension of resourceLoader.getExtensions()?.extensions ?? []) {
+      const shutdownHandlers = extension.handlers?.get?.("session_shutdown") ?? [];
+      for (const handler of shutdownHandlers) {
+        try { await handler({ type: "session_shutdown", reason }, {}); } catch {}
+      }
+    }
+  };
 
   const getModelRuntime = () => {
     modelRuntimePromise ??= ModelRuntime.create({
@@ -327,6 +347,7 @@ export function createRengePiHost({
 
   const releaseSessionResource = async (entry, reason = "resume") => {
     if (!entry) return;
+    clearEntryIdleTimer(entry);
     await entry.closing;
     await shutdownSession(entry.session, reason);
     if (entry.providerId && entry.modelRuntime) {
@@ -347,13 +368,52 @@ export function createRengePiHost({
   };
 
   const suspendSession = async (sessionKey, entry) => {
-    const { session, ...metadata } = entry;
+    clearEntryIdleTimer(entry);
+    const { session, idleTimer: _ignoredTimer, ...metadata } = entry;
     const model = session.model;
     // The transcript stays in Pi's session file. Drop extensions, listeners,
     // retry state and the AgentSession's duplicate in-memory history.
     const cold = { ...metadata, model, closing: shutdownSession(session) };
+    if (coldSessions.has(sessionKey)) coldSessions.delete(sessionKey);
+    while (coldSessions.size >= MAX_COLD_SESSIONS) {
+      const oldestKey = coldSessions.keys().next().value;
+      if (oldestKey === undefined) break;
+      const oldest = coldSessions.get(oldestKey);
+      coldSessions.delete(oldestKey);
+      await releaseSessionResource(oldest, "evict");
+    }
     coldSessions.set(sessionKey, cold);
     try { await cold.closing; } finally { delete cold.closing; }
+  };
+
+  const storeIdleSession = async (sessionKey, entry) => {
+    const baseScope = String(entry.sessionScope ?? "").replace(/-(?:text|vision)$/, "");
+    for (const [otherKey, otherEntry] of [...idleSessions.entries()]) {
+      if (otherKey === sessionKey) continue;
+      const otherBaseScope = String(otherEntry.sessionScope ?? "").replace(/-(?:text|vision)$/, "");
+      if (otherEntry.ownerSessionId === entry.ownerSessionId && otherBaseScope === baseScope) {
+        idleSessions.delete(otherKey);
+        await suspendSession(otherKey, otherEntry);
+      }
+    }
+    if (idleSessions.has(sessionKey)) idleSessions.delete(sessionKey);
+    while (idleSessions.size >= MAX_IDLE_SESSIONS) {
+      const oldestKey = idleSessions.keys().next().value;
+      if (oldestKey === undefined) break;
+      const oldest = idleSessions.get(oldestKey);
+      idleSessions.delete(oldestKey);
+      await suspendSession(oldestKey, oldest);
+    }
+    clearEntryIdleTimer(entry);
+    const timer = setTimeout(() => {
+      entry.idleTimer = null;
+      if (idleSessions.get(sessionKey) !== entry) return;
+      idleSessions.delete(sessionKey);
+      void suspendSession(sessionKey, entry).catch(() => undefined);
+    }, IDLE_SESSION_TTL_MS);
+    timer.unref?.();
+    entry.idleTimer = timer;
+    idleSessions.set(sessionKey, entry);
   };
 
   const handleSessionActivity = async (body) => {
@@ -393,6 +453,11 @@ export function createRengePiHost({
     if (!Number.isFinite(discoveredWindow) || discoveredWindow < 512) return;
     const key = providerContextKey(provider);
     const current = contextWindowOverrides.get(key);
+    if (contextWindowOverrides.has(key)) contextWindowOverrides.delete(key);
+    else if (contextWindowOverrides.size >= MAX_CONTEXT_WINDOW_OVERRIDES) {
+      const oldestKey = contextWindowOverrides.keys().next().value;
+      if (oldestKey !== undefined) contextWindowOverrides.delete(oldestKey);
+    }
     contextWindowOverrides.set(key, current ? Math.min(current, discoveredWindow) : discoveredWindow);
   };
 
@@ -473,11 +538,13 @@ export function createRengePiHost({
     };
   };
 
-  const handleChat = async (body, request, response) => {
+  const handleChat = async (initialBody, request, response) => {
+    let body = initialBody;
+    initialBody = null;
     const runId = String(body?.runId ?? "").trim() || randomUUID();
     if (runs.has(runId)) throw new Error("重复的 Pi runId");
     const provider = normalizePiProviderConfig(body);
-    const requestBody = body?.request && typeof body.request === "object"
+    let requestBody = body?.request && typeof body.request === "object"
       ? body.request
       : {};
     const workspace = body.workspace && typeof body.workspace === "object" ? body.workspace : null;
@@ -606,6 +673,7 @@ export function createRengePiHost({
       if (changes) writeSse(response, piEvent("workspace_changes", { runId, changes }));
     };
     let liveContext;
+    let loadedResourceLoader = null;
     let providerId = "";
     let modelRuntime;
     let effectiveContextWindow = 0;
@@ -688,6 +756,7 @@ export function createRengePiHost({
           ...(converted.systemPrompt ? [appendPromptToSystemPrompt(converted.systemPrompt)] : []),
         ],
       });
+      loadedResourceLoader = resourceLoader;
       await resourceLoader.reload();
       checkCancelled();
       const extensionToolNames = resourceLoader
@@ -736,6 +805,7 @@ export function createRengePiHost({
         }
         for (const message of converted.history) sessionManager.appendMessage(message);
       }
+      converted.history.length = 0;
       const { session } = await createAgentSession({
         cwd,
         modelRuntime,
@@ -946,6 +1016,10 @@ export function createRengePiHost({
       const prompt = resolvePrompt(
         converted.promptMessage ?? converted.fallbackPromptMessage,
       );
+      converted.promptMessage = null;
+      converted.fallbackPromptMessage = null;
+      body = null;
+      requestBody = null;
       checkCancelled();
       const pendingPromptTokens = estimatePendingPromptTokens(prompt) +
         converted.promptSuffix.reduce((total, message) => total + estimateTokens(message), 0);
@@ -1028,23 +1102,35 @@ export function createRengePiHost({
       if (run.cancelled) await run.session?.abort();
       unsubscribe();
       settlePendingTools(run, new Error("Pi 会话已结束"));
+      const compactionResources = run.compactionResources;
+      run.response = null;
+      run.inputs.clear();
+      run.streamingToolCalls.clear();
+      run.unexecutedToolCalls.clear();
+      run.executionToolCallAliases.clear();
+      run.compactionResources = null;
       if (run.session && run.sessionKey && !disposed) {
         const entry = {
           session: run.session,
           providerId,
           modelRuntime,
           settingsManager: run.settingsManager,
-          compactionResources: run.compactionResources,
+          compactionResources,
           thinkingLevel: run.session.thinkingLevel,
           ownerSessionId,
           sessionScope,
           cwd,
+          idleTimer: null,
         };
         if (frozenOwners.has(ownerSessionId)) await suspendSession(run.sessionKey, entry);
-        else idleSessions.set(run.sessionKey, entry);
+        else await storeIdleSession(run.sessionKey, entry);
       } else {
+        if (!run.session && loadedResourceLoader) {
+          await shutdownUnboundResourceLoader(loadedResourceLoader, "abort");
+        }
         await releaseSessionResource({ session: run.session, providerId, modelRuntime });
       }
+      loadedResourceLoader = null;
       runs.delete(runId);
       if (!response.destroyed && !response.writableEnded) response.end();
     }
@@ -1108,9 +1194,9 @@ export function createRengePiHost({
       tools: [],
     });
     await session.bindExtensions({ mode: "json" });
-    const restored = { ...entry, session };
+    const restored = { ...entry, session, idleTimer: null };
     coldSessions.delete(sessionKey);
-    idleSessions.set(sessionKey, restored);
+    await storeIdleSession(sessionKey, restored);
     return restored;
   };
 

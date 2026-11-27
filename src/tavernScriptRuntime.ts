@@ -509,6 +509,14 @@ function installParentSideEffectTracker(
     }
   };
 
+  const isSameCaptureOption = (
+    left?: boolean | EventListenerOptions,
+    right?: boolean | EventListenerOptions,
+  ) => {
+    const leftCapture = typeof left === "boolean" ? left : Boolean(left?.capture);
+    const rightCapture = typeof right === "boolean" ? right : Boolean(right?.capture);
+    return leftCapture === rightCapture;
+  };
   const eventTargetPrototype = hostGlobal.EventTarget.prototype;
   const originalAddEventListener = eventTargetPrototype.addEventListener;
   const originalRemoveEventListener = eventTargetPrototype.removeEventListener;
@@ -523,10 +531,35 @@ function installParentSideEffectTracker(
     }
     return originalAddEventListener.call(this, type, listener, options);
   };
+  const trackedRemoveEventListener = function (
+    this: EventTarget,
+    type: string,
+    listener: EventListenerOrEventListenerObject | null,
+    options?: boolean | EventListenerOptions,
+  ) {
+    if (listener && trackedEventListeners.length > 0) {
+      for (let index = trackedEventListeners.length - 1; index >= 0; index -= 1) {
+        const entry = trackedEventListeners[index];
+        if (
+          entry.target === this &&
+          entry.type === type &&
+          entry.listener === listener &&
+          isSameCaptureOption(entry.options, options)
+        ) {
+          trackedEventListeners.splice(index, 1);
+        }
+      }
+    }
+    return originalRemoveEventListener.call(this, type, listener, options);
+  };
   eventTargetPrototype.addEventListener = trackedAddEventListener;
+  eventTargetPrototype.removeEventListener = trackedRemoveEventListener;
   restoreCallbacks.push(() => {
     if (eventTargetPrototype.addEventListener === trackedAddEventListener) {
       eventTargetPrototype.addEventListener = originalAddEventListener;
+    }
+    if (eventTargetPrototype.removeEventListener === trackedRemoveEventListener) {
+      eventTargetPrototype.removeEventListener = originalRemoveEventListener;
     }
   });
 
@@ -789,13 +822,59 @@ function installParentSideEffectTracker(
   }
 
   const hostRecord = hostWindow as unknown as Record<string, unknown>;
+  const jqueryNamespace = `renge_rt_${runtimeToken.replace(/[^A-Za-z0-9_]/g, "_")}`;
+  const hostJQueryCandidate = hostRecord.jQuery;
+  const hostJQueryFn = isJQuery(hostJQueryCandidate) ? hostJQueryCandidate.fn : undefined;
+  const originalHostJQueryOn =
+    hostJQueryFn && typeof hostJQueryFn.on === "function"
+      ? (hostJQueryFn.on as (...args: unknown[]) => unknown)
+      : null;
+  if (hostJQueryFn && originalHostJQueryOn) {
+    const trackedHostJQueryOn = function (this: unknown, events: unknown, ...rest: unknown[]) {
+      if (active && typeof events === "string" && isTavernCall()) {
+        const namespacedEvents = events
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean)
+          .map((token) => (token.includes(`.${jqueryNamespace}`) ? token : `${token}.${jqueryNamespace}`))
+          .join(" ");
+        if (namespacedEvents) {
+          return originalHostJQueryOn.call(this, namespacedEvents, ...rest);
+        }
+      }
+      return originalHostJQueryOn.call(this, events, ...rest);
+    };
+    hostJQueryFn.on = trackedHostJQueryOn;
+    restoreCallbacks.push(() => {
+      if (hostJQueryFn.on === trackedHostJQueryOn) {
+        hostJQueryFn.on = originalHostJQueryOn;
+      }
+      if (isJQuery(hostRecord.jQuery)) {
+        const jq = hostRecord.jQuery as (target: unknown) => { off?: (ns: string) => void };
+        [hostWindow, hostDocument, hostDocument.documentElement, hostDocument.body].forEach((target) => {
+          if (!target) return;
+          try { jq(target).off?.(`.${jqueryNamespace}`); } catch {}
+        });
+        try { jq(hostDocument.querySelectorAll("#chat, #chat *")).off?.(`.${jqueryNamespace}`); } catch {}
+      }
+    });
+  }
   ["MutationObserver", "ResizeObserver", "IntersectionObserver"].forEach((name) => {
     const OriginalObserver = hostRecord[name];
     if (typeof OriginalObserver !== "function") return;
     const previousDescriptor = Object.getOwnPropertyDescriptor(hostWindow, name);
     const TrackedObserver = function (this: unknown, ...args: unknown[]) {
       const observer = Reflect.construct(OriginalObserver, args) as { disconnect(): void };
-      if (active && isTavernCall()) trackedObservers.add(observer);
+      if (active && isTavernCall()) {
+        trackedObservers.add(observer);
+        const nativeDisconnect = observer.disconnect;
+        if (typeof nativeDisconnect === "function") {
+          observer.disconnect = function (this: unknown) {
+            trackedObservers.delete(observer);
+            return nativeDisconnect.call(this);
+          };
+        }
+      }
       return observer;
     };
     Object.setPrototypeOf(TrackedObserver, OriginalObserver);
@@ -1680,9 +1759,14 @@ function createTavernAudioPlayer(hostWindow: Window & typeof globalThis) {
     },
     destroy: () => {
       channels.forEach((channel) => {
-        channel.element?.pause();
-        channel.element?.removeAttribute("src");
-        channel.element = null;
+        if (channel.element) {
+          channel.element.pause();
+          channel.element.removeAttribute("src");
+          try {
+            channel.element.load();
+          } catch {}
+          channel.element = null;
+        }
       });
       channels.clear();
     },

@@ -132,23 +132,39 @@ export function createPiRequestBodyRecoveryFetch({
   limits = new Map(),
   providerKey = "default",
 } = {}) {
+  const rememberLimit = (budget) => {
+    if (limits.has(providerKey)) limits.delete(providerKey);
+    else if (limits.size >= 128) {
+      const oldestKey = limits.keys().next().value;
+      if (oldestKey !== undefined) limits.delete(oldestKey);
+    }
+    limits.set(providerKey, budget);
+  };
   return async (input, init) => {
     if (typeof init?.body !== "string") return fetchImpl(input, init);
-    let payload;
-    try { payload = JSON.parse(init.body); } catch { return fetchImpl(input, init); }
-    if (!Array.isArray(payload?.messages) && !Array.isArray(payload?.input)) return fetchImpl(input, init);
-
     let budget = limits.get(providerKey) ?? Infinity;
-    let current = reducePiRequestPayload(payload, budget);
-    let body = current === payload ? init.body : JSON.stringify(current);
+    let payload;
+    let current;
+    let body = init.body;
+    if (Number.isFinite(budget)) {
+      try { payload = JSON.parse(init.body); } catch { return fetchImpl(input, init); }
+      if (!Array.isArray(payload?.messages) && !Array.isArray(payload?.input)) return fetchImpl(input, init);
+      current = reducePiRequestPayload(payload, budget);
+      body = current === payload ? init.body : JSON.stringify(current);
+    }
     for (let attempt = 0; ; attempt += 1) {
       init.signal?.throwIfAborted();
       const headers = new Headers(init.headers);
       headers.delete("content-length");
       const response = await fetchImpl(input, { ...init, headers, body });
       if (response.status !== 413) {
-        if (response.ok && Number.isFinite(budget)) limits.set(providerKey, budget);
+        if (response.ok && Number.isFinite(budget)) rememberLimit(budget);
         return response;
+      }
+      if (!current) {
+        try { payload = JSON.parse(init.body); } catch { return response; }
+        if (!Array.isArray(payload?.messages) && !Array.isArray(payload?.input)) return response;
+        current = payload;
       }
       await response.body?.cancel();
       if (attempt >= MAX_RECOVERY_ATTEMPTS) return requestTooLargeResponse();

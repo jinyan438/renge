@@ -3322,7 +3322,16 @@ async function loadPersistentAppData(): Promise<PersistentAppDataLoadResult> {
   }
 }
 
+type CoalescedAppDataSave = {
+  data: RengeAppData;
+  characterCardsStored: boolean;
+  omitCharacterCards: boolean;
+  promise: Promise<boolean>;
+  resolve: (ok: boolean) => void;
+};
+
 let persistentAppDataSaveQueue: Promise<void> = Promise.resolve();
+let coalescedPendingAppDataSave: CoalescedAppDataSave | null = null;
 let lastCharacterCardsForPersistentStore: CharacterCard[] | null = null;
 let lastAppDataForPersistentStore: RengeAppData | null = null;
 let lastChatSessionsForPersistentStore: ChatSession[] = [];
@@ -3364,76 +3373,125 @@ function compactAppDataForPersistentStore(
   };
 }
 
+async function executePersistentAppDataSave(
+  data: RengeAppData,
+  characterCardsStored: boolean,
+  replaceExistingData: boolean,
+  omitCharacterCards: boolean,
+): Promise<boolean> {
+  try {
+    const persistentData = compactAppDataForPersistentStore(data, characterCardsStored);
+    const characterCards = data.characterCards ?? [];
+    const preserveStoredCharacterCards =
+      omitCharacterCards || lastCharacterCardsForPersistentStore === characterCards;
+    const requestData = replaceExistingData
+      ? persistentData
+      : createShallowReferencePatch(
+          persistentData,
+          lastAppDataForPersistentStore,
+          preserveStoredCharacterCards
+            ? new Set<keyof RengeAppData>(["characterCards"])
+            : undefined,
+        );
+    const patchExistingData = !replaceExistingData;
+    const sessionPatch = patchExistingData ? createChatSessionPatch(
+      data.chatSessions ?? [], lastChatSessionsForPersistentStore, persistentChatSessionVersions,
+      { messageDeltas: persistentMessagePatchesSupported },
+    ) : undefined;
+    if (patchExistingData) delete requestData.chatSessions;
+    if (
+      patchExistingData &&
+      !sessionPatch?.upserts.length && !sessionPatch?.deletes.length &&
+      !hasMeaningfulPatchChanges(
+        requestData,
+        new Set<keyof RengeAppData>(["updatedAt"]),
+      )
+    ) {
+      lastCharacterCardsForPersistentStore = characterCards;
+      lastAppDataForPersistentStore = data;
+      lastChatSessionsForPersistentStore = data.chatSessions ?? [];
+      return true;
+    }
+    const response = await sendJsonOffThread("/api/app-data", patchExistingData ? "PATCH" : "PUT", {
+      data: requestData, ...(sessionPatch ? { sessionPatch } : {}),
+    });
+    const payload = response.payload as {
+      error?: string; sessionVersions?: Record<string, string>;
+    };
+    if (response.ok) {
+      lastCharacterCardsForPersistentStore = characterCards;
+      lastAppDataForPersistentStore = data;
+      lastChatSessionsForPersistentStore = data.chatSessions ?? [];
+      if (replaceExistingData) persistentChatSessionVersions = payload.sessionVersions ?? {};
+      // Unchanged local sessions retain their original versions: adopting a
+      // remote version without its content would hide a later stale edit.
+      for (const { session } of sessionPatch?.upserts ?? []) {
+        if (payload.sessionVersions?.[session.id]) {
+          persistentChatSessionVersions[session.id] = payload.sessionVersions[session.id];
+        }
+      }
+      for (const { id } of sessionPatch?.deletes ?? []) delete persistentChatSessionVersions[id];
+      reportAppDataSaveError("");
+    } else {
+      reportAppDataSaveError(payload.error || `应用数据保存失败（${response.status}），请先导出本页备份。`);
+    }
+    return response.ok;
+  } catch (error) {
+    // The app can still run with localStorage when the persistence API is unavailable.
+    reportAppDataSaveError(error instanceof Error ? `应用数据保存失败：${error.message}` : "应用数据保存失败，请先导出本页备份。");
+    return false;
+  }
+}
+
 async function savePersistentAppData(
   data: RengeAppData,
   characterCardsStored = false,
   replaceExistingData = false,
   omitCharacterCards = false,
 ): Promise<boolean> {
-  const operation = persistentAppDataSaveQueue.then(async () => {
-    try {
-      const persistentData = compactAppDataForPersistentStore(data, characterCardsStored);
-      const characterCards = data.characterCards ?? [];
-      const preserveStoredCharacterCards =
-        omitCharacterCards || lastCharacterCardsForPersistentStore === characterCards;
-      const requestData = replaceExistingData
-        ? persistentData
-        : createShallowReferencePatch(
-            persistentData,
-            lastAppDataForPersistentStore,
-            preserveStoredCharacterCards
-              ? new Set<keyof RengeAppData>(["characterCards"])
-              : undefined,
-          );
-      const patchExistingData = !replaceExistingData;
-      const sessionPatch = patchExistingData ? createChatSessionPatch(
-        data.chatSessions ?? [], lastChatSessionsForPersistentStore, persistentChatSessionVersions,
-        { messageDeltas: persistentMessagePatchesSupported },
-      ) : undefined;
-      if (patchExistingData) delete requestData.chatSessions;
-      if (
-        patchExistingData &&
-        !sessionPatch?.upserts.length && !sessionPatch?.deletes.length &&
-        !hasMeaningfulPatchChanges(
-          requestData,
-          new Set<keyof RengeAppData>(["updatedAt"]),
-        )
-      ) {
-        lastCharacterCardsForPersistentStore = characterCards;
-        lastAppDataForPersistentStore = data;
-        lastChatSessionsForPersistentStore = data.chatSessions ?? [];
-        return true;
+  if (!replaceExistingData && coalescedPendingAppDataSave) {
+    coalescedPendingAppDataSave.data = data;
+    coalescedPendingAppDataSave.characterCardsStored = characterCardsStored;
+    coalescedPendingAppDataSave.omitCharacterCards = omitCharacterCards;
+    return coalescedPendingAppDataSave.promise;
+  }
+
+  if (!replaceExistingData) {
+    let resolvePending!: (ok: boolean) => void;
+    const promise = new Promise<boolean>((resolve) => {
+      resolvePending = resolve;
+    });
+    const slot: CoalescedAppDataSave = {
+      data,
+      characterCardsStored,
+      omitCharacterCards,
+      promise,
+      resolve: resolvePending,
+    };
+    coalescedPendingAppDataSave = slot;
+    const operation = persistentAppDataSaveQueue.then(async () => {
+      if (coalescedPendingAppDataSave === slot) {
+        coalescedPendingAppDataSave = null;
       }
-      const response = await sendJsonOffThread("/api/app-data", patchExistingData ? "PATCH" : "PUT", {
-        data: requestData, ...(sessionPatch ? { sessionPatch } : {}),
-      });
-      const payload = response.payload as {
-        error?: string; sessionVersions?: Record<string, string>;
-      };
-      if (response.ok) {
-        lastCharacterCardsForPersistentStore = characterCards;
-        lastAppDataForPersistentStore = data;
-        lastChatSessionsForPersistentStore = data.chatSessions ?? [];
-        if (replaceExistingData) persistentChatSessionVersions = payload.sessionVersions ?? {};
-        // Unchanged local sessions retain their original versions: adopting a
-        // remote version without its content would hide a later stale edit.
-        for (const { session } of sessionPatch?.upserts ?? []) {
-          if (payload.sessionVersions?.[session.id]) {
-            persistentChatSessionVersions[session.id] = payload.sessionVersions[session.id];
-          }
-        }
-        for (const { id } of sessionPatch?.deletes ?? []) delete persistentChatSessionVersions[id];
-        reportAppDataSaveError("");
-      } else {
-        reportAppDataSaveError(payload.error || `应用数据保存失败（${response.status}），请先导出本页备份。`);
-      }
-      return response.ok;
-    } catch (error) {
-      // The app can still run with localStorage when the persistence API is unavailable.
-      reportAppDataSaveError(error instanceof Error ? `应用数据保存失败：${error.message}` : "应用数据保存失败，请先导出本页备份。");
-      return false;
-    }
-  });
+      const ok = await executePersistentAppDataSave(
+        slot.data,
+        slot.characterCardsStored,
+        false,
+        slot.omitCharacterCards,
+      );
+      slot.resolve(ok);
+    });
+    persistentAppDataSaveQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return promise;
+  }
+
+  coalescedPendingAppDataSave = null;
+  const operation = persistentAppDataSaveQueue.then(() =>
+    executePersistentAppDataSave(data, characterCardsStored, true, omitCharacterCards),
+  );
   persistentAppDataSaveQueue = operation.then(
     () => undefined,
     () => undefined,
@@ -3473,24 +3531,35 @@ function setLocalStorageValueSafely(key: string, value: string) {
 
 const localStorageJsonAttemptByKey = new Map<
   string,
-  { value: unknown; stored: boolean }
+  { objectRef?: WeakRef<object>; primitiveValue?: unknown; isObject: boolean }
 >();
 const blockedLocalStorageJsonKeys = new Set<string>();
 
 function setLocalStorageJsonSafely(key: string, value: unknown) {
-  const previousAttempt = localStorageJsonAttemptByKey.get(key);
-  if (previousAttempt && previousAttempt.value === value) return previousAttempt.stored;
   if (blockedLocalStorageJsonKeys.has(key)) return false;
-  let stored = false;
+  const previousAttempt = localStorageJsonAttemptByKey.get(key);
+  const isObject = typeof value === "object" && value !== null;
+  if (previousAttempt && previousAttempt.isObject === isObject) {
+    const previousValue = isObject
+      ? previousAttempt.objectRef?.deref()
+      : previousAttempt.primitiveValue;
+    if (previousValue === value && (value !== undefined || !isObject)) return true;
+  }
   try {
     localStorage.setItem(key, JSON.stringify(value));
-    stored = true;
+    localStorageJsonAttemptByKey.set(
+      key,
+      isObject
+        ? { isObject: true, objectRef: new WeakRef(value as object) }
+        : { isObject: false, primitiveValue: value },
+    );
+    return true;
   } catch {
     // Large chats and images can exceed a browser origin's localStorage quota.
+    localStorageJsonAttemptByKey.delete(key);
     blockedLocalStorageJsonKeys.add(key);
+    return false;
   }
-  localStorageJsonAttemptByKey.set(key, { value, stored });
-  return stored;
 }
 
 function removeLocalStorageValueSafely(key: string) {
@@ -4285,7 +4354,13 @@ type HtmlPreviewContext = {
   tavern?: HtmlPreviewTavernSnapshot;
 };
 
-type HtmlPreviewContextProvider = () => { context: HtmlPreviewContext; request: HtmlPreviewDataRequest; content: string };
+type HtmlPreviewContextProvider = () => {
+  context: HtmlPreviewContext;
+  request: HtmlPreviewDataRequest;
+  content: string;
+  isActive: () => boolean;
+  markDirty: () => void;
+};
 
 const executableCommandNames = new Set(["npm", "pnpm", "yarn", "node", "git"]);
 const shellLanguages = new Set(["sh", "shell", "bash", "zsh", "cmd", "bat", "powershell", "ps1"]);
@@ -4310,10 +4385,43 @@ const HTML_PREVIEW_HEAVY_MOUNT_GAP = 900;
 const HTML_PREVIEW_FALLBACK_LOAD_DELAY = 600;
 const HTML_PREVIEW_LAZY_ROOT_MARGIN = "240px 0px";
 const HTML_PREVIEW_FREEZE_DELAY_MS = 900;
+const HTML_PREVIEW_UNMOUNT_DELAY_MS = 4_000;
+const MAX_INACTIVE_HTML_PREVIEW_FRAMES = 4;
+const MAX_HTML_PREVIEW_HEIGHT_CACHE_ENTRIES = 512;
 const HTML_PREVIEW_ACTIVITY_MESSAGE = "renge-html-preview-activity";
 const HTML_PREVIEW_STREAMING_CONTEXT_INTERVAL_MS = 500;
 
 const htmlPreviewMountQueue = createChatPreviewMountQueue();
+const htmlPreviewMeasuredHeights = new Map<string, number>();
+const inactiveMountedHtmlPreviews = new Map<string, () => void>();
+const inFlightHtmlPreviewFrames = new WeakSet<HTMLIFrameElement>();
+
+function rememberHtmlPreviewMeasuredHeight(previewId: string, height: number) {
+  if (!previewId || !Number.isFinite(height) || height <= 0) return;
+  if (htmlPreviewMeasuredHeights.has(previewId)) {
+    htmlPreviewMeasuredHeights.delete(previewId);
+  } else if (htmlPreviewMeasuredHeights.size >= MAX_HTML_PREVIEW_HEIGHT_CACHE_ENTRIES) {
+    const oldest = htmlPreviewMeasuredHeights.keys().next().value;
+    if (oldest !== undefined) htmlPreviewMeasuredHeights.delete(oldest);
+  }
+  htmlPreviewMeasuredHeights.set(previewId, Math.round(height));
+}
+
+function registerInactiveHtmlPreview(previewId: string, evict: () => void) {
+  inactiveMountedHtmlPreviews.delete(previewId);
+  inactiveMountedHtmlPreviews.set(previewId, evict);
+  while (inactiveMountedHtmlPreviews.size > MAX_INACTIVE_HTML_PREVIEW_FRAMES) {
+    const oldestEntry = inactiveMountedHtmlPreviews.entries().next().value;
+    if (!oldestEntry) break;
+    const [oldestId, oldestEvict] = oldestEntry;
+    inactiveMountedHtmlPreviews.delete(oldestId);
+    oldestEvict();
+  }
+}
+
+function unregisterInactiveHtmlPreview(previewId: string) {
+  inactiveMountedHtmlPreviews.delete(previewId);
+}
 
 const htmlPreviewStyle = [
   '<style data-renge-html-preview="true">',
@@ -4587,8 +4695,20 @@ const htmlPreviewJqueryDelegationScript = [
   "const jquery = window.jQuery || window.$;",
   "if (typeof jquery !== \"function\" || !jquery.fn || jquery.__rengeDelegationInstalled) return;",
   "const originalOn = jquery.fn.on;",
+  "const originalOff = jquery.fn.off;",
   "if (typeof originalOn !== \"function\") return;",
-  "const getEventTypes = (events) => String(events || \"\").trim().split(/\\s+/).map((token) => token.split(\".\")[0]).filter(Boolean);",
+  "const parseEventTokens = (events) => String(events || \"\").trim().split(/\\s+/).filter(Boolean).map((token) => {",
+  "  const parts = token.split(\".\");",
+  "  return { type: parts[0], namespaces: parts.slice(1).filter(Boolean).sort() };",
+  "});",
+  "const rootEntries = new WeakMap();",
+  "const matchesOffToken = (entryToken, offTokens) => {",
+  "  if (!offTokens.length) return true;",
+  "  return offTokens.some((off) => {",
+  "    if (off.type && off.type !== entryToken.type) return false;",
+  "    return off.namespaces.every((ns) => entryToken.namespaces.includes(ns));",
+  "  });",
+  "};",
   "jquery.fn.on = function(events, selector, data, handler) {",
   "  if (typeof selector !== \"string\") return originalOn.apply(this, arguments);",
   "  const delegatedHandler = typeof data === \"function\" ? data : handler;",
@@ -4599,15 +4719,19 @@ const htmlPreviewJqueryDelegationScript = [
   "    if (nativeEvent && typeof nativeEvent === \"object\") handledNativeEvents.add(nativeEvent);",
   "    return delegatedHandler.call(this, event, ...args);",
   "  };",
+  "  wrappedHandler.guid = delegatedHandler.guid;",
   "  const result = typeof data === \"function\"",
   "    ? originalOn.call(this, events, selector, wrappedHandler)",
   "    : originalOn.call(this, events, selector, data, wrappedHandler);",
-  "  const eventTypes = getEventTypes(events);",
+  "  if (!delegatedHandler.guid && wrappedHandler.guid) delegatedHandler.guid = wrappedHandler.guid;",
+  "  const tokens = parseEventTokens(events).filter((token) => token.type);",
   "  this.each(function() {",
   "    const root = this;",
   "    if (!root || typeof root.addEventListener !== \"function\") return;",
-  "    eventTypes.forEach((eventType) => {",
-  "      root.addEventListener(eventType, (event) => {",
+  "    let list = rootEntries.get(root);",
+  "    if (!list) { list = []; rootEntries.set(root, list); }",
+  "    tokens.forEach((token) => {",
+  "      const nativeListener = (event) => {",
   "        if (handledNativeEvents.has(event)) return;",
   "        const eventTarget = event.target instanceof Element ? event.target : event.target?.parentElement;",
   "        const matchedTarget = eventTarget?.closest?.(selector);",
@@ -4615,11 +4739,36 @@ const htmlPreviewJqueryDelegationScript = [
   "        if (root !== document && typeof root.contains === \"function\" && !root.contains(matchedTarget)) return;",
   "        const handlerResult = delegatedHandler.call(matchedTarget, event);",
   "        if (handlerResult === false) { event.preventDefault(); event.stopPropagation(); }",
-  "      });",
+  "      };",
+  "      root.addEventListener(token.type, nativeListener);",
+  "      list.push({ token, selector, delegatedHandler, wrappedHandler, nativeListener });",
   "    });",
   "  });",
   "  return result;",
   "};",
+  "if (typeof originalOff === \"function\") {",
+  "  jquery.fn.off = function(events, selector, handler) {",
+  "    const offFn = typeof selector === \"function\" ? selector : handler;",
+  "    const offSelector = typeof selector === \"string\" ? selector : null;",
+  "    const offTokens = typeof events === \"string\" ? parseEventTokens(events) : null;",
+  "    if (events === undefined || typeof events === \"string\") {",
+  "      this.each(function() {",
+  "        const root = this;",
+  "        const list = root && typeof root === \"object\" ? rootEntries.get(root) : null;",
+  "        if (!list?.length) return;",
+  "        for (let i = list.length - 1; i >= 0; i -= 1) {",
+  "          const item = list[i];",
+  "          if (offTokens && !matchesOffToken(item.token, offTokens)) continue;",
+  "          if (offSelector !== null && offSelector !== \"**\" && item.selector !== offSelector) continue;",
+  "          if (offFn && item.delegatedHandler !== offFn && item.wrappedHandler !== offFn) continue;",
+  "          try { root.removeEventListener(item.token.type, item.nativeListener); } catch {}",
+  "          list.splice(i, 1);",
+  "        }",
+  "      });",
+  "    }",
+  "    return originalOff.apply(this, arguments);",
+  "  };",
+  "}",
   "jquery.__rengeDelegationInstalled = true;",
   "})();",
   "</script>",
@@ -4788,7 +4937,11 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "const getVariables = (option) => clone(resolveVariables(option) || {});",
     `const helperBridge = (${HTML_PREVIEW_TAVERN_HELPER_API_SOURCE})({ previewId, subscriptionMessageType, snapshot, clone, isRecord, mergeRecords, requestParentCommand, getVariables }, ${HTML_PREVIEW_TAVERN_CONSTANTS_LITERAL});`,
     "const { eventOn, eventOnce, eventMakeFirst, eventMakeLast, eventOnButton, eventOff, eventRemoveListener, eventClearEvent, eventClearListener, eventClearAll, eventEmit, eventEmitAndWait } = helperBridge.api;",
-    "const emitVariableUpdate = () => void helperBridge.deliverHostEvent(String(window.Mvu?.events?.VARIABLE_UPDATE_ENDED || \"mag_variable_update_ended\"), [clone(snapshot)]);",
+    "const emitVariableUpdate = () => {",
+    "  const eventName = String(window.Mvu?.events?.VARIABLE_UPDATE_ENDED || \"mag_variable_update_ended\");",
+    "  if (!helperBridge.hasEventListeners?.(eventName)) return;",
+    "  void helperBridge.deliverHostEvent(eventName, [clone(snapshot)]);",
+    "};",
     "window.addEventListener(\"message\", (event) => {",
     "  if (event.source !== parent || !isRecord(event.data)) return;",
     "  if (event.data.type === viewportMessageType && event.data.id === previewId) {",
@@ -4812,7 +4965,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  }",
     "  if (event.data.type !== contextUpdateMessageType || event.data.id !== previewId) return;",
     "  if (!isRecord(event.data.context)) return;",
-    "  const incomingContext = clone(event.data.context);",
+    "  const incomingContext = event.data.context;",
     "  const contextDataChanged = incomingContext.contextDataRevision !== snapshot.contextDataRevision;",
     "  if (isRecord(incomingContext.tavern) && isRecord(snapshot.tavern)) {",
     "    if (!contextDataChanged && String(snapshot.tavern.currentCharacterAvatar || '').startsWith('data:')) incomingContext.tavern.currentCharacterAvatar = snapshot.tavern.currentCharacterAvatar;",
@@ -4822,7 +4975,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  const finishContextUpdate = () => {",
     "    refreshSillyTavernChatCache();",
     "    void scriptExportsBridge.refresh().then(emitVariableUpdate).catch(console.error);",
-    "    try { window.dispatchEvent(new CustomEvent(\"renge-html-preview-context-updated\", { detail: clone(snapshot) })); } catch {}",
+    "    try { window.dispatchEvent(new CustomEvent(\"renge-html-preview-context-updated\", { detail: { personalization: snapshot.personalization ? clone(snapshot.personalization) : undefined } })); } catch {}",
     "  };",
     "  if (contextDataChanged) {",
     "    void requestParentCommand(\"getPreviewContext\").then(fresh => {",
@@ -4985,16 +5138,39 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "};",
     `const normalizeSetChatMessageUpdate = ${normalizeTavernSetChatMessageUpdate.toString()};`,
     "const setChatMessage = async (messageOrId, idOrContent, options) => setChatMessages([normalizeSetChatMessageUpdate(messageOrId, idOrContent, options)]);",
-    "const sillyTavernChatCache = snapshot.messages.map((message, index) => formatMessage(message, index, true));",
-    "let sillyTavernChatSources = clone(snapshot.messages);",
-    "const refreshSillyTavernChatCache = () => {",
+    "let sillyTavernChatCache = null;",
+    "let sillyTavernChatDigests = [];",
+    "let sillyTavernChatDirty = true;",
+    "const getMessageDigest = (message) => {",
+    "  if (!isRecord(message)) return \"\";",
+    "  return `${message.role ?? \"\"}\\u0000${message.source ?? \"\"}\\u0000${message.content ?? \"\"}\\u0000${JSON.stringify(message.variables ?? {})}\\u0000${JSON.stringify(message.extra ?? {})}\\u0000${JSON.stringify(message.tavernSwipeState ?? null)}`;",
+    "};",
+    "const ensureSillyTavernChatCache = () => {",
+    "  if (!sillyTavernChatCache) {",
+    "    sillyTavernChatCache = snapshot.messages.map((message, index) => formatMessage(message, index, true));",
+    "    sillyTavernChatDigests = snapshot.messages.map(getMessageDigest);",
+    "    sillyTavernChatDirty = false;",
+    "    return sillyTavernChatCache;",
+    "  }",
+    "  if (!sillyTavernChatDirty) return sillyTavernChatCache;",
     "  snapshot.messages.forEach((message, index) => {",
-    "    if (JSON.stringify(message) !== JSON.stringify(sillyTavernChatSources[index])) sillyTavernChatCache[index] = formatMessage(message, index, true);",
+    "    const digest = getMessageDigest(message);",
+    "    if (digest !== sillyTavernChatDigests[index]) {",
+    "      sillyTavernChatCache[index] = formatMessage(message, index, true);",
+    "      sillyTavernChatDigests[index] = digest;",
+    "    }",
     "  });",
     "  sillyTavernChatCache.length = snapshot.messages.length;",
-    "  sillyTavernChatSources = clone(snapshot.messages);",
+    "  sillyTavernChatDigests.length = snapshot.messages.length;",
+    "  sillyTavernChatDirty = false;",
+    "  return sillyTavernChatCache;",
+    "};",
+    "const refreshSillyTavernChatCache = () => {",
+    "  sillyTavernChatDirty = true;",
+    "  if (sillyTavernChatCache) ensureSillyTavernChatCache();",
     "};",
     "const saveSillyTavernChat = async () => {",
+    "  if (!sillyTavernChatCache) return true;",
     "  const updates = [];",
     "  sillyTavernChatCache.forEach((cachedMessage, index) => {",
     "    const sourceMessage = snapshot.messages[index];",
@@ -5094,7 +5270,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  const chatMetadata = clone(snapshot.tavern?.chatMetadata || snapshot.chatVariables || {});",
     "  const extensionSettings = clone(snapshot.extensionVariables || {});",
     "  const context = {",
-    "    chat: sillyTavernChatCache,",
+    "    get chat() { return ensureSillyTavernChatCache(); },",
     "    characters: helperBridge.getCharactersForContext(),",
     "    characterId: snapshot.characterName ? \"0\" : undefined,",
     "    this_chid: snapshot.characterName ? 0 : undefined,",
@@ -6587,10 +6763,17 @@ function parseChatContentParts(
 }
 
 const CHAT_CONTENT_PARTS_CACHE_LIMIT = 240;
+const CHAT_CONTENT_PARTS_CACHE_MAX_CHARS = 4 * 1024 * 1024;
+let chatContentPartsCacheChars = 0;
 const chatContentPartsCache = new Map<
   string,
-  { content: string; parts: ChatContentPart[] }
+  { content: string; parts: ChatContentPart[]; chars: number }
 >();
+
+function clearChatContentPartsCache() {
+  chatContentPartsCache.clear();
+  chatContentPartsCacheChars = 0;
+}
 
 function getCachedChatContentParts(
   content: string,
@@ -6604,13 +6787,28 @@ function getCachedChatContentParts(
     chatContentPartsCache.set(key, cached);
     return cached.parts;
   }
+  if (cached) {
+    chatContentPartsCache.delete(key);
+    chatContentPartsCacheChars = Math.max(0, chatContentPartsCacheChars - cached.chars);
+  }
 
   const parsed = parseChatContentParts(content, audioRenderingEnabled);
-  chatContentPartsCache.set(key, { content, parts: parsed });
-  while (chatContentPartsCache.size > CHAT_CONTENT_PARTS_CACHE_LIMIT) {
-    const oldestKey = chatContentPartsCache.keys().next().value;
-    if (oldestKey === undefined) break;
-    chatContentPartsCache.delete(oldestKey);
+  const chars = content.length * 2;
+  if (chars <= CHAT_CONTENT_PARTS_CACHE_MAX_CHARS / 2) {
+    chatContentPartsCache.set(key, { content, parts: parsed, chars });
+    chatContentPartsCacheChars += chars;
+    while (
+      chatContentPartsCache.size > CHAT_CONTENT_PARTS_CACHE_LIMIT ||
+      chatContentPartsCacheChars > CHAT_CONTENT_PARTS_CACHE_MAX_CHARS
+    ) {
+      const oldestEntry = chatContentPartsCache.entries().next().value;
+      if (!oldestEntry) break;
+      chatContentPartsCache.delete(oldestEntry[0]);
+      chatContentPartsCacheChars = Math.max(
+        0,
+        chatContentPartsCacheChars - oldestEntry[1].chars,
+      );
+    }
   }
   return parsed;
 }
@@ -7277,6 +7475,7 @@ type ChatHtmlPreviewProps = {
   previewId: string;
   frameRegistry: { current: Map<string, HTMLIFrameElement> };
   contextRegistry: { current: Map<string, HtmlPreviewContextProvider> };
+  subscribedEventsRegistry?: { current: Map<string, Set<string>> };
   contextBaseRef: { current: Omit<HtmlPreviewContext, "currentMessageIndex"> };
 };
 
@@ -7288,6 +7487,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
   previewId,
   frameRegistry,
   contextRegistry,
+  subscribedEventsRegistry,
   contextBaseRef,
 }: ChatHtmlPreviewProps) {
   const hostWindow = useDesktopWindow();
@@ -7300,41 +7500,50 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
   const initializedFrameRef = useRef<HTMLIFrameElement | null>(null);
   const mountStartedRef = useRef(false);
   const previewActiveRef = useRef(false);
+  const contextDirtyWhileInactiveRef = useRef(false);
   const heavyContent = content.trim().length >= HTML_PREVIEW_HEAVY_CONTENT_THRESHOLD;
   const [renderReady, setRenderReady] = useState(false);
   const [previewActive, setPreviewActive] = useState(false);
+  const [restoredHeight, setRestoredHeight] = useState(
+    () => htmlPreviewMeasuredHeights.get(previewId) ?? 0,
+  );
   const loadSyncTimersRef = useRef<(() => void)[]>([]);
-  const sourceDocumentRef = useRef<{
-    content: string;
-    previewId: string;
-    value: string;
-  } | null>(null);
   const isolatedFrame = useMemo(
     () => getIsolatedHtmlPreviewFrame(previewId),
     [previewId],
   );
 
-  if (
-    mountReady &&
-    renderReady &&
-    (!sourceDocumentRef.current ||
-      sourceDocumentRef.current.content !== content ||
-      sourceDocumentRef.current.previewId !== previewId)
-  ) {
-    sourceDocumentRef.current = {
-      content,
-      previewId,
-      value: buildHtmlPreviewDocument(content, previewId, context),
-    };
-  }
+  const sendContextUpdate = useCallback(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    const latest = latestContextRef.current;
+    const parentGlobals = getHtmlPreviewParentGlobals(latest.content);
+    contextDirtyWhileInactiveRef.current = false;
+    postMessageToFrame(
+      frame,
+      {
+        type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
+        id: previewId,
+        context: {
+          ...latest.context,
+          ...contextBaseRef.current,
+          chatId: latest.context.chatId,
+          parentGlobals,
+        },
+      },
+      "*",
+    );
+  }, [contextBaseRef, previewId]);
 
   useEffect(() => {
     if (!mountReady) {
+      unregisterInactiveHtmlPreview(previewId);
       setRenderReady(false);
       setPreviewActive(false);
       mountStartedRef.current = false;
       previewActiveRef.current = false;
-      sourceDocumentRef.current = null;
+      initializedFrameRef.current = null;
+      contextDirtyWhileInactiveRef.current = false;
       requestHeavyMountRef.current = () => {};
       return;
     }
@@ -7343,13 +7552,30 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
     if (!container) return;
     let cancelQueuedMount: (() => void) | null = null;
     let freezeTimer = 0;
+    let unmountTimer = 0;
     let queued = false;
     const clearFreezeTimer = () => {
       if (!freezeTimer) return;
       window.clearTimeout(freezeTimer);
       freezeTimer = 0;
     };
+    const clearUnmountTimer = () => {
+      if (!unmountTimer) return;
+      window.clearTimeout(unmountTimer);
+      unmountTimer = 0;
+    };
+    const isFrameProtected = (frame: HTMLIFrameElement | null) =>
+      Boolean(
+        frame &&
+          (hostWindow.document.activeElement === frame ||
+            frame.classList.contains("renge-html-fullscreen-frame") ||
+            inFlightHtmlPreviewFrames.has(frame)),
+      );
     const updatePreviewActivity = (active: boolean) => {
+      if (active) {
+        clearUnmountTimer();
+        unregisterInactiveHtmlPreview(previewId);
+      }
       if (previewActiveRef.current === active) return;
       previewActiveRef.current = active;
       setPreviewActive(active);
@@ -7358,9 +7584,44 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
         { type: HTML_PREVIEW_ACTIVITY_MESSAGE, id: previewId, active },
         "*",
       );
+      if (active && contextDirtyWhileInactiveRef.current) {
+        sendContextUpdate();
+      }
+    };
+    const evictOffscreenPreview = () => {
+      clearUnmountTimer();
+      if (previewActiveRef.current || !mountStartedRef.current) {
+        unregisterInactiveHtmlPreview(previewId);
+        return;
+      }
+      const frame = frameRef.current;
+      if (isFrameProtected(frame)) {
+        unmountTimer = window.setTimeout(
+          evictOffscreenPreview,
+          HTML_PREVIEW_UNMOUNT_DELAY_MS,
+        );
+        return;
+      }
+      const measured = Math.round(
+        frame?.offsetHeight ||
+          containerRef.current?.offsetHeight ||
+          htmlPreviewMeasuredHeights.get(previewId) ||
+          0,
+      );
+      if (measured > 0) {
+        rememberHtmlPreviewMeasuredHeight(previewId, measured);
+        setRestoredHeight(measured);
+      }
+      unregisterInactiveHtmlPreview(previewId);
+      mountStartedRef.current = false;
+      initializedFrameRef.current = null;
+      contextDirtyWhileInactiveRef.current = false;
+      setRenderReady(false);
     };
     const queueMount = () => {
       clearFreezeTimer();
+      clearUnmountTimer();
+      unregisterInactiveHtmlPreview(previewId);
       updatePreviewActivity(true);
       if (queued || mountStartedRef.current) return;
       queued = true;
@@ -7377,11 +7638,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
     const freezePreview = () => {
       freezeTimer = 0;
       const frame = frameRef.current;
-      if (
-        frame &&
-        (hostWindow.document.activeElement === frame ||
-          frame.classList.contains("renge-html-fullscreen-frame"))
-      ) {
+      if (isFrameProtected(frame)) {
         freezeTimer = window.setTimeout(
           freezePreview,
           HTML_PREVIEW_FREEZE_DELAY_MS,
@@ -7389,6 +7646,15 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
         return;
       }
       updatePreviewActivity(false);
+      if (mountStartedRef.current) {
+        registerInactiveHtmlPreview(previewId, evictOffscreenPreview);
+        if (!unmountTimer && mountStartedRef.current) {
+          unmountTimer = window.setTimeout(
+            evictOffscreenPreview,
+            HTML_PREVIEW_UNMOUNT_DELAY_MS,
+          );
+        }
+      }
     };
     const scheduleFreeze = () => {
       cancelQueuedMount?.();
@@ -7424,26 +7690,13 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
     return () => {
       window.clearTimeout(fallbackTimer);
       clearFreezeTimer();
+      clearUnmountTimer();
+      unregisterInactiveHtmlPreview(previewId);
       observer?.disconnect();
       requestHeavyMountRef.current = () => {};
       cancelQueuedMount?.();
     };
-  }, [heavyContent, hostWindow, mountReady, previewId]);
-
-  const sendContextUpdate = useCallback(() => {
-    const frame = frameRef.current;
-    if (!frame) return;
-    const parentGlobals = getHtmlPreviewParentGlobals(content);
-    postMessageToFrame(
-      frame,
-      {
-        type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE,
-        id: previewId,
-        context: { ...context, ...contextBaseRef.current, chatId: context.chatId, parentGlobals },
-      },
-      "*",
-    );
-  }, [content, context, contextBaseRef, previewId]);
+  }, [heavyContent, hostWindow, mountReady, previewId, sendContextUpdate]);
 
   const sendViewportUpdate = useCallback(() => {
     const frame = frameRef.current;
@@ -7479,8 +7732,19 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
   }, [previewId]);
 
   useEffect(() => {
+    if (!frameRef.current) return;
+    if (!previewActiveRef.current) {
+      contextDirtyWhileInactiveRef.current = true;
+      return;
+    }
     return scheduleChatIdleWork(sendContextUpdate);
-  }, [sendContextUpdate]);
+  }, [
+    content,
+    context.chatId,
+    context.currentHtmlPartIndex,
+    context.currentMessageIndex,
+    sendContextUpdate,
+  ]);
 
   useEffect(() => {
     const update = () => sendViewportUpdate();
@@ -7514,6 +7778,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       if (previousFrame !== frame) {
         loadSyncTimersRef.current.forEach((cancel) => cancel());
         loadSyncTimersRef.current = [];
+        if (!frame) initializedFrameRef.current = null;
       }
       if (
         previousFrame &&
@@ -7522,21 +7787,33 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       ) {
         frameRegistry.current.delete(previewId);
         contextRegistry.current.delete(previewId);
+        subscribedEventsRegistry?.current.delete(previewId);
       }
       frameRef.current = frame;
       if (frame) {
         frameRegistry.current.set(previewId, frame);
         contextRegistry.current.set(previewId, () => {
           const latest = latestContextRef.current;
-          return { ...latest, context: { ...latest.context, ...contextBaseRef.current, chatId: latest.context.chatId } };
+          return {
+            ...latest,
+            context: {
+              ...latest.context,
+              ...contextBaseRef.current,
+              chatId: latest.context.chatId,
+            },
+            isActive: () => previewActiveRef.current,
+            markDirty: () => {
+              contextDirtyWhileInactiveRef.current = true;
+            },
+          };
         });
-      }
-      else if (frameRegistry.current.get(previewId) === previousFrame) {
+      } else if (frameRegistry.current.get(previewId) === previousFrame) {
         frameRegistry.current.delete(previewId);
         contextRegistry.current.delete(previewId);
+        subscribedEventsRegistry?.current.delete(previewId);
       }
     },
-    [contextBaseRef, contextRegistry, frameRegistry, previewId],
+    [contextBaseRef, contextRegistry, frameRegistry, previewId, subscribedEventsRegistry],
   );
 
   const handleLoad = useCallback(
@@ -7554,17 +7831,24 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
         },
         "*",
       );
-      if (
-        initializedFrameRef.current !== loadedFrame &&
-        sourceDocumentRef.current
-      ) {
+      if (initializedFrameRef.current !== loadedFrame) {
         initializedFrameRef.current = loadedFrame;
+        const latest = latestContextRef.current;
+        const documentHtml = buildHtmlPreviewDocument(
+          latest.content,
+          previewId,
+          {
+            ...latest.context,
+            ...contextBaseRef.current,
+            chatId: latest.context.chatId,
+          },
+        );
         postMessageToFrame(
           loadedFrame,
           {
             type: HTML_PREVIEW_FRAME_INIT_MESSAGE,
             id: previewId,
-            document: sourceDocumentRef.current.value,
+            document: documentHtml,
           },
           isolatedFrame?.origin ?? "*",
         );
@@ -7589,6 +7873,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       );
     },
     [
+      contextBaseRef,
       isolatedFrame,
       previewId,
       requestLayoutMeasurement,
@@ -7596,6 +7881,11 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       sendViewportUpdate,
     ],
   );
+
+  const placeholderStyle =
+    !renderReady && restoredHeight > 0
+      ? { height: `${restoredHeight}px`, minHeight: `${restoredHeight}px`, boxSizing: "border-box" as const }
+      : undefined;
 
   return (
     <div
@@ -7605,7 +7895,7 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
       data-preview-id={previewId}
       ref={containerRef}
     >
-      {mountReady && renderReady && sourceDocumentRef.current ? (
+      {mountReady && renderReady ? (
         <iframe
           className="chat-html-frame"
           allow="autoplay; fullscreen; gamepad"
@@ -7622,11 +7912,16 @@ const ChatHtmlPreview = memo(function ChatHtmlPreview({
           }
           src={isolatedFrame?.url}
           srcDoc={isolatedFrame ? undefined : htmlPreviewFrameBootstrapDocument}
+          style={restoredHeight > 0 ? { minHeight: `${restoredHeight}px` } : undefined}
           tabIndex={0}
           title="HTML 预览"
         />
       ) : (
-        <div className="chat-html-preview-placeholder" role="status">
+        <div
+          className="chat-html-preview-placeholder"
+          role="status"
+          style={placeholderStyle}
+        >
           <span>
             {!mountReady
               ? "正在同步角色卡会话与脚本环境…"
@@ -14935,6 +15230,7 @@ export function App() {
       }
 
       if (payload.type === HTML_PREVIEW_COMMAND_MESSAGE) {
+        inFlightHtmlPreviewFrames.add(frame);
         try {
           let result: unknown;
           if (payload.operation === "getPreviewContext" || payload.operation === "scriptExport" || payload.operation === "scriptExportSnapshots") {
@@ -15150,6 +15446,8 @@ export function App() {
             message: error instanceof Error ? error.message : "角色卡命令执行失败。",
           });
           respondToHtmlCommand(frame, payload.id, payload.requestId, undefined, error);
+        } finally {
+          inFlightHtmlPreviewFrames.delete(frame);
         }
         return;
       }
@@ -15388,6 +15686,10 @@ export function App() {
         return;
       }
 
+      if (fullscreenFrame && !fullscreenFrame.isConnected) {
+        leaveHtmlPreviewFullscreen(false);
+      }
+
       if (payload.type !== HTML_PREVIEW_RESIZE_MESSAGE) return;
 
       const nextHeight = Number(payload.height);
@@ -15412,6 +15714,7 @@ export function App() {
         Math.min(Math.ceil(nextHeight), HTML_PREVIEW_MAX_HEIGHT),
       );
       frame.style.height = `${clampedHeight}px`;
+      rememberHtmlPreviewMeasuredHeight(payload.id, clampedHeight);
     }
 
     window.addEventListener("message", handleHtmlPreviewMessage);
@@ -15657,12 +15960,19 @@ export function App() {
 
   const showChatSession = (session: Pick<ChatSession, "id" | "messages" | "mode">) => {
     if (session.id !== activeChatSessionIdRef.current) {
-      chatContentPartsCache.clear();
+      clearChatContentPartsCache();
       regexDisplayCacheRef.current.entries.clear();
       regexDisplayCacheRef.current.context = null;
       chatRuntimesRef.current.select(session.id);
     }
-    chatDraftsRef.current.set(activeChatSessionIdRef.current, { text: chatInputValueRef.current, attachments: chatAttachmentsLiveRef.current });
+    if (chatInputValueRef.current || chatAttachmentsLiveRef.current.length > 0) {
+      chatDraftsRef.current.set(activeChatSessionIdRef.current, {
+        text: chatInputValueRef.current,
+        attachments: chatAttachmentsLiveRef.current,
+      });
+    } else {
+      chatDraftsRef.current.delete(activeChatSessionIdRef.current);
+    }
     const draft = chatDraftsRef.current.get(session.id);
     setChatInput(draft?.text ?? "");
     setChatAttachments(draft?.attachments ?? []);
@@ -16082,6 +16392,35 @@ export function App() {
         compactedAiAvatars.sessions !== normalizedChatSessions ||
         compactedAiAvatars.settings !== nextChatPersonalization.aiAvatarSettings;
       normalizedChatSessions = compactedAiAvatars.sessions;
+      if (!aiAvatarsNeedMigration && Array.isArray(persistentData?.chatSessions)) {
+        const normalizedById = new Map(
+          normalizedChatSessions.map((session) => [session.id, session]),
+        );
+        lastChatSessionsForPersistentStore = persistentData.chatSessions.map((rawSession) => {
+          if (!isObjectRecord(rawSession) || typeof rawSession.id !== "string") {
+            return rawSession as ChatSession;
+          }
+          const normalizedSession = normalizedById.get(rawSession.id);
+          if (!normalizedSession) return rawSession as ChatSession;
+          if (areJsonValuesEqual(normalizedSession, rawSession)) {
+            return normalizedSession;
+          }
+          if (Array.isArray(rawSession.messages)) {
+            const normalizedMessagesById = new Map(
+              normalizedSession.messages.map((message) => [message.id, message]),
+            );
+            const deduplicatedMessages = rawSession.messages.map((rawMsg) => {
+              if (!isObjectRecord(rawMsg) || typeof rawMsg.id !== "string") return rawMsg;
+              const normalizedMsg = normalizedMessagesById.get(rawMsg.id);
+              return normalizedMsg && areJsonValuesEqual(normalizedMsg, rawMsg)
+                ? normalizedMsg
+                : rawMsg;
+            });
+            return { ...(rawSession as ChatSession), messages: deduplicatedMessages as ChatMessage[] };
+          }
+          return rawSession as ChatSession;
+        });
+      }
       if (compactedAiAvatars.settings !== nextChatPersonalization.aiAvatarSettings) {
         nextChatPersonalization = {
           ...nextChatPersonalization,
@@ -16101,8 +16440,9 @@ export function App() {
         if (!hasPersistentCharacterCards && databaseCharacterCards.length > 0) {
           dirtyKeys.add("characterCards");
         }
+        const { chatSessions: _omittedBaselineSessions, ...persistedWithoutSessions } = persistentData;
         pendingPersistentStoreBaseline = {
-          persistedData: persistentData,
+          persistedData: persistedWithoutSessions,
           dirtyKeys,
         };
       }
@@ -20174,33 +20514,66 @@ export function App() {
 
     const originalWindowFetch = window.fetch;
     const originalSetTimeout = window.setTimeout;
+    const originalClearTimeout = window.clearTimeout;
     const originalSetInterval = window.setInterval;
+    const originalClearInterval = window.clearInterval;
     const trackedTimeouts = new Set<number>();
     const trackedIntervals = new Set<number>();
     const isExtensionCall = () =>
       /\/(?:api\/extensions|scripts\/extensions\/third-party)\//.test(
         String(new Error().stack ?? ""),
       );
-    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
-      const timerId = originalSetTimeout(handler, timeout, ...args);
-      if (isExtensionCall()) trackedTimeouts.add(timerId);
+    const trackedExtSetTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      if (typeof handler !== "function" || !isExtensionCall()) {
+        return originalSetTimeout(handler, timeout, ...args);
+      }
+      let timerId = 0;
+      timerId = originalSetTimeout(
+        (...callbackArgs: unknown[]) => {
+          trackedTimeouts.delete(timerId);
+          return handler(...callbackArgs);
+        },
+        timeout,
+        ...args,
+      );
+      trackedTimeouts.add(timerId);
       return timerId;
     }) as typeof window.setTimeout;
-    window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+    const trackedExtClearTimeout = ((timerId?: number) => {
+      if (typeof timerId === "number") {
+        trackedTimeouts.delete(timerId);
+        trackedIntervals.delete(timerId);
+      }
+      return originalClearTimeout(timerId);
+    }) as typeof window.clearTimeout;
+    const trackedExtSetInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
       const timerId = originalSetInterval(handler, timeout, ...args);
       if (isExtensionCall()) trackedIntervals.add(timerId);
       return timerId;
     }) as typeof window.setInterval;
+    const trackedExtClearInterval = ((timerId?: number) => {
+      if (typeof timerId === "number") {
+        trackedIntervals.delete(timerId);
+        trackedTimeouts.delete(timerId);
+      }
+      return originalClearInterval(timerId);
+    }) as typeof window.clearInterval;
+    window.setTimeout = trackedExtSetTimeout;
+    window.clearTimeout = trackedExtClearTimeout;
+    window.setInterval = trackedExtSetInterval;
+    window.clearInterval = trackedExtClearInterval;
 
     const eventTargetPrototype = window.EventTarget.prototype;
     const originalAddEventListener = eventTargetPrototype.addEventListener;
+    const originalRemoveEventListener = eventTargetPrototype.removeEventListener;
     const trackedEventListeners: Array<{
       target: EventTarget;
       type: string;
       listener: EventListenerOrEventListenerObject;
       options?: boolean | AddEventListenerOptions;
     }> = [];
-    eventTargetPrototype.addEventListener = function (
+    const trackedExtAddEventListener = function (
+      this: EventTarget,
       type: string,
       listener: EventListenerOrEventListenerObject | null,
       options?: boolean | AddEventListenerOptions,
@@ -20210,6 +20583,32 @@ export function App() {
       }
       return originalAddEventListener.call(this, type, listener, options);
     };
+    const trackedExtRemoveEventListener = function (
+      this: EventTarget,
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: boolean | EventListenerOptions,
+    ) {
+      if (listener && trackedEventListeners.length > 0) {
+        const capture = typeof options === "boolean" ? options : Boolean(options?.capture);
+        for (let index = trackedEventListeners.length - 1; index >= 0; index -= 1) {
+          const item = trackedEventListeners[index];
+          const itemCapture =
+            typeof item.options === "boolean" ? item.options : Boolean(item.options?.capture);
+          if (
+            item.target === this &&
+            item.type === type &&
+            item.listener === listener &&
+            itemCapture === capture
+          ) {
+            trackedEventListeners.splice(index, 1);
+          }
+        }
+      }
+      return originalRemoveEventListener.call(this, type, listener, options);
+    };
+    eventTargetPrototype.addEventListener = trackedExtAddEventListener;
+    eventTargetPrototype.removeEventListener = trackedExtRemoveEventListener;
     const existingBodyChildren = new Set(Array.from(document.body.children));
     const existingHeadChildren = new Set(Array.from(document.head.children));
     const existingWindowGlobals = new Set(Object.getOwnPropertyNames(window));
@@ -20350,15 +20749,24 @@ export function App() {
       eventBus.clear();
       hooks.clear();
       runtimeNodes.forEach((node) => node.remove());
-      trackedTimeouts.forEach((timerId) => window.clearTimeout(timerId));
-      trackedIntervals.forEach((timerId) => window.clearInterval(timerId));
+      trackedTimeouts.forEach((timerId) => originalClearTimeout(timerId));
+      trackedIntervals.forEach((timerId) => originalClearInterval(timerId));
       trackedEventListeners.forEach(({ target, type, listener, options }) => {
-        target.removeEventListener(type, listener, options);
+        originalRemoveEventListener.call(target, type, listener, options);
       });
-      if (window.setTimeout !== originalSetTimeout) window.setTimeout = originalSetTimeout;
-      if (window.setInterval !== originalSetInterval) window.setInterval = originalSetInterval;
-      if (eventTargetPrototype.addEventListener !== originalAddEventListener) {
+      if (window.setTimeout === trackedExtSetTimeout) window.setTimeout = originalSetTimeout;
+      if (window.clearTimeout === trackedExtClearTimeout) {
+        window.clearTimeout = originalClearTimeout;
+      }
+      if (window.setInterval === trackedExtSetInterval) window.setInterval = originalSetInterval;
+      if (window.clearInterval === trackedExtClearInterval) {
+        window.clearInterval = originalClearInterval;
+      }
+      if (eventTargetPrototype.addEventListener === trackedExtAddEventListener) {
         eventTargetPrototype.addEventListener = originalAddEventListener;
+      }
+      if (eventTargetPrototype.removeEventListener === trackedExtRemoveEventListener) {
+        eventTargetPrototype.removeEventListener = originalRemoveEventListener;
       }
       if (window.fetch !== originalWindowFetch) window.fetch = originalWindowFetch;
       window.removeEventListener("error", handleExtensionWindowError);
@@ -22256,7 +22664,7 @@ export function App() {
 
   const htmlPreviewSourceMessages = useThrottledValue(
     chatMessages,
-    chatMode === "roleplay" && chatGenerationState !== "idle"
+    chatGenerationState !== "idle"
       ? HTML_PREVIEW_STREAMING_CONTEXT_INTERVAL_MS
       : 0,
   );
@@ -22435,6 +22843,10 @@ export function App() {
       const frame = htmlPreviewFrameRefs.current.get(id);
       const provided = provider();
       if (!frame || provided.context.chatId !== htmlPreviewContextBase.chatId) return;
+      if (!provided.isActive()) {
+        provided.markDirty();
+        return;
+      }
       postMessageToFrame(frame, { type: HTML_PREVIEW_CONTEXT_UPDATE_MESSAGE, id,
         context: { ...provided.context, ...htmlPreviewContextBase,
           parentGlobals: getHtmlPreviewParentGlobals(provided.content) } }, "*");
@@ -23445,6 +23857,72 @@ export function App() {
     setChatStatus({ status: "idle", message: "" });
   };
 
+  const rememberChatAttachment = (attachment: ChatAttachment, file?: File) => {
+    const MAX_CACHED_CHAT_ATTACHMENTS = 64;
+    if (file) {
+      chatAttachmentFilesRef.current.delete(attachment.id);
+      while (chatAttachmentFilesRef.current.size >= MAX_CACHED_CHAT_ATTACHMENTS) {
+        const oldestKey = chatAttachmentFilesRef.current.keys().next().value;
+        if (oldestKey === undefined) break;
+        chatAttachmentFilesRef.current.delete(oldestKey);
+      }
+      chatAttachmentFilesRef.current.set(attachment.id, file);
+    }
+    chatAttachmentMetadataRef.current.delete(attachment.id);
+    while (chatAttachmentMetadataRef.current.size >= MAX_CACHED_CHAT_ATTACHMENTS) {
+      const oldestKey = chatAttachmentMetadataRef.current.keys().next().value;
+      if (oldestKey === undefined) break;
+      chatAttachmentMetadataRef.current.delete(oldestKey);
+    }
+    chatAttachmentMetadataRef.current.set(attachment.id, attachment);
+  };
+
+  const pruneChatAttachmentCaches = (survivingSessions: readonly ChatSession[]) => {
+    if (
+      chatAttachmentFilesRef.current.size === 0 &&
+      chatAttachmentMetadataRef.current.size === 0
+    ) {
+      return;
+    }
+    const referencedIds = new Set<string>();
+    chatAttachmentsLiveRef.current.forEach((item) => referencedIds.add(item.id));
+    chatDraftsRef.current.forEach((draft) =>
+      draft.attachments.forEach((item) => referencedIds.add(item.id)),
+    );
+    survivingSessions.forEach((session) =>
+      session.messages.forEach((message) =>
+        (message.attachments ?? []).forEach((item) => referencedIds.add(item.id)),
+      ),
+    );
+    for (const id of Array.from(chatAttachmentFilesRef.current.keys())) {
+      if (!referencedIds.has(id)) chatAttachmentFilesRef.current.delete(id);
+    }
+    for (const id of Array.from(chatAttachmentMetadataRef.current.keys())) {
+      if (!referencedIds.has(id)) chatAttachmentMetadataRef.current.delete(id);
+    }
+  };
+
+  const cleanupDeletedSessionClientState = (sessionId: string) => {
+    void resetPiSession(sessionId).catch(() => undefined);
+    chatDraftsRef.current.delete(sessionId);
+    chatRuntimesRef.current.reset(sessionId);
+    sessionRunDataRef.current.delete(sessionId);
+    liveToolVisualizations.clearSession(sessionId);
+    piContextUsageStore.clearSession(sessionId);
+    setContextRuntimeUsageByKey((usage) =>
+      Object.fromEntries(
+        Object.entries(usage).filter(([key]) => !key.startsWith(`${sessionId}\u0000`)),
+      ),
+    );
+    removeLocalStorageValueSafely(pocketStorageKey(sessionId));
+    removeLocalStorageValueSafely(redStorageKey(sessionId));
+    for (const previewKey of Array.from(htmlPreviewMeasuredHeights.keys())) {
+      if (previewKey.startsWith(`${sessionId}-`)) {
+        htmlPreviewMeasuredHeights.delete(previewKey);
+      }
+    }
+  };
+
   const deleteChatSession = async (sessionId: string) => {
     if (memoryCleanupTasksRef.current.has(sessionId) || memoryDeletionSessionsRef.current.has(sessionId)) return;
     if (chatRuntimesRef.current.get(sessionId).controller) {
@@ -23468,8 +23946,8 @@ export function App() {
     }
     // 后端清理该会话目录下持久化的生成图片，fire-and-forget
     void fetch(`/api/session-images/${encodeURIComponent(sessionId)}`, { method: "DELETE" }).catch(() => undefined);
-    // Keep Pi's persisted session tree aligned with Renge session deletion.
-    void resetPiSession(sessionId).catch(() => undefined);
+    // Keep Pi's persisted session tree and client stores aligned with session deletion.
+    cleanupDeletedSessionClientState(sessionId);
     const remaining = deleteChatSessionsWithMemoryCleanup(
       chatSessionsRef.current,
       (session) => session.id === sessionId,
@@ -23506,6 +23984,7 @@ export function App() {
         safeRemaining[0];
       showChatSession(fallback);
     }
+    pruneChatAttachmentCaches(safeRemaining);
     setChatStatus({ status: "idle", message: "会话和对应角色记忆目录已删除。" });
     memoryDeletionSessionsRef.current.delete(sessionId);
   };
@@ -23545,9 +24024,10 @@ export function App() {
       return;
     }
 
-    // 后端清理该工作区下所有会话目录的生成图片
+    // 后端清理该工作区下所有会话目录的生成图片及前后端运行时状态
     for (const session of deletedSessions) {
       void fetch(`/api/session-images/${encodeURIComponent(session.id)}`, { method: "DELETE" }).catch(() => undefined);
+      cleanupDeletedSessionClientState(session.id);
     }
     const remaining = deleteChatSessionsWithMemoryCleanup(
       chatSessionsRef.current,
@@ -23573,6 +24053,7 @@ export function App() {
         safeRemaining[0];
       showChatSession(fallback);
     }
+    pruneChatAttachmentCaches(safeRemaining);
     setChatStatus({ status: "idle", message: "工作区会话和对应角色记忆目录已删除。" });
     for (const id of deletedIds) memoryDeletionSessionsRef.current.delete(id);
   };
@@ -26102,6 +26583,7 @@ export function App() {
                   context={getHtmlPreviewContext(partIndex)}
                   frameRegistry={htmlPreviewFrameRefs}
                   contextRegistry={htmlPreviewFrameContextsRef}
+                  subscribedEventsRegistry={htmlPreviewSubscribedEventsRef}
                   contextBaseRef={htmlPreviewContextBaseRef}
                   key={previewId}
                   mountReady={htmlPreviewSessionReady}
@@ -26196,6 +26678,7 @@ export function App() {
                 context={getHtmlPreviewContext(partIndex)}
                 frameRegistry={htmlPreviewFrameRefs}
                 contextRegistry={htmlPreviewFrameContextsRef}
+                subscribedEventsRegistry={htmlPreviewSubscribedEventsRef}
                 contextBaseRef={htmlPreviewContextBaseRef}
                 key={previewId}
                 mountReady={htmlPreviewSessionReady}
@@ -29753,9 +30236,7 @@ export function App() {
         selectedFiles.map((file) => createChatAttachmentFromFile(file)),
       );
       nextAttachments.forEach((attachment, index) => {
-        const file = selectedFiles[index];
-        if (file) chatAttachmentFilesRef.current.set(attachment.id, file);
-        chatAttachmentMetadataRef.current.set(attachment.id, attachment);
+        rememberChatAttachment(attachment, selectedFiles[index]);
       });
       if (activeChatSessionIdRef.current === sessionId) setChatAttachments((current) => [...current, ...nextAttachments]);
       else {
@@ -29797,7 +30278,7 @@ export function App() {
       textContent,
       createdAt: comment.createdAt,
     };
-    chatAttachmentMetadataRef.current.set(attachment.id, attachment);
+    rememberChatAttachment(attachment);
     setChatAttachments((current) => [
       ...current.filter((candidate) => candidate.id !== attachment.id),
       attachment,
@@ -33700,13 +34181,11 @@ export function App() {
     activeTavernScripts,
     aiModeAvatarImage,
     chatChoiceDrafts,
-    chatGenerationState !== "idle",
     chatHtmlRenderEnabled,
     chatMode,
     chatMultiBubbleEnabled,
     chatPersonalization.aiAvatarSettings,
     chatReasoningVisible,
-    chatStatus.status,
     copyChatCodeBlock,
     effectiveChatModelId,
     htmlPreviewSessionReady,
@@ -33729,9 +34208,19 @@ export function App() {
     const segments = item.kind === "toolOnlyGroup"
       ? item.toolGroups.flatMap((toolGroup) => toolGroup.segments)
       : item.kind === "toolGroup" ? item.segments : [item];
-    const deps: unknown[] = [chatItemRenderContext, renderedItemIndex === lastVisibleChatItemIndex];
+    const isNewestVisibleItem = renderedItemIndex === lastVisibleChatItemIndex;
+    const isIncompleteToolItem =
+      (item.kind === "toolOnlyGroup" || item.kind === "toolGroup") && !item.completed;
+    const deps: unknown[] = [
+      chatItemRenderContext,
+      isNewestVisibleItem,
+      isNewestVisibleItem || isIncompleteToolItem ? chatGenerationState !== "idle" : false,
+    ];
     for (const { message, segment, segmentIndex } of segments) {
       const messageIndex = chatMessageIndexById.get(message.id) ?? -1;
+      const usesLoadingStatus =
+        Boolean(message.choiceRequest) ||
+        (message.source === "roleplay-greeting" && roleplayGreetingIsOnlyMessage);
       deps.push(
         message,
         segment,
@@ -33740,9 +34229,7 @@ export function App() {
         chatMessages[messageIndex]?.content,
         turnPresentedFiles.get(message.id),
         Boolean(message.choiceRequest) && lastUserChatMessageIndex > messageIndex,
-        // HTML previews read the shared script context, which also changes
-        // when unrelated messages arrive; plain messages do not need it.
-        chatHtmlRenderEnabled && message.content.includes("<") ? htmlPreviewContexts : null,
+        usesLoadingStatus ? chatStatus.status === "loading" : false,
       );
       // Inline editors call handlers that read the whole conversation.
       if (editingChatMessage?.messageId === message.id) deps.push({});
@@ -34261,7 +34748,7 @@ export function App() {
                   onClick={() => openOrCreateCharacterRoleplay(card)}
                 >
                   {card.avatarDataUrl ? (
-                    <img src={card.avatarDataUrl} alt={`${card.name} 封面`} />
+                    <img src={card.avatarDataUrl} alt={`${card.name} 封面`} loading="lazy" decoding="async" />
                   ) : (
                     <span className="character-cover-placeholder">
                       <UserRound size={52} />
@@ -38983,6 +39470,13 @@ export function App() {
     setContextRuntimeUsageByKey(withoutSessionUsage);
     piContextUsageStore.clearSession(sessionId);
     liveToolVisualizations.clearSession(sessionId);
+    chatDraftsRef.current.delete(sessionId);
+    pruneChatAttachmentCaches(nextSessions);
+    for (const previewKey of Array.from(htmlPreviewMeasuredHeights.keys())) {
+      if (previewKey.startsWith(`${sessionId}-`)) {
+        htmlPreviewMeasuredHeights.delete(previewKey);
+      }
+    }
     contextSummaryCacheRef.current.clear();
     setPiCompactionPending(false);
     setTavernRuntimeLogs([]);
@@ -39614,7 +40108,7 @@ export function App() {
                           >
                             <span className="chat-character-choice-cover">
                               {card.avatarDataUrl ? (
-                                <img src={card.avatarDataUrl} alt={`${card.name} 封面`} />
+                                <img src={card.avatarDataUrl} alt={`${card.name} 封面`} loading="lazy" decoding="async" />
                               ) : (
                                 <span className="chat-character-choice-placeholder">
                                   <UserRound size={38} />
@@ -40395,8 +40889,7 @@ export function App() {
                       textContent: pastedText,
                       createdAt: new Date().toISOString(),
                     };
-                    chatAttachmentFilesRef.current.set(attachment.id, file);
-                    chatAttachmentMetadataRef.current.set(attachment.id, attachment);
+                    rememberChatAttachment(attachment, file);
                     setChatAttachments((current) => [...current, attachment]);
                   }
                   if (pastedImages.length > 0) {
@@ -40809,7 +41302,7 @@ export function App() {
                               }}
                             >
                               <span className="composer-character-avatar">
-                                {card.avatarDataUrl ? <img src={card.avatarDataUrl} alt="" /> : <UserRound size={15} />}
+                                {card.avatarDataUrl ? <img src={card.avatarDataUrl} alt="" loading="lazy" decoding="async" /> : <UserRound size={15} />}
                               </span>
                               <span>{card.name}</span>
                               <small>

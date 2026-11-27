@@ -61,6 +61,10 @@ export function createDesktopWindowManager({ screen, icon, onWindowCreated = () 
       });
       mainWindow.webContents.on("did-create-window", (child, { frameName }) => {
         const id = frameName.slice("renge-desktop-".length);
+        const existing = windows.get(id);
+        if (existing && existing !== child && !existing.isDestroyed()) {
+          existing.destroy();
+        }
         windows.set(id, child);
         child.on("focus", () => { lastActiveWindow = child; });
         child.removeMenu();
@@ -76,6 +80,7 @@ export function createDesktopWindowManager({ screen, icon, onWindowCreated = () 
           }));
         }
         child.on("closed", () => {
+          if (lastActiveWindow === child) lastActiveWindow = null;
           if (windows.get(id) !== child) return;
           windows.delete(id);
           drags.delete(id);
@@ -140,6 +145,7 @@ export function createDesktopWindowManager({ screen, icon, onWindowCreated = () 
       }
       windows.clear();
       drags.clear();
+      if (lastActiveWindow && lastActiveWindow !== owner) lastActiveWindow = null;
     },
   };
 }
