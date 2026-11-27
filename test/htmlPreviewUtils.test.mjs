@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import vm from "node:vm";
+
+import { serializeHtmlPreviewValue } from "../src/htmlPreviewSerialization.ts";
 
 import {
   collectInheritedHtmlPreviewStyleResources,
@@ -19,6 +22,55 @@ import {
 } from "../src/htmlPreviewUtils.ts";
 
 const packDocument = (html) => `<body><script>(function(){var h=new TextDecoder().decode(Uint8Array.from(atob('${Buffer.from(html).toString('base64')}'),function(c){return c.charCodeAt(0)}));document.write(h)})();</script></body>`;
+
+test("serializes large Tavern snapshots without expanding shared cards, swipes and HTML", () => {
+  const html = "<div>Fixture</div>".repeat(60_000);
+  const extensions = { regex_scripts: [{ replaceString: html }] };
+  const card = { first_mes: html, extensions, data: { first_mes: html, extensions } };
+  const snapshot = {
+    messages: [{ content: html, tavernSwipeState: { swipes: Array(8).fill(html) } }],
+    scriptTrees: { character: [{ content: html }] },
+    tavern: {
+      charData: card,
+      charDataByName: Object.fromEntries(Array.from({ length: 64 }, (_, index) => [
+        [`Card ${index}`, card], [`card-${index}`, card],
+      ]).flat()),
+    },
+  };
+  // Plain JSON expands this small in-memory graph past V8's string limit.
+  const script = serializeHtmlPreviewValue(snapshot);
+  assert.ok(script.length < html.length * 2, "the document size follows unique HTML, not the number of aliases");
+  const restored = vm.runInNewContext(script);
+  assert.equal(restored.messages[0].content, html);
+  assert.equal(restored.messages[0].tavernSwipeState.swipes[7], html);
+  assert.equal(restored.scriptTrees.character[0].content, html);
+  for (const name of Object.keys(snapshot.tavern.charDataByName)) {
+    assert.equal(restored.tavern.charDataByName[name], restored.tavern.charData);
+  }
+  assert.equal(restored.tavern.charData.extensions, restored.tavern.charData.data.extensions);
+  assert.equal(restored.tavern.charData.data.extensions.regex_scripts[0].replaceString, html);
+});
+
+test("preview serialization preserves JSON values and safely embeds script text and property names", () => {
+  const source = JSON.parse('{"__proto__":{"polluted":true},"constructor":"card"}');
+  Object.assign(source, {
+    script: '</script><script>throw "injected"</script>\u2028\u2029 $& $1 $` $\' $$',
+    date: new Date("2026-11-27T00:00:00Z"),
+    omitted: undefined,
+    callback: () => {},
+    array: [undefined, NaN, Infinity, () => {}, Symbol("ignored")],
+    custom: { toJSON(key) { return { key, value: "custom JSON" }; } },
+  });
+  const script = serializeHtmlPreviewValue(source);
+  assert.doesNotMatch(script, /<|\u2028|\u2029/);
+  const restored = vm.runInNewContext(script);
+  assert.deepEqual(JSON.parse(JSON.stringify(restored)), JSON.parse(JSON.stringify(source)));
+  assert.equal(Object.hasOwn(restored, "__proto__"), true);
+  assert.equal(restored.polluted, undefined);
+  for (const value of [null, undefined, "preview-id", true, 42, NaN]) {
+    assert.equal(vm.runInNewContext(serializeHtmlPreviewValue(value)), JSON.parse(JSON.stringify(value) ?? "null"));
+  }
+});
 
 test("unpacks complete UTF-8 document writers before preview compatibility transforms", () => {
   const html = '<head><title>档案 $& $1</title></head><body><div id="app">旅人</div></body>';

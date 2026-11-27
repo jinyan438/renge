@@ -214,6 +214,34 @@ try {
     assert.equal(await page.locator("#chat #active-fragment").count(), 0);
   }
 
+  // Deferred frontends retain the complete compatibility snapshot without
+  // embedding repeated large message sources once per history/swipe alias.
+  const largePreview = `\`\`\`html
+    <html><body><output id="large-ready"></output><script>
+      document.getElementById('large-ready').textContent = JSON.stringify({
+        sameSource: getChatMessages(-1)[0].message === getChatMessages(-2)[0].message,
+        character: getCharData().name,
+        hasPreset: Array.isArray(getPreset('in_use').prompts),
+      });
+    </script><!--LARGE_SNAPSHOT_SOURCE_TOKEN:${"large preview fixture ".repeat(30_000)}--></body></html>
+  \`\`\``;
+  await page.evaluate(async content => TavernHelper.createChatMessages([
+    { role: "assistant", message: content }, { role: "assistant", message: content },
+  ]), largePreview);
+  const largeMessage = page.locator("#chat .mes").last();
+  await largeMessage.scrollIntoViewIfNeeded();
+  await page.waitForFunction(() => !document.querySelector('#chat .mes:last-child .chat-html-preview-placeholder')?.textContent.includes("正在同步"));
+  await largeMessage.locator(".chat-html-preview-placeholder button").evaluateAll(buttons => buttons.forEach(button => button.click()));
+  const largeFrame = await (await largeMessage.locator("iframe.chat-html-frame").elementHandle()).contentFrame();
+  await largeFrame.waitForFunction(() => document.querySelector('#large-ready')?.textContent);
+  assert.deepEqual(JSON.parse(await largeFrame.locator("#large-ready").textContent()), {
+    sameSource: true, character: "Runner fixture", hasPreset: true,
+  });
+  const serialized = await largeFrame.locator("[data-renge-html-preview-variables]").textContent();
+  assert.equal(serialized.split("LARGE_SNAPSHOT_SOURCE_TOKEN:").length - 1, 1);
+  assert.ok(serialized.length < largePreview.length * 2, "snapshot serialization must not multiply the large HTML");
+  assert.equal(await page.getByText("界面加载失败", { exact: true }).count(), 0);
+
   const saved = JSON.parse(await readFile(join(root,"data","app-data.json"),"utf8"));
   const profileEntry = saved.chatSessions.find(chat=>chat.id==='one').characterWorldBookOverrides.card.entries.find(entry=>entry.extra?.profile_source);
   assert.equal(profileEntry.extra.nested.name, "Alex");

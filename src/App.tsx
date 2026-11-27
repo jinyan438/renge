@@ -120,6 +120,7 @@ import vueSource from "vue/dist/vue.global.prod.js?raw";
 import htmlPreviewDependenciesSource from "virtual:html-preview-dependencies";
 import { HTML_PREVIEW_PARENT_BRIDGE_SOURCE } from "./htmlPreviewParentBridge";
 import { HTML_PREVIEW_TAVERN_SCRIPTS_SOURCE } from "./htmlPreviewTavernScripts";
+import { serializeHtmlPreviewValue } from "./htmlPreviewSerialization";
 import {
   getTavernScriptTrees,
   replaceTavernScriptTrees,
@@ -4616,13 +4617,6 @@ const htmlPreviewJqueryDelegationScript = [
   "})();",
   "</script>",
 ].join("");
-
-function serializeHtmlPreviewValue(value: unknown) {
-  return (JSON.stringify(value) ?? "null")
-    .replace(/</g, "\\u003c")
-    .replace(/\u2028/g, "\\u2028")
-    .replace(/\u2029/g, "\\u2029");
-}
 
 const HTML_PREVIEW_TAVERN_CONSTANTS: HtmlPreviewTavernConstants = {
   tavernHelperVersion: TAVERN_HELPER_VERSION,
