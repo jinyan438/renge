@@ -5034,6 +5034,37 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "  getLastMessageId: () => snapshot.messages.length - 1,",
     "  getChatMessages, setChatMessages, setChatMessage, createChatMessages, getContext, eventOn, eventOnce, eventEmit, eventRemoveListener,",
     "};",
+    // Tavern Helper 4 functions that only the host can serve are forwarded to
+    // the script runtime. Names the frame already implements are kept.
+    "const callTavernApi = (name, args) => requestParentCommand(\"tavernApi\", { name, args: clone(args) });",
+    `${JSON.stringify(HTML_PREVIEW_TAVERN_API_REMOTE_NAMES)}.forEach((name) => {`,
+    "  if (!(name in api)) api[name] = (...args) => callTavernApi(name, args);",
+    "});",
+    // Updater callbacks cannot cross postMessage: read, update here, write back.
+    "const remoteUpdater = (getName, replaceName, argCount) => async (...args) => {",
+    "  const target = args.slice(0, argCount);",
+    "  const updater = args[argCount];",
+    "  const rest = args.slice(argCount + 1);",
+    "  const current = await callTavernApi(getName, [...target, ...rest]);",
+    "  const updated = typeof updater === \"function\" ? await updater(current) : current;",
+    "  await callTavernApi(replaceName, [...target, updated ?? current, ...rest]);",
+    "  return await callTavernApi(getName, [...target, ...rest]);",
+    "};",
+    "api.updateWorldbookWith = remoteUpdater(\"getWorldbook\", \"replaceWorldbook\", 1);",
+    "api.updatePresetWith = remoteUpdater(\"getPreset\", \"replacePreset\", 1);",
+    "api.updateCharacterWith = remoteUpdater(\"getCharacter\", \"replaceCharacter\", 1);",
+    "api.updatePersonaWith = remoteUpdater(\"getPersona\", \"replacePersona\", 1);",
+    "api.updateLorebookEntriesWith = remoteUpdater(\"getLorebookEntries\", \"replaceLorebookEntries\", 1);",
+    "api.updateTavernRegexesWith = remoteUpdater(\"getTavernRegexes\", \"replaceTavernRegexes\", 0);",
+    `api.getTavernHelperVersion = api.getFrontendVersion = () => ${JSON.stringify(TAVERN_HELPER_VERSION)};`,
+    `api.getTavernVersion = () => ${JSON.stringify(SILLYTAVERN_VERSION)};`,
+    `api.tavern_events = ${JSON.stringify(TAVERN_EVENT_TYPES)};`,
+    `api.iframe_events = ${JSON.stringify(TAVERN_HELPER_IFRAME_EVENTS)};`,
+    `api.builtin_prompt_default_order = api.placeholder_prompt_default_order = ${JSON.stringify(TAVERN_BUILTIN_PROMPT_DEFAULT_ORDER)};`,
+    "api.eventOff = api.eventRemoveListener;",
+    "api.getIframeName = () => \"TH-message--\" + snapshot.currentMessageIndex + \"--0\";",
+    "api.getMessageId = () => snapshot.currentMessageIndex;",
+    "api.reloadIframe = () => window.location.reload();",
     "Object.assign(window, api);",
     "const installLegacySendControls = () => {",
     "  const root = document.body || document.documentElement;",
@@ -5074,7 +5105,7 @@ function buildHtmlPreviewVariablesScript(previewId: string, context: HtmlPreview
     "else document.addEventListener(\"DOMContentLoaded\", installLegacySendControls, { once: true });",
     "window.getCurrentMessage = () => getChatMessages(snapshot.currentMessageIndex)[0] || null;",
     "window.TavernHelper = window.tavernHelper = window.tavernHelperAPI = window.th = api;",
-    "const sillyTavern = { version: \"3.5.0\", getContext, getCurrentChatId: () => snapshot.chatId, saveChat: saveSillyTavernChat, reloadCurrentChat: async () => true };",
+    `const sillyTavern = { version: ${JSON.stringify(SILLYTAVERN_VERSION)}, eventTypes: api.tavern_events, event_types: api.tavern_events, getContext, getCurrentChatId: () => snapshot.chatId, saveChat: saveSillyTavernChat, reloadCurrentChat: async () => true };`,
     "Object.defineProperties(sillyTavern, {",
     "  chat: { get: () => sillyTavernChatCache, configurable: true },",
     "  name1: { get: () => snapshot.userName, configurable: true },",
@@ -14646,6 +14677,34 @@ export function App() {
             if (payload.operation === "injectPrompts") runtime.injectPrompts(payload.prompts, payload.options);
             else runtime.uninjectPrompts(payload.ids);
             result = true;
+          } else if (payload.operation === "tavernApi") {
+            // Generic bridge to the Tavern Helper API of the script runtime.
+            // Cards probe for missing data with try/catch, so a failure goes
+            // back to the frame without raising an app-level error.
+            try {
+              const deadline = Date.now() + 15_000;
+              let runtime = tavernScriptRuntimeRef.current;
+              while ((!runtime || !runtime.isReady()) && Date.now() < deadline) {
+                await new Promise((resolve) => window.setTimeout(resolve, 50));
+                runtime = tavernScriptRuntimeRef.current;
+              }
+              if (!runtime?.isReady()) throw new Error("酒馆助手接口尚未就绪。");
+              const apiPayload = payload as { name?: unknown; args?: unknown };
+              const apiResult = await runtime.callApi(
+                String(apiPayload.name ?? ""),
+                Array.isArray(apiPayload.args) ? apiPayload.args : [],
+              );
+              let transferable: unknown = null;
+              try {
+                transferable = apiResult === undefined ? null : JSON.parse(JSON.stringify(apiResult));
+              } catch {
+                transferable = null;
+              }
+              respondToHtmlCommand(frame, payload.id, payload.requestId, transferable);
+            } catch (error) {
+              respondToHtmlCommand(frame, payload.id, payload.requestId, undefined, error);
+            }
+            return;
           } else if (payload.operation === "notice") {
             const text = String(payload.text ?? "");
             const title = String(payload.title ?? "");
@@ -20279,10 +20338,12 @@ export function App() {
       promise: Promise.resolve(),
     };
     setTavernRuntimeButtons([]);
-    if (activeTavernScripts.length === 0) {
+    // Without scripts the runtime still serves the Tavern Helper API to
+    // message iframes, but runs nothing and leaves the host page untouched.
+    const apiOnly = activeTavernScripts.length === 0;
+    if (apiOnly) {
       const idleStatus: TavernRuntimeStatus = { state: "idle", message: "" };
       setTavernRuntimeStatus(idleStatus);
-      return;
     }
 
     let runtime: TavernScriptRuntime;
@@ -20888,8 +20949,16 @@ export function App() {
           message: title ? `${title}：${message}` : message,
         });
       },
-    }, tavernHostWindow);
+    }, tavernHostWindow, { apiOnly });
     tavernScriptRuntimeRef.current = runtime;
+    if (apiOnly) {
+      // Keep the "no script runtime" bookkeeping: frames must not wait for it.
+      void runtime.initialize().catch(() => undefined);
+      return () => {
+        if (tavernScriptRuntimeRef.current === runtime) tavernScriptRuntimeRef.current = null;
+        runtime.destroy();
+      };
+    }
     tavernRuntimeConfigurationKeyRef.current = tavernRuntimeConfigurationKey;
     const initializePromise = runtime.initialize();
     tavernRuntimeInitializationRef.current = {
@@ -20961,7 +21030,7 @@ export function App() {
             Boolean(runtime) &&
             tavernRuntimeInitializationRef.current.configurationKey ===
               tavernRuntimeConfigurationKey
-          : !runtime && tavernRuntimeConfigurationKeyRef.current === "";
+          : (!runtime || runtime.isApiOnly()) && tavernRuntimeConfigurationKeyRef.current === "";
         if (runtimeSettled) break;
         await delay(50);
       }

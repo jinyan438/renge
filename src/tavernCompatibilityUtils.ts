@@ -218,6 +218,17 @@ export function resolveTavernCreateMessageInsertionIndex(
   messageCount: number,
 ) {
   const count = Math.max(0, Math.trunc(messageCount));
+  if (positionOrOptions && typeof positionOrOptions === "object") {
+    // Tavern Helper 4 passes { insert_before } (formerly { insert_at }); a
+    // negative id counts back from the end and "end" appends.
+    const options = positionOrOptions as { insert_before?: unknown; insert_at?: unknown };
+    const requested = options.insert_before ?? options.insert_at;
+    if (requested === undefined || requested === null || requested === "end") return count;
+    const index = Number(requested);
+    if (!Number.isInteger(index)) return count;
+    const resolved = index < 0 ? count + index : index;
+    return resolved >= 0 && resolved < count ? resolved : count;
+  }
   const position =
     typeof positionOrOptions === "number" || typeof positionOrOptions === "string"
       ? Number(positionOrOptions)
@@ -615,7 +626,7 @@ export function createTavernMacroRegistry(
 ) {
   const entries = new Set<{
     matcher: string | RegExp;
-    resolver: (context: TavernMacroContext, match: string) => unknown;
+    resolver: (context: TavernMacroContext, match: string, ...groups: unknown[]) => unknown;
   }>();
 
   const registerMacroLike = (matcher: unknown, resolver: unknown) => {
@@ -633,7 +644,7 @@ export function createTavernMacroRegistry(
             String((matcher as RegExp).source),
             String((matcher as RegExp).flags),
           ),
-      resolver: resolver as (context: TavernMacroContext, match: string) => unknown,
+      resolver: resolver as (context: TavernMacroContext, match: string, ...groups: unknown[]) => unknown,
     };
     entries.add(entry);
     const unregister = () => entries.delete(entry);
@@ -643,9 +654,11 @@ export function createTavernMacroRegistry(
   const substitute = (value: unknown, context: TavernMacroContext = getContext()) => {
     let result = String(value ?? "");
     entries.forEach(({ matcher, resolver }) => {
-      const replace = (match: string) => {
+      // Tavern Helper hands the callback the match followed by its capture
+      // groups, exactly like String.prototype.replace.
+      const replace = (match: string, ...groups: unknown[]) => {
         try {
-          return String(resolver(context, match) ?? "");
+          return String(resolver(context, match, ...groups) ?? "");
         } catch {
           return match;
         }
@@ -657,7 +670,21 @@ export function createTavernMacroRegistry(
     return result;
   };
 
-  return { registerMacroLike, substitute };
+  const unregisterMacroLike = (matcher: unknown) => {
+    const isRegex = Object.prototype.toString.call(matcher) === "[object RegExp]";
+    let removed = false;
+    entries.forEach((entry) => {
+      const matches = isRegex
+        ? entry.matcher instanceof RegExp &&
+          entry.matcher.source === String((matcher as RegExp).source) &&
+          entry.matcher.flags === String((matcher as RegExp).flags)
+        : entry.matcher === matcher;
+      if (matches) removed = entries.delete(entry) || removed;
+    });
+    return removed;
+  };
+
+  return { registerMacroLike, unregisterMacroLike, substitute };
 }
 
 const JSDELIVR_MODULE_URL_PATTERN =

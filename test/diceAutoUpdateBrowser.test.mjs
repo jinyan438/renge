@@ -200,7 +200,7 @@ try {
   assert.ok(Object.values(apiState.helperMethods).every(type => type === "function"));
   assert.equal(apiState.events.source, "function");
   assert.equal(apiState.events.messageSent, "message_sent");
-  assert.equal(apiState.events.generationAfterCommands, "generation_after_commands");
+  assert.equal(apiState.events.generationAfterCommands, "GENERATION_AFTER_COMMANDS");
 
   await page.evaluate(() => document.querySelector('[data-desktop-project-icon="chat"]')?.click());
   await page.locator("#chat").waitFor();
